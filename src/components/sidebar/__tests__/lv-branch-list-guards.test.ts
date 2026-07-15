@@ -24,9 +24,25 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvBranchList } from '../lv-branch-list.ts';
+import { repositoryStore } from '../../../stores/index.ts';
+import type { Repository } from '../../../types/git.types.ts';
 
 // Import the actual component
 import '../lv-branch-list.ts';
+
+function mockRepo(path: string, name: string): Repository {
+  return {
+    path,
+    name,
+    isValid: true,
+    isBare: false,
+    headRef: 'main',
+    state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
+  };
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -231,6 +247,91 @@ describe('lv-branch-list operationInProgress guards', () => {
 
     const rebaseCalls = invokeCalls.filter(c => c.command === 'rebase');
     expect(rebaseCalls).to.have.length(0);
+  });
+
+  it('closes its embedded interactive-rebase dialog when the pinned repo tab is removed', async () => {
+    // The dialog is kept alive across background refreshes by the single stable
+    // template. If the user closes the repo tab the rebase was started on, the
+    // dialog must self-close — otherwise Execute would rewrite a repo with no
+    // tab observing it. The store subscription in connectedCallback owns this.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    // connectedCallback subscribes only AFTER an async loadBranches(); wait
+    // until the store subscription is actually registered.
+    for (let i = 0; i < 50; i++) {
+      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // Shadow the @query getter with a fake dialog pinned to repo A.
+    let closed = false;
+    Object.defineProperty(el, 'interactiveRebaseDialog', {
+      configurable: true,
+      value: {
+        pinnedRepositoryPathIfOpen: '/repo/a',
+        close: () => {
+          closed = true;
+        },
+      },
+    });
+
+    // Closing A's tab must trigger the subscription to close the dialog.
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(closed, 'dialog closed when its pinned repo tab was removed').to.be.true;
+
+    repositoryStore.getState().reset();
+  });
+
+  it('leaves the dialog open when a DIFFERENT repo tab is removed', async () => {
+    // Only the pinned repo's removal cancels the rebase; unrelated tab churn
+    // must not disrupt an in-progress plan.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+
+    let closed = false;
+    Object.defineProperty(el, 'interactiveRebaseDialog', {
+      configurable: true,
+      value: {
+        pinnedRepositoryPathIfOpen: '/repo/a',
+        close: () => {
+          closed = true;
+        },
+      },
+    });
+
+    repositoryStore.getState().removeRepository('/repo/b');
+    await el.updateComplete;
+
+    expect(closed, 'dialog stays open when an unrelated tab is removed').to.be.false;
+
+    repositoryStore.getState().reset();
+  });
+
+  it('branches-changed carries the originating repositoryPath so refreshes pin correctly', async () => {
+    // The host pins its refresh to detail.repositoryPath (the repo the mutation
+    // ran on), not the active tab. A branches-changed with no repositoryPath
+    // would refresh whichever tab happens to be active after a mid-op switch.
+    const el = await createComponent();
+
+    let detail: { repositoryPath?: string } | null = null;
+    el.addEventListener('branches-changed', (e) => {
+      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    });
+
+    (el as unknown as { dispatchBranchesChanged: (p: string) => void }).dispatchBranchesChanged(
+      '/repo/origin'
+    );
+
+    expect(detail, 'branches-changed dispatched').to.not.be.null;
+    expect(detail!.repositoryPath).to.equal('/repo/origin');
   });
 
   it('handleCheckout should clear operationInProgress even on error', async () => {

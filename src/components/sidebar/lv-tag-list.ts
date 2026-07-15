@@ -580,15 +580,17 @@ export class LvTagList extends LitElement {
 
     this.operationInProgress = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.deleteTag({
-        path: this.repositoryPath,
+        path: repoPath,
         name: tag.name,
       });
 
       if (result.success) {
         await this.loadTags();
         this.dispatchEvent(new CustomEvent('tags-changed', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -623,6 +625,7 @@ export class LvTagList extends LitElement {
   private async handleTagCreated(): Promise<void> {
     await this.loadTags();
     this.dispatchEvent(new CustomEvent('tags-changed', {
+      detail: { repositoryPath: this.repositoryPath },
       bubbles: true,
       composed: true,
     }));

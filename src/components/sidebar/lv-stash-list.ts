@@ -262,9 +262,10 @@ export class LvStashList extends LitElement {
 
     this.isStashing = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.createStash({
-        path: this.repositoryPath,
+        path: repoPath,
         message: undefined,
         includeUntracked: true,
       });
@@ -277,6 +278,7 @@ export class LvStashList extends LitElement {
         }
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-created', {
+          detail: { repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -429,16 +431,17 @@ export class LvStashList extends LitElement {
 
     this.operationInProgress = true;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.dropStash({
-        path: this.repositoryPath,
+        path: repoPath,
         index: stash.index,
       });
 
       if (result.success) {
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-dropped', {
-          detail: { stash },
+          detail: { stash, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));

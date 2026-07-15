@@ -580,6 +580,8 @@ export class LvBranchList extends LitElement {
 
   private static readonly HIDDEN_BRANCHES_STORAGE_PREFIX = 'lv-hidden-branches:';
 
+  private storeUnsubscribe?: () => void;
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     this.loadHiddenBranches();
@@ -588,6 +590,18 @@ export class LvBranchList extends LitElement {
     document.addEventListener('keydown', this.handleKeydown);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
+    // Close our OWN embedded interactive-rebase dialog when its pinned repo's
+    // tab is closed — mirrors app-shell's guard for the app-level dialogs.
+    // Without it, the dialog (kept alive across refreshes by the single
+    // stable template) floats over a closed repo and Execute would rewrite
+    // a repo with no tab to observe it.
+    this.storeUnsubscribe = repositoryStore.subscribe((state) => {
+      const pinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
+        this.interactiveRebaseDialog.close();
+        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
+      }
+    });
   }
 
   disconnectedCallback(): void {
@@ -596,6 +610,7 @@ export class LvBranchList extends LitElement {
     document.removeEventListener('keydown', this.handleKeydown);
     window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
+    this.storeUnsubscribe?.();
   }
 
   private handleRepositoryRefresh = (): void => {
@@ -992,10 +1007,7 @@ export class LvBranchList extends LitElement {
    */
   private async handleCleanupComplete(): Promise<void> {
     await this.loadBranches();
-    this.dispatchEvent(new CustomEvent('branches-changed', {
-      bubbles: true,
-      composed: true,
-    }));
+    this.dispatchBranchesChanged(this.repositoryPath);
   }
 
   /**
@@ -1023,6 +1035,7 @@ export class LvBranchList extends LitElement {
     if (!confirmed) return;
 
     // Delete branches one by one
+    const repoPath = this.repositoryPath;
     let deleted = 0;
     let failed = 0;
 
@@ -1042,10 +1055,7 @@ export class LvBranchList extends LitElement {
 
     if (deleted > 0) {
       await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('branches-changed', {
-        bubbles: true,
-        composed: true,
-      }));
+      this.dispatchBranchesChanged(repoPath);
     }
 
     if (failed > 0) {
@@ -1059,10 +1069,7 @@ export class LvBranchList extends LitElement {
 
   private async handleBranchCreated(): Promise<void> {
     await this.loadBranches();
-    this.dispatchEvent(new CustomEvent('branches-changed', {
-      bubbles: true,
-      composed: true,
-    }));
+    this.dispatchBranchesChanged(this.repositoryPath);
   }
 
   private handleBranchClick(branch: Branch): void {
@@ -1140,6 +1147,7 @@ export class LvBranchList extends LitElement {
   private async handleRenameBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
     if (!branch || this.operationInProgress) return;
+    const repoPath = this.repositoryPath;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1163,10 +1171,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', {
-          bubbles: true,
-          composed: true,
-        }));
+        this.dispatchBranchesChanged(repoPath);
       } else {
         console.error('Rename branch failed:', result.error);
         showToast(`Failed to rename branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -1179,6 +1184,7 @@ export class LvBranchList extends LitElement {
   private async handleDeleteBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
     if (!branch || this.operationInProgress) return;
+    const repoPath = this.repositoryPath;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1220,10 +1226,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', {
-          bubbles: true,
-          composed: true,
-        }));
+        this.dispatchBranchesChanged(repoPath);
       } else {
         console.error('Delete branch failed:', result.error);
         showToast(`Failed to delete branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -1258,10 +1261,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', {
-          bubbles: true,
-          composed: true,
-        }));
+        this.dispatchBranchesChanged(repoPath);
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
         this.dispatchEvent(new CustomEvent('merge-conflict', {
@@ -1303,10 +1303,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
-        this.dispatchEvent(new CustomEvent('branches-changed', {
-          bubbles: true,
-          composed: true,
-        }));
+        this.dispatchBranchesChanged(repoPath);
       } else if (result.error?.code === 'REBASE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
         this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
@@ -1331,6 +1328,18 @@ export class LvBranchList extends LitElement {
     this.interactiveRebaseDialog.open(branch.shorthand);
   }
 
+  /** Dispatch branches-changed carrying the repo the mutating operation ran
+   * on (captured pre-await by the caller), so the host pins the refresh to
+   * that repo instead of whichever tab is active if the user switched
+   * mid-operation. Pass `this.repositoryPath` for synchronous callers. */
+  private dispatchBranchesChanged(repoPath: string): void {
+    this.dispatchEvent(new CustomEvent('branches-changed', {
+      detail: { repositoryPath: repoPath },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private async handleRebaseComplete(e: Event): Promise<void> {
     // Reload our OWN view only when the rebase ran on the repo we're
     // showing. After a mid-rebase tab switch the completed repo may be
@@ -1341,10 +1350,7 @@ export class LvBranchList extends LitElement {
     const repoPath = (e as CustomEvent<{ repositoryPath?: string }>).detail?.repositoryPath;
     if (repoPath && repoPath !== this.repositoryPath) return;
     await this.loadBranches();
-    this.dispatchEvent(new CustomEvent('branches-changed', {
-      bubbles: true,
-      composed: true,
-    }));
+    this.dispatchBranchesChanged(repoPath ?? this.repositoryPath);
   }
 
   private handleCreateBranchFrom(): void {
@@ -1361,6 +1367,7 @@ export class LvBranchList extends LitElement {
   private async handleTrackRemoteBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
     if (!branch || !branch.isRemote) return;
+    const repoPath = this.repositoryPath;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1407,6 +1414,7 @@ export class LvBranchList extends LitElement {
     const upstream = await showPrompt('Set Upstream', `Set upstream for "${branch.shorthand}":`, defaultUpstream);
     if (!upstream) return;
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.setUpstreamBranch(
         this.repositoryPath,
@@ -1432,6 +1440,7 @@ export class LvBranchList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.unsetUpstreamBranch(
         this.repositoryPath,

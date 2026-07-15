@@ -787,6 +787,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           this.resolvedInPlace = true;
           return;
         }
+        // The isNoLongerConflicted await (a slow per-file get_conflicts)
+        // yielded — a newer file selection may have superseded this load.
+        // Without this, the submodule early-return below would WIPE the
+        // newer file's segments/panes, leaving it with "No conflicts" and
+        // Mark Resolved enabled → a 0-byte write. (The binary path is
+        // guarded by the post-Promise.all epoch check further down.)
+        if (epoch !== this.loadEpoch) return;
       }
 
       // Submodule (gitlink) conflicts have nothing to read: the entry OIDs
@@ -1407,22 +1414,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     const blobsAvailable = this.oursLines.length > 0 || this.theirsLines.length > 0;
     if (!blobsAvailable) return segments;
     const echo = this.markerEchoPattern();
-    // A conflict side's content is everything BETWEEN markers, so a START
-    // marker (`<<<<<<<`) inside a pane is always a swept orphan (a fallback
-    // split pulled a nested/orphaned start into content) — a leak. An
-    // end/separator SHAPE in a side can be legitimate hand-typed content
-    // the parser deliberately keeps, so only start shapes are flagged in
-    // panes. Blob content (a quoted example) is never flagged.
-    const n = Math.min(7, this.effectiveMarkerSize);
-    const startEcho = new RegExp(`^<{${n},}( |\\r?$)`);
-    const orphanResolved = (lines: string[]): boolean =>
+    // A marker-shaped line (any shape: <<<<<<< / ======= / >>>>>>> / |||||||)
+    // that is in NO blob is a real orphaned marker, whether it landed in a
+    // resolved segment (hand-deleted start marker) or a conflict pane (an
+    // unvalidated fallback split swept it into a side). A VALIDATED split's
+    // sides are contiguous blob runs, so every line IS blob content and is
+    // never flagged — only unvalidated fallbacks (genuinely malformed
+    // input) can carry a non-blob marker line into a pane. Either way it
+    // would render raw, so fall back to the whole-file conflict.
+    const orphan = (lines: string[]): boolean =>
       lines.some((l) => echo.test(l) && !this.lineIsBlobContent(l));
-    const orphanPane = (lines: string[]): boolean =>
-      lines.some((l) => startEcho.test(l) && !this.lineIsBlobContent(l));
     const hasOrphanMarker = segments.some((s) =>
-      s.type === 'resolved'
-        ? orphanResolved(s.lines)
-        : orphanPane(s.oursLines) || orphanPane(s.theirsLines),
+      s.type === 'resolved' ? orphan(s.lines) : orphan(s.oursLines) || orphan(s.theirsLines),
     );
     if (!hasOrphanMarker) return segments;
     return [

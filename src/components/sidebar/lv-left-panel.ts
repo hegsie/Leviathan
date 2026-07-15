@@ -283,14 +283,12 @@ export class LvLeftPanel extends LitElement {
     this.forwardRefresh(e);
   }
 
-  private handleStashCreated(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleStashCreated(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
-  private handleStashDropped(): void {
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleStashDropped(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
   private handleTagCheckout(e?: Event): void {
@@ -305,10 +303,8 @@ export class LvLeftPanel extends LitElement {
     this.forwardRefresh(e);
   }
 
-  private handleTagsChanged(): void {
-    // Refresh repository state after tags changed
-    this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+  private handleTagsChanged(e?: Event): void {
+    this.forwardRefresh(e);
   }
 
   private toggleSection(section: string): void {

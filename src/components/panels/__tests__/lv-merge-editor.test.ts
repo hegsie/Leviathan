@@ -1181,6 +1181,65 @@ describe('lv-merge-editor', () => {
       expect(internal.segments.flatMap((s) => s.lines).join('\n')).to.equal('b-content');
       expect(internal.loading).to.be.false;
     });
+
+    it('a stale submodule load whose conflict re-check resolves late must not wipe a newer file', async () => {
+      // A submodule's load awaits get_conflicts (isNoLongerConflicted). If the
+      // user switches to a text file while that await is in flight, the stale
+      // submodule load resumes and — without the post-await epoch guard — falls
+      // into the gitlink branch that blanks segments/panes, leaving the NEW
+      // file showing "no conflicts" with Mark Resolved enabled → a 0-byte write.
+      setupDefaultMocks();
+      let releaseConflicts: ((v: unknown) => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = (async (command: string, args?: unknown) => {
+        if (command === 'get_conflicts') {
+          // Park the submodule's re-check until we release it, then report the
+          // submodule STILL conflicted (isNoLongerConflicted → false) so the
+          // stale load reaches the gitlink-wipe branch the guard must skip.
+          return new Promise((res) => {
+            releaseConflicts = res as (v: unknown) => void;
+          });
+        }
+        return baseMock(command, args);
+      }) as MockInvoke;
+
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = {
+        path: 'sub',
+        ancestor: { oid: 'a'.repeat(40), path: 'sub', mode: 0o160000 },
+        ours: { oid: 'b'.repeat(40), path: 'sub', mode: 0o160000 },
+        theirs: { oid: 'c'.repeat(40), path: 'sub', mode: 0o160000 },
+        isBinary: false,
+        isSubmodule: true,
+      };
+      await el.updateComplete;
+      // Let the submodule load park on the hanging get_conflicts.
+      await new Promise((r) => setTimeout(r, 40));
+
+      // User switches to a normal text file, which loads fully.
+      internal.conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      const bSegments = internal.segments;
+      expect(bSegments.length, 'text file loaded its segments').to.be.greaterThan(0);
+
+      // The submodule's re-check finally resolves (still conflicted). The stale
+      // load must return without touching the newer file's state.
+      releaseConflicts!([{ path: 'sub' }, { path: 'src/b.ts' }]);
+      await new Promise((r) => setTimeout(r, 40));
+      await el.updateComplete;
+
+      expect(internal.segments, 'newer file segments preserved').to.equal(bSegments);
+      expect(internal.segments.length).to.be.greaterThan(0);
+      expect(
+        (el as unknown as { resolvedInPlace: boolean }).resolvedInPlace,
+        'newer file not falsely resolved'
+      ).to.not.equal(true);
+    });
   });
 
   // ── Load failure handling ────────────────────────────────────────────
@@ -3750,10 +3809,11 @@ describe('lv-merge-editor', () => {
       expectNoMarkers(el);
     });
 
-    it('a hand-typed end-shaped line before the separator does not close the region early', async () => {
-      // Mid-region junk: an end-shaped line typed BEFORE the real
-      // separator, with the real separator+end below. Closing at the junk
-      // would strand the real markers in "resolved" text.
+    it('a hand-typed end-shaped line inside a region never renders raw (whole-file fallback)', async () => {
+      // Mid-region junk: an end-shaped line typed BEFORE the real separator.
+      // Any split that keeps it as pane content would show a raw >>>>>>>
+      // marker, so the safety net presents the whole file as one clean
+      // conflict block instead — no marker is ever displayed.
       setupDefaultMocks();
       workdirContent = [
         'line1',
@@ -3770,31 +3830,28 @@ describe('lv-merge-editor', () => {
 
       const conflicts = internal.segments.filter((s) => s.type === 'conflict');
       expect(conflicts.length).to.equal(1);
-      // Closes at the REAL end marker: theirs is intact and line3 resolved.
-      expect(conflicts[0].theirsLines).to.deep.equal(['line2-theirs']);
-      expect(internal.segments[internal.segments.length - 1].lines).to.deep.equal(['line3']);
+      // No pane contains any raw marker.
+      for (const c of conflicts) {
+        for (const line of [...c.oursLines, ...c.theirsLines]) {
+          expect(/^(<{7,}|={7,}|>{7,}|\|{7,})/.test(line), `pane leaked "${line}"`).to.be.false;
+        }
+      }
+      expectNoMarkers(el);
     });
   });
 
   // ── Orphan-marker write confirmation ─────────────────────────────────────
   describe('orphan-marker write confirmation', () => {
-    /** Load the junk-marker file and accept the conflict block with ours —
-     * the accepted side then contains a marker-shaped line that is in
-     * NEITHER blob (a real orphaned marker). */
+    /** Load a clean editor, then directly install a RESOLVED segment that
+     * carries a real orphaned marker (a marker-shaped line in NEITHER blob,
+     * origin != 'manual'). The parser's whole-file fallback prevents this
+     * shape from arising via parsing, but the write-time confirm gate is
+     * defense-in-depth for any other path (AI, stale segments), so it is
+     * tested by constructing the segment directly. */
     async function editorWithOrphanMarkerAccepted(
       confirmAnswers: { calls: number; answer: unknown },
     ): Promise<LvMergeEditor> {
       setupDefaultMocks();
-      workdirContent = [
-        'line1',
-        '<<<<<<< HEAD',
-        'line2-ours',
-        '>>>>>>> junk',
-        '=======',
-        'line2-theirs',
-        '>>>>>>> feature',
-        'line3',
-      ].join('\n');
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'plugin:dialog|message') {
@@ -3804,7 +3861,23 @@ describe('lv-merge-editor', () => {
         return baseMock(command, args);
       };
       const el = await renderLoadedEditor();
-      findConflictButton(el, 'Use Ours').click();
+      const internal = el as unknown as EditorInternal & {
+        segments: OutputSegmentShape[];
+        nextSegmentId: number;
+      };
+      internal.segments = [
+        {
+          id: internal.nextSegmentId++,
+          type: 'resolved',
+          lines: ['line2-ours', '>>>>>>> junk'],
+          oursLines: [],
+          theirsLines: [],
+          oursLabel: '',
+          theirsLabel: '',
+          origin: 'ours',
+          fromConflict: true,
+        },
+      ];
       await el.updateComplete;
       return el;
     }
