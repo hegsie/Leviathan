@@ -1366,6 +1366,62 @@ describe('lv-merge-editor', () => {
     });
   });
 
+  // ── External tool session signaling ──────────────────────────────────
+  describe('external tool session signaling', () => {
+    it('announces tool start/finish so the host can lock destructive actions', async () => {
+      setupDefaultMocks();
+      let releaseTool: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') {
+          return new Promise((res) => {
+            releaseTool = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor();
+      const events: string[] = [];
+      el.addEventListener('external-tool-started', () => events.push('started'));
+      el.addEventListener('external-tool-finished', () => events.push('finished'));
+
+      const toolBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.includes('External Tool')
+      ) as HTMLButtonElement;
+      expect(toolBtn, 'external tool button rendered').to.not.be.undefined;
+      toolBtn.click();
+      await el.updateComplete;
+
+      expect(events).to.deep.equal(['started']);
+
+      releaseTool!();
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      expect(events).to.deep.equal(['started', 'finished']);
+    });
+
+    it('the external tool button disables while the host locks it', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor();
+      el.externalToolLocked = true;
+      await el.updateComplete;
+
+      const toolBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.includes('External Tool')
+      ) as HTMLButtonElement;
+      expect(toolBtn.disabled).to.be.true;
+    });
+  });
+
   // ── Binary conflicts ────────────────────────────────────────────────────
   describe('binary conflicts', () => {
     it('renders take-side UI (no text editor) for a binary conflict', async () => {

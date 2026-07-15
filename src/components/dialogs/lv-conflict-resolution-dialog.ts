@@ -392,6 +392,8 @@ export class LvConflictResolutionDialog extends LitElement {
   private priorFinishCommitLanded = false;
   @state() private aborting = false;
   @state() private continuing = false;
+  /** True while the EMBEDDED merge editor has an external tool session open. */
+  @state() private editorToolActive = false;
   @state() private showAbortConfirm = false;
   @state() private hasMergeTool = false;
   @state() private launchingExternalTool: string | null = null;
@@ -598,7 +600,14 @@ export class LvConflictResolutionDialog extends LitElement {
     // while a stash-drop Complete is in flight would revert the files AND
     // lose the stash entry; aborting under an open external tool would let
     // its later save re-dirty the just-aborted working tree.
-    if (this.aborting || this.continuing || this.launchingExternalTool !== null) return;
+    if (
+      this.aborting ||
+      this.continuing ||
+      this.launchingExternalTool !== null ||
+      this.editorToolActive
+    ) {
+      return;
+    }
     // Once the merge commit has landed (only the follow-up git-flow finish
     // step failed), there is nothing to abort — exit directly WITHOUT the
     // "all resolved changes will be lost" confirm, which would be false here
@@ -640,7 +649,8 @@ export class LvConflictResolutionDialog extends LitElement {
       !this.repositoryPath ||
       this.aborting ||
       this.continuing ||
-      this.launchingExternalTool !== null
+      this.launchingExternalTool !== null ||
+      this.editorToolActive
     ) {
       return;
     }
@@ -780,7 +790,8 @@ export class LvConflictResolutionDialog extends LitElement {
       !this.repositoryPath ||
       this.continuing ||
       this.aborting ||
-      this.launchingExternalTool !== null
+      this.launchingExternalTool !== null ||
+      this.editorToolActive
     ) {
       return;
     }
@@ -1140,7 +1151,10 @@ export class LvConflictResolutionDialog extends LitElement {
                     .repositoryPath=${this.repositoryPath}
                     .conflictFile=${this.selectedConflict}
                     .operationType=${this.operationType}
+                    .externalToolLocked=${this.continuing || this.aborting}
                     @conflict-resolved=${this.handleConflictResolved}
+                    @external-tool-started=${() => { this.editorToolActive = true; }}
+                    @external-tool-finished=${() => { this.editorToolActive = false; }}
                   ></lv-merge-editor>
                 `
               : html`
@@ -1176,7 +1190,10 @@ export class LvConflictResolutionDialog extends LitElement {
             <button
               class="btn btn-danger"
               @click=${this.handleAbort}
-              ?disabled=${this.continuing || this.aborting || this.launchingExternalTool !== null}
+              ?disabled=${this.continuing ||
+                this.aborting ||
+                this.launchingExternalTool !== null ||
+                this.editorToolActive}
             >
               Abort ${this.getOperationTitle()}
             </button>
@@ -1186,6 +1203,7 @@ export class LvConflictResolutionDialog extends LitElement {
               ?disabled=${this.continuing ||
                 this.aborting ||
                 this.launchingExternalTool !== null ||
+                this.editorToolActive ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}

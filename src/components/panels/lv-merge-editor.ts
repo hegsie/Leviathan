@@ -530,6 +530,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @property({ type: Object }) conflictFile: ConflictFile | null = null;
   /** Which git operation produced the conflict — controls the side labels. */
   @property({ type: String }) operationType: MergeOperationType = 'merge';
+  /**
+   * Set by the host while its own destructive flows (abort/complete) run —
+   * launching an external tool then would race them.
+   */
+  @property({ type: Boolean }) externalToolLocked = false;
 
   @state() private baseContent = '';
   @state() private oursContent = '';
@@ -595,9 +600,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private async handleOpenExternalMergeTool(): Promise<void> {
-    if (!this.repositoryPath || !this.conflictFile) return;
+    if (!this.repositoryPath || !this.conflictFile || this.externalToolLocked) return;
 
     this.launchingExternalTool = true;
+    // Tell the host a tool session is open so its Abort/Complete stay inert —
+    // they would otherwise race the tool's eventual save.
+    this.dispatchEvent(
+      new CustomEvent('external-tool-started', { bubbles: true, composed: true })
+    );
     try {
       const result = await gitService.launchMergeTool(this.repositoryPath, this.conflictFile.path);
       if (result.success && result.data?.success) {
@@ -610,6 +620,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       showToast('Failed to launch merge tool', 'error');
     } finally {
       this.launchingExternalTool = false;
+      this.dispatchEvent(
+        new CustomEvent('external-tool-finished', { bubbles: true, composed: true })
+      );
     }
   }
 
@@ -1537,7 +1550,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <button
               class="btn"
               @click=${this.handleOpenExternalMergeTool}
-              ?disabled=${this.launchingExternalTool}
+              ?disabled=${this.launchingExternalTool || this.externalToolLocked}
               title="Open in external merge tool"
             >
               ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}

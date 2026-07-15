@@ -900,6 +900,43 @@ describe('lv-conflict-resolution-dialog', () => {
       internal.handleAbort.call(el);
       expect(internal.showAbortConfirm).to.be.false;
     });
+
+    it("blocks Abort and Complete while the EDITOR's external tool is open", async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      // The embedded merge editor announces its tool session with an event.
+      const editor = el.shadowRoot!.querySelector('lv-merge-editor')!;
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-started', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        showAbortConfirm: boolean;
+        handleAbort: () => void;
+      };
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+
+      // The lock releases when the tool session ends.
+      editor.dispatchEvent(
+        new CustomEvent('external-tool-finished', { bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+      expect(abortBtn.disabled).to.be.false;
+    });
   });
 
   // ── Merge completion ─────────────────────────────────────────────────────
