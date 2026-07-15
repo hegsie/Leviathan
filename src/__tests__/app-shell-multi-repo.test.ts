@@ -879,4 +879,106 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
   });
+
+  describe('conflict dialog repo pinning', () => {
+    it('keeps operating on the repo it was opened for after a tab switch', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        // Stash-apply conflicts on repo A (clean state) open the dialog.
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        const dialog = () =>
+          el.shadowRoot!.querySelector('lv-conflict-resolution-dialog') as HTMLElement & {
+            repositoryPath: string;
+          };
+        expect(dialog(), 'dialog should open').to.exist;
+        expect(dialog().repositoryPath).to.equal('/repo/a');
+
+        // Ctrl+Tab still works behind the full-screen dialog — the dialog
+        // must NOT retarget to repo B, or its abort/resolve commands would
+        // destroy repo B's unrelated work.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+        expect(dialog(), 'dialog stays open').to.exist;
+        expect(dialog().repositoryPath).to.equal('/repo/a');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('re-pins to the repo active at the NEXT open', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        (el as any).closeConflictDialog();
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        const dialog = el.shadowRoot!.querySelector(
+          'lv-conflict-resolution-dialog'
+        ) as HTMLElement & { repositoryPath: string };
+        expect(dialog.repositoryPath).to.equal('/repo/b');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('conflict operation derivation for external operations', () => {
+    for (const state of ['apply-mailbox', 'apply-mailbox-or-rebase', 'bisect'] as const) {
+      it(`refuses to open the dialog for an external ${state} operation`, async () => {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          const repo = { ...mockRepo('/repo/a', 'a'), state };
+          repositoryStore.getState().addRepository(repo, { activate: true });
+          await el.updateComplete;
+
+          // The dialog cannot drive am/bisect: Complete would not run their
+          // --continue and the inferred-stash Abort would discard the
+          // conflicted files while the operation stays wedged.
+          (el as any).openConflictDialogFromState();
+          await el.updateComplete;
+
+          expect((el as any).showConflictDialog).to.be.false;
+          expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
+          const toasts = uiStore.getState().toasts;
+          expect(toasts.some((t) => t.type === 'warning' && t.message.includes(state))).to.be
+            .true;
+        } finally {
+          el.remove();
+        }
+      });
+    }
+
+    it('still infers a stash conflict for a clean state', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        await el.updateComplete;
+        (el as any).openConflictDialogFromState();
+        await el.updateComplete;
+        expect((el as any).showConflictDialog).to.be.true;
+        expect((el as any).conflictOperationType).to.equal('stash');
+      } finally {
+        el.remove();
+      }
+    });
+  });
 });

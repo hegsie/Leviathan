@@ -801,7 +801,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    */
   private get effectiveMarkerSize(): number {
     const size = this.conflictFile?.markerSize;
-    return typeof size === 'number' && Number.isInteger(size) && size >= 1 ? size : 7;
+    // The backend caps sizes at u16 range; anything beyond that here is a
+    // corrupt value and must not drive giant separator-string allocations.
+    return typeof size === 'number' && Number.isInteger(size) && size >= 1 && size <= 65535
+      ? size
+      : 7;
   }
 
   /**
@@ -834,7 +838,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return n === markerSize && (s.length === n || s[n] === ' ');
     };
     const isConflictStart = (l: string): boolean => isMarker(l, '<');
-    const isBaseMarker = (l: string): boolean => isMarker(l, '|');
+    // `|||||||` is a base-section marker ONLY in diff3-style emission. In
+    // the default 'merge' style (which is also all libgit2 ever writes) a
+    // pipe run is ours CONTENT — treating it as a marker would silently
+    // discard every ours line after it. The backend reports the style it
+    // verified against the file's actual emission.
+    const diff3 = this.conflictFile?.conflictStyle === 'diff3';
+    const isBaseMarker = (l: string): boolean => diff3 && isMarker(l, '|');
     const isSeparator = (l: string): boolean => stripCr(l) === '='.repeat(markerSize);
     const isConflictEnd = (l: string): boolean => isMarker(l, '>');
 
@@ -996,6 +1006,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private resolveConflictSegment(id: number, choice: 'ours' | 'theirs' | 'both'): void {
+    // In-memory picks are blocked while a resolve write or external tool
+    // session runs: the post-write/post-tool reload would silently destroy
+    // them (the pre-launch confirm only covers picks made BEFORE launch).
+    if (this.actionsBlocked) return;
     const segment = this.segments.find((s) => s.id === id);
     if (!segment || segment.type !== 'conflict') return;
 
@@ -1012,6 +1026,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   /** Revert a resolved-from-conflict segment back to an open conflict block. */
   private resetSegment(id: number): void {
+    if (this.actionsBlocked) return;
     const segment = this.segments.find((s) => s.id === id);
     if (!segment || !segment.fromConflict) return;
     if (this.editingSegmentId === id) this.editingSegmentId = null;
@@ -1020,6 +1035,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private startEditSegment(segment: OutputSegment): void {
+    if (this.actionsBlocked) return;
     this.editingSegmentId = segment.id;
     // Editing an open conflict starts from both sides so the user trims what
     // they don't want — never from marker text.
@@ -1029,13 +1045,42 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         : segment.lines.join('\n');
   }
 
-  private applyEditSegment(): void {
+  /**
+   * Matches lines that LOOK like conflict markers. Runs of min(7, size)+
+   * cover the default, raised, AND lowered conflict-marker-size cases.
+   * Used to keep marker-shaped text out of resolved output unless the user
+   * explicitly wants it there.
+   */
+  private markerEchoPattern(): RegExp {
+    const n = Math.min(7, this.effectiveMarkerSize);
+    return new RegExp(`^(<{${n},}|={${n},}|>{${n},}|\\|{${n},})( |\\r?$)`, 'm');
+  }
+
+  private async applyEditSegment(): Promise<void> {
+    if (this.actionsBlocked) return;
     const id = this.editingSegmentId;
     if (id === null) return;
     const segment = this.segments.find((s) => s.id === id);
     if (!segment) {
       this.editingSegmentId = null;
       return;
+    }
+
+    // Marker-shaped lines in a hand edit are usually an accidental paste of
+    // raw conflict text — writing them back would defeat the whole editor.
+    // But they CAN be legitimate (a Markdown setext underline is exactly
+    // `=======`), so unlike the AI path this confirms instead of blocking.
+    if (this.markerEchoPattern().test(this.editDraft)) {
+      const proceed = await showConfirm(
+        'Keep conflict-marker-like text?',
+        'Your edit contains lines that look like git conflict markers. If you pasted raw conflict text, cancel and remove the marker lines; if the text is intentional it will be kept as-is.',
+        'warning',
+      );
+      if (!proceed) return;
+      // The confirm awaited — the edit may have been closed or retargeted
+      // by a file switch in the meantime; applying a stale draft would
+      // write it into the wrong segment.
+      if (this.editingSegmentId !== id || !this.segments.some((s) => s.id === id)) return;
     }
 
     this.clearAiExplanation(id);
@@ -1066,7 +1111,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): void {
     // With a failed load the side contents are not trustworthy — accepting
     // one would replace the segments with fabricated (possibly empty) text.
-    if (this.loadFailed) return;
+    // Blocked during resolve writes / tool sessions like every other
+    // in-memory mutation (the take-side delegation below re-checks too).
+    if (this.loadFailed || this.actionsBlocked) return;
 
     // A side with no entry DELETED the file — accepting it means staging the
     // deletion, not writing a 0-byte file from its empty content.
@@ -1099,6 +1146,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   /** Re-read the on-disk merge, discarding all in-editor resolutions. */
   private async handleReload(): Promise<void> {
+    // Reloading mid-write would clear the resolve lock for THIS file and
+    // let a second write race the first; reloading mid-tool-session is the
+    // session's own job when it ends.
+    if (this.actionsBlocked) return;
+    // Reload discards exactly like a file switch does — same confirm.
+    if (this.hasUnsavedResolutions()) {
+      const proceed = await showConfirm(
+        'Discard in-progress resolution?',
+        'Reloading re-reads the file from disk and discards your unsaved picks and edits.',
+        'warning',
+      );
+      if (!proceed) return;
+      // Re-check: a resolve/tool session may have started while the
+      // confirm was up.
+      if (this.actionsBlocked) return;
+    }
     await this.loadContents();
   }
 
@@ -1106,7 +1169,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
   /** Resolve one conflict block via AI. Returns false when the call failed. */
   private async handleSuggestSegment(id: number): Promise<boolean> {
-    if (!this.conflictFile || this.suggestingSegment !== null) return false;
+    if (!this.conflictFile || this.suggestingSegment !== null || this.actionsBlocked) return false;
     const segment = this.segments.find((s) => s.id === id);
     if (!segment || segment.type !== 'conflict') return false;
 
@@ -1142,13 +1205,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (result.success && result.data) {
         // AI output bypasses parseSegments, so it must be validated here:
         // a suggestion that echoes marker lines would otherwise render them
-        // as "resolved" text and let them be written back to the file. Runs
-        // of min(7, size)+ cover the default, raised, AND lowered
-        // conflict-marker-size cases; being overly conservative here just
-        // leaves the block unresolved, which is safe.
-        const n = Math.min(7, this.effectiveMarkerSize);
-        const markerEcho = new RegExp(`^(<{${n},}|={${n},}|>{${n},}|\\|{${n},})( |\\r?$)`, 'm');
-        if (markerEcho.test(result.data.resolvedContent)) {
+        // as "resolved" text and let them be written back to the file.
+        // Unlike the hand-edit path this hard-blocks — AI output is
+        // untrusted, and being overly conservative just leaves the block
+        // unresolved, which is safe.
+        if (this.markerEchoPattern().test(result.data.resolvedContent)) {
           showToast('AI suggestion contained conflict markers — block left unresolved', 'error');
           return false;
         }
@@ -1183,7 +1244,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private async handleAiResolveAll(): Promise<void> {
-    if (this.suggestingAll) return;
+    if (this.suggestingAll || this.actionsBlocked) return;
 
     const conflictIds = this.segments.filter((s) => s.type === 'conflict').map((s) => s.id);
     if (conflictIds.length === 0) return;
@@ -1469,7 +1530,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         ></textarea>
         <div class="segment-editor-actions">
           <button class="btn" @click=${this.cancelEditSegment}>Cancel</button>
-          <button class="btn btn-primary" @click=${this.applyEditSegment}>Apply</button>
+          <button class="btn btn-primary" @click=${this.applyEditSegment} ?disabled=${this.actionsBlocked}>
+            Apply
+          </button>
         </div>
       </div>
     `;
@@ -1492,6 +1555,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button
             class="segment-btn"
             @click=${() => this.startEditSegment(segment)}
+            ?disabled=${this.actionsBlocked}
             title="Edit this section"
           >
             Edit
@@ -1501,6 +1565,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
                 <button
                   class="segment-btn"
                   @click=${() => this.resetSegment(segment.id)}
+                  ?disabled=${this.actionsBlocked}
                   title="Undo this resolution and reopen the conflict"
                 >
                   Reset
@@ -1566,24 +1631,28 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <button
               class="btn btn-ours conflict-pick-btn"
               @click=${() => this.resolveConflictSegment(segment.id, 'ours')}
+              ?disabled=${this.actionsBlocked}
             >
               Use Ours
             </button>
             <button
               class="btn btn-theirs conflict-pick-btn"
               @click=${() => this.resolveConflictSegment(segment.id, 'theirs')}
+              ?disabled=${this.actionsBlocked}
             >
               Use Theirs
             </button>
             <button
               class="btn btn-both conflict-pick-btn"
               @click=${() => this.resolveConflictSegment(segment.id, 'both')}
+              ?disabled=${this.actionsBlocked}
             >
               Use Both
             </button>
             <button
               class="btn conflict-pick-btn"
               @click=${() => this.startEditSegment(segment)}
+              ?disabled=${this.actionsBlocked}
               title="Write this section by hand (starts from both sides)"
             >
               Edit
@@ -1593,7 +1662,9 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
                   <button
                     class="btn btn-ai conflict-pick-btn"
                     @click=${() => this.handleSuggestSegment(segment.id)}
-                    ?disabled=${this.suggestingSegment !== null || this.suggestingAll}
+                    ?disabled=${this.suggestingSegment !== null ||
+                    this.suggestingAll ||
+                    this.actionsBlocked}
                   >
                     ${isSuggesting ? 'AI...' : 'AI Suggest'}
                   </button>
@@ -1715,12 +1786,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
           <button
             class="btn"
             @click=${this.handleReload}
+            ?disabled=${this.actionsBlocked}
             title="Reload the file from disk, discarding resolutions made here"
           >
             Reload
           </button>
           ${this.conflictFile.ancestor
-            ? html`<button class="btn" @click=${this.handleAcceptBase} ?disabled=${this.loadFailed} title="Reset to common ancestor">
+            ? html`<button class="btn" @click=${this.handleAcceptBase} ?disabled=${this.loadFailed || this.actionsBlocked} title="Reset to common ancestor">
                 Use Base
               </button>`
             : nothing}
@@ -1728,21 +1800,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             ? html`<button class="btn btn-ours" @click=${() => this.handleTakeSide('ours')} ?disabled=${this.actionsBlocked} title="Ours deleted this file — keep it deleted">
                 Use Ours (delete file)
               </button>`
-            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.ours}">
+            : html`<button class="btn btn-ours" @click=${this.handleAcceptOurs} ?disabled=${this.loadFailed || this.actionsBlocked} title="Use entire file from ${labels.ours}">
                 Use Ours
               </button>`}
           ${this.conflictFile && !this.conflictFile.theirs
             ? html`<button class="btn btn-theirs" @click=${() => this.handleTakeSide('theirs')} ?disabled=${this.actionsBlocked} title="Theirs deleted this file — delete it">
                 Use Theirs (delete file)
               </button>`
-            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} ?disabled=${this.loadFailed} title="Use entire file from ${labels.theirs}">
+            : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} ?disabled=${this.loadFailed || this.actionsBlocked} title="Use entire file from ${labels.theirs}">
                 Use Theirs
               </button>`}
           ${this.aiAvailable && conflictCount > 0 ? html`
             <button
               class="btn btn-ai"
               @click=${this.handleAiResolveAll}
-              ?disabled=${this.suggestingAll || this.suggestingSegment !== null}
+              ?disabled=${this.suggestingAll ||
+              this.suggestingSegment !== null ||
+              this.actionsBlocked}
               title="Use AI to resolve all remaining conflicts"
             >
               ${this.suggestingAll ? 'AI Resolving...' : 'AI Resolve All'}

@@ -529,6 +529,14 @@ export class AppShell extends LitElement {
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
+  /**
+   * Repository the conflict dialog was opened FOR. The dialog must keep
+   * operating on that repository even if the user switches repo tabs while
+   * it is up (Ctrl+Tab still works behind the full-screen dialog) — binding
+   * the live active-repo path would aim its abort/resolve/stage commands at
+   * whichever repo happens to be active, destroying unrelated work.
+   */
+  @state() private conflictDialogRepoPath: string | null = null;
   @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
   // Stash-completion semantics for the conflict dialog (which entry to drop and
   // whether to drop it at all — pop drops, plain apply keeps).
@@ -920,7 +928,7 @@ export class AppShell extends LitElement {
       // An explicit operation always knows its source — clear any uncertainty
       // left over from a previous state-inferred stash flow.
       this.conflictStashSourceCertain = true;
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
     } else {
       // No operation context (the diff view's "Open Merge Editor" button, a
       // conflicted-file stage click): derive the operation from repository
@@ -934,9 +942,20 @@ export class AppShell extends LitElement {
   private handleMergeConflictEvent = (): void => {
     this.conflictOperationType = 'merge';
     this.resetConflictDetailState();
-    this.showConflictDialog = true;
+    this.openConflictDialogPinned();
     this.handleRefresh();
   };
+
+  /** Open the conflict dialog pinned to the repository that is active NOW. */
+  private openConflictDialogPinned(): void {
+    this.conflictDialogRepoPath = this.activeRepository?.repository.path ?? null;
+    this.showConflictDialog = true;
+  }
+
+  private closeConflictDialog(): void {
+    this.showConflictDialog = false;
+    this.conflictDialogRepoPath = null;
+  }
 
   // Reset the conflict-dialog completion semantics to defaults so a value set by a
   // prior operation (e.g. squash=true from a git-flow squash finish, or a non-zero
@@ -1442,7 +1461,7 @@ export class AppShell extends LitElement {
       this.conflictOperationType = 'stash';
       this.resetConflictDetailState();
       this.conflictDropStashOnComplete = true;
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       this.handleRefresh();
     } else if (data.stashed && data.stashApplied) {
       showToast(data.message, data.message.includes('staged status was not preserved') ? 'warning' : 'info');
@@ -1468,7 +1487,7 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       notifyWarning(
         'Merge Conflict',
         `Conflicts detected while merging ${refName}. Please resolve conflicts to continue.`,
@@ -1497,7 +1516,7 @@ export class AppShell extends LitElement {
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       notifyWarning(
         'Rebase Conflict',
         `Conflicts detected while rebasing onto ${refName}. Please resolve conflicts to continue.`,
@@ -1595,7 +1614,7 @@ export class AppShell extends LitElement {
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
     this.resetConflictDetailState();
-    this.showConflictDialog = true;
+    this.openConflictDialogPinned();
     notifyWarning(
       'Cherry-pick Conflict',
       'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
@@ -1616,16 +1635,27 @@ export class AppShell extends LitElement {
 
   /**
    * Derive which operation the current index conflicts belong to from the
-   * repository state. A clean state with conflicted files means a stash apply
-   * conflicted — the only conflict source that leaves no in-progress state.
+   * repository state. A CLEAN state with conflicted files means a stash
+   * apply conflicted — the only conflict source that leaves no in-progress
+   * state. Returns null for states this dialog cannot drive (an external
+   * `git am` / `git bisect`): its Complete does not run their --continue
+   * and its stash-flavored Abort would discard the conflicted files while
+   * leaving the operation wedged mid-flight.
    */
-  private deriveConflictOperationType(): 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' {
+  private deriveConflictOperationType():
+    | 'merge'
+    | 'rebase'
+    | 'cherry-pick'
+    | 'revert'
+    | 'stash'
+    | null {
     const state = this.activeRepository?.repository.state ?? 'clean';
     if (state === 'cherrypick') return 'cherry-pick';
     if (state === 'rebase' || state === 'rebase-interactive' || state === 'rebase-merge') return 'rebase';
     if (state === 'revert') return 'revert';
     if (state === 'merge') return 'merge';
-    return 'stash';
+    if (state === 'clean') return 'stash';
+    return null;
   }
 
   /**
@@ -1636,7 +1666,15 @@ export class AppShell extends LitElement {
   private openConflictDialogFromState(initialFilePath?: string): void {
     if (!this.activeRepository) return;
 
-    this.conflictOperationType = this.deriveConflictOperationType();
+    const operationType = this.deriveConflictOperationType();
+    if (operationType === null) {
+      showToast(
+        `Conflicts from an external ${this.activeRepository.repository.state} operation — resolve them with git in a terminal`,
+        'warning',
+      );
+      return;
+    }
+    this.conflictOperationType = operationType;
     this.resetConflictDetailState();
     // A state-derived stash conflict has unknown pop semantics — never drop a
     // stash entry we can't identify (completing keeps the stash), and the
@@ -1647,7 +1685,7 @@ export class AppShell extends LitElement {
       this.conflictStashSourceCertain = false;
     }
     this.conflictInitialFilePath = initialFilePath ?? null;
-    this.showConflictDialog = true;
+    this.openConflictDialogPinned();
   }
 
   private handleOpenConflictDialog(): void {
@@ -1689,7 +1727,7 @@ export class AppShell extends LitElement {
       // Show conflict resolution dialog
       this.conflictOperationType = 'revert';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       notifyWarning(
         'Revert Conflict',
         `Conflicts detected while reverting ${commit.oid.substring(0, 7)}. Please resolve conflicts to continue.`,
@@ -2037,12 +2075,12 @@ export class AppShell extends LitElement {
   }
 
   private handleConflictResolved(): void {
-    this.showConflictDialog = false;
+    this.closeConflictDialog();
     this.handleRefresh();
   }
 
   private handleConflictAborted(): void {
-    this.showConflictDialog = false;
+    this.closeConflictDialog();
     this.handleRefresh();
   }
 
@@ -2999,13 +3037,13 @@ export class AppShell extends LitElement {
       progressService.failOperation(opId);
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       this.handleRefresh();
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
-      this.showConflictDialog = true;
+      this.openConflictDialogPinned();
       this.handleRefresh();
     } else {
       progressService.failOperation(opId);
@@ -3417,7 +3455,7 @@ export class AppShell extends LitElement {
         ? html`
             <lv-conflict-resolution-dialog
               open
-              repositoryPath=${this.activeRepository.repository.path}
+              repositoryPath=${this.conflictDialogRepoPath ?? this.activeRepository.repository.path}
               operationType=${this.conflictOperationType}
               .initialFilePath=${this.conflictInitialFilePath}
               .stashSourceCertain=${this.conflictStashSourceCertain}

@@ -390,6 +390,13 @@ export interface ConflictFile {
    * the parser must use this exact size — never guess from content.
    */
   markerSize?: number;
+  /**
+   * Conflict style the hunks were written with. Only when this is 'diff3'
+   * may a `|||||||` run be treated as a base-section marker — in the
+   * default 'merge' style it is ours CONTENT, and discarding it would
+   * silently lose lines.
+   */
+  conflictStyle?: 'merge' | 'diff3';
 }
 
 export interface ConflictEntry {

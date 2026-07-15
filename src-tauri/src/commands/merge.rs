@@ -900,34 +900,28 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .filter_map(|e| e.as_ref())
             .any(|e| repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false));
 
-        // The marker size git used when writing this file's conflict hunks.
-        // A raised size means 7-char marker-shaped lines are CONTENT, so the
-        // parser cannot guess — it needs the authoritative attribute value.
-        // BUT the attribute only describes what git's CLI writes: libgit2's
-        // own merge/checkout ignores conflict-marker-size and always emits
-        // 7-char markers, so a raised attribute is only trusted when the
-        // working file really contains a complete conflict at that size.
-        let attr_size = repo
-            .get_attr(
-                Path::new(&file_path),
-                "conflict-marker-size",
-                git2::AttrCheckFlags::default(),
+        // How this file's conflict hunks were actually written. The
+        // conflict-marker-size attribute and merge.conflictStyle config only
+        // describe what git's CLI writes — libgit2's own merge/checkout
+        // ignores both and always emits 7-char merge-style markers — so the
+        // emission must be verified against the working file, not assumed.
+        // Binary conflicts have no marker hunks to detect (and libgit2's
+        // binary merge result has no content to replay against) — report
+        // the defaults; the text merge editor never parses them anyway.
+        let (marker_size, conflict_style) = if is_binary {
+            (
+                crate::models::conflict::default_marker_size(),
+                crate::models::conflict::default_conflict_style(),
             )
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or_else(crate::models::conflict::default_marker_size);
-        let marker_size = if attr_size == 7 {
-            7
         } else {
-            match std::fs::read_to_string(Path::new(&path).join(&file_path)) {
-                Ok(content) if has_complete_conflict(&content, attr_size as usize) => attr_size,
-                Ok(_) => 7,
-                // Unreadable working file (deleted side, binary) — the size
-                // is moot for parsing, report the attribute value.
-                Err(_) => attr_size,
-            }
+            detect_conflict_emission(
+                &repo,
+                Path::new(&path),
+                &file_path,
+                conflict.ancestor.as_ref(),
+                conflict.our.as_ref(),
+                conflict.their.as_ref(),
+            )
         };
 
         conflicts.push(ConflictFile {
@@ -937,6 +931,7 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             theirs: get_entry(conflict.their),
             is_binary,
             marker_size,
+            conflict_style,
         });
     }
 
@@ -944,27 +939,163 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
     Ok(conflicts)
 }
 
+/// True when `line` is a marker run of `ch`: EXACTLY `size` characters
+/// followed by a space or end-of-line.
+fn is_marker_run(line: &str, ch: char, size: usize) -> bool {
+    let n = line.chars().take_while(|&c| c == ch).count();
+    n == size && matches!(line.chars().nth(n), None | Some(' '))
+}
+
+/// The `conflict-marker-size` gitattribute for a path, defaulting to 7.
+/// Parsed as u16: real sizes are tiny, and the cap also bounds the
+/// separator-string allocations downstream — a hostile
+/// `conflict-marker-size=4000000000` in a cloned repo's .gitattributes must
+/// not make the backend try to allocate gigabytes.
+fn attr_marker_size(repo: &git2::Repository, file_path: &str) -> u32 {
+    repo.get_attr(
+        Path::new(file_path),
+        "conflict-marker-size",
+        git2::AttrCheckFlags::default(),
+    )
+    .ok()
+    .flatten()
+    .and_then(|v| v.parse::<u16>().ok())
+    .map(u32::from)
+    .filter(|&n| n >= 1)
+    .unwrap_or_else(crate::models::conflict::default_marker_size)
+}
+
 /// True when `content` holds a complete conflict written at `size`: a start
 /// run, then a separator, then an end run — each exactly `size` marker
 /// characters followed by a space or end-of-line, in git's emission order.
-/// Used to verify that a raised conflict-marker-size attribute matches what
-/// was actually written (libgit2 ignores the attribute and emits 7).
+/// Fallback signal only — content that QUOTES a complete conflict (docs,
+/// fixtures) fools it, which is why detect_conflict_emission replays the
+/// merge first.
 fn has_complete_conflict(content: &str, size: usize) -> bool {
-    let run_is = |line: &str, ch: char| -> bool {
-        let n = line.chars().take_while(|&c| c == ch).count();
-        n == size && matches!(line.chars().nth(n), None | Some(' '))
-    };
     let sep: String = "=".repeat(size);
     let mut stage = 0u8; // 0 = want start, 1 = want separator, 2 = want end
     for line in content.lines() {
         match stage {
-            0 if run_is(line, '<') => stage = 1,
+            0 if is_marker_run(line, '<', size) => stage = 1,
             1 if line == sep => stage = 2,
-            2 if run_is(line, '>') => return true,
+            2 if is_marker_run(line, '>', size) => return true,
             _ => {}
         }
     }
     false
+}
+
+/// True when the FIRST complete conflict at `size` contains a base marker
+/// (`|||||||` run of the same size) between its start and separator —
+/// the structural signature of diff3 emission. Fallback signal only.
+fn diff3_within_first_conflict(content: &str, size: usize) -> bool {
+    let sep: String = "=".repeat(size);
+    let mut in_ours = false;
+    let mut saw_base = false;
+    for line in content.lines() {
+        if !in_ours {
+            if is_marker_run(line, '<', size) {
+                in_ours = true;
+            }
+        } else if line == sep {
+            return saw_base;
+        } else if is_marker_run(line, '|', size) {
+            saw_base = true;
+        }
+    }
+    false
+}
+
+/// Line-based comparison of the working file against a replayed merge,
+/// tolerant of the two things that legitimately differ between engines:
+/// marker LABELS (git's CLI writes branch names/commit subjects, libgit2
+/// writes index-entry paths) and CR line endings (checkout filters).
+/// Content lines must match exactly.
+fn matches_replay(workdir: &str, replay: &str, size: usize) -> bool {
+    let marker_kind = |line: &str| -> Option<char> {
+        ['<', '>', '|']
+            .into_iter()
+            .find(|&ch| is_marker_run(line, ch, size))
+    };
+    let a: Vec<&str> = workdir.lines().collect();
+    let b: Vec<&str> = replay.lines().collect();
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x == y || matches!((marker_kind(x), marker_kind(y)), (Some(p), Some(q)) if p == q)
+        })
+}
+
+/// Determine the marker size and conflict style this file's hunks were
+/// ACTUALLY written with. The gitattribute/config only describe what git's
+/// CLI writes; libgit2 (the in-app merge engine) ignores both and always
+/// emits 7-char merge-style markers, and the same bytes can be a real
+/// conflict at one size and quoted content at another. So: replay the merge
+/// from the index blobs at each candidate size × style and accept a
+/// (label/CR tolerant) match as definitive; fall back to structural scans
+/// only when replay cannot decide (user-edited file, missing side).
+fn detect_conflict_emission(
+    repo: &git2::Repository,
+    repo_root: &Path,
+    file_path: &str,
+    ancestor: Option<&git2::IndexEntry>,
+    ours: Option<&git2::IndexEntry>,
+    theirs: Option<&git2::IndexEntry>,
+) -> (u32, String) {
+    let attr_size = attr_marker_size(repo, file_path);
+    let content = match std::fs::read_to_string(repo_root.join(file_path)) {
+        Ok(c) => c,
+        // Unreadable working file (deleted side, binary) — size and style
+        // are moot for parsing; report the attribute value.
+        Err(_) => return (attr_size, crate::models::conflict::default_conflict_style()),
+    };
+
+    let mut candidates: Vec<u32> = vec![attr_size];
+    if attr_size != 7 {
+        candidates.push(7);
+    }
+
+    if let (Some(anc), Some(our), Some(their)) = (ancestor, ours, theirs) {
+        for &size in &candidates {
+            for style in ["merge", "diff3", "zdiff3"] {
+                let mut opts = git2::MergeFileOptions::new();
+                opts.marker_size(size as u16);
+                opts.style_diff3(style == "diff3");
+                opts.style_zdiff3(style == "zdiff3");
+                let Ok(result) = repo.merge_file_from_index(anc, our, their, Some(&mut opts))
+                else {
+                    continue;
+                };
+                let replay = String::from_utf8_lossy(result.content());
+                if matches_replay(&content, &replay, size as usize) {
+                    // zdiff3 emits the same structure as diff3 to a parser.
+                    let reported = if style == "merge" { "merge" } else { "diff3" };
+                    return (size, reported.to_string());
+                }
+            }
+        }
+    }
+
+    // Structural fallback. When BOTH sizes show a complete conflict the
+    // bytes are undecidable — follow the gitattributes-documented semantics
+    // (the replay above already resolved the common libgit2 case).
+    let size = if attr_size == 7 {
+        7
+    } else {
+        match (
+            has_complete_conflict(&content, attr_size as usize),
+            has_complete_conflict(&content, 7),
+        ) {
+            (true, _) => attr_size,
+            (false, true) => 7,
+            (false, false) => 7,
+        }
+    };
+    let style = if diff3_within_first_conflict(&content, size as usize) {
+        "diff3"
+    } else {
+        "merge"
+    };
+    (size, style.to_string())
 }
 
 /// Get content of a blob by OID
@@ -2445,6 +2576,7 @@ mod tests {
             txt.marker_size, 7,
             "raised attribute must fall back to 7 when the file was written with 7-char markers"
         );
+        assert_eq!(txt.conflict_style, "merge");
         let md = conflicts
             .iter()
             .find(|c| c.path == "other.md")
@@ -2453,7 +2585,8 @@ mod tests {
 
         // Git's CLI (rebase/cherry-pick shell-outs, external git) DOES honor
         // the attribute. Simulate its emission: with real 12-char markers on
-        // disk the raised size must be reported.
+        // disk the raised size must be reported. (The extra content line is
+        // not in the blobs, so this exercises the structural fallback.)
         std::fs::write(
             repo.path.join("shared.txt"),
             "<<<<<<<<<<<< HEAD\nmain content\n<<<<<<< a 7-char sample in content\n============\nfeature content\n>>>>>>>>>>>> feature\n",
@@ -2468,6 +2601,205 @@ mod tests {
             txt.marker_size, 12,
             "raised attribute must be reported when the file really uses raised markers"
         );
+    }
+
+    /// Replays a merge of the conflicted index entries for `path` with the
+    /// given options and writes the result to the working directory —
+    /// simulating what a different engine (git's CLI) would have written.
+    fn replay_conflict_to_workdir(repo: &TestRepo, path: &str, opts: &mut git2::MergeFileOptions) {
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let conflict = index
+            .conflicts()
+            .unwrap()
+            .flatten()
+            .find(|c| {
+                c.our
+                    .as_ref()
+                    .map(|e| String::from_utf8_lossy(&e.path) == path)
+                    .unwrap_or(false)
+            })
+            .expect("conflict should exist");
+        let result = git_repo
+            .merge_file_from_index(
+                conflict.ancestor.as_ref().unwrap(),
+                conflict.our.as_ref().unwrap(),
+                conflict.their.as_ref().unwrap(),
+                Some(opts),
+            )
+            .unwrap();
+        std::fs::write(repo.path.join(path), result.content()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_replay_detects_cli_written_raised_markers() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict exactly as git's CLI would: raised size, with
+        // labels DIFFERENT from libgit2's index-entry paths — the replay
+        // comparison must tolerate label differences.
+        let mut opts = git2::MergeFileOptions::new();
+        opts.marker_size(12);
+        opts.our_label("HEAD");
+        opts.their_label("feature");
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(txt.marker_size, 12);
+        assert_eq!(txt.conflict_style, "merge");
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_quoted_raised_sample_does_not_fool_size_detection() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // The OURS side's CONTENT quotes a complete 12-char conflict — the
+        // very kind of file conflict-marker-size gets raised for. A purely
+        // structural scan reports 12 here; only the merge replay can tell
+        // that libgit2 actually wrote the real markers at 7.
+        let quoted = "docs:\n<<<<<<<<<<<< sample\none\n============\ntwo\n>>>>>>>>>>>> sample\n";
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=12\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", quoted)]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.contains("<<<<<<<<<<<< sample") && written.contains("<<<<<<< "),
+            "precondition: quoted 12-sample AND real 7-char markers coexist; got:\n{written}"
+        );
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 7,
+            "the quoted sample must not defeat the replay verification"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_hostile_marker_size_attribute_is_rejected() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // A hostile/typo attribute value must not force a multi-gigabyte
+        // allocation — it is rejected at parse time and falls back to 7.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=4000000000\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("txt conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_reports_diff3_style() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict as diff3 emission (merge.conflictStyle=diff3
+        // via git's CLI) — the style must be detected and reported so the
+        // frontend knows a ||||||| line is a base section, not ours content.
+        let mut opts = git2::MergeFileOptions::new();
+        opts.style_diff3(true);
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.contains("|||||||"),
+            "precondition: diff3 emission has a base marker; got:\n{written}"
+        );
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(txt.marker_size, 7);
+        assert_eq!(txt.conflict_style, "diff3");
+    }
+
+    #[test]
+    fn test_diff3_within_first_conflict() {
+        let diff3 = "<<<<<<< HEAD\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> f\n";
+        assert!(diff3_within_first_conflict(diff3, 7));
+
+        let merge_style = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> f\n";
+        assert!(!diff3_within_first_conflict(merge_style, 7));
+
+        // A pipe run in the THEIRS section is content, not a diff3 signal.
+        let pipes_in_theirs = "<<<<<<< HEAD\nours\n=======\n||||||| x\ntheirs\n>>>>>>> f\n";
+        assert!(!diff3_within_first_conflict(pipes_in_theirs, 7));
     }
 
     #[test]

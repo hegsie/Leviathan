@@ -262,12 +262,31 @@ describe('lv-merge-editor', () => {
 
     it('supports diff3 output without leaking the base section into ours', async () => {
       const el = await renderEditor();
+      internalOf(el).conflictFile = { ...makeConflictFile('src/test.ts'), conflictStyle: 'diff3' };
       const segments = internalOf(el).parseSegments(
         '<<<<<<< HEAD\nours\n||||||| base\nbase-line\n=======\ntheirs\n>>>>>>> other'
       );
       expect(segments.length).to.equal(1);
       expect(segments[0].oursLines).to.deep.equal(['ours']);
       expect(segments[0].theirsLines).to.deep.equal(['theirs']);
+    });
+
+    it('keeps a ||||||| line as ours CONTENT in default merge-style conflicts', async () => {
+      const el = await renderEditor();
+      // The default style has no base sections (and libgit2 never writes
+      // them): a pipe run in ours is real content — discarding the lines
+      // after it as a "base section" would silently lose them from every
+      // Use Ours / Use Both pick.
+      const segments = internalOf(el).parseSegments(
+        '<<<<<<< HEAD\nline A\n|||||||\nline B (part of ours)\n=======\ntheir line\n>>>>>>> branch'
+      );
+      expect(segments.length).to.equal(1);
+      expect(segments[0].oursLines).to.deep.equal([
+        'line A',
+        '|||||||',
+        'line B (part of ours)',
+      ]);
+      expect(segments[0].theirsLines).to.deep.equal(['their line']);
     });
 
     it('does not mistake a divider banner inside ours for the separator', async () => {
@@ -475,7 +494,8 @@ describe('lv-merge-editor', () => {
 
     it('falls back to size 7 for missing or nonsense marker sizes', async () => {
       const el = await renderEditor();
-      for (const bad of [0, -3, 2.5, undefined]) {
+      // 1e9 would drive a gigabyte separator-string allocation if trusted.
+      for (const bad of [0, -3, 2.5, 1_000_000_000, undefined]) {
         internalOf(el).conflictFile = makeConflictFile('src/test.ts', bad as number | undefined);
         const segments = internalOf(el).parseSegments(DEFAULT_WORKDIR_CONTENT);
         expect(segments.filter((s) => s.type === 'conflict').length, `size=${bad}`).to.equal(1);
@@ -788,6 +808,12 @@ describe('lv-merge-editor', () => {
     });
 
     it('Reload re-reads the on-disk merge, restoring conflicts', async () => {
+      // The whole-file accept is unsaved work, so Reload confirms first.
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        return baseMock(command, args);
+      };
       const el = await renderLoadedEditor();
       const useOurs = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions .btn-ours')).find(
         (b) => b.textContent?.trim() === 'Use Ours'
@@ -1726,20 +1752,79 @@ describe('lv-merge-editor', () => {
       }
       await el.updateComplete;
 
-      // User does WIP on file B: resolve a conflict block manually.
-      findConflictButton(el, 'Use Ours').click();
+      // While ANY tool session is open, in-memory picks are inert (they
+      // could be wiped by a post-tool reload, so they are blocked outright)
+      // and the buttons say so.
+      const useOurs = findConflictButton(el, 'Use Ours');
+      expect(useOurs.disabled, 'picks are disabled during a tool session').to.be.true;
+      useOurs.click();
       await el.updateComplete;
-      const resolvedCountBefore = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
-      expect(resolvedCountBefore, 'B has a manual resolution in progress').to.equal(1);
+      expect(
+        internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length,
+        'a click during the session must not resolve anything'
+      ).to.equal(0);
 
       // A's external tool now finishes — its completion must only touch A,
-      // never reload (and wipe) the file the user has since switched to.
+      // never reload the file the user has since switched to, and B's
+      // blocks re-enable for normal work.
       releaseTool!();
       await toolPromise;
       await el.updateComplete;
 
-      const resolvedCountAfter = internal.segments.filter((s) => s.type === 'resolved' && s.origin === 'ours').length;
-      expect(resolvedCountAfter, 'B\'s WIP resolution must survive an unrelated file\'s external tool completing').to.equal(1);
+      expect(findConflictButton(el, 'Use Ours').disabled).to.be.false;
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const resolvedCountAfter = internal.segments.filter(
+        (s) => s.type === 'resolved' && s.origin === 'ours'
+      ).length;
+      expect(resolvedCountAfter, "B's picks work normally after the session ends").to.equal(1);
+    });
+
+    it('all in-memory mutations are inert while a tool session is open', async () => {
+      setupDefaultMocks();
+      let releaseTool: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_merge_tool_config') return { toolName: 'meld' };
+        if (command === 'launch_merge_tool') {
+          return new Promise((res) => {
+            releaseTool = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      const internal = el as unknown as EditorInternal & {
+        handleOpenExternalMergeTool: () => Promise<void>;
+        acceptWholeFile: (origin: string) => void;
+        startEditSegment: (segment: unknown) => void;
+        handleReload: () => Promise<void>;
+        editingSegmentId: number | null;
+      };
+      const toolPromise = internal.handleOpenExternalMergeTool.call(el);
+      await el.updateComplete;
+
+      // Whole-file accept: would be silently destroyed by the post-tool
+      // reload — must be a no-op.
+      internal.acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+      expect(internal.segments.some((s) => s.type === 'conflict'), 'accept was inert').to.be.true;
+
+      // Opening an inline edit: same fate.
+      internal.startEditSegment.call(el, internal.segments[0]);
+      expect(internal.editingSegmentId).to.equal(null);
+
+      // Reload: would clear the session's lock semantics mid-flight.
+      invokeHistory.length = 0;
+      await internal.handleReload.call(el);
+      expect(
+        invokeHistory.some((h) => h.command === 'read_file_content'),
+        'reload was inert'
+      ).to.be.false;
+
+      releaseTool!();
+      await toolPromise;
     });
 
     it('a still-conflicted tool exit warns instead of toasting success', async () => {
@@ -1808,7 +1893,7 @@ describe('lv-merge-editor', () => {
       const toolPromise = internal.handleOpenExternalMergeTool.call(el);
       await el.updateComplete;
 
-      // Switch to B and make a pick while A's tool is open.
+      // Switch to B while A's tool is open.
       internal.conflictFile = makeConflictFile('src/b.ts');
       await el.updateComplete;
       for (let i = 0; i < 100; i++) {
@@ -1816,14 +1901,22 @@ describe('lv-merge-editor', () => {
         if (!internal.loading && internal.segments.length > 0) break;
       }
       await el.updateComplete;
-      findConflictButton(el, 'Use Ours').click();
-      await el.updateComplete;
 
+      invokeHistory.length = 0;
       releaseTool!();
       await toolPromise;
       await el.updateComplete;
 
-      // B's pick survived — the still-conflicted branch did not reload B.
+      // The still-conflicted branch must not reload anything: A is no
+      // longer on screen, and reloading B would wipe the state the user is
+      // working in.
+      expect(
+        invokeHistory.some((h) => h.command === 'read_file_content'),
+        'no file may be reloaded when the tool file is no longer selected'
+      ).to.be.false;
+      // B is fully usable after the session ends.
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
       const resolved = internal.segments.filter((s) => s.origin === 'ours').length;
       expect(resolved).to.equal(1);
     });
@@ -2188,6 +2281,165 @@ describe('lv-merge-editor', () => {
       expect((takeSide!.args as Record<string, unknown>).side).to.equal('theirs');
       expect(invokeHistory.some(h => h.command === 'resolve_conflict')).to.be.false;
       expect(resolvedFired).to.be.true;
+    });
+  });
+
+  // ── Hand-edit marker confirmation ─────────────────────────────────────
+  describe('hand-edit marker confirmation', () => {
+    async function renderWithEdit(): Promise<{
+      el: LvMergeEditor;
+      internal: EditorInternal & {
+        startEditSegment: (segment: unknown) => void;
+        applyEditSegment: () => Promise<void>;
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+    }> {
+      const el = await renderLoadedEditor('src/test.ts');
+      const internal = el as unknown as EditorInternal & {
+        startEditSegment: (segment: unknown) => void;
+        applyEditSegment: () => Promise<void>;
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      const conflict = internal.segments.find((s) => s.type === 'conflict')!;
+      internal.startEditSegment.call(el, conflict);
+      await el.updateComplete;
+      return { el, internal };
+    }
+
+    it('a pasted marker line asks for confirmation and declining keeps the edit open', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const { el, internal } = await renderWithEdit();
+      const editedId = internal.editingSegmentId;
+      internal.editDraft = '<<<<<<< HEAD\npasted raw conflict text';
+      await internal.applyEditSegment.call(el);
+      await el.updateComplete;
+
+      expect(confirmCalls, 'marker-shaped edit must confirm').to.equal(1);
+      expect(internal.editingSegmentId, 'declining keeps the edit open').to.equal(editedId);
+      expect(
+        internal.segments.find((s) => s.id === editedId)?.type,
+        'the segment stays an open conflict'
+      ).to.equal('conflict');
+    });
+
+    it('confirming keeps intentional marker-like text (setext underlines are legal)', async () => {
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        return baseMock(command, args);
+      };
+      const { el, internal } = await renderWithEdit();
+      const editedId = internal.editingSegmentId!;
+      internal.editDraft = 'Heading\n=======';
+      await internal.applyEditSegment.call(el);
+      await el.updateComplete;
+
+      const segment = internal.segments.find((s) => s.id === editedId)!;
+      expect(segment.type).to.equal('resolved');
+      expect(segment.lines).to.deep.equal(['Heading', '=======']);
+      expect(internal.editingSegmentId).to.equal(null);
+    });
+
+    it('marker-free edits apply without any confirmation', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return 'Ok';
+        }
+        return baseMock(command, args);
+      };
+      const { el, internal } = await renderWithEdit();
+      const editedId = internal.editingSegmentId!;
+      internal.editDraft = 'hand merged';
+      await internal.applyEditSegment.call(el);
+      await el.updateComplete;
+
+      expect(confirmCalls).to.equal(0);
+      expect(internal.segments.find((s) => s.id === editedId)?.lines).to.deep.equal([
+        'hand merged',
+      ]);
+    });
+  });
+
+  // ── Reload confirmation ───────────────────────────────────────────────
+  describe('reload confirmation', () => {
+    it('reload with unsaved picks confirms; declining keeps them', async () => {
+      setupDefaultMocks();
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/test.ts');
+      const internal = el as unknown as EditorInternal & {
+        handleReload: () => Promise<void>;
+      };
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions()).to.be.true;
+
+      // Declined: picks stay, nothing reloads.
+      await internal.handleReload.call(el);
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(1);
+      expect(el.hasUnsavedResolutions(), 'declining keeps the picks').to.be.true;
+
+      // Accepted: the file re-parses from disk and the picks are gone.
+      confirmAnswer = 'Ok';
+      await internal.handleReload.call(el);
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      await el.updateComplete;
+      expect(el.hasUnsavedResolutions(), 'accepting reloads from disk').to.be.false;
+      expect(internal.segments.some((s) => s.type === 'conflict')).to.be.true;
+    });
+
+    it('reload without unsaved picks does not ask', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:dialog|message') {
+          confirmCalls++;
+          return false;
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor('src/test.ts');
+      const internal = el as unknown as EditorInternal & {
+        handleReload: () => Promise<void>;
+      };
+      invokeHistory.length = 0;
+      await internal.handleReload.call(el);
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && internal.segments.length > 0) break;
+      }
+      expect(confirmCalls).to.equal(0);
+      expect(invokeHistory.some((h) => h.command === 'read_file_content')).to.be.true;
     });
   });
 });
