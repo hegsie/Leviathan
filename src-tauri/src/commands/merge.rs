@@ -992,11 +992,11 @@ fn has_complete_conflict(content: &str, size: usize) -> bool {
 /// size. Used when the conflict-marker-size attribute no longer matches
 /// what git wrote (it can change mid-operation via .gitattributes' own
 /// resolution). The 7+ floor avoids false positives on `< quoted` lines.
-fn detected_marker_sizes(content: &str) -> Vec<u32> {
+fn detected_marker_sizes(content: &str, min_size: usize) -> Vec<u32> {
     let mut sizes: Vec<u32> = Vec::new();
     for line in content.lines() {
         let n = line.chars().take_while(|&c| c == '<').count();
-        if n >= 7
+        if n >= min_size
             && n <= u16::MAX as usize
             && matches!(line.chars().nth(n), None | Some(' '))
             && !sizes.contains(&(n as u32))
@@ -1085,12 +1085,18 @@ fn detect_conflict_emission(
     // markers' feet, and trusting only the attribute would then report a
     // size the file does not use (the frontend would find zero conflicts
     // and let Mark Resolved stage the raw markers as resolved content).
-    let detected = detected_marker_sizes(&content);
+    // Git emits runs as small as 1, so the REPLAY candidates take every
+    // demonstrated size — a wrong size simply fails the replay match, so
+    // sub-7 candidates cannot cause false positives there. The structural
+    // fallback below stays at the 7+ floor: quoted `< text` / `= text`
+    // lines can coincidentally form complete sub-7 structures, and only
+    // the replay can certify those sizes safely.
+    let detected_all = detected_marker_sizes(&content, 1);
     let mut candidates: Vec<u32> = vec![attr_size];
     if attr_size != 7 {
         candidates.push(7);
     }
-    for &d in &detected {
+    for &d in &detected_all {
         if !candidates.contains(&d) {
             candidates.push(d);
         }
@@ -1173,7 +1179,7 @@ fn detect_conflict_emission(
     } else if complete_7 {
         7
     } else {
-        detected.first().copied().unwrap_or(7)
+        detected_all.iter().copied().find(|&n| n >= 7).unwrap_or(7)
     };
     let style = if diff3_within_first_conflict(&content, size as usize) {
         "diff3"
@@ -3128,14 +3134,76 @@ mod tests {
     #[test]
     fn test_detected_marker_sizes() {
         let raised = "ctx\n<<<<<<<<<<<< HEAD\nours\n============\ntheirs\n>>>>>>>>>>>> f\n";
-        assert_eq!(detected_marker_sizes(raised), vec![12]);
+        assert_eq!(detected_marker_sizes(raised, 7), vec![12]);
 
         let none = "just\nplain\ntext\n< quoted line\n";
-        assert!(detected_marker_sizes(none).is_empty());
+        assert!(detected_marker_sizes(none, 7).is_empty());
 
         // An incomplete start-shaped line demonstrates nothing.
         let incomplete = "<<<<<<< HEAD\nno separator or end\n";
-        assert!(detected_marker_sizes(incomplete).is_empty());
+        assert!(detected_marker_sizes(incomplete, 7).is_empty());
+
+        // Git emits runs as small as 1 — sub-7 sizes are demonstrable when
+        // the floor allows them (used for replay candidates only).
+        let tiny = "<<<< HEAD\nours\n====\ntheirs\n>>>> f\n";
+        assert_eq!(detected_marker_sizes(tiny, 1), vec![4]);
+        assert!(detected_marker_sizes(tiny, 7).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_conflicts_recovers_sub7_size_when_attribute_went_stale() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        // The file's markers were written at size 4 (git honors sub-7
+        // attribute values), but the attribute has since changed to 8 —
+        // e.g. by resolving .gitattributes' own conflict mid-operation.
+        // The replay must still certify the true size via the
+        // content-demonstrated candidates.
+        repo.create_commit(
+            "Add attrs and shared",
+            &[
+                (".gitattributes", "*.txt conflict-marker-size=8\n"),
+                ("shared.txt", "base"),
+            ],
+        );
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+
+        // Rewrite the conflict as size-4 emission (what git wrote before
+        // the attribute changed).
+        let mut opts = git2::MergeFileOptions::new();
+        opts.marker_size(4);
+        replay_conflict_to_workdir(&repo, "shared.txt", &mut opts);
+        let written = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(
+            written.lines().any(|l| l.starts_with("<<<< ")),
+            "precondition: size-4 markers on disk; got:\n{written}"
+        );
+
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let txt = conflicts
+            .iter()
+            .find(|c| c.path == "shared.txt")
+            .expect("conflict should be listed");
+        assert_eq!(
+            txt.marker_size, 4,
+            "the replay must certify the sub-7 size the content demonstrates"
+        );
+        assert!(
+            !txt.conflict_hunks.is_empty(),
+            "replay-certified files get authoritative hunks"
+        );
     }
 
     #[cfg(unix)]
