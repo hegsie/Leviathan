@@ -1041,7 +1041,7 @@ export class LvBranchList extends LitElement {
 
     for (const branch of mergedBranches) {
       const result = await gitService.deleteBranch(
-        this.repositoryPath,
+        repoPath,
         branch.name,
         false
       );
@@ -1147,6 +1147,10 @@ export class LvBranchList extends LitElement {
   private async handleRenameBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
     if (!branch || this.operationInProgress) return;
+    // Captured BEFORE the in-app prompt await (a Lit overlay, NOT a native
+    // modal — the window stays interactive, so the user can switch tabs while
+    // it is open). The rename must run against the repo it was invoked on, not
+    // whichever tab is active when the prompt resolves.
     const repoPath = this.repositoryPath;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
@@ -1164,7 +1168,7 @@ export class LvBranchList extends LitElement {
     this.operationInProgress = true;
 
     try {
-      const result = await gitService.renameBranch(this.repositoryPath, {
+      const result = await gitService.renameBranch(repoPath, {
         oldName: branch.name,
         newName: newName.trim(),
       });
@@ -1205,7 +1209,7 @@ export class LvBranchList extends LitElement {
 
     try {
       let result = await gitService.deleteBranch(
-        this.repositoryPath,
+        repoPath,
         branch.name,
         false
       );
@@ -1221,7 +1225,7 @@ export class LvBranchList extends LitElement {
           'warning'
         );
         if (!forceConfirmed) return;
-        result = await gitService.deleteBranch(this.repositoryPath, branch.name, true);
+        result = await gitService.deleteBranch(repoPath, branch.name, true);
       }
 
       if (result.success) {
@@ -1375,7 +1379,7 @@ export class LvBranchList extends LitElement {
     const remoteBranchRef = branch.name;
 
     try {
-      const createResult = await gitService.createBranch(this.repositoryPath, {
+      const createResult = await gitService.createBranch(repoPath, {
         name: localName,
         startPoint: remoteBranchRef,
         checkout: false,
@@ -1387,7 +1391,7 @@ export class LvBranchList extends LitElement {
       }
 
       const upstreamResult = await gitService.setUpstreamBranch(
-        this.repositoryPath,
+        repoPath,
         localName,
         remoteBranchRef,
       );
@@ -1410,14 +1414,18 @@ export class LvBranchList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
+    // Captured BEFORE the in-app prompt await (a Lit overlay, NOT a native
+    // modal — the window stays interactive, so the user can switch tabs while
+    // it is open). Without this the set-upstream would run against whichever
+    // repo is active when the prompt resolves, not the one it was invoked on.
+    const repoPath = this.repositoryPath;
     const defaultUpstream = branch.upstream ?? `origin/${branch.shorthand}`;
     const upstream = await showPrompt('Set Upstream', `Set upstream for "${branch.shorthand}":`, defaultUpstream);
     if (!upstream) return;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.setUpstreamBranch(
-        this.repositoryPath,
+        repoPath,
         branch.name,
         upstream.trim(),
       );
@@ -1443,7 +1451,7 @@ export class LvBranchList extends LitElement {
     const repoPath = this.repositoryPath;
     try {
       const result = await gitService.unsetUpstreamBranch(
-        this.repositoryPath,
+        repoPath,
         branch.name,
       );
 

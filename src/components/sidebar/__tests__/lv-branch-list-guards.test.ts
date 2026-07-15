@@ -334,6 +334,93 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect(detail!.repositoryPath).to.equal('/repo/origin');
   });
 
+  it('handleTrackRemoteBranch runs create AND set-upstream against the origin repo after a mid-op switch', async () => {
+    // Both git ops must target the repo the operation was invoked on. The
+    // second op (set-upstream) runs AFTER the create IPC await — a tab switch
+    // during that await must not split the two operations across repos.
+    const el = await createComponent();
+
+    let resolveCreate!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'create_branch') {
+        return new Promise((resolve) => {
+          resolveCreate = resolve;
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    const branch = makeBranch({ name: 'origin/feature/x', shorthand: 'feature/x', isRemote: true });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, branch };
+
+    invokeCalls.length = 0;
+    const promise = (
+      el as unknown as { handleTrackRemoteBranch: () => Promise<void> }
+    ).handleTrackRemoteBranch();
+
+    // The create IPC is now in flight; user switches tabs.
+    await new Promise((r) => setTimeout(r, 10));
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+
+    resolveCreate({ name: 'feature/x' });
+    await promise;
+
+    const createCall = invokeCalls.find((c) => c.command === 'create_branch');
+    const upstreamCall = invokeCalls.find((c) => c.command === 'set_upstream_branch');
+    expect(createCall, 'create_branch called').to.not.be.undefined;
+    expect(upstreamCall, 'set_upstream_branch called').to.not.be.undefined;
+    expect((createCall!.args as { path: string }).path).to.equal(REPO_PATH);
+    expect((upstreamCall!.args as { path: string }).path).to.equal(REPO_PATH);
+  });
+
+  it('handleRenameBranch renames the origin repo, not the tab switched to during the prompt', async () => {
+    // showPrompt is an in-app Lit overlay, not a native modal: the window stays
+    // interactive, so the user can switch tabs while the rename prompt is open.
+    // The rename must still run against the repo it was invoked on.
+    const el = await createComponent();
+
+    mockInvoke = (command: string) => defaultMockInvoke(command);
+
+    const branch = makeBranch({ name: 'feature/old', shorthand: 'feature/old', isHead: false, isRemote: false });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, branch };
+
+    invokeCalls.length = 0;
+    const promise = (
+      el as unknown as { handleRenameBranch: () => Promise<void> }
+    ).handleRenameBranch();
+
+    // Wait for the in-app prompt dialog to mount.
+    let dialog: (Element & { value: string }) | null = null;
+    for (let i = 0; i < 50; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      dialog = document.querySelector('lv-prompt-dialog') as (Element & { value: string }) | null;
+      if (dialog && (dialog as unknown as { resolve: unknown }).resolve) break;
+    }
+    expect(dialog, 'prompt dialog mounted').to.not.be.null;
+
+    // User switches tabs while the prompt is open, then confirms a new name.
+    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
+    (dialog as unknown as { value: string }).value = 'feature/new';
+    await (dialog as unknown as { updateComplete: Promise<unknown> }).updateComplete;
+    const confirmBtn = dialog!.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+    confirmBtn.click();
+
+    await promise;
+
+    const renameCall = invokeCalls.find((c) => c.command === 'rename_branch');
+    expect(renameCall, 'rename_branch called').to.not.be.undefined;
+    expect((renameCall!.args as { path: string }).path).to.equal(REPO_PATH);
+    expect((renameCall!.args as { newName: string }).newName).to.equal('feature/new');
+  });
+
   it('handleUnsetUpstream emits branches-changed pinned to the origin repo after a mid-op switch', async () => {
     // Regression: these context-menu handlers previously dispatched a bare
     // branches-changed with no repositoryPath, so a mid-op tab switch made the
