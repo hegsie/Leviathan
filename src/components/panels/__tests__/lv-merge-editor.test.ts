@@ -708,6 +708,80 @@ describe('lv-merge-editor', () => {
       expect(invokeHistory.some((h) => h.command === 'resolve_conflict')).to.be.false;
     });
 
+    it('dispatches the file it actually resolved, not the one selected after a mid-flight switch', async () => {
+      setupDefaultMocks();
+      let releaseResolve: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict') {
+          return new Promise((res) => {
+            releaseResolve = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/a.ts');
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      const resolvedPaths: string[] = [];
+      el.addEventListener('conflict-resolved', ((e: CustomEvent) => {
+        resolvedPaths.push(e.detail.file.path);
+      }) as EventListener);
+
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('.toolbar-actions button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      markBtn.click();
+      await el.updateComplete;
+
+      // The user selects another file while the backend call is in flight.
+      internalOf(el).conflictFile = makeConflictFile('src/b.ts');
+      await el.updateComplete;
+
+      releaseResolve!();
+      await new Promise((r) => setTimeout(r, 30));
+
+      // The event must carry the file the call resolved — marking B resolved
+      // without resolving it would let a stash Complete drop the stash early.
+      expect(resolvedPaths).to.deep.equal(['src/a.ts']);
+    });
+
+    it('ignores a double-click while the resolve call is in flight', async () => {
+      setupDefaultMocks();
+      let resolveCalls = 0;
+      let releaseResolve: (() => void) | null = null;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict') {
+          resolveCalls++;
+          return new Promise((res) => {
+            releaseResolve = () => res({ success: true });
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      let resolvedEvents = 0;
+      el.addEventListener('conflict-resolved', () => {
+        resolvedEvents++;
+      });
+
+      const internal = el as unknown as { handleMarkResolved: () => Promise<void> };
+      const first = internal.handleMarkResolved.call(el);
+      const second = internal.handleMarkResolved.call(el);
+      releaseResolve!();
+      await Promise.all([first, second]);
+
+      expect(resolveCalls).to.equal(1);
+      expect(resolvedEvents).to.equal(1);
+    });
+
     it('writes marker-free content and dispatches conflict-resolved once resolved', async () => {
       const el = await renderLoadedEditor();
       findConflictButton(el, 'Use Both').click();

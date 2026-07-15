@@ -868,6 +868,38 @@ describe('lv-conflict-resolution-dialog', () => {
       release!();
       await completing;
     });
+
+    it('blocks Abort and Complete while the external merge tool is open', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        launchingExternalTool: string | null;
+        showAbortConfirm: boolean;
+        handleAbort: () => void;
+      };
+      // Simulate an external tool session in flight (launchMergeTool blocks
+      // until the tool exits).
+      internal.launchingExternalTool = 'src/main.ts';
+      await el.updateComplete;
+
+      const abortBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-danger'
+      ) as HTMLButtonElement;
+      const continueBtn = el.shadowRoot!.querySelector(
+        '.footer-actions .btn-primary'
+      ) as HTMLButtonElement;
+      expect(abortBtn.disabled).to.be.true;
+      expect(continueBtn.disabled).to.be.true;
+
+      // Aborting under an open tool would let its later save re-dirty the
+      // just-aborted working tree.
+      internal.handleAbort.call(el);
+      expect(internal.showAbortConfirm).to.be.false;
+    });
   });
 
   // ── Merge completion ─────────────────────────────────────────────────────
