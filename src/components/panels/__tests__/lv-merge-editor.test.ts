@@ -345,6 +345,35 @@ describe('lv-merge-editor', () => {
       expect(segments[0].type).to.equal('resolved');
     });
 
+    it('a long marker example in docs cannot swallow a real conflict below it', async () => {
+      const el = await renderEditor();
+      // Docs text shows an 8-char marker sample; a REAL 7-char conflict
+      // follows, then a setext-style 8-equals underline. The sample line
+      // must stay content and the real conflict must parse — otherwise the
+      // real markers would render as pickable content and be written back.
+      const segments = internalOf(el).parseSegments(
+        [
+          'Conflict docs',
+          '<<<<<<<< (a raised-size marker looks like this)',
+          'some prose',
+          '<<<<<<< HEAD',
+          'real ours line',
+          '=======',
+          'real theirs line',
+          '>>>>>>> feature',
+          'Overview',
+          '========',
+          'tail content',
+        ].join('\n')
+      );
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['real ours line']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['real theirs line']);
+      // The docs sample line stayed ordinary content.
+      expect(segments[0].lines).to.include('<<<<<<<< (a raised-size marker looks like this)');
+    });
+
     it('parses raised conflict-marker-size markers (gitattribute)', async () => {
       const el = await renderEditor();
       const m = (ch: string) => ch.repeat(32);

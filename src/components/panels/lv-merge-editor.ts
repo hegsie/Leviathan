@@ -830,15 +830,26 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       const n = markerRun(lines[index], '<');
       if (n === 0) return 0;
       if (n === 7) return 7;
-      // A raised size must look like a REAL git conflict: both the exact-size
-      // separator AND an exact-size end marker must follow. Requiring only
-      // the separator would let a banner line plus one coincidental divider
-      // swallow the rest of the file into a phantom conflict.
+      // A raised size must look like a REAL git conflict, in git's emission
+      // order: the exact-size separator, then an exact-size end marker.
+      // Bail if a DEFAULT-size start appears before the separator — the
+      // raised "start" would otherwise swallow a real conflict (and its
+      // markers) as pickable content, e.g. in a docs file that shows a long
+      // marker example above an actual conflict.
       const sep = '='.repeat(n);
-      const rest = lines.slice(index + 1);
-      const hasSeparator = rest.some((l) => stripCr(l) === sep);
-      const hasEnd = rest.some((l) => markerRun(l, '>') === n);
-      return hasSeparator && hasEnd ? n : 0;
+      let sepIndex = -1;
+      for (let j = index + 1; j < lines.length; j++) {
+        if (markerRun(lines[j], '<') === 7) return 0;
+        if (stripCr(lines[j]) === sep) {
+          sepIndex = j;
+          break;
+        }
+      }
+      if (sepIndex < 0) return 0;
+      for (let j = sepIndex + 1; j < lines.length; j++) {
+        if (markerRun(lines[j], '>') === n) return n;
+      }
+      return 0;
     };
 
     const segments: OutputSegment[] = [];
