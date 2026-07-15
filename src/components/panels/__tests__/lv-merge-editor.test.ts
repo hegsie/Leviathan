@@ -816,6 +816,106 @@ describe('lv-merge-editor', () => {
       expect(resolvedText).to.deep.equal(['ctx', '>>>>>>> feature', 'tail']);
     });
 
+    it('a quoted start marker directly ABOVE the real conflict stays content', async () => {
+      // git emits the quoted `<<<<<<< A` (common context) directly above
+      // the real hunk. Opening the region there swallows the real start
+      // marker into the body — nothing validates and the shape-only
+      // fallback would leak `<<<<<<< HEAD` as ours content. The parser
+      // must reconsider the quoted line as content and rescan.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid')
+            return '<<<<<<< A\nx0\n=======\ny\n>>>>>>> B';
+          if (blobArgs?.oid === 'ours-oid')
+            return '<<<<<<< A\nx1\n=======\ny\n>>>>>>> B';
+          if (blobArgs?.oid === 'theirs-oid')
+            return '<<<<<<< A\nx2\n=======\ny\n>>>>>>> B';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            '<<<<<<< A',
+            '<<<<<<< HEAD',
+            'x1',
+            '=======',
+            'x2',
+            '>>>>>>> theirs',
+            '=======',
+            'y',
+            '>>>>>>> B',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('docs/example.md');
+      const segments = internalOf(el).segments;
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['x1']);
+      expect(conflicts[0].theirsLines).to.deep.equal(['x2']);
+      const resolvedText = segments
+        .filter((s) => s.type === 'resolved')
+        .flatMap((s) => s.lines);
+      expect(resolvedText, 'quoted markers stay content; real markers are consumed').to.deep.equal(
+        ['<<<<<<< A', '=======', 'y', '>>>>>>> B']
+      );
+    });
+
+    it('a quoted start marker INSIDE theirs does not blind the close checks', async () => {
+      // The theirs hunk contains marker-fragment content (like this very
+      // test file). The trailing window after an early close candidate must
+      // look PAST quoted start-shaped lines, or the orphaned real end below
+      // them goes unseen and the file splinters into phantom blocks.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'X\ntail';
+          if (blobArgs?.oid === 'ours-oid') return 'O1\ntail';
+          if (blobArgs?.oid === 'theirs-oid')
+            return 'T1\n>>>>>>> QE\nT2\n<<<<<<< QS\nT3\ntail';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            '<<<<<<< HEAD',
+            'O1',
+            '=======',
+            'T1',
+            '>>>>>>> QE',
+            'T2',
+            '<<<<<<< QS',
+            'T3',
+            '>>>>>>> theirs',
+            'tail',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderLoadedEditor('src/parser.test.ts');
+      const segments = internalOf(el).segments;
+      const conflicts = segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines).to.deep.equal(['O1']);
+      expect(conflicts[0].theirsLines).to.deep.equal([
+        'T1',
+        '>>>>>>> QE',
+        'T2',
+        '<<<<<<< QS',
+        'T3',
+      ]);
+      const resolvedText = segments
+        .filter((s) => s.type === 'resolved')
+        .flatMap((s) => s.lines);
+      expect(resolvedText).to.deep.equal(['tail']);
+    });
+
     it('keeps an unterminated conflict as a conflict block', async () => {
       const el = await renderEditor();
       const segments = internalOf(el).parseSegments(
@@ -2942,6 +3042,41 @@ describe('lv-merge-editor', () => {
         el.hasUnsavedResolutions(),
         'the write supersedes the in-memory picks'
       ).to.be.false;
+    });
+
+    it('a take-side DELETION reloads the on-screen file into the guarded state', async () => {
+      // Modify/delete conflict, LAST file (no auto-advance): after "Use
+      // Theirs (delete file)" the stale parse must not stay on screen with
+      // Mark Resolved enabled — clicking it would fs::write the old
+      // content back, silently resurrecting the deletion the user staged.
+      setupDefaultMocks();
+      let deleted = false;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict_take_side') {
+          deleted = true;
+          return { success: true };
+        }
+        if (command === 'read_file_content' && deleted) {
+          throw new Error('file deleted');
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor('src/test.ts');
+      await (
+        el as unknown as { handleTakeSide: (s: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internalOf(el).loading) break;
+      }
+      await el.updateComplete;
+
+      expect(internalOf(el).loadFailed, 'the stale parse is gone').to.be.true;
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled, 'Mark Resolved cannot resurrect the file').to.be.true;
     });
 
     it('reload without unsaved picks does not ask', async () => {

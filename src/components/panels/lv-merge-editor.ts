@@ -920,11 +920,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       if (cs.length === 0) return splitAt(b, b.length);
       return splitAt(b, cs[0]);
     };
-    /** The text after a candidate close, up to the next start-shaped line. */
+    /**
+     * The text after a candidate close, up to the next REAL start-shaped
+     * line. A start-shaped line that is blob content (a quoted example)
+     * does not end the window — stopping there would hide an orphaned real
+     * end marker sitting below it from both justification checks.
+     */
     const trailingAfter = (endIdx: number): string[] => {
       const out: string[] = [];
       for (let k = endIdx + 1; k < lines.length; k++) {
-        if (isConflictStart(lines[k])) break;
+        if (isConflictStart(lines[k]) && !lineInBlobs(lines[k])) break;
         out.push(lines[k]);
       }
       return out;
@@ -1059,6 +1064,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       } else if (closed) {
         pushConflict(closed.split!, oursLabel, labelOf(lines[closed.end], 'THEIRS'));
         i = closed.end + 1;
+      } else if (blobsAvailable && lineInBlobs(line)) {
+        // NOTHING below this start-shaped line validates, and the line
+        // itself is blob content — it is a quoted example sitting directly
+        // above the real conflict, and it opened the region one line too
+        // early (every candidate ours-slice began with the real start
+        // marker, which is in neither blob). Treat it as content and
+        // rescan from the next line so the REAL start can open a region
+        // whose split validates.
+        currentResolved.push(line);
+        i++;
       } else if (firstCandidate) {
         // No candidate could be justified (nothing validates) — close at
         // the FIRST candidate, the pre-validation behavior.
@@ -1571,6 +1586,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         // raise a false confirm.
         if (token === this.resolveToken) {
           this.userTouched = false;
+        }
+        // Reload when the taken file is still the one on screen (the last
+        // file has no auto-advance target): the stale pre-take parse would
+        // otherwise sit there with Mark Resolved enabled, and one click
+        // would fs::write the old content back — silently resurrecting a
+        // file whose DELETION the user just staged.
+        if (this.conflictFile?.path === file.path) {
+          await this.loadContents();
         }
         this.dispatchEvent(new CustomEvent('conflict-resolved', {
           detail: { file },
