@@ -271,6 +271,57 @@ describe('lv-merge-editor', () => {
       expect(segments[0].theirsLines).to.deep.equal(['theirs']);
     });
 
+    it('diff3: a bare ||||||| line in OURS content cannot truncate the ours hunk', async () => {
+      // merge.conflictStyle=diff3: the ours hunk itself contains a bare
+      // 7-pipe line. Cutting ours at the FIRST base-marker-shaped line
+      // would silently drop everything after it (the truncated prefix
+      // still validates!) — base candidates must be tried longest-first.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_blob_content') {
+          const blobArgs = args as { oid: string };
+          if (blobArgs?.oid === 'base-oid') return 'base-line';
+          if (blobArgs?.oid === 'ours-oid') return 'ours-A\n|||||||\nours-B';
+          if (blobArgs?.oid === 'theirs-oid') return 'theirs-line';
+          return '';
+        }
+        if (command === 'read_file_content') {
+          return [
+            '<<<<<<< HEAD',
+            'ours-A',
+            '|||||||',
+            'ours-B',
+            '||||||| c5ca07f',
+            'base-line',
+            '=======',
+            'theirs-line',
+            '>>>>>>> feature',
+          ].join('\n');
+        }
+        return baseMock(command, args);
+      };
+
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), conflictStyle: 'diff3' };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+
+      const conflicts = internal.segments.filter((s) => s.type === 'conflict');
+      expect(conflicts.length).to.equal(1);
+      expect(conflicts[0].oursLines, 'the full ours hunk survives').to.deep.equal([
+        'ours-A',
+        '|||||||',
+        'ours-B',
+      ]);
+      expect(conflicts[0].theirsLines).to.deep.equal(['theirs-line']);
+    });
+
     it('keeps a ||||||| line as ours CONTENT in default merge-style conflicts', async () => {
       const el = await renderEditor();
       // The default style has no base sections (and libgit2 never writes
@@ -3079,11 +3130,12 @@ describe('lv-merge-editor', () => {
       ).to.be.false;
     });
 
-    it('a take-side DELETION reloads the on-screen file into the guarded state', async () => {
+    it('a take-side DELETION lands in the terminal deleted state, not an error', async () => {
       // Modify/delete conflict, LAST file (no auto-advance): after "Use
       // Theirs (delete file)" the stale parse must not stay on screen with
-      // Mark Resolved enabled — clicking it would fs::write the old
-      // content back, silently resurrecting the deletion the user staged.
+      // Mark Resolved enabled (one click would fs::write the old content
+      // back), and it must NOT reload into the read-failure error whose
+      // Retry/verbatim buttons would resurrect the staged deletion.
       setupDefaultMocks();
       let deleted = false;
       const baseMock = mockInvoke;
@@ -3097,21 +3149,68 @@ describe('lv-merge-editor', () => {
         }
         return baseMock(command, args);
       };
+      // Theirs DELETED the file in this conflict.
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+
+      await (
+        el as unknown as { handleTakeSide: (s: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(internalOf(el).loadFailed, 'no false error state').to.be.false;
+      expect(shadowText(el)).to.include('deleted by the resolution');
+      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === 'Mark Resolved'
+      ) as HTMLButtonElement;
+      expect(markBtn.disabled, 'Mark Resolved cannot resurrect the file').to.be.true;
+      // No resurrect buttons anywhere.
+      const verbatimBtns = Array.from(el.shadowRoot!.querySelectorAll('button')).filter(
+        (b) => b.textContent?.includes('verbatim') || b.textContent?.trim() === 'Retry'
+      );
+      expect(verbatimBtns.length).to.equal(0);
+    });
+
+    it('a take-side that KEEPS the file reloads the fresh content', async () => {
+      setupDefaultMocks();
+      let taken = false;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'resolve_conflict_take_side') {
+          taken = true;
+          return { success: true };
+        }
+        if (command === 'read_file_content' && taken) {
+          return 'line1\nline2-theirs\nline3';
+        }
+        return baseMock(command, args);
+      };
       const el = await renderLoadedEditor('src/test.ts');
       await (
         el as unknown as { handleTakeSide: (s: string) => Promise<void> }
       ).handleTakeSide.call(el, 'theirs');
       for (let i = 0; i < 100; i++) {
         await new Promise((r) => setTimeout(r, 20));
-        if (!internalOf(el).loading) break;
+        if (!internalOf(el).loading && internalOf(el).segments.length > 0) break;
       }
       await el.updateComplete;
 
-      expect(internalOf(el).loadFailed, 'the stale parse is gone').to.be.true;
-      const markBtn = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
-        (b) => b.textContent?.trim() === 'Mark Resolved'
-      ) as HTMLButtonElement;
-      expect(markBtn.disabled, 'Mark Resolved cannot resurrect the file').to.be.true;
+      const internal = internalOf(el);
+      expect(internal.loadFailed).to.be.false;
+      // The stale conflicted parse is gone; the taken content shows.
+      expect(internal.segments.filter((s) => s.type === 'conflict').length).to.equal(0);
+      expect(internal.segments.flatMap((s) => s.lines)).to.deep.equal([
+        'line1',
+        'line2-theirs',
+        'line3',
+      ]);
     });
 
     it('reload without unsaved picks does not ask', async () => {

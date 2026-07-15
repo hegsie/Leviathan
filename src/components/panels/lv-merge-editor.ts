@@ -543,6 +543,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @state() private segments: OutputSegment[] = [];
   @state() private loading = false;
   @state() private loadFailed = false;
+  /**
+   * True after a take-side that DELETED the file while it is still on
+   * screen (the last file has no auto-advance target). Terminal: the
+   * output pane shows a "file deleted" notice, and every write path is
+   * inert — reloading instead would fail the workdir read into an
+   * alarming error whose verbatim button would resurrect the file, and an
+   * empty resolved state would let Mark Resolved write a 0-byte file.
+   */
+  @state() private resolvedAsDeleted = false;
   @state() private launchingExternalTool = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
@@ -609,7 +618,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       !this.conflictFile ||
       this.externalToolLocked ||
       this.launchingExternalTool ||
-      this.resolving
+      this.resolving ||
+      this.resolvedAsDeleted
     ) {
       return;
     }
@@ -697,6 +707,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
 
     this.loading = true;
     this.loadFailed = false;
+    this.resolvedAsDeleted = false;
     // Per-file UI state must not leak between files.
     this.editingSegmentId = null;
     this.aiExplanations = new Map();
@@ -901,15 +912,33 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
      * content shaped exactly like the separator (a Markdown setext
      * underline is `=======`) is indistinguishable from git's separator by
      * shape alone. Returns the first candidate split that validates.
+     *
+     * diff3 base markers get the same treatment: a bare `|||||||` line in
+     * the OURS content is shaped exactly like git's base marker, and
+     * cutting ours at the first one would silently truncate the hunk (the
+     * truncated prefix still validates!). Base candidates are therefore
+     * tried longest-ours-first, so the real base marker — the one whose
+     * full ours slice matches the blob — wins.
      */
     const validSplitOf = (b: string[]): { ours: string[]; theirs: string[] } | null => {
       for (const s of splitCandidates(b)) {
-        const split = splitAt(b, s);
-        if (
-          isContiguousRun(split.ours, this.oursLines) &&
-          isContiguousRun(split.theirs, this.theirsLines)
-        ) {
-          return split;
+        const theirs = b.slice(s + 1);
+        if (!isContiguousRun(theirs, this.theirsLines)) continue;
+        const baseCandidates: number[] = [];
+        for (let bi = 0; bi < s; bi++) {
+          if (isBaseMarker(b[bi])) baseCandidates.push(bi);
+        }
+        if (baseCandidates.length === 0) {
+          if (isContiguousRun(b.slice(0, s), this.oursLines)) {
+            return { ours: b.slice(0, s), theirs };
+          }
+          continue;
+        }
+        for (let c = baseCandidates.length - 1; c >= 0; c--) {
+          const ours = b.slice(0, baseCandidates[c]);
+          if (isContiguousRun(ours, this.oursLines)) {
+            return { ours, theirs };
+          }
         }
       }
       return null;
@@ -1126,9 +1155,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   /** Resolve writes and an open external tool must never overlap — both
    * mutate the same on-disk file and the last write would silently win.
    * The host lock counts too: the dialog sets it while ITS tool session or
-   * abort/complete runs against this same file. */
+   * abort/complete runs against this same file. A resolution that DELETED
+   * the on-screen file is terminal: every further action would either fail
+   * or resurrect the file. */
   private get actionsBlocked(): boolean {
-    return this.resolving || this.launchingExternalTool || this.externalToolLocked;
+    return (
+      this.resolving ||
+      this.launchingExternalTool ||
+      this.externalToolLocked ||
+      this.resolvedAsDeleted
+    );
   }
 
   /** Serialized output of the last successful Mark Resolved for this file —
@@ -1597,13 +1633,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         if (token === this.resolveToken) {
           this.userTouched = false;
         }
-        // Reload when the taken file is still the one on screen (the last
-        // file has no auto-advance target): the stale pre-take parse would
-        // otherwise sit there with Mark Resolved enabled, and one click
-        // would fs::write the old content back — silently resurrecting a
-        // file whose DELETION the user just staged.
+        // When the taken file is still the one on screen (the last file
+        // has no auto-advance target), the stale pre-take parse must not
+        // sit there with Mark Resolved enabled — one click would fs::write
+        // the old content back. A DELETION cannot reload (the workdir read
+        // would fail into an error state whose verbatim button resurrects
+        // the file); it lands in the terminal deleted state instead.
+        const tookDeletion = side === 'ours' ? !file.ours : !file.theirs;
         if (this.conflictFile?.path === file.path) {
-          await this.loadContents();
+          if (tookDeletion) {
+            if (token === this.resolveToken) {
+              this.segments = [];
+              this.editingSegmentId = null;
+              this.resolvedAsDeleted = true;
+            }
+          } else {
+            await this.loadContents();
+          }
         }
         this.dispatchEvent(new CustomEvent('conflict-resolved', {
           detail: { file },
@@ -1935,6 +1981,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   }
 
   private renderOutput(): ReturnType<typeof html> {
+    if (this.resolvedAsDeleted) {
+      // Terminal success state — deliberately NOT the error state: a
+      // Retry/verbatim escape hatch here would resurrect the deletion.
+      return html`
+        <div class="loading">
+          Resolved — this file was deleted by the resolution. Nothing further to do here.
+        </div>
+      `;
+    }
     if (this.loadFailed) {
       // Say what actually failed — blaming the working-directory file when
       // only a side blob was unreadable would be wrong and alarming.
@@ -2062,7 +2117,10 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             <button
               class="btn"
               @click=${this.handleOpenExternalMergeTool}
-              ?disabled=${this.launchingExternalTool || this.externalToolLocked || this.resolving}
+              ?disabled=${this.launchingExternalTool ||
+              this.externalToolLocked ||
+              this.resolving ||
+              this.resolvedAsDeleted}
               title="Open in external merge tool"
             >
               ${this.launchingExternalTool ? 'Waiting for tool...' : 'External Tool'}
