@@ -567,8 +567,14 @@ pub async fn read_file_content(
             "File not found in index".to_string(),
         ))
     } else {
-        // Read from working directory
+        // Read from working directory. A MISSING file gets its own error
+        // code — callers must be able to tell "the file is gone" (e.g. a
+        // staged deletion) from "the file exists but could not be decoded"
+        // (legacy encoding), which are presented very differently.
         let full_path = validate_path_within_repo(Path::new(&repo_path), &file_path)?;
+        if !full_path.exists() {
+            return Err(crate::error::LeviathanError::FileNotFound(file_path));
+        }
         let content = std::fs::read_to_string(&full_path)?;
         Ok(content)
     }

@@ -3309,7 +3309,9 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'read_file_content') throw new Error('file deleted');
+        // Structured Tauri error: the file is GONE (not merely undecodable).
+        if (command === 'read_file_content')
+          throw { code: 'FILE_NOT_FOUND', message: 'File not found: src/gone.ts' };
         // The index no longer lists the file — its deletion is staged.
         if (command === 'get_conflicts') return [];
         return baseMock(command, args);
@@ -3335,6 +3337,34 @@ describe('lv-merge-editor', () => {
         (b) => b.textContent?.includes('verbatim') || b.textContent?.trim() === 'Retry'
       );
       expect(badButtons.length, 'no resurrect/retry affordances').to.equal(0);
+    });
+
+    it('a KEPT but undecodable file is a read error, never a false "was deleted"', async () => {
+      // The file was resolved externally by KEEPING it (checkout --ours &&
+      // add) but its content is legacy-encoded, so the strict read fails
+      // the same way a missing file would. The deletion claim requires
+      // FILE_NOT_FOUND — anything else lands in the honest error state.
+      setupDefaultMocks();
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'read_file_content')
+          throw { code: 'IO_ERROR', message: 'stream did not contain valid UTF-8' };
+        if (command === 'get_conflicts') return [];
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = el as unknown as EditorInternal;
+      internal.conflictFile = { ...makeConflictFile('src/latin1.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+
+      expect(internal.loadFailed).to.be.true;
+      expect(shadowText(el)).to.include('Could not read the merged file');
+      expect(shadowText(el)).to.not.include('deleted by the resolution');
     });
 
     it('a take-side that KEEPS the file reloads the fresh content', async () => {

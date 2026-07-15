@@ -894,11 +894,17 @@ pub async fn get_conflicts(path: String) -> Result<Vec<ConflictFile>> {
             .map(|e| String::from_utf8_lossy(&e.path).to_string())
             .unwrap_or_default();
 
-        // Binary conflicts must not be routed through the text merge editor
+        // Binary conflicts must not be routed through the text merge editor.
+        // SYMLINK conflicts must not either: their blobs are text (the link
+        // target path), but resolving them means recreating a LINK, not
+        // writing text — the whole-blob chooser (take-side, which is
+        // symlink-aware) is the only correct affordance.
         let is_binary = [&conflict.our, &conflict.their, &conflict.ancestor]
             .iter()
             .filter_map(|e| e.as_ref())
-            .any(|e| repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false));
+            .any(|e| {
+                e.mode == 0o120000 || repo.find_blob(e.id).map(|b| b.is_binary()).unwrap_or(false)
+            });
 
         // How this file's conflict hunks were actually written. The
         // conflict-marker-size attribute and merge.conflictStyle config only
@@ -1297,12 +1303,26 @@ pub async fn resolve_conflict(
         }
         index.remove_path(Path::new(&file_path))?;
     } else {
-        // Write the resolved content to the working directory
+        // Write the resolved content to the working directory. NEVER write
+        // THROUGH an existing symlink — fs::write follows it and would
+        // corrupt the link's target file (and stage the wrong blob).
+        remove_if_symlink(&full_path)?;
         std::fs::write(&full_path, &content)?;
         index.add_path(Path::new(&file_path))?;
     }
     index.write()?;
 
+    Ok(())
+}
+
+/// Remove `path` when it is a symlink, so a subsequent write creates a new
+/// file instead of following the link into its target.
+fn remove_if_symlink(path: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -1347,19 +1367,38 @@ pub async fn resolve_conflict_take_side(
 
     match entry {
         Some(e) => {
-            // Write the chosen side's raw blob bytes (works for binary files)
             let blob = repo.find_blob(e.id)?;
-            std::fs::write(&full_path, blob.content())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                // Apply the chosen side's mode in BOTH directions: fs::write
-                // keeps the existing file's permissions, so taking a
-                // non-executable side over an executable on-disk file must
-                // chmod DOWN too, or the resolved file is staged with the
-                // mode of the side the user rejected.
-                let mode = if e.mode == 0o100755 { 0o755 } else { 0o644 };
-                std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(mode))?;
+            // NEVER write through an existing symlink: fs::write follows
+            // it, which would corrupt the link's TARGET file and stage the
+            // pre-existing (wrong) link blob instead of the chosen side.
+            remove_if_symlink(&full_path)?;
+            if e.mode == 0o120000 {
+                // The chosen side IS a symlink — its blob content is the
+                // link target path; recreate the link rather than writing
+                // a regular file containing the target as text.
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(
+                    String::from_utf8_lossy(blob.content()).as_ref(),
+                    &full_path,
+                )?;
+                #[cfg(not(unix))]
+                std::fs::write(&full_path, blob.content())?;
+            } else {
+                // Write the chosen side's raw blob bytes (works for binary
+                // files).
+                std::fs::write(&full_path, blob.content())?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    // Apply the chosen side's mode in BOTH directions:
+                    // fs::write keeps the existing file's permissions, so
+                    // taking a non-executable side over an executable
+                    // on-disk file must chmod DOWN too, or the resolved
+                    // file is staged with the mode of the side the user
+                    // rejected.
+                    let mode = if e.mode == 0o100755 { 0o755 } else { 0o644 };
+                    std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(mode))?;
+                }
             }
             index.add_path(Path::new(&file_path))?;
         }
@@ -3204,6 +3243,83 @@ mod tests {
             !txt.conflict_hunks.is_empty(),
             "replay-certified files get authoritative hunks"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_take_side_recreates_symlinks_without_corrupting_targets() {
+        use std::os::unix::fs::symlink;
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        // Tracked target files the link may point at.
+        repo.create_commit(
+            "Add targets",
+            &[("target-a", "A CONTENT\n"), ("target-b", "B CONTENT\n")],
+        );
+        // Base: link -> target-a
+        let link = repo.path.join("link");
+        symlink("target-a", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Add link", &[]);
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        std::fs::remove_file(&link).unwrap();
+        symlink("target-b", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Feature retargets link", &[]);
+
+        repo.checkout_branch(&initial_branch);
+        std::fs::remove_file(&link).unwrap();
+        symlink("target-a-changed", &link).unwrap();
+        repo.stage_file("link");
+        repo.create_commit("Main retargets link", &[]);
+
+        let _ = merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        let conflicts = get_conflicts(repo.path_str()).await.unwrap();
+        let entry = conflicts
+            .iter()
+            .find(|c| c.path == "link")
+            .expect("symlink conflict should be listed");
+        // Routed to the whole-blob chooser, never the text editor.
+        assert!(entry.is_binary, "symlink conflicts must use the chooser");
+
+        resolve_conflict_take_side(repo.path_str(), "link".to_string(), "theirs".to_string())
+            .await
+            .unwrap();
+
+        // The resolution is a real symlink to theirs' target...
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "a LINK, not a text file");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap().to_string_lossy(),
+            "target-b"
+        );
+        // ...the tracked target files are untouched...
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-a")).unwrap(),
+            "A CONTENT\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target-b")).unwrap(),
+            "B CONTENT\n"
+        );
+        // ...and the index stages the CHOSEN side's blob at link mode.
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        assert!(!index.has_conflicts());
+        let staged = index.get_path(Path::new("link"), 0).expect("stage-0 entry");
+        assert_eq!(staged.mode, 0o120000, "staged as a symlink");
+        let staged_blob = git_repo.find_blob(staged.id).unwrap();
+        assert_eq!(staged_blob.content(), b"target-b");
     }
 
     #[cfg(unix)]

@@ -982,6 +982,8 @@ describe('lv-conflict-resolution-dialog', () => {
       let dropCalls = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-drop-me' }];
         if (command === 'drop_stash') {
           dropCalls++;
           // Slow backend call — the second click arrives while this awaits.
@@ -990,6 +992,8 @@ describe('lv-conflict-resolution-dialog', () => {
         }
         return null;
       };
+      // Identity captured at open (drops are identity-verified, never blind).
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-drop-me';
 
       // Double-click: both invocations start before the first completes. A
       // second dropStash would delete an UNRELATED entry after indices shift.
@@ -1021,15 +1025,23 @@ describe('lv-conflict-resolution-dialog', () => {
       let release: (() => void) | null = null;
       mockInvoke = async (command: string) => {
         if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-drop-me' }];
         if (command === 'drop_stash') {
           await new Promise<void>(r => { release = r; });
           return null;
         }
         return null;
       };
+      (el as unknown as { stashOidToDrop: string | null }).stashOidToDrop = 'oid-drop-me';
 
       const completing = internal.handleContinue.call(el);
       await el.updateComplete;
+      // The identity verification awaits getStashes before dropping — poll
+      // until the drop call is actually in flight.
+      for (let i = 0; i < 50 && !release; i++) {
+        await new Promise(r => setTimeout(r, 10));
+      }
 
       // While Complete awaits the backend, Abort must be inert — aborting now
       // would revert the files AND lose the stash entry, with a false toast.
@@ -1505,6 +1517,12 @@ describe('lv-conflict-resolution-dialog', () => {
     });
 
     it('drops the stash and completes on continue', async () => {
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes')
+          return [{ index: 0, message: 'popped', oid: 'oid-popped' }];
+        return baseMock(command, args);
+      };
       const el = await renderDialog('stash');
       el.open = true;
       await el.updateComplete;
@@ -1649,7 +1667,49 @@ describe('lv-conflict-resolution-dialog', () => {
       ).to.be.false;
       expect(completedFired, 'the resolution itself still completes').to.be.true;
       const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
-      expect(warn?.message).to.include('left in place');
+      expect(warn?.message).to.include('left in the stash list');
+    });
+
+    it('an unverifiable identity NEVER falls back to a blind index drop', async () => {
+      // The open-time capture failed (get_stashes errored); meanwhile an
+      // external `git stash push` put unrelated WIP at index 0. A blind
+      // index drop would permanently delete that WIP.
+      let allowStashList = false;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') {
+          if (!allowStashList) throw new Error('transient failure');
+          return [{ index: 0, message: 'unrelated WIP', oid: 'oid-wip' }];
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderDialog('stash');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      allowStashList = true;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => {
+        completedFired = true;
+      });
+      clearToasts();
+      invokeHistory.length = 0;
+      await internal.handleContinue.call(el);
+
+      expect(
+        invokeHistory.some(h => h.command === 'drop_stash'),
+        'no identity, no drop — never a blind index'
+      ).to.be.false;
+      expect(completedFired).to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn?.message).to.include('left in the stash list');
     });
 
     it('aborts a stash conflict by restoring ONLY the conflicted files (no hard reset, stash kept)', async () => {
@@ -1735,6 +1795,18 @@ describe('lv-conflict-resolution-dialog', () => {
     beforeEach(() => clearToasts());
 
     it('drops stash@{stashIndex} when dropStashOnComplete is true', async () => {
+      // Four entries; the popped one is index 3. Its identity is captured
+      // at open and the drop is verified against it.
+      const stashList = [0, 1, 2, 3].map((i) => ({
+        index: i,
+        message: `stash ${i}`,
+        oid: `oid-${i}`,
+      }));
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_stashes') return stashList;
+        return baseMock(command, args);
+      };
       const el = await renderDialog('stash');
       el.stashIndex = 3;
       el.dropStashOnComplete = true;

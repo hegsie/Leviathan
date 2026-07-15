@@ -1090,32 +1090,28 @@ export class LvConflictResolutionDialog extends LitElement {
           // All conflicts resolved. Drop the stash only for pop semantics
           // (dropAfter/pop/auto-stash) — a plain apply must keep the stash entry.
           if (this.dropStashOnComplete) {
-            // Re-locate the entry by the identity captured at open — an
-            // external `git stash drop` while the dialog was up shifts the
-            // indices, and a blind index drop could delete an unrelated
-            // stash. Skipping the drop (with a warning) is always safer
-            // than dropping the wrong entry.
-            let dropIndex: number | null = this.stashIndex;
-            if (this.stashOidToDrop) {
+            // Drop ONLY via the identity captured at OPEN — never by a
+            // blind index, not even as a fallback. The list can shift
+            // under the dialog (an external `git stash push` puts new WIP
+            // at index 0), so any index read after open — including a
+            // "fresh capture" at Complete time — can name the wrong entry.
+            // Skipping the drop (with a warning) is always safer than
+            // dropping the wrong one.
+            let dropIndex: number | null = null;
+            if (this.stashOidToDrop !== null) {
               const stashes = await gitService.getStashes(this.repositoryPath);
-              if (!stashes.success || !stashes.data) {
-                showToast(
-                  'Could not verify the stash entry — it was left in the stash list',
-                  'warning',
-                );
-                dropIndex = null;
-              } else {
+              if (stashes.success && stashes.data) {
                 const found = stashes.data.findIndex((s) => s.oid === this.stashOidToDrop);
-                if (found < 0) {
-                  showToast(
-                    'The stash list changed while resolving — the entry was left in place',
-                    'warning',
-                  );
-                  dropIndex = null;
-                } else {
+                if (found >= 0) {
                   dropIndex = found;
                 }
               }
+            }
+            if (dropIndex === null) {
+              showToast(
+                'Could not verify the stash entry — it was left in the stash list',
+                'warning',
+              );
             }
             if (dropIndex !== null) {
               result = await gitService.dropStash({ path: this.repositoryPath, index: dropIndex });

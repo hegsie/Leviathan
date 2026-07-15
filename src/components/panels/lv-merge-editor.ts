@@ -790,6 +790,11 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
         this.segments = this.parseSegments(workdirResult.data);
       } else if (
         !workdirResult.success &&
+        // The deletion claim requires the file to actually be GONE — a
+        // kept-but-undecodable file (legacy encoding, resolved externally
+        // with checkout --ours) fails the read the same way but must land
+        // in the error/Retry/verbatim state, not a false "was deleted".
+        workdirResult.error?.code === 'FILE_NOT_FOUND' &&
         (!file.ours || !file.theirs) &&
         (await this.isResolvedDeletion(file.path))
       ) {
