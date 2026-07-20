@@ -44,7 +44,7 @@
     "@web/test-runner": "^0.20.2",
     "@web/test-runner-playwright": "^1.0.0",
     "eslint": "^10.7.0",
-    "globals": "^17.6.0",
+    "globals": "^17.7.0",
     "playwright-core": "1.61.1",
     "prettier": "^3.9.5",
     "sharp": "^0.35.3",
