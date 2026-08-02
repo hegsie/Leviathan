@@ -505,6 +505,8 @@ export class AppShell extends LitElement {
 
   // Settings dialog
   @state() private showSettings = false;
+  /** True while an abort is in flight — blocks a double-click firing two. */
+  @state() private abortInProgress = false;
 
   // Search/filter
   @state() private searchFilter: SearchFilter | null = null;
@@ -1672,6 +1674,17 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    // Deleting from the graph's ref menu destroys the same branch as the
+    // sidebar's delete, so it must be gated the same way (lv-branch-list.ts
+    // handleDeleteBranch). Without this, one click on a graph label is enough.
+    const confirmed = await showConfirm(
+      'Delete Branch',
+      `Are you sure you want to delete the branch "${branchName}"?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     const result = await gitService.deleteBranch(
       repoPath,
       branchName,
@@ -1695,6 +1708,16 @@ export class AppShell extends LitElement {
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    // Gated to match the sidebar's tag delete (lv-tag-list.ts) — the graph ref
+    // menu deletes the same tag and must not be the one unguarded path.
+    const confirmed = await showConfirm(
+      'Delete Tag',
+      `Are you sure you want to delete the tag "${tagName}"?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
 
     const result = await gitService.deleteTag({
       path: repoPath,
@@ -1903,40 +1926,67 @@ export class AppShell extends LitElement {
   }
 
   private async handleAbortOperation(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.abortInProgress) return;
 
     const state = this.activeRepository.repository.state;
     const path = this.activeRepository.repository.path;
     let result;
 
-    switch (state) {
-      case 'cherrypick':
-        result = await gitService.abortCherryPick({ path });
-        break;
-      case 'merge':
-        result = await gitService.abortMerge({ path });
-        break;
-      case 'rebase':
-      case 'rebase-interactive':
-      case 'rebase-merge':
-        result = await gitService.abortRebase({ path });
-        break;
-      case 'revert':
-        result = await gitService.abortRevert({ path });
-        break;
-      default:
-        showToast(`Cannot abort operation: ${state}`, 'error');
-        return;
+    // Reject an unabortable state BEFORE prompting — otherwise the user
+    // confirms a destructive action that was never going to run.
+    const ABORTABLE = ['cherrypick', 'merge', 'rebase', 'rebase-interactive', 'rebase-merge', 'revert'];
+    if (!ABORTABLE.includes(state)) {
+      showToast(`Cannot abort operation: ${state}`, 'error');
+      return;
     }
 
-    if (result.success) {
-      showToast(`Aborted ${state}`, 'success');
-      // `path` was captured before the abort await — pin the refresh to it so a
-      // mid-abort tab switch doesn't refresh the wrong repo.
-      this.refreshConflictDialogRepo(path);
-    } else {
-      log.error('Abort failed:', result.error);
-      showToast(result.error?.message || 'Abort failed', 'error');
+    // Aborting throws away every conflict resolution made so far and restores
+    // the pre-operation working tree. The conflict dialog's own Abort button
+    // gates this behind an explicit confirmation panel; the banner button
+    // reaches the same command, so it needs the same gate rather than being a
+    // one-click path to the identical loss.
+    const confirmed = await showConfirm(
+      `Abort ${state}?`,
+      `This discards all conflict resolutions and restores the working tree to ` +
+        `its state before the ${state} began. This cannot be undone.`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
+    // Guards against a double-click firing two aborts: the second would run
+    // against an already-restored tree and surface a confusing failure.
+    this.abortInProgress = true;
+
+    try {
+      switch (state) {
+        case 'cherrypick':
+          result = await gitService.abortCherryPick({ path });
+          break;
+        case 'merge':
+          result = await gitService.abortMerge({ path });
+          break;
+        case 'rebase':
+        case 'rebase-interactive':
+        case 'rebase-merge':
+          result = await gitService.abortRebase({ path });
+          break;
+        default:
+          result = await gitService.abortRevert({ path });
+          break;
+      }
+
+      if (result.success) {
+        showToast(`Aborted ${state}`, 'success');
+        // `path` was captured before the abort await — pin the refresh to it so
+        // a mid-abort tab switch doesn't refresh the wrong repo.
+        this.refreshConflictDialogRepo(path);
+      } else {
+        log.error('Abort failed:', result.error);
+        showToast(result.error?.message || 'Abort failed', 'error');
+      }
+    } finally {
+      this.abortInProgress = false;
     }
   }
 
@@ -1947,21 +1997,46 @@ export class AppShell extends LitElement {
 
   private handleForceDeleteBranch = (e: CustomEvent<{ branchName?: string }>): void => {
     const branchName = e.detail?.branchName;
-    if (!branchName || !this.activeRepository) return;
+    if (branchName) void this.forceDeleteBranch(branchName);
+  };
 
-    // Captured before the delete: the force-delete and its refresh must target
+  private async forceDeleteBranch(branchName: string): Promise<void> {
+    if (!this.activeRepository) return;
+
+    // Captured before the confirm: the force-delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
-    gitService.deleteBranch(repoPath, branchName, true).then(async (result) => {
+
+    // This fires from the "Force Delete" action on an error-suggestion toast,
+    // i.e. one click away from an ordinary delete that just failed as unmerged.
+    // Force-deleting discards commits that exist on no other ref, so it needs
+    // its own gate — the sidebar escalation (lv-branch-list.ts) re-confirms
+    // here too, and the toast button must not be the cheaper route to the same
+    // irreversible outcome.
+    const confirmed = await showConfirm(
+      'Force Delete Branch',
+      `"${branchName}" has commits that are not merged anywhere else. ` +
+        `Force deleting it discards those commits permanently — they will be ` +
+        `recoverable only through the reflog. Continue?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
+    try {
+      const result = await gitService.deleteBranch(repoPath, branchName, true);
       if (result.success) {
         this.refreshConflictDialogRepo(repoPath);
         showToast(`Force deleted branch ${branchName}`, 'success');
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
       }
-    }).catch((e) => {
-      showToast(`Force delete failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
-    });
+    } catch (err) {
+      showToast(
+        `Force delete failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error'
+      );
+    }
   };
 
   private handleOpenSettings = (): void => {
@@ -2768,10 +2843,32 @@ export class AppShell extends LitElement {
 
           if (result.success && result.data) {
             const match = result.data;
-            const confirmed = await showConfirm('Smart Undo', `${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
+
+            // Resolve the index to a commit BEFORE the confirm. An AI round
+            // trip plus a prompt plus a confirm all elapse between the reflog
+            // being read and the reset firing, and any commit or checkout in
+            // that window renumbers every entry. Pinning the oid means the
+            // reset either lands on the commit named here or is refused.
+            const git = await import('./services/git.service.ts');
+            const reflog = await git.getReflog(repoPath);
+            const target = reflog.success ? reflog.data?.[match.index] : undefined;
+
+            if (!target) {
+              showToast('Could not resolve that reflog entry — try again', 'error');
+              return;
+            }
+
+            const confirmed = await showConfirm(
+              'Smart Undo',
+              `${match.description}\n\nReset to ${target.shortId} (HEAD@{${match.index}})? ` +
+                `(soft reset — changes preserved as staged)`
+            );
             if (confirmed) {
-              const resetResult = await import('./services/git.service.ts').then(m =>
-                m.resetToReflog(repoPath, match.index, 'soft')
+              const resetResult = await git.resetToReflog(
+                repoPath,
+                match.index,
+                'soft',
+                target.oid
               );
               if (resetResult.success) {
                 showToast('Undo successful', 'success');
@@ -3310,7 +3407,14 @@ export class AppShell extends LitElement {
     // Pinned: if the user switches tabs while the stash is being created, the
     // refresh must target the repo that was stashed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.createStash({ path: repoPath });
+    // includeUntracked matches the stash-list button (lv-stash-list.ts): both
+    // surfaces report an identical "Stash created", so they must stash the same
+    // set — otherwise the shortcut silently leaves untracked files behind and
+    // the divergence only surfaces during a later checkout or clean.
+    const result = await gitService.createStash({
+      path: repoPath,
+      includeUntracked: true,
+    });
     if (result.success) {
       if (result.data === null) {
         // Clean working tree: nothing to stash — informational, not an error.
@@ -3326,6 +3430,21 @@ export class AppShell extends LitElement {
 
   private async handleRunGc(aggressive = false): Promise<void> {
     if (!this.activeRepository) return;
+
+    // GC prunes unreachable objects, which is exactly the set that keeps
+    // dropped stashes, deleted branches, amended commits and hard resets
+    // recoverable. From the command palette this is two keystrokes, so it needs
+    // the same gate every other destructive palette entry has.
+    const confirmed = await showConfirm(
+      aggressive ? 'Run Garbage Collection (Aggressive)' : 'Run Garbage Collection',
+      'This permanently removes unreachable objects. Work recoverable only ' +
+        'through the reflog — dropped stashes, deleted branches, amended ' +
+        'commits — will become unrecoverable. Continue?',
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     await gitService.runGc({
       path: this.activeRepository.repository.path,
       aggressive,
@@ -3342,6 +3461,20 @@ export class AppShell extends LitElement {
 
   private async handleRunPrune(): Promise<void> {
     if (!this.activeRepository) return;
+
+    // Same irreversibility as GC — see handleRunGc. `Ctrl+P → "prune" → Enter`
+    // must not be a shorter path to destroying the reflog safety net than any
+    // of the operations that net exists to protect.
+    const confirmed = await showConfirm(
+      'Prune Unreachable Objects',
+      'This permanently deletes unreachable objects. Work recoverable only ' +
+        'through the reflog — dropped stashes, deleted branches, amended ' +
+        'commits — will become unrecoverable. Continue?',
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     await gitService.runPrune({
       path: this.activeRepository.repository.path,
     });

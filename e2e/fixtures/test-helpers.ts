@@ -196,6 +196,10 @@ export async function autoConfirmDialogs(page: Page): Promise<void> {
   await injectCommandMock(page, {
     'plugin:dialog|confirm': true,
     'plugin:dialog|ask': true,
+    // plugin-dialog 2.x routes confirm() through `message` and resolves true
+    // only when the command returns the OK button label. Without this, every
+    // showConfirm() in the app reads as "declined" under test.
+    'plugin:dialog|message': 'Ok',
   });
 }
 

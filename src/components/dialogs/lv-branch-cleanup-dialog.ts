@@ -424,31 +424,46 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private assessRisk(candidate: CleanupCandidate): { risk: RiskLevel; riskReason: string } {
-    const ahead = candidate.aheadBehind?.ahead ?? 0;
-
-    if (ahead === 0) {
-      return { risk: 'safe', riskReason: 'Fully merged into current branch' };
+    // `aheadBehind` is null when the backend could not measure divergence at
+    // all — a branch that neither tracks an upstream nor is "gone". Coercing
+    // that to 0 would claim "fully merged" about a branch whose unmerged work
+    // is simply unknown, which is a false safety claim in the unsafe direction:
+    // it also clears the confirm gate in handleDelete. Unknown is a warning.
+    if (!candidate.aheadBehind) {
+      return {
+        risk: 'warning',
+        riskReason: candidate.upstream
+          ? 'Unpushed work unknown — no upstream comparison available'
+          : 'No upstream configured — may contain unmerged work',
+      };
     }
 
-    if (candidate.category === 'gone' && ahead > 0) {
+    const ahead = candidate.aheadBehind.ahead;
+
+    if (ahead === 0) {
+      // A 'gone' branch is measured against HEAD (its upstream is gone), so
+      // ahead === 0 genuinely means merged; anything else is measured against
+      // its upstream, where it means nothing left to push.
+      return {
+        risk: 'safe',
+        riskReason:
+          candidate.category === 'gone'
+            ? 'Fully merged into current branch'
+            : 'No unpushed work',
+      };
+    }
+
+    if (candidate.category === 'gone') {
       return {
         risk: 'danger',
         riskReason: `Remote deleted with ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
       };
     }
 
-    if (ahead > 0) {
-      return {
-        risk: 'warning',
-        riskReason: `Has ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
-      };
-    }
-
-    if (!candidate.upstream) {
-      return { risk: 'warning', riskReason: 'No upstream configured' };
-    }
-
-    return { risk: 'safe', riskReason: 'No unpushed work' };
+    return {
+      risk: 'warning',
+      riskReason: `Has ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
+    };
   }
 
   private isBuiltinProtected(name: string): boolean {
@@ -564,6 +579,7 @@ export class LvBranchCleanupDialog extends LitElement {
     this.deleting = true;
     let deleted = 0;
     let failed = 0;
+    const failures: string[] = [];
 
     // Pinned at open(): these irreversible force-deletes and the remote prune
     // must target the repo the cleanup was invoked on, even if the user
@@ -578,6 +594,9 @@ export class LvBranchCleanupDialog extends LitElement {
         deleted++;
       } else {
         failed++;
+        // Keep the reason: a bare "Failed to delete N branches" leaves the user
+        // with no idea why and no way forward.
+        failures.push(`${cb.branch.name}: ${result.error?.message ?? 'unknown error'}`);
         console.error(`Failed to delete ${cb.branch.name}:`, result.error);
       }
     }
@@ -611,7 +630,10 @@ export class LvBranchCleanupDialog extends LitElement {
       );
       this.close();
     } else if (failed > 0) {
-      showToast(`Failed to delete ${failed} branch${failed !== 1 ? 'es' : ''}`, 'error');
+      showToast(
+        `Failed to delete ${failed} branch${failed !== 1 ? 'es' : ''} — ${failures.join('; ')}`,
+        'error'
+      );
     }
   }
 

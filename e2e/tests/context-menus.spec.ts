@@ -207,6 +207,9 @@ test.describe('Operation Banner', () => {
       },
     });
 
+    // Aborting discards every conflict resolution, so it is gated by a confirm.
+    await autoConfirmDialogs(page);
+
     const banner = page.locator('.operation-banner');
     await expect(banner).toBeVisible();
     await expect(banner).toContainText('Cherry-pick in progress');
@@ -220,6 +223,28 @@ test.describe('Operation Banner', () => {
     const successToast = page.locator('.toast').first();
     await expect(successToast).toBeVisible({ timeout: 5000 });
     await expect(successToast).toContainText(/Aborted|abort/i);
+  });
+
+  test('declining the abort confirm does not abort', async ({ page }) => {
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'cherrypick',
+      },
+    });
+    await startCommandCapture(page);
+
+    // Decline: plugin-dialog treats any non-OK label as "cancel".
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+
+    const abortBtn = page.locator('.operation-abort-btn');
+    await expect(abortBtn).toBeEnabled();
+    await abortBtn.click();
+
+    await expect(page.locator('.operation-banner')).toBeVisible();
+    expect(await findCommand(page, 'abort_cherry_pick')).toHaveLength(0);
   });
 
   test('should show Resolve Conflicts button for cherry-pick state', async ({ page }) => {

@@ -280,6 +280,10 @@ pub async fn abort_merge(path: String) -> Result<()> {
     if !touched.is_empty() {
         let mut checkout = git2::build::CheckoutBuilder::new();
         checkout.force();
+        // Keeps "everything else is left alone" literally true: without this,
+        // CheckoutBuilder::path() glob-matches, so a touched path containing
+        // `*`, `?` or `[` would also force-restore unrelated dirty files.
+        checkout.disable_pathspec_match(true);
         for p in &touched {
             checkout.path(p);
         }

@@ -412,9 +412,16 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     // A path in HEAD but absent from the index is a staged deletion; there is
     // no worktree change to discard, so it is left untouched.
     let mut index_paths: Vec<&str> = Vec::new();
-    let mut untracked_paths: Vec<&str> = Vec::new();
+    let mut untracked_paths: Vec<std::path::PathBuf> = Vec::new();
 
     for file_path in &paths {
+        // Validate BEFORE any git2 lookup. git2's Index::get_path panics
+        // outright on a path beginning with `..`, so an unvalidated traversal
+        // crashes this command across the IPC boundary rather than returning an
+        // error. It also guards the untracked branch below, which is the only
+        // place in this file that deletes recursively.
+        let full_path = validate_path_within_repo(repo_path, file_path)?;
+
         let path_obj = Path::new(file_path);
 
         // Check if file exists in HEAD
@@ -431,7 +438,7 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
             index_paths.push(file_path);
         } else if !in_head {
             // Untracked - need to delete it.
-            untracked_paths.push(file_path);
+            untracked_paths.push(full_path);
         }
         // in_head && !in_index: staged deletion, nothing to discard.
     }
@@ -441,6 +448,12 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         checkout_opts.remove_untracked(false);
+        // CheckoutBuilder::path() adds a PATHSPEC, not a literal path: without
+        // this, a filename containing a glob metacharacter (`*`, `?`, `[`, `\`)
+        // also matches its neighbours. Discarding `report[1].md` would then
+        // force-restore `report1.md` too, silently destroying uncommitted work
+        // in a file the confirm never named.
+        checkout_opts.disable_pathspec_match(true);
 
         for file_path in &index_paths {
             checkout_opts.path(file_path);
@@ -454,8 +467,8 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     // FOLLOW symlinks, so a dangling link would be skipped (left on disk)
     // and a link to a directory would be reported as a directory. The
     // symlink itself is what must go — never its target.
-    for file_path in untracked_paths {
-        let full_path = repo_path.join(file_path);
+    // Paths were containment-checked during classification above.
+    for full_path in untracked_paths {
         if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
             if meta.file_type().is_dir() {
                 std::fs::remove_dir_all(&full_path)?;
@@ -1052,6 +1065,58 @@ mod tests {
 
         // Staged file should still exist (wasn't in discard list)
         assert!(repo.path.join("another.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_rejects_path_outside_repo() {
+        let repo = TestRepo::with_initial_commit();
+
+        // A path that is in neither the index nor HEAD is classified untracked,
+        // which is the branch that DELETES. Without containment validation the
+        // traversal would escape the repo and remove an unrelated directory.
+        let outside = repo.path.parent().unwrap().join("outside-victim.txt");
+        std::fs::write(&outside, "must survive").unwrap();
+
+        let result =
+            discard_changes(repo.path_str(), vec!["../outside-victim.txt".to_string()]).await;
+
+        assert!(result.is_err(), "traversing path must be rejected");
+        assert!(
+            outside.exists(),
+            "file outside the repository must not be deleted"
+        );
+
+        std::fs::remove_file(&outside).ok();
+    }
+
+    #[tokio::test]
+    async fn test_discard_changes_does_not_glob_match_sibling() {
+        let repo = TestRepo::with_initial_commit();
+
+        // `a[1].txt` is a legitimate filename, but it is also a pathspec that
+        // matches `a1.txt`. Discarding the former must not restore the latter.
+        repo.create_file("a[1].txt", "original bracket");
+        repo.create_file("a1.txt", "original plain");
+        repo.stage_file("a[1].txt");
+        repo.stage_file("a1.txt");
+        repo.create_commit("add both", &[]);
+
+        repo.create_file("a[1].txt", "modified bracket");
+        repo.create_file("a1.txt", "UNSAVED WORK");
+
+        let result = discard_changes(repo.path_str(), vec!["a[1].txt".to_string()]).await;
+        assert!(result.is_ok());
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("a[1].txt")).unwrap(),
+            "original bracket",
+            "the named file should be restored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("a1.txt")).unwrap(),
+            "UNSAVED WORK",
+            "a file that merely glob-matches must be left untouched"
+        );
     }
 
     #[tokio::test]

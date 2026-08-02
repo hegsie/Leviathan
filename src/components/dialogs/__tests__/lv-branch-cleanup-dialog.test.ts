@@ -355,6 +355,29 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(warningBadge!.textContent).to.include('Warning');
     });
 
+    it('branch with unmeasurable divergence shows .risk-badge.warning, not "safe"', async () => {
+      // aheadBehind is null when the backend could not compare at all — a
+      // branch that neither tracks an upstream nor is gone. Treating that as
+      // ahead: 0 claimed "Fully merged into current branch" about a branch
+      // whose unmerged work is simply unknown, and cleared the delete confirm.
+      const unknownDivergence = createCandidate('spike/old-idea', 'stale', {
+        aheadBehind: null,
+        upstream: null,
+      });
+      const el = await renderAndOpen([unknownDivergence]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+
+      expect(el.shadowRoot!.querySelector('.risk-badge.safe'), 'must not be labelled safe').to.be
+        .null;
+      const warningBadge = el.shadowRoot!.querySelector('.risk-badge.warning');
+      expect(warningBadge).to.not.be.null;
+      expect(warningBadge!.textContent).to.include('Warning');
+    });
+
     it('gone branch with ahead: 3 shows .risk-badge.danger', async () => {
       const el = await renderAndOpen([goneDanger]);
 

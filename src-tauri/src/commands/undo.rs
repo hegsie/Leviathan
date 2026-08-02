@@ -992,7 +992,7 @@ mod tests {
         repo.create_commit("Second", &[("f2.txt", "2")]);
         let second_oid = repo.head_oid();
 
-        crate::commands::reflog::reset_to_reflog(repo.path_str(), 1, "hard".to_string())
+        crate::commands::reflog::reset_to_reflog(repo.path_str(), 1, "hard".to_string(), None)
             .await
             .unwrap();
         let after_reset = repo.head_oid();

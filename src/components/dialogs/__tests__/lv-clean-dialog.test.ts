@@ -13,6 +13,8 @@ let lastCleanFilesArgs: Record<string, unknown> | null = null;
 // confirm() routes through `plugin:dialog|message` and treats a truthy return
 // as "confirmed").
 let confirmResult = true;
+/** When set, clean_files reports this many removed instead of all requested. */
+let partialCleanCount: number | null = null;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
@@ -39,6 +41,9 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 
   if (command === 'clean_files') {
     lastCleanFilesArgs = args as Record<string, unknown>;
+    // partialCleanCount simulates the backend skipping entries it cannot
+    // remove, which it reports by returning a count lower than the request.
+    if (partialCleanCount !== null) return partialCleanCount;
     return (args as { paths?: unknown[] }).paths?.length ?? 1;
   }
 
@@ -60,6 +65,7 @@ describe('lv-clean-dialog', () => {
     cleanableEntries = [];
     lastCleanFilesArgs = null;
     confirmResult = true;
+    partialCleanCount = null;
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -87,6 +93,44 @@ describe('lv-clean-dialog', () => {
     await (el as any).handleClean();
 
     expect(eventFired).to.be.true;
+  });
+
+  it('toasts what was deleted on success', async () => {
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['a.txt', 'b.txt']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    const toast = uiStore.getState().toasts.find(t => t.type === 'success');
+    expect(toast, 'success toast shown').to.not.be.undefined;
+    expect(toast!.message).to.include('2');
+  });
+
+  it('warns when clean_files removed fewer items than were selected', async () => {
+    // clean_files silently skips nested repos without force, directories with
+    // tracked content, and locked files. The dialog closes immediately, so the
+    // shortfall must be surfaced or the user assumes everything was deleted.
+    cleanableEntries = [];
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['a.txt', 'b.txt', 'c.txt']);
+    // Backend reports only 1 of the 3 actually removed.
+    partialCleanCount = 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+    partialCleanCount = null;
+
+    const toast = uiStore.getState().toasts.find(t => t.type === 'warning');
+    expect(toast, 'warning toast shown').to.not.be.undefined;
+    expect(toast!.message).to.include('1 of 3');
+    expect(toast!.message).to.include('2 could not be removed');
   });
 
   it('shows error toast on API failure', async () => {

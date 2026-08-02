@@ -709,17 +709,15 @@ export class LvFileStatus extends LitElement {
     const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToDiscard.length === 0) return;
 
-    const paths = this.discardablePaths(filesToDiscard);
-    if (paths.length === 0) return;
+    const entries = this.discardableEntries(filesToDiscard);
+    if (entries.length === 0) return;
+    const paths = entries.map((f) => f.path);
     // Captured BEFORE the confirm await: discarding is irreversible and must
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""} in "${dirPath}"? This cannot be undone.`,
-      "warning",
-    );
+    const { title, message } = this.discardConfirmCopy(entries, dirPath);
+    const confirmed = await showConfirm(title, message, "warning");
     if (!confirmed) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
@@ -1193,7 +1191,7 @@ export class LvFileStatus extends LitElement {
    * the index stays conflicted — either way the conflict must be resolved
    * (or the operation aborted) in the merge editor instead.
    */
-  private discardablePaths(files: StatusEntry[]): string[] {
+  private discardableEntries(files: StatusEntry[]): StatusEntry[] {
     const conflicted = files.filter((f) => f.isConflicted);
     if (conflicted.length > 0) {
       showToast(
@@ -1201,7 +1199,58 @@ export class LvFileStatus extends LitElement {
         'warning',
       );
     }
-    return files.filter((f) => !f.isConflicted).map((f) => f.path);
+    return files.filter((f) => !f.isConflicted);
+  }
+
+  /**
+   * Confirm title/message for a discard.
+   *
+   * Discarding an UNTRACKED file deletes it from disk — staging.rs classifies
+   * anything absent from both the index and HEAD as untracked and removes it.
+   * There is no git object and no trash, so the file is unrecoverable. "Discard
+   * changes to X" reads as "restore X to its previous state", which materially
+   * understates that, and in bulk "discard changes to 12 files" can mean 12
+   * permanent deletions. Name the deletion whenever one is involved.
+   */
+  private discardConfirmCopy(
+    files: StatusEntry[],
+    scope?: string,
+  ): { title: string; message: string } {
+    const untracked = files.filter((f) => f.status === 'untracked').length;
+    const tracked = files.length - untracked;
+    const where = scope ? ` in "${scope}"` : '';
+    const plural = (n: number) => (n === 1 ? '' : 's');
+
+    if (files.length === 1) {
+      return untracked === 1
+        ? {
+            title: 'Delete Untracked File',
+            message: `Permanently delete the untracked file "${files[0].path}"? It is not in Git and cannot be recovered.`,
+          }
+        : {
+            title: 'Discard Changes',
+            message: `Discard changes to "${files[0].path}"? This cannot be undone.`,
+          };
+    }
+
+    if (untracked === 0) {
+      return {
+        title: 'Discard Changes',
+        message: `Discard changes to ${tracked} file${plural(tracked)}${where}? This cannot be undone.`,
+      };
+    }
+
+    if (tracked === 0) {
+      return {
+        title: 'Delete Untracked Files',
+        message: `Permanently delete ${untracked} untracked file${plural(untracked)}${where}? They are not in Git and cannot be recovered.`,
+      };
+    }
+
+    return {
+      title: 'Discard Changes',
+      message: `Discard changes to ${tracked} file${plural(tracked)} and permanently delete ${untracked} untracked file${plural(untracked)}${where}? This cannot be undone.`,
+    };
   }
 
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
@@ -1271,11 +1320,8 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Are you sure you want to discard changes to "${file.path}"? This action cannot be undone.`,
-      "warning",
-    );
+    const { title, message } = this.discardConfirmCopy([file]);
+    const confirmed = await showConfirm(title, message, "warning");
 
     if (!confirmed) return;
 
@@ -1405,20 +1451,18 @@ export class LvFileStatus extends LitElement {
   }
 
   private async handleDiscardSelected(): Promise<void> {
-    const paths = this.discardablePaths(
+    const entries = this.discardableEntries(
       this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
     );
-    if (paths.length === 0) return;
+    if (entries.length === 0) return;
+    const paths = entries.map((f) => f.path);
 
     // Captured BEFORE the confirm await: discarding is irreversible and must
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""}? This cannot be undone.`,
-      "warning",
-    );
+    const { title, message } = this.discardConfirmCopy(entries);
+    const confirmed = await showConfirm(title, message, "warning");
     if (!confirmed) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
@@ -1545,11 +1589,8 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to "${file.path}"? This cannot be undone.`,
-      "warning",
-    );
+    const { title, message } = this.discardConfirmCopy([file]);
+    const confirmed = await showConfirm(title, message, "warning");
     if (!confirmed) return;
     const result = await gitService.discardChanges(repoPath, [
       file.path,

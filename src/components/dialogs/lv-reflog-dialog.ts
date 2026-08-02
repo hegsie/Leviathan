@@ -392,6 +392,11 @@ export class LvReflogDialog extends LitElement {
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
 
+    // Captured BEFORE the confirm await: this dialog is bound to the active
+    // repository and rebinds live, so a mid-confirm tab switch would otherwise
+    // reset the repo the user switched TO.
+    const repoPath = this.repositoryPath;
+
     // Confirm hard reset
     if (mode === 'hard') {
       const confirmed = await showConfirm(
@@ -405,7 +410,10 @@ export class LvReflogDialog extends LitElement {
     this.resetting = true;
 
     try {
-      const result = await gitService.resetToReflog(this.repositoryPath, entry.index, mode);
+      // entry.oid pins the reset to the commit the user was actually shown:
+      // this dialog loads the reflog once and never reloads, so an external
+      // commit or checkout shifts entry.index onto a different commit.
+      const result = await gitService.resetToReflog(repoPath, entry.index, mode, entry.oid);
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('undo-complete', {

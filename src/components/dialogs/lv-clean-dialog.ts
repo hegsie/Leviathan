@@ -429,6 +429,11 @@ export class LvCleanDialog extends LitElement {
   private async handleClean(): Promise<void> {
     if (this.selectedPaths.size === 0) return;
 
+    // Captured BEFORE the nested-repo confirm await: this dialog is bound to
+    // the active repository and rebinds live, so a mid-confirm tab switch would
+    // otherwise delete files from the repo the user switched TO.
+    const repoPath = this.repositoryPath;
+
     // If any selected entry is an untracked nested git repository, require an
     // explicit confirmation before force-deleting it (this destroys the nested
     // repo's history, which `git clean` guards behind a second `-f`).
@@ -454,11 +459,25 @@ export class LvCleanDialog extends LitElement {
 
     try {
       const paths = Array.from(this.selectedPaths);
-      const result = await gitService.cleanFiles(this.repositoryPath, paths, forceNested);
+      const result = await gitService.cleanFiles(repoPath, paths, forceNested);
 
       if (result.success) {
+        // clean_files skips entries it cannot remove — nested repos without
+        // force, directories holding tracked content, locked files — and
+        // reports how many it actually deleted. The dialog closes immediately,
+        // so without this the user sees no feedback at all and assumes every
+        // selected file is gone.
+        const removed = result.data ?? 0;
+        const shortfall = paths.length - removed;
+        showToast(
+          shortfall > 0
+            ? `Deleted ${removed} of ${paths.length} items — ${shortfall} could not be removed`
+            : `Deleted ${removed} item${removed === 1 ? '' : 's'}`,
+          shortfall > 0 ? 'warning' : 'success'
+        );
+
         this.dispatchEvent(new CustomEvent('files-cleaned', {
-          detail: { count: result.data },
+          detail: { count: removed },
           bubbles: true,
           composed: true,
         }));

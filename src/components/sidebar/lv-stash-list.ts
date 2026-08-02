@@ -306,6 +306,54 @@ export class LvStashList extends LitElement {
     };
   }
 
+  /**
+   * Re-resolve a stash captured at context-menu time to its CURRENT index in
+   * `repoPath`'s stash list.
+   *
+   * `Stash.index` is a POSITION, not an identity: creating or dropping any
+   * stash shifts every entry below it. The context menu caches the Stash object
+   * from when it opened and survives list reloads — `repository-refresh`
+   * reloads the list without closing the menu (handleRepositoryRefresh), and
+   * only Escape or a click dismisses it — so the cached index can name a
+   * different stash by the time the user clicks an action, or by the time a
+   * confirm is dismissed. Match on `oid`, which is stable.
+   *
+   * Reads the list from `repoPath` rather than `this.stashes`: the caller pins
+   * repoPath before its confirm, and on a mid-confirm tab switch `this.stashes`
+   * holds the OTHER repo's entries — resolving against it would produce an
+   * index into the wrong list.
+   *
+   * Returns the live index, or null if the caller must abort (already toasted).
+   */
+  private async resolveStashIndex(
+    repoPath: string,
+    stash: Stash,
+    action: 'applied' | 'popped' | 'dropped'
+  ): Promise<number | null> {
+    const result = await gitService.getStashes(repoPath);
+
+    if (!result.success || !result.data) {
+      showToast(
+        result.error?.message ?? `Could not read the stash list — nothing was ${action}`,
+        'error'
+      );
+      return null;
+    }
+
+    const index = result.data.findIndex(s => s.oid === stash.oid);
+
+    if (index < 0) {
+      showToast(
+        `"${stash.message}" is no longer in the stash list — nothing was ${action}`,
+        'warning'
+      );
+      await this.loadStashes();
+      return null;
+    }
+
+    return index;
+  }
+
   private async handleApplyStash(): Promise<void> {
     const stash = this.contextMenu.stash;
     if (!stash || this.operationInProgress) return;
@@ -317,9 +365,12 @@ export class LvStashList extends LitElement {
     // apply actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
     try {
+      const index = await this.resolveStashIndex(repoPath, stash, 'applied');
+      if (index === null) return;
+
       const result = await gitService.applyStash({
         path: repoPath,
-        index: stash.index,
+        index,
         dropAfter: false,
       });
 
@@ -342,7 +393,7 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
-              stashIndex: stash.index,
+              stashIndex: index,
               dropStashOnComplete: false,
               repositoryPath: repoPath,
             },
@@ -383,9 +434,12 @@ export class LvStashList extends LitElement {
     this.operationInProgress = true;
 
     try {
+      const index = await this.resolveStashIndex(repoPath, stash, 'popped');
+      if (index === null) return;
+
       const result = await gitService.popStash({
         path: repoPath,
-        index: stash.index,
+        index,
       });
 
       if (result.success) {
@@ -407,7 +461,7 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
-              stashIndex: stash.index,
+              stashIndex: index,
               dropStashOnComplete: true,
               repositoryPath: repoPath,
             },
@@ -441,9 +495,12 @@ export class LvStashList extends LitElement {
     this.operationInProgress = true;
 
     try {
+      const index = await this.resolveStashIndex(repoPath, stash, 'dropped');
+      if (index === null) return;
+
       const result = await gitService.dropStash({
         path: repoPath,
-        index: stash.index,
+        index,
       });
 
       if (result.success) {

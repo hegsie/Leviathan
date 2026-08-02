@@ -442,6 +442,11 @@ export class LvWorktreeDialog extends LitElement {
       return;
     }
 
+    // Captured BEFORE the confirm await: this dialog is bound to the active
+    // repository and rebinds live, so a mid-confirm tab switch would otherwise
+    // run the removal against the repo the user switched TO.
+    const repoPath = this.repositoryPath;
+
     const confirmed = await showConfirm(
       'Remove Worktree',
       `Are you sure you want to remove the worktree at "${worktree.path}"?`,
@@ -453,7 +458,7 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.removeWorktree(this.repositoryPath, worktree.path);
+    const result = await gitService.removeWorktree(repoPath, worktree.path);
 
     if (result.success) {
       this.success = 'Worktree removed';

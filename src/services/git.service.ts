@@ -1698,15 +1698,25 @@ export async function getReflog(
   return invokeCommand<ReflogEntry[]>("get_reflog", { path: repoPath, limit });
 }
 
+/**
+ * Reset HEAD to a reflog entry.
+ *
+ * `expectedOid` guards against the reflog shifting between listing and reset
+ * (a commit or checkout from another window renumbers every entry). Pass the
+ * oid the user was shown; the backend refuses if the position no longer holds
+ * it. Omitting it skips the check.
+ */
 export async function resetToReflog(
   repoPath: string,
   reflogIndex: number,
   mode: "soft" | "mixed" | "hard" = "mixed",
+  expectedOid?: string,
 ): Promise<CommandResult<ReflogEntry>> {
   return invokeCommand<ReflogEntry>("reset_to_reflog", {
     path: repoPath,
     reflogIndex,
     mode,
+    expectedOid,
   });
 }
 

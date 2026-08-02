@@ -43,14 +43,22 @@ function makeStash(overrides: Partial<{
   };
 }
 
+/**
+ * Stash list returned by `get_stashes`. The handlers re-resolve the
+ * right-clicked stash by oid against this list before acting, so a test that
+ * expects an operation to RUN must seed it with that stash.
+ */
+let mockStashes: unknown[] = [];
+
 function defaultMockInvoke(command: string): Promise<unknown> {
   if (command === 'get_stashes') {
-    return Promise.resolve([]);
+    return Promise.resolve(mockStashes);
   }
   return Promise.resolve(null);
 }
 
 async function createComponent(): Promise<LvStashList> {
+  mockStashes = [];
   mockInvoke = defaultMockInvoke;
   const el = await fixture<LvStashList>(
     html`<lv-stash-list .repositoryPath=${REPO_PATH}></lv-stash-list>`
@@ -133,6 +141,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     };
 
     const stash = makeStash({ index: 0 });
+    mockStashes = [stash];
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
@@ -142,6 +151,10 @@ describe('lv-stash-list operationInProgress guards', () => {
 
     // Should be in progress now
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(true);
+
+    // The handler re-resolves the stash by oid (an extra awaited round trip)
+    // before calling apply_stash, so let that settle before resolving it.
+    await new Promise((r) => setTimeout(r, 0));
 
     // Resolve
     resolveApply({ success: true });
@@ -162,6 +175,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     };
 
     const stash = makeStash({ index: 0 });
+    mockStashes = [stash];
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
@@ -197,6 +211,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     });
 
     const stash = makeStash({ index: 0 });
+    mockStashes = [stash];
     (
       el as unknown as {
         contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null };
@@ -206,6 +221,9 @@ describe('lv-stash-list operationInProgress guards', () => {
     const promise = (
       el as unknown as { handleApplyStash: () => Promise<void> }
     ).handleApplyStash();
+
+    // Let the oid re-resolution settle so apply_stash is actually in flight.
+    await new Promise((r) => setTimeout(r, 0));
 
     // User switches tabs mid-apply: the prop rebinds to another repo.
     (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
@@ -236,6 +254,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     };
 
     const stash = makeStash({ index: 0 });
+    mockStashes = [stash];
     (
       el as unknown as {
         contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null };
@@ -254,6 +273,73 @@ describe('lv-stash-list operationInProgress guards', () => {
     const dropCall = invokeCalls.find((c) => c.command === 'drop_stash');
     expect(dropCall, 'drop_stash called').to.not.be.undefined;
     expect((dropCall!.args as { path: string }).path).to.equal(REPO_PATH);
+  });
+
+  it('handleDropStash drops the stash the user right-clicked after the list shifts', async () => {
+    // Stash.index is a POSITION. Creating a stash while the context menu is
+    // open (Ctrl+Shift+S does not close it) pushes every entry down one, so the
+    // cached index names a different stash by the time Drop is clicked.
+    const el = await createComponent();
+
+    const target = makeStash({ index: 1, message: 'refactor WIP', oid: 'target-oid' });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+    // A new stash landed at 0, so the target now sits at index 2.
+    mockStashes = [
+      makeStash({ index: 0, message: 'brand new', oid: 'new-oid' }),
+      makeStash({ index: 1, message: 'other', oid: 'other-oid' }),
+      target,
+    ];
+
+    // Confirm the drop: plugin-dialog's confirm() resolves via
+    // `plugin:dialog|message`, where the OK button label means confirmed.
+    mockInvoke = (command: string) =>
+      command === 'plugin:dialog|message'
+        ? Promise.resolve('Ok')
+        : defaultMockInvoke(command);
+
+    invokeCalls.length = 0;
+    await (el as unknown as { handleDropStash: () => Promise<void> }).handleDropStash();
+
+    const dropCall = invokeCalls.find((c) => c.command === 'drop_stash');
+    expect(dropCall, 'drop_stash called').to.not.be.undefined;
+    expect(
+      (dropCall!.args as { index: number }).index,
+      'must drop the right-clicked stash at its CURRENT position, not the stale one'
+    ).to.equal(2);
+  });
+
+  it('handleDropStash aborts when the right-clicked stash is gone', async () => {
+    const el = await createComponent();
+
+    const target = makeStash({ index: 0, message: 'gone', oid: 'gone-oid' });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+    // Someone dropped it from a terminal — it is no longer in the list.
+    mockStashes = [makeStash({ index: 0, message: 'unrelated', oid: 'other-oid' })];
+
+    // Confirm the drop: plugin-dialog's confirm() resolves via
+    // `plugin:dialog|message`, where the OK button label means confirmed.
+    mockInvoke = (command: string) =>
+      command === 'plugin:dialog|message'
+        ? Promise.resolve('Ok')
+        : defaultMockInvoke(command);
+
+    invokeCalls.length = 0;
+    await (el as unknown as { handleDropStash: () => Promise<void> }).handleDropStash();
+
+    expect(
+      invokeCalls.filter((c) => c.command === 'drop_stash'),
+      'must not drop a substitute stash'
+    ).to.have.length(0);
   });
 
   it('isStashing guard prevents double createStash', async () => {
