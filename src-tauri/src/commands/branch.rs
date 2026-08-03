@@ -160,7 +160,14 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
     // command directly, so a rule the UI displays as active was inert on both
     // of those surfaces. Checked before the force branch so force cannot bypass
     // an explicit protection rule.
-    let rules = super::branch_rules::load_rules(Path::new(&path)).unwrap_or_default();
+    // Propagated, NOT unwrap_or_default: load_rules errors both when the file
+    // is unreadable and when it fails to parse (save_rules is a non-atomic
+    // write, so a crash mid-save can truncate it). Defaulting to "no rules"
+    // would make an unreadable rule set indistinguishable from an empty one and
+    // silently disable every protection in the repo — a protection that fails
+    // open is worse than none, because the UI still shows the branch as
+    // protected.
+    let rules = super::branch_rules::load_rules(Path::new(&path))?;
     if super::branch_rules::is_deletion_prevented(&rules, &name) {
         return Err(LeviathanError::OperationFailed(format!(
             "Branch \"{}\" is protected by a branch rule and cannot be deleted. Remove the rule first.",

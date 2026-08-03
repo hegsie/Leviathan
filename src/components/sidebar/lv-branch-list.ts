@@ -1065,6 +1065,7 @@ export class LvBranchList extends LitElement {
     // Delete branches one by one
     let deleted = 0;
     let failed = 0;
+    const failures: string[] = [];
 
     for (const branch of mergedBranches) {
       const result = await gitService.deleteBranch(
@@ -1076,6 +1077,10 @@ export class LvBranchList extends LitElement {
         deleted++;
       } else {
         failed++;
+        // Keep the reason. A bare count cannot distinguish a protection rule
+        // from an unmerged tip or a branch checked out in a worktree, and
+        // branch rules made "refused on purpose" a routine outcome here.
+        failures.push(`${branch.name}: ${result.error?.message ?? 'unknown error'}`);
         console.error(`Failed to delete ${branch.name}:`, result.error);
       }
     }
@@ -1088,7 +1093,7 @@ export class LvBranchList extends LitElement {
     if (failed > 0) {
       await showConfirm(
         'Partial Success',
-        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, but ${failed} failed to delete.`,
+        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, but ${failed} failed to delete.\n\n${failures.join('\n')}`,
         'warning'
       );
     }

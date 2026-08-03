@@ -4749,13 +4749,19 @@ export async function gitFlowStartFeature(
   return invokeCommand<Branch>("gitflow_start_feature", { path: repoPath, name });
 }
 
+/** Outcome of a git-flow finish; branchKeptReason is set when a branch rule blocked the delete. */
+export interface GitFlowFinishResult {
+  branchDeleted: boolean;
+  branchKeptReason: string | null;
+}
+
 export async function gitFlowFinishFeature(
   repoPath: string,
   name: string,
   deleteBranch?: boolean,
   squash?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_feature", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_feature", {
     path: repoPath,
     name,
     deleteBranch,
@@ -4775,8 +4781,8 @@ export async function gitFlowFinishRelease(
   version: string,
   tagMessage?: string,
   deleteBranch?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_release", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_release", {
     path: repoPath,
     version,
     tagMessage,
@@ -4796,8 +4802,8 @@ export async function gitFlowFinishHotfix(
   version: string,
   tagMessage?: string,
   deleteBranch?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_hotfix", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_hotfix", {
     path: repoPath,
     version,
     tagMessage,

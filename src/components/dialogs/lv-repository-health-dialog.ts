@@ -366,9 +366,11 @@ export class LvRepositoryHealthDialog extends LitElement {
       });
 
       if (result.success) {
-        showToast('File system check completed - no issues found', 'success');
+        // `git fsck` exits 0 while reporting dangling/unreachable objects, so
+        // show its actual output rather than asserting "no issues found".
+        showToast(result.data?.message ?? 'File system check completed', 'success');
       } else {
-        showToast(`File system check found issues: ${result.error?.message}`, 'warning');
+        showToast(`File system check failed: ${result.error?.message}`, 'error');
       }
     } finally {
       this.runningAction = null;

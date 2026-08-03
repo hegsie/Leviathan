@@ -55,6 +55,13 @@ function clearHistory(): void {
   invokeHistory.length = 0;
 }
 
+/** Messages passed to showConfirm(), in order. */
+function confirmMessages(): string[] {
+  return invokeHistory
+    .filter((h) => h.command === 'plugin:dialog|message')
+    .map((h) => (h.args as { message?: string })?.message ?? '');
+}
+
 function findCommands(name: string): Array<{ command: string; args?: unknown }> {
   return invokeHistory.filter((h) => h.command === name);
 }
@@ -126,6 +133,11 @@ const goneDanger = createCandidate('feature/gone-danger', 'gone', {
   upstream: 'origin/feature/gone-danger',
 });
 
+const protectedMainStale = createCandidate('main', 'stale', {
+  aheadBehind: { ahead: 0, behind: 0 },
+  lastCommitTimestamp: 1600000000,
+});
+
 const protectedMain = createCandidate('main', 'merged', {
   aheadBehind: { ahead: 0, behind: 0 },
 });
@@ -190,8 +202,9 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     });
 
     it('risk badges render with correct class (.risk-badge.safe, .risk-badge.warning, .risk-badge.danger)', async () => {
-      // Put one of each risk in merged tab
-      const el = await renderAndOpen([mergedSafe, mergedWarning]);
+      // A merged branch is always safe (the backend proved HEAD descends from
+      // it), so 'warning' is only reachable outside that category — use stale.
+      const el = await renderAndOpen([staleSafe, staleWarning]);
 
       const safeBadge = el.shadowRoot!.querySelector('.risk-badge.safe');
       const warningBadge = el.shadowRoot!.querySelector('.risk-badge.warning');
@@ -347,12 +360,48 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(safeBadge!.textContent).to.include('Safe');
     });
 
-    it('branch with ahead: 5 shows .risk-badge.warning', async () => {
-      const el = await renderAndOpen([mergedWarning]);
+    it('unmerged branch with unpushed commits shows .risk-badge.warning', async () => {
+      const el = await renderAndOpen([staleWarning]);
 
       const warningBadge = el.shadowRoot!.querySelector('.risk-badge.warning');
       expect(warningBadge).to.not.be.null;
       expect(warningBadge!.textContent).to.include('Warning');
+    });
+
+    it('merged branch with measured unpushed commits stays .risk-badge.safe', async () => {
+      // `ahead` measures distance from the UPSTREAM, which says nothing about
+      // whether deleting the local ref loses work. The backend already proved
+      // HEAD descends from this branch, so nothing is lost.
+      const mergedUnpushed = createCandidate('feature/x', 'merged', {
+        aheadBehind: { ahead: 3, behind: 0 },
+        upstream: 'origin/feature/x',
+      });
+      const el = await renderAndOpen([mergedUnpushed]);
+
+      const safeBadge = el.shadowRoot!.querySelector('.risk-badge.safe');
+      expect(safeBadge, 'a merged branch is safe regardless of upstream drift').to.not.be.null;
+    });
+
+    it('gives one branch the same risk in every tab it appears in', async () => {
+      // The backend emits a branch once per qualifying category. Risk belongs
+      // to the branch, so the merged proof must win in the Stale tab too —
+      // otherwise the same branch reads green on one tab and amber on another.
+      const name = 'feature/old-and-merged';
+      const el = await renderAndOpen([
+        createCandidate(name, 'merged', { aheadBehind: null, upstream: null }),
+        createCandidate(name, 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+
+      expect(
+        el.shadowRoot!.querySelector('.risk-badge.warning'),
+        'the merged proof must apply in the Stale tab too',
+      ).to.be.null;
+      expect(el.shadowRoot!.querySelector('.risk-badge.safe')).to.not.be.null;
     });
 
     it('merged branch with no upstream stays .risk-badge.safe', async () => {
@@ -502,7 +551,8 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     });
 
     it('select-all checkbox toggles all selectable branches', async () => {
-      const el = await renderAndOpen([mergedSafe, mergedWarning, protectedMain]);
+      // Stale branches are never auto-selected, so select-all has something to do.
+      const el = await renderAndOpen([staleSafe, staleWarning, protectedMainStale]);
 
       // Find select-all checkbox
       const selectAllCheckbox = el.shadowRoot!.querySelector(
@@ -554,12 +604,79 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     });
 
     it('delete button disabled when nothing selected', async () => {
-      // Use a warning branch that won't be auto-selected
-      const el = await renderAndOpen([mergedWarning]);
+      // Stale branches are never auto-selected.
+      const el = await renderAndOpen([staleWarning]);
 
       const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
       expect(deleteBtn).to.not.be.null;
       expect(deleteBtn.disabled).to.be.true;
+    });
+
+    it('never shows a confirm with an empty clause', async () => {
+      // A branch emitted as BOTH merged and stale used to get two labels; the
+      // gate read the un-deduplicated union (saw 'warning') while the message
+      // read the deduplicated set (saw only 'safe'), producing the text
+      // "Of the selected branches, .".
+      const name = 'feature/old-and-merged';
+      const el = await renderAndOpen([
+        createCandidate(name, 'merged', { aheadBehind: null, upstream: null }),
+        createCandidate(name, 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      for (const message of confirmMessages()) {
+        expect(message, `malformed confirm: ${message}`).to.not.match(/,\s*\./);
+      }
+      expect(findCommands('delete_branch'), 'the delete still runs').to.have.length(1);
+    });
+
+    it('offers a force escalation when the backend refuses an unmerged branch', async () => {
+      // force is withheld for unmeasurable divergence (that is the safe
+      // outcome), but git's "use force to delete anyway" is unactionable
+      // unless the dialog offers it.
+      const el = await renderAndOpen([
+        createCandidate('spike/idea', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+
+      // First delete_branch call is refused as unmerged; the retry succeeds.
+      let deleteCalls = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'delete_branch') {
+          deleteCalls++;
+          if (deleteCalls === 1) {
+            throw { code: 'COMMAND_ERROR', message: 'Branch is not fully merged. Use force to delete anyway.' };
+          }
+          return undefined;
+        }
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const calls = findCommands('delete_branch');
+      expect(calls.length, 'should retry after the escalation confirm').to.equal(2);
+      expect((calls[0].args as { force?: boolean }).force).to.not.equal(true);
+      expect((calls[1].args as { force?: boolean }).force).to.equal(true);
+      expect(
+        confirmMessages().some((m) => /not fully merged/i.test(m)),
+        'the escalation must be confirmed explicitly',
+      ).to.be.true;
     });
 
     it('does NOT force-delete a branch whose divergence could not be measured', async () => {
@@ -597,7 +714,8 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     });
 
     it('force-deletes only when unpushed commits were actually measured', async () => {
-      const el = await renderAndOpen([mergedWarning]);
+      // staleWarning has a measured ahead of 3, so force is justified.
+      const el = await renderAndOpen([staleWarning]);
 
       const checkbox = el.shadowRoot!.querySelector(
         '.branch-item input[type="checkbox"]',
@@ -615,17 +733,9 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     });
 
     it('clicking delete calls delete_branch for each selected branch', async () => {
+      // Both are merged and therefore safe, so both are auto-selected.
       const candidates = [mergedSafe, mergedWarning];
       const el = await renderAndOpen(candidates);
-      clearHistory();
-
-      // Select the warning branch too (safe is auto-selected)
-      const branchItems = el.shadowRoot!.querySelectorAll('.branch-item');
-      const warningItem = Array.from(branchItems).find(
-        (item) => item.querySelector('.branch-name')?.textContent?.trim() === 'feature/wip',
-      );
-      const warningCheckbox = warningItem!.querySelector('input[type="checkbox"]') as HTMLInputElement;
-      warningCheckbox.click();
       await settle(el);
 
       clearHistory();
@@ -749,8 +859,8 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
   // ── Footer ─────────────────────────────────────────────────────────────
   describe('Footer', () => {
     it('shows "No branches selected" when none selected', async () => {
-      // Use only a warning branch so nothing is auto-selected
-      const el = await renderAndOpen([mergedWarning]);
+      // Stale branches are never auto-selected.
+      const el = await renderAndOpen([staleWarning]);
 
       const footer = el.shadowRoot!.querySelector('.footer-summary');
       expect(footer).to.not.be.null;

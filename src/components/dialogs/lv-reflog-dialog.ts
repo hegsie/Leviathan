@@ -428,7 +428,13 @@ export class LvReflogDialog extends LitElement {
         // user to "refresh and try again" — but this dialog loads once and has
         // no refresh affordance, so without this the stale indices persist and
         // every retry fails identically. Reload so the advice is actionable.
-        await this.loadReflog();
+        //
+        // Skipped if the active repository changed while the reset was in
+        // flight: reloading would then replace the list with a DIFFERENT
+        // repo's reflog while the error still refers to this one.
+        if (this.repositoryPath === repoPath) {
+          await this.loadReflog();
+        }
       }
     } catch (err) {
       console.error('Reset failed:', err);

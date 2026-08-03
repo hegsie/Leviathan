@@ -1251,8 +1251,14 @@ export class LvConflictResolutionDialog extends LitElement {
       if (ctx.deleteBranch) {
         const del = await gitService.deleteBranch(this.repositoryPath, ctx.branchName, true);
         if (!del.success) {
-          showToast(del.error?.message ?? 'Failed to delete feature branch', 'error');
-          return false;
+          // The squash commit has already landed — deleting the branch is the
+          // optional last step. Treating its failure (e.g. a preventDeletion
+          // branch rule) as "finish incomplete" left the dialog stuck on a
+          // fully-resolved conflict list with no way forward but closing it.
+          showToast(
+            `${del.error?.message ?? 'Failed to delete feature branch'} — the squash commit landed`,
+            'warning',
+          );
         }
       }
       return true;
@@ -1262,7 +1268,7 @@ export class LvConflictResolutionDialog extends LitElement {
     // re-invoking the (now idempotent) backend finish skips the up-to-date
     // master/develop merges, creates the version tag (release/hotfix), and deletes
     // the branch.
-    let result: CommandResult<void>;
+    let result: CommandResult<gitService.GitFlowFinishResult>;
     switch (ctx.kind) {
       case 'feature':
         result = await gitService.gitFlowFinishFeature(
@@ -1319,6 +1325,12 @@ export class LvConflictResolutionDialog extends LitElement {
       }
       showToast(result.error?.message ?? 'Failed to complete Git Flow finish', 'error');
       return false;
+    }
+
+    // The finish can succeed while a branch rule blocks its branch deletion —
+    // say so, or the branch silently survives the finish.
+    if (result.data?.branchKeptReason) {
+      showToast(result.data.branchKeptReason, 'warning');
     }
     return true;
   }

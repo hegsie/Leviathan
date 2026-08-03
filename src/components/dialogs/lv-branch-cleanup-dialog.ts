@@ -351,6 +351,23 @@ export class LvBranchCleanupDialog extends LitElement {
       const stale: CleanupBranch[] = [];
       const gone: CleanupBranch[] = [];
 
+      // Group by branch name FIRST. The backend emits the same branch once per
+      // category it qualifies for (merged AND stale is common for an old
+      // finished feature branch), but risk is a property of the BRANCH, not of
+      // the tab it happens to be listed under. Assessing each entry separately
+      // gave one branch two different badges — green on Merged, amber on Stale
+      // — and let the delete gate fire on a label the deletion path had already
+      // deduplicated away.
+      const byName = new Map<string, CleanupCandidate[]>();
+      for (const candidate of result.data) {
+        const group = byName.get(candidate.name);
+        if (group) {
+          group.push(candidate);
+        } else {
+          byName.set(candidate.name, [candidate]);
+        }
+      }
+
       for (const candidate of result.data) {
         const branch: Branch = {
           name: candidate.name,
@@ -366,7 +383,7 @@ export class LvBranchCleanupDialog extends LitElement {
 
         const isProtected = candidate.isProtected || this.isBuiltinProtected(candidate.name);
         const protectedReason = isProtected ? this.getProtectedReason(candidate) : undefined;
-        const risk = this.assessRisk(candidate);
+        const risk = this.assessRisk(byName.get(candidate.name) ?? [candidate]);
 
         const entry: CleanupBranch = {
           branch,
@@ -423,20 +440,33 @@ export class LvBranchCleanupDialog extends LitElement {
     }
   }
 
-  private assessRisk(candidate: CleanupCandidate): { risk: RiskLevel; riskReason: string } {
-    // `aheadBehind` is null when the backend could not measure divergence at
-    // all — a branch that neither tracks an upstream nor is "gone". Coercing
-    // that to 0 would claim "fully merged" about a branch whose unmerged work
-    // is simply unknown, which is a false safety claim in the unsafe direction:
-    // it also clears the confirm gate in handleDelete. Unknown is a warning.
+  /**
+   * Canonical risk for a branch, computed from EVERY category the backend
+   * listed it under.
+   *
+   * Takes the whole group rather than one entry because the backend emits a
+   * branch once per qualifying category, and risk belongs to the branch: a
+   * branch that is both merged and stale is still merged, and deleting it
+   * loses nothing.
+   */
+  private assessRisk(group: CleanupCandidate[]): { risk: RiskLevel; riskReason: string } {
+    // The backend proved this merged — HEAD descends from its tip, or the two
+    // are equal (branch_cleanup.rs). Every commit on it is therefore reachable
+    // from HEAD and deleting the ref loses nothing. That proof outranks any
+    // upstream comparison, measured or missing: `ahead` counts distance from
+    // the UPSTREAM, which says nothing about whether local deletion loses work.
+    if (group.some((c) => c.category === 'merged')) {
+      return { risk: 'safe', riskReason: 'Fully merged into current branch' };
+    }
+
+    // Prefer an entry that actually carries a measurement; the categories a
+    // branch appears in do not all populate aheadBehind.
+    const candidate = group.find((c) => c.aheadBehind) ?? group[0];
+
+    // aheadBehind is null when divergence could not be measured at all — a
+    // branch that neither tracks an upstream nor is "gone". Coercing that to 0
+    // would claim "fully merged" about work we simply cannot see.
     if (!candidate.aheadBehind) {
-      // The backend independently proved this branch merged (graph_descendant_of
-      // / tip equality, branch_cleanup.rs) to put it in the 'merged' category.
-      // That is a stronger signal than the missing upstream comparison, so
-      // trust it rather than warning about work we know is already merged.
-      if (candidate.category === 'merged') {
-        return { risk: 'safe', riskReason: 'Fully merged into current branch' };
-      }
       return {
         risk: 'warning',
         riskReason: candidate.upstream
@@ -446,21 +476,19 @@ export class LvBranchCleanupDialog extends LitElement {
     }
 
     const ahead = candidate.aheadBehind.ahead;
+    const isGone = group.some((c) => c.category === 'gone');
 
     if (ahead === 0) {
       // A 'gone' branch is measured against HEAD (its upstream is gone), so
-      // ahead === 0 genuinely means merged; anything else is measured against
-      // its upstream, where it means nothing left to push.
+      // ahead === 0 genuinely means merged; otherwise it is measured against
+      // the upstream, where it means nothing left to push.
       return {
         risk: 'safe',
-        riskReason:
-          candidate.category === 'gone'
-            ? 'Fully merged into current branch'
-            : 'No unpushed work',
+        riskReason: isGone ? 'Fully merged into current branch' : 'No unpushed work',
       };
     }
 
-    if (candidate.category === 'gone') {
+    if (isGone) {
       return {
         risk: 'danger',
         riskReason: `Remote deleted with ${ahead} unpushed commit${ahead !== 1 ? 's' : ''}`,
@@ -537,51 +565,50 @@ export class LvBranchCleanupDialog extends LitElement {
     return this.selectedBranches.size;
   }
 
-  private get hasWarningOrDanger(): boolean {
-    const allBranches = [
-      ...this.mergedBranches,
-      ...this.staleBranches,
-      ...this.goneUpstreamBranches,
-    ];
-    return allBranches.some(
-      (cb) =>
-        this.selectedBranches.has(cb.branch.name) &&
-        (cb.risk === 'warning' || cb.risk === 'danger'),
-    );
-  }
-
-  private async handleDelete(): Promise<void> {
-    if (this.totalSelected === 0) return;
-
-    // Build list of selected branches with their categories
+  /**
+   * The selected branches, one entry per branch.
+   *
+   * Single source of truth for the delete flow: the confirm gate, the confirm
+   * text, and the force flag are all derived from THIS list. Deriving the gate
+   * from the un-deduplicated union while the message used the deduplicated set
+   * let them disagree, producing a confirm with an empty clause.
+   */
+  private selectedForDeletion(): CleanupBranch[] {
     const allBranches = [
       ...this.mergedBranches,
       ...this.staleBranches,
       ...this.goneUpstreamBranches,
     ];
 
-    // Deduplicate (a branch could appear in both stale and gone)
     const selectedMap = new Map<string, CleanupBranch>();
     for (const cb of allBranches) {
       if (this.selectedBranches.has(cb.branch.name) && !selectedMap.has(cb.branch.name)) {
         selectedMap.set(cb.branch.name, cb);
       }
     }
+    return Array.from(selectedMap.values());
+  }
 
-    const toDelete = Array.from(selectedMap.values());
+  private async handleDelete(): Promise<void> {
+    if (this.totalSelected === 0) return;
 
-    // Confirm if any are warning/danger. Distinguish MEASURED unpushed commits
-    // from unmeasurable divergence — claiming "has unpushed commits" about a
-    // branch we could not compare is the same false-precision the risk badge
-    // used to have, just in the other direction.
-    if (this.hasWarningOrDanger) {
-      const risky = toDelete.filter((cb) => cb.risk === 'warning' || cb.risk === 'danger');
+    const toDelete = this.selectedForDeletion();
+
+    // Gate on the SAME deduplicated list the message and the deletes use.
+    // Distinguish MEASURED unpushed commits from unmeasurable divergence —
+    // claiming "has unpushed commits" about a branch we could not compare is
+    // the same false precision the risk badge used to have, reversed.
+    const risky = toDelete.filter((cb) => cb.risk === 'warning' || cb.risk === 'danger');
+
+    if (risky.length > 0) {
       const unpushed = risky.filter((cb) => (cb.branch.aheadBehind?.ahead ?? 0) > 0).length;
       const unknown = risky.length - unpushed;
 
       const parts: string[] = [];
       if (unpushed > 0) {
-        parts.push(`${unpushed} have unpushed commits that will be lost`);
+        parts.push(
+          `${unpushed} ${unpushed === 1 ? 'has' : 'have'} unpushed commits that will be lost`,
+        );
       }
       if (unknown > 0) {
         parts.push(
@@ -607,6 +634,12 @@ export class LvBranchCleanupDialog extends LitElement {
     // switches tabs during the confirm or across the delete loop's awaits
     // (which rebinds the live repositoryPath prop).
     const repoPath = this.pinnedRepoPath;
+    // Branches the backend refused as unmerged. Force was withheld because we
+    // could not measure their divergence, so the refusal is the SAFE outcome —
+    // but leaving it there strands the user with an error telling them to force
+    // and no way to do it. Collect them and offer one escalation below.
+    const unmergedRefusals: CleanupBranch[] = [];
+
     for (const cb of toDelete) {
       // Force only when we have MEASURED unpushed commits. Deriving this from
       // the risk label instead would mean any branch labelled 'warning' — including
@@ -618,12 +651,44 @@ export class LvBranchCleanupDialog extends LitElement {
       const result = await gitService.deleteBranch(repoPath, cb.branch.name, force);
       if (result.success) {
         deleted++;
+      } else if (!force && /not fully merged/i.test(result.error?.message ?? '')) {
+        unmergedRefusals.push(cb);
       } else {
         failed++;
         // Keep the reason: a bare "Failed to delete N branches" leaves the user
         // with no idea why and no way forward.
         failures.push(`${cb.branch.name}: ${result.error?.message ?? 'unknown error'}`);
         console.error(`Failed to delete ${cb.branch.name}:`, result.error);
+      }
+    }
+
+    // Escalation, mirroring the sidebar's force path (lv-branch-list.ts): the
+    // user already confirmed the delete, so ask once about the subset git
+    // refused rather than reporting a failure they cannot act on.
+    if (unmergedRefusals.length > 0) {
+      const names = unmergedRefusals.map((cb) => cb.branch.name).join(', ');
+      const forceConfirmed = await showConfirm(
+        'Branches Not Fully Merged',
+        `${unmergedRefusals.length} branch${unmergedRefusals.length !== 1 ? 'es' : ''} ` +
+          `(${names}) ${unmergedRefusals.length === 1 ? 'is' : 'are'} not fully merged, so ` +
+          `deleting ${unmergedRefusals.length === 1 ? 'it' : 'them'} discards commits that ` +
+          `exist nowhere else. Force delete anyway?`,
+        'warning',
+      );
+
+      for (const cb of unmergedRefusals) {
+        if (!forceConfirmed) {
+          failed++;
+          failures.push(`${cb.branch.name}: not fully merged (kept)`);
+          continue;
+        }
+        const retry = await gitService.deleteBranch(repoPath, cb.branch.name, true);
+        if (retry.success) {
+          deleted++;
+        } else {
+          failed++;
+          failures.push(`${cb.branch.name}: ${retry.error?.message ?? 'unknown error'}`);
+        }
       }
     }
 

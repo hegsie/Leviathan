@@ -182,6 +182,54 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     })
 }
 
+/// Outcome of a git-flow finish.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFlowFinishResult {
+    /// True when the source branch was deleted as part of the finish.
+    pub branch_deleted: bool,
+    /// Set when deletion was requested but skipped, explaining why.
+    pub branch_kept_reason: Option<String>,
+}
+
+/// Delete the finished branch unless a protection rule forbids it.
+///
+/// Branch rules are enforced here as well as in `delete_branch` because these
+/// finishes delete the branch themselves rather than going through that
+/// command — without this, a `preventDeletion` rule the UI displays as active
+/// is inert on every git-flow finish.
+///
+/// A protected branch must NOT fail the whole finish: the merge and tag have
+/// already landed by this point and deletion is the optional last step. Report
+/// what happened instead so the caller can explain why the branch is still
+/// there.
+fn delete_finished_branch(
+    repo: &git2::Repository,
+    repo_path: &str,
+    branch_name: &str,
+) -> Result<GitFlowFinishResult> {
+    let rules = super::branch_rules::load_rules(Path::new(repo_path))?;
+    if super::branch_rules::is_deletion_prevented(&rules, branch_name) {
+        return Ok(GitFlowFinishResult {
+            branch_deleted: false,
+            branch_kept_reason: Some(format!(
+                "\"{}\" is protected by a branch rule and was kept. The merge completed.",
+                branch_name
+            )),
+        });
+    }
+
+    let mut branch = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(branch_name.to_string()))?;
+    branch.delete()?;
+
+    Ok(GitFlowFinishResult {
+        branch_deleted: true,
+        branch_kept_reason: None,
+    })
+}
+
 /// Finish a git flow feature branch (merge into develop)
 #[command]
 pub async fn gitflow_finish_feature(
@@ -189,7 +237,7 @@ pub async fn gitflow_finish_feature(
     name: String,
     delete_branch: Option<bool>,
     squash: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -280,13 +328,13 @@ pub async fn gitflow_finish_feature(
 
     // Delete feature branch if requested
     if delete_branch.unwrap_or(true) {
-        let mut branch = repo
-            .find_branch(&branch_name, git2::BranchType::Local)
-            .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
-        branch.delete()?;
+        return delete_finished_branch(&repo, &path, &branch_name);
     }
 
-    Ok(())
+    Ok(GitFlowFinishResult {
+        branch_deleted: false,
+        branch_kept_reason: None,
+    })
 }
 
 /// Start a git flow release branch
@@ -338,7 +386,7 @@ pub async fn gitflow_finish_release(
     version: String,
     tag_message: Option<String>,
     delete_branch: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     finish_release_like(
         path,
         version,
@@ -360,7 +408,7 @@ async fn finish_release_like(
     delete_branch: Option<bool>,
     prefix_key: &str,
     prefix_default: &str,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -489,13 +537,13 @@ async fn finish_release_like(
 
     // Delete release branch
     if delete_branch.unwrap_or(true) {
-        let mut branch = repo
-            .find_branch(&branch_name, git2::BranchType::Local)
-            .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
-        branch.delete()?;
+        return delete_finished_branch(&repo, &path, &branch_name);
     }
 
-    Ok(())
+    Ok(GitFlowFinishResult {
+        branch_deleted: false,
+        branch_kept_reason: None,
+    })
 }
 
 /// Start a git flow hotfix branch
@@ -547,7 +595,7 @@ pub async fn gitflow_finish_hotfix(
     version: String,
     tag_message: Option<String>,
     delete_branch: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     // Same flow as release finish, but the branch lives under the hotfix
     // prefix — delegating with the release prefix made every hotfix finish
     // fail with BranchNotFound.
@@ -574,6 +622,74 @@ mod tests {
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(!config.initialized);
+    }
+
+    /// A preventDeletion rule must survive a git-flow finish. These finishes
+    /// delete the branch themselves rather than going through delete_branch, so
+    /// without an explicit check the rule is inert on this surface.
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_respects_branch_rule() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "protected-work".to_string())
+            .await
+            .unwrap();
+
+        crate::commands::branch_rules::set_branch_rule(
+            repo.path_str(),
+            crate::commands::branch_rules::BranchRule {
+                pattern: "feature/*".to_string(),
+                prevent_deletion: true,
+                prevent_force_push: false,
+                require_pull_request: false,
+                prevent_direct_push: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "protected-work".to_string(),
+            Some(true),
+            None,
+        )
+        .await;
+
+        // The merge must still succeed — only the optional delete is skipped.
+        assert!(result.is_ok(), "finish should complete despite the rule");
+        let outcome = result.unwrap();
+        assert!(!outcome.branch_deleted, "protected branch must be kept");
+        assert!(
+            outcome.branch_kept_reason.is_some(),
+            "the caller must be told why the branch survived"
+        );
+
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("feature/protected-work", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_deletes_unprotected_branch() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "ordinary".to_string())
+            .await
+            .unwrap();
+
+        let outcome =
+            gitflow_finish_feature(repo.path_str(), "ordinary".to_string(), Some(true), None)
+                .await
+                .unwrap();
+
+        assert!(outcome.branch_deleted);
+        assert!(outcome.branch_kept_reason.is_none());
     }
 
     #[tokio::test]

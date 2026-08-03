@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showPrompt } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
@@ -461,6 +462,12 @@ export class LvGitflowPanel extends LitElement {
     try {
       const result = await gitService.gitFlowFinishFeature(repoPath, item.name, true, squash);
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-feature', name: item.name, repositoryPath: repoPath },
@@ -544,6 +551,12 @@ export class LvGitflowPanel extends LitElement {
         true,
       );
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-release', name: item.name, repositoryPath: repoPath },
@@ -622,6 +635,12 @@ export class LvGitflowPanel extends LitElement {
         true,
       );
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-hotfix', name: item.name, repositoryPath: repoPath },

@@ -3483,13 +3483,15 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     const result = await gitService.runFsck({ path: repoPath, full: true });
 
-    // Reporting IS this command's purpose — without a toast the palette entry
-    // does nothing observable at all.
+    // Reporting IS this command's purpose, so report what git actually said.
+    // `git fsck` exits 0 while printing "dangling commit" / "unreachable blob"
+    // warnings, and run_fsck packs that output into `message` — asserting a
+    // clean bill of health from the exit code alone would hide it.
     showToast(
       result.success
-        ? 'Repository integrity check completed — no issues found'
-        : `Repository integrity check found issues: ${result.error?.message ?? 'Unknown error'}`,
-      result.success ? 'success' : 'warning'
+        ? (result.data?.message ?? 'Repository integrity check completed')
+        : `Repository integrity check failed: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'error'
     );
   }
 
@@ -3704,6 +3706,16 @@ export class AppShell extends LitElement {
                             ? html`
                                 <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
                                   Abort
+                                </button>
+                              `
+                            : ''}
+                          ${this.activeRepository.repository.state === 'bisect'
+                            ? html`
+                                <button
+                                  class="operation-btn operation-btn-primary"
+                                  @click=${() => { this.showBisect = true; }}
+                                >
+                                  Manage Bisect
                                 </button>
                               `
                             : ''}
