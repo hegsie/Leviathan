@@ -8,6 +8,7 @@ import {
   injectCommandMock,
   injectCommandError,
   openViaCommandPalette,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 async function openHealthDialog(page: import('@playwright/test').Page): Promise<void> {
@@ -22,6 +23,8 @@ async function openHealthDialog(page: import('@playwright/test').Page): Promise<
 test.describe('Repository Health Dialog - Statistics', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -94,6 +97,8 @@ test.describe('Repository Health Dialog - Statistics', () => {
 test.describe('Repository Health Dialog - Maintenance Actions', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -167,6 +172,8 @@ test.describe('Repository Health Dialog - Maintenance Actions', () => {
 test.describe('Repository Health Dialog - Recommendations', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -209,6 +216,8 @@ test.describe('Repository Health Dialog - Recommendations', () => {
 test.describe('Repository Health Dialog - Healthy State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -236,6 +245,8 @@ test.describe('Repository Health Dialog - Healthy State', () => {
 test.describe('Repository Health Dialog - Footer', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -276,6 +287,8 @@ test.describe('Repository Health Dialog - Footer', () => {
 test.describe('Repository Health Dialog - GC E2E', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
   });
 
   test('run GC should invoke run_gc and show success feedback', async ({ page }) => {
@@ -392,6 +405,8 @@ test.describe('Repository Health Dialog - GC E2E', () => {
 test.describe('Repository Health Dialog - Error Scenarios', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
 
     await injectCommandMock(page, {
       get_repository_stats: {
@@ -440,6 +455,33 @@ test.describe('Repository Health Dialog - Error Scenarios', () => {
 test.describe('Repository Health - Extended Tests', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // GC and prune destroy unreachable objects, so both are confirm-gated.
+    await autoConfirmDialogs(page);
+  });
+
+  test('declining the GC confirm does not run gc', async ({ page }) => {
+    // This dialog reaches the same irreversible run_gc as the command palette,
+    // so it must be gated the same way rather than being the unguarded route.
+    await startCommandCaptureWithMocks(page, {
+      get_repository_stats: { count: 1250, loose: 600, sizeKb: 5120 },
+      get_pack_info: { packCount: 15, packSizeKb: 4096 },
+      run_gc: { success: true, message: 'Garbage collection completed' },
+    });
+
+    await openHealthDialog(page);
+
+    // Decline: plugin-dialog treats any non-OK label as cancel.
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+
+    const healthDialog = page.locator('lv-repository-health-dialog');
+    const gcButton = healthDialog
+      .locator('.action-btn', { hasText: /Garbage Collection/i })
+      .first();
+    await expect(gcButton).toBeVisible();
+    await gcButton.click();
+
+    await expect(healthDialog).toBeVisible();
+    expect(await findCommand(page, 'run_gc')).toHaveLength(0);
   });
 
   test('clicking Aggressive GC should invoke run_gc command', async ({ page }) => {
