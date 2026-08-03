@@ -434,12 +434,34 @@ export class LvCleanDialog extends LitElement {
     // otherwise delete files from the repo the user switched TO.
     const repoPath = this.repositoryPath;
 
-    // If any selected entry is an untracked nested git repository, require an
-    // explicit confirmation before force-deleting it (this destroys the nested
-    // repo's history, which `git clean` guards behind a second `-f`).
+    // Captured BEFORE the confirms too. loadFiles() reassigns selectedPaths on
+    // every option change and on its own initial load, so reading it after an
+    // await can yield a set the user never chose — or an empty one. Pinning it
+    // also guarantees the count named in the confirm is exactly what gets
+    // deleted.
+    const paths = Array.from(this.selectedPaths);
     const nestedRepos = this.entries.filter(
-      e => this.selectedPaths.has(e.path) && e.isNestedRepo
+      e => paths.includes(e.path) && e.isNestedRepo
     );
+
+    // Untracked files are unlinked outright: they exist in no git object and
+    // there is no trash, so this is the one deletion in the app with no
+    // recovery path at all. Discarding a SINGLE untracked file from the file
+    // list raises a confirm the user cannot even switch off
+    // (lv-file-status.ts confirmDiscard), so deleting 200 of them here must
+    // not be the ungated route. The dialog's checkboxes are a selection UI,
+    // not a confirmation.
+    const confirmedDelete = await showConfirm(
+      'Delete Untracked Files',
+      `Permanently delete ${paths.length} item${paths.length === 1 ? '' : 's'}? ` +
+        `They are not in Git and cannot be recovered.`,
+      'warning'
+    );
+    if (!confirmedDelete) return;
+
+    // A nested git repository additionally destroys that repo's whole history,
+    // which `git clean` itself guards behind a second `-f` — so it gets its own
+    // gate on top of the deletion confirm above.
     if (nestedRepos.length > 0) {
       const names = nestedRepos.map(e => e.path).join(', ');
       const confirmed = await showConfirm(
@@ -458,7 +480,6 @@ export class LvCleanDialog extends LitElement {
     this.cleaning = true;
 
     try {
-      const paths = Array.from(this.selectedPaths);
       const result = await gitService.cleanFiles(repoPath, paths, forceNested);
 
       if (result.success) {

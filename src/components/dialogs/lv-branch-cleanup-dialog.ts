@@ -337,7 +337,7 @@ export class LvBranchCleanupDialog extends LitElement {
     this.pruneRemotes = true;
   }
 
-  private async loadCleanupData(): Promise<void> {
+  private async loadCleanupData(preserveSelection = false): Promise<void> {
     this.loading = true;
 
     try {
@@ -416,18 +416,34 @@ export class LvBranchCleanupDialog extends LitElement {
       this.staleBranches = stale;
       this.goneUpstreamBranches = gone;
 
-      // Auto-select safe branches in merged and gone categories
-      for (const cb of this.mergedBranches) {
-        if (!cb.isProtected && cb.risk === 'safe') {
-          this.selectedBranches.add(cb.branch.name);
+      if (preserveSelection) {
+        // Reload of an ALREADY-OPEN dialog. Auto-select must not run: it only
+        // ever adds, so it would silently re-check a branch the user
+        // deliberately unchecked, and the next Delete would remove it without
+        // a confirm (safe branches skip the risky-branch gate). Keep exactly
+        // what the user chose, minus anything no longer listed.
+        const stillListed = new Set(
+          [...this.mergedBranches, ...this.staleBranches, ...this.goneUpstreamBranches].map(
+            (cb) => cb.branch.name,
+          ),
+        );
+        this.selectedBranches = new Set(
+          [...this.selectedBranches].filter((name) => stillListed.has(name)),
+        );
+      } else {
+        // Auto-select safe branches in merged and gone categories
+        for (const cb of this.mergedBranches) {
+          if (!cb.isProtected && cb.risk === 'safe') {
+            this.selectedBranches.add(cb.branch.name);
+          }
         }
-      }
-      for (const cb of this.goneUpstreamBranches) {
-        if (!cb.isProtected && cb.risk === 'safe') {
-          this.selectedBranches.add(cb.branch.name);
+        for (const cb of this.goneUpstreamBranches) {
+          if (!cb.isProtected && cb.risk === 'safe') {
+            this.selectedBranches.add(cb.branch.name);
+          }
         }
+        // Don't auto-select stale branches (they require more deliberate action)
       }
-      // Don't auto-select stale branches (they require more deliberate action)
 
       // Select the first non-empty tab
       if (this.mergedBranches.length > 0) {
@@ -566,7 +582,10 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private get totalSelected(): number {
-    return this.selectedBranches.size;
+    // Derived from the branches actually listed, not the raw Set: after a
+    // reload the Set can hold names that are no longer candidates, and a
+    // Delete click on those would run an empty loop and report nothing.
+    return this.selectedForDeletion().length;
   }
 
   /**
@@ -712,7 +731,14 @@ export class LvBranchCleanupDialog extends LitElement {
       const anyWithoutRemoteCopy = unmergedRefusals.some(
         (cb) => !cb.branch.upstream || !cb.branch.aheadBehind || cb.branch.aheadBehind.ahead > 0,
       );
-      const forceConfirmed = await showConfirm(
+      // showConfirm is the only throw source inside the `deleting` window
+      // (invokeCommand never throws). An unhandled rejection here would unwind
+      // with `deleting` stuck true, and since open() refuses to re-show the
+      // dialog while that is set, Branch Cleanup would be dead for the rest of
+      // the session with no error anywhere. Treat a failed prompt as declined.
+      let forceConfirmed = false;
+      try {
+        forceConfirmed = await showConfirm(
         'Branches Not Fully Merged',
         `${unmergedRefusals.length} branch${plural ? 'es' : ''} (${names}) ` +
           `${plural ? 'are' : 'is'} not merged into the current branch.\n\n` +
@@ -723,7 +749,10 @@ export class LvBranchCleanupDialog extends LitElement {
               `from the remote.`) +
           `\n\nForce delete anyway?`,
         'warning',
-      );
+        );
+      } catch {
+        forceConfirmed = false;
+      }
 
       for (const cb of unmergedRefusals) {
         if (!forceConfirmed) {
@@ -751,7 +780,10 @@ export class LvBranchCleanupDialog extends LitElement {
     let pruned = false;
     if (this.pruneRemotes) {
       const pruneResult = await gitService.pruneRemoteTrackingBranches(repoPath);
-      pruned = pruneResult.success;
+      // Ok with an empty list means there was nothing to prune — reporting
+      // "remotes pruned" for that overstates, and it forced a reload after
+      // every zero-delete attempt.
+      pruned = pruneResult.success && (pruneResult.data?.branchesPruned.length ?? 0) > 0;
       if (!pruneResult.success) {
         showToast(
           `Failed to prune remote branches: ${pruneResult.error?.message ?? 'Unknown error'}`,
@@ -802,15 +834,22 @@ export class LvBranchCleanupDialog extends LitElement {
     // has since changed — either way the list on screen is no longer what the
     // next Delete click would act on.
     if (pruned || failed > 0) {
-      await this.loadCleanupData();
+      await this.loadCleanupData(true);
     }
   }
 
   private handleModalClose(): void {
-    this.isOpen = false;
-    if (!this.deleting) {
-      this.reset();
+    // Cancel is disabled while deleting; Escape, the overlay and the × must
+    // honour the same rule. Dismissing mid-loop left it force-deleting and
+    // pruning with no visible surface, and open() now refuses to re-show the
+    // dialog while `deleting`, so the user could not get back to it.
+    if (this.deleting) {
+      this.modal.open = true;
+      return;
     }
+
+    this.isOpen = false;
+    this.reset();
   }
 
   private formatTimeAgo(timestamp: number): string {
@@ -976,7 +1015,7 @@ export class LvBranchCleanupDialog extends LitElement {
               <button
                 class="btn btn-danger"
                 @click=${this.handleDelete}
-                ?disabled=${this.totalSelected === 0 || this.deleting}
+                ?disabled=${this.totalSelected === 0 || this.deleting || this.loading}
               >
                 ${this.deleting
                   ? 'Deleting...'

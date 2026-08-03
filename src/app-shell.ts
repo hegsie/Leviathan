@@ -2173,9 +2173,15 @@ export class AppShell extends LitElement {
     // what a reset is — so every confirm has to say so and name the recovery
     // path. Describing only what happens to the working tree made soft/mixed
     // read as harmless and understated hard, which is the loudest of them.
+    // Phrased for ANY target. The graph context menu offers Reset on every
+    // node, so the target may be a descendant of HEAD (nothing is dropped) or
+    // sit on a diverged branch (the dropped set is not a simple "after X").
+    // Saying "commits after X are removed" is false in the first case and
+    // mischaracterises the second — and a confirm that overstates trains users
+    // to dismiss the one that matters.
     const droppedNote =
-      `Commits after "${commit.summary}" are removed from this branch and will be ` +
-      `recoverable only through the reflog.`;
+      `This branch will point at ${commit.shortId}. Any commit no longer reachable ` +
+      `from it is recoverable only through the reflog.`;
 
     if (mode === 'hard') {
       const confirmed = await showConfirm(
@@ -2904,8 +2910,11 @@ export class AppShell extends LitElement {
 
             const confirmed = await showConfirm(
               'Smart Undo',
-              `${match.description}\n\nReset to ${target.shortId} (HEAD@{${match.index}})? ` +
-                `(soft reset — changes preserved as staged)`
+              `${match.description}\n\nReset to ${target.shortId} (HEAD@{${match.index}})?\n\n` +
+                `This branch will point at ${target.shortId}. Any commit no longer ` +
+                `reachable from it is recoverable only through the reflog. Your ` +
+                `changes remain staged.`,
+              'warning'
             );
             if (confirmed) {
               const resetResult = await git.resetToReflog(

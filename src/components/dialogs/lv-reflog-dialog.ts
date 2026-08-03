@@ -397,15 +397,30 @@ export class LvReflogDialog extends LitElement {
     // reset the repo the user switched TO.
     const repoPath = this.repositoryPath;
 
-    // Confirm hard reset
-    if (mode === 'hard') {
-      const confirmed = await showConfirm(
-        'Hard Reset',
-        `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`,
-        'warning'
-      );
-      if (!confirmed) return;
-    }
+    // EVERY mode is a reset — the "Undo" button runs a mixed one — so every
+    // mode repoints the branch and drops commits off it. Gating the confirm on
+    // `hard` alone meant clicking Undo in a dialog opened just to LOOK at
+    // history silently reset the branch. The same operation from the graph
+    // context menu confirms for all three modes; this surface must match.
+    const droppedNote =
+      `This branch will point at ${entry.shortId}. Any commit no longer reachable ` +
+      `from it is recoverable only through the reflog.`;
+
+    const modeNote =
+      mode === 'hard'
+        ? 'All uncommitted changes are also discarded permanently — those are not in the reflog and cannot be recovered.'
+        : mode === 'mixed'
+          ? 'Your working-directory changes are kept, but unstaged.'
+          : 'Your changes remain staged.';
+
+    const titles = { hard: 'Hard Reset', mixed: 'Undo to This State', soft: 'Soft Reset' };
+
+    const confirmed = await showConfirm(
+      titles[mode],
+      `Reset to ${entry.shortId}?\n\n${droppedNote}\n\n${modeNote}`,
+      'warning'
+    );
+    if (!confirmed) return;
 
     this.resetting = true;
 

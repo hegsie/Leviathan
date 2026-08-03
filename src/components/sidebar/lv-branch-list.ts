@@ -1034,9 +1034,6 @@ export class LvBranchList extends LitElement {
     this.dispatchBranchesChanged(repoPath);
   }
 
-  /**
-   * Delete all branches that are merged into HEAD
-   */
   private async handleBranchCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
     // The dialog pins to the repo it was opened for and reports it here. The
     // user may have switched tabs while the dialog was open (rebinding our live

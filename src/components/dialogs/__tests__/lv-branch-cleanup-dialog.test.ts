@@ -84,7 +84,7 @@ async function renderAndOpen(
       case 'delete_branch':
         return undefined;
       case 'prune_remote_tracking_branches':
-        return { success: true, pruned: [], count: 0 };
+        return { success: true, branchesPruned: ['origin/gone'] };
       case 'plugin:notification|is_permission_granted':
         return false;
       // plugin-dialog 2.7 routes confirm() through `message` and returns the
@@ -787,7 +787,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
           };
         }
         if (command === 'prune_remote_tracking_branches') {
-          return { success: true, pruned: ['origin/gone'], count: 1 };
+          return { success: true, branchesPruned: ['origin/gone'] };
         }
         return null;
       };

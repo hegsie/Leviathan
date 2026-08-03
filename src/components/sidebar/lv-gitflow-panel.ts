@@ -477,13 +477,22 @@ export class LvGitflowPanel extends LitElement {
     // ordinary finish with only a tooltip between them, so it needs its own
     // gate; the plain finish is non-destructive by comparison.
     if (squash) {
-      const confirmed = await showConfirm(
+      // The guard flag is claimed above but the try/finally that releases it
+      // starts below, so a rejecting confirm would leave operationInProgress
+      // stuck true — which disables every button in this panel. Treat a failed
+      // prompt as declined.
+      let confirmed = false;
+      try {
+        confirmed = await showConfirm(
         'Squash and Finish',
         `"${item.name}" will be squashed into a single commit on develop and then ` +
           `deleted. Its individual commits will no longer be reachable from any ` +
           `branch.\n\nThis cannot be undone.`,
         'warning',
-      );
+        );
+      } catch {
+        confirmed = false;
+      }
       if (!confirmed) {
         this.operationInProgress = false;
         return;
@@ -562,10 +571,13 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
-    // Same re-entrancy guard as handleFinishFeature: these await a prompt
-    // before setting operationInProgress, and they are strictly MORE
-    // destructive (merge to master, tag, merge develop, delete branch).
+    // Claimed BEFORE the prompt, like handleFinishFeature. showPrompt is a
+    // singleton whose open() overwrites its resolver, so a second click during
+    // the prompt strands the first call on a promise that never settles rather
+    // than racing it — claiming up front prevents that hang and keeps the three
+    // finish handlers consistent.
     if (this.operationInProgress) return;
+    this.operationInProgress = true;
 
     // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
     // this prop while it is open): the finish must run on the repo whose
@@ -575,10 +587,12 @@ export class LvGitflowPanel extends LitElement {
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
-    if (tagMessage === null) return;
+    if (tagMessage === null) {
+      this.operationInProgress = false;
+      return;
+    }
 
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowFinishRelease(
@@ -656,18 +670,23 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
-    // Same re-entrancy guard as handleFinishFeature: these await a prompt
-    // before setting operationInProgress, and they are strictly MORE
-    // destructive (merge to master, tag, merge develop, delete branch).
+    // Claimed BEFORE the prompt, like handleFinishFeature. showPrompt is a
+    // singleton whose open() overwrites its resolver, so a second click during
+    // the prompt strands the first call on a promise that never settles rather
+    // than racing it — claiming up front prevents that hang and keeps the three
+    // finish handlers consistent.
     if (this.operationInProgress) return;
+    this.operationInProgress = true;
 
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
-    if (tagMessage === null) return;
+    if (tagMessage === null) {
+      this.operationInProgress = false;
+      return;
+    }
 
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowFinishHotfix(
