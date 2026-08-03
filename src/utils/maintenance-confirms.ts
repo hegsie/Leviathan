@@ -45,3 +45,24 @@ export function confirmPrune(): Promise<boolean> {
     'warning'
   );
 }
+
+/**
+ * Condense `git fsck` output for a toast.
+ *
+ * `git fsck --full` prints one line per dangling/unreachable object, which on a
+ * repo with rebased or amended history is dozens of lines. A toast is ~400px
+ * wide with no max-height and auto-dismisses, so dumping that raw makes it both
+ * unreadable and large enough to cover the view. Lead with the count instead.
+ *
+ * Shared by the command palette and the Repository Health dialog: they reach
+ * the same command, so summarising only one of them left the problem reachable.
+ */
+export function summariseFsck(message: string | undefined): string {
+  const text = (message ?? '').trim();
+  if (!text) return 'Repository integrity check completed';
+
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length <= 2 && text.length <= 200) return text;
+
+  return `Repository integrity check completed — ${lines.length} notes reported (${lines[0].trim()}, …)`;
+}

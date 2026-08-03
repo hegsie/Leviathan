@@ -671,27 +671,40 @@ export class LvBranchCleanupDialog extends LitElement {
     // user already confirmed the delete, so ask once about the subset git
     // refused rather than reporting a failure they cannot act on.
     if (unmergedRefusals.length > 0) {
-      // Name each branch's actual exposure. "not fully merged" is measured
+      // State each branch's ACTUAL exposure. "not fully merged" is measured
       // against HEAD, while the Safe/Warning badge is measured against the
-      // UPSTREAM — so a branch can be refused here while its commits sit safely
-      // on its remote. Claiming they "exist nowhere else" would be false for
-      // exactly those, and a confirm that overstates trains users to dismiss it.
+      // UPSTREAM, so this set mixes three genuinely different situations and a
+      // single blanket sentence is wrong for two of them:
+      //   - no upstream at all  -> the commits exist on no other ref (total loss)
+      //   - upstream, ahead === 0 -> the commits are on the remote (recoverable)
+      //   - upstream, unmeasured  -> unknown; never coerce that to "pushed"
+      // Overstating trains users to dismiss confirms; understating loses work.
       const names = unmergedRefusals
         .map((cb) => {
-          const pushed =
-            cb.branch.upstream && (cb.branch.aheadBehind?.ahead ?? 0) === 0
-              ? ` (pushed to ${cb.branch.upstream})`
-              : '';
-          return `${cb.branch.name}${pushed}`;
+          const { upstream, aheadBehind } = cb.branch;
+          if (upstream && aheadBehind && aheadBehind.ahead === 0) {
+            return `${cb.branch.name} (pushed to ${upstream})`;
+          }
+          if (!upstream) {
+            return `${cb.branch.name} (no remote copy)`;
+          }
+          return `${cb.branch.name} (unpushed work unknown)`;
         })
         .join(', ');
       const plural = unmergedRefusals.length !== 1;
+      const anyWithoutRemoteCopy = unmergedRefusals.some(
+        (cb) => !cb.branch.upstream || !cb.branch.aheadBehind || cb.branch.aheadBehind.ahead > 0,
+      );
       const forceConfirmed = await showConfirm(
         'Branches Not Fully Merged',
         `${unmergedRefusals.length} branch${plural ? 'es' : ''} (${names}) ` +
-          `${plural ? 'are' : 'is'} not merged into the current branch. Any commits ` +
-          `not also on their upstream will be discarded permanently.\n\n` +
-          `Force delete anyway?`,
+          `${plural ? 'are' : 'is'} not merged into the current branch.\n\n` +
+          (anyWithoutRemoteCopy
+            ? `Commits that are not on a remote will be discarded permanently and ` +
+              `cannot be recovered.`
+            : `Their commits are on their upstreams, so the branches can be restored ` +
+              `from the remote.`) +
+          `\n\nForce delete anyway?`,
         'warning',
       );
 
@@ -713,32 +726,45 @@ export class LvBranchCleanupDialog extends LitElement {
       }
     }
 
-    // Prune remote tracking branches if requested
+    // Prune remote tracking branches if requested.
+    //
+    // invokeCommand NEVER throws — it resolves to { success: false, error } —
+    // so a try/catch here is dead code and the outcome must be read off the
+    // result. Without that, an offline or auth-failed prune reported success.
+    let pruned = false;
     if (this.pruneRemotes) {
-      try {
-        await gitService.pruneRemoteTrackingBranches(repoPath);
-      } catch (err) {
-        console.error('Failed to prune remote tracking branches:', err);
-        showToast(`Failed to prune remote branches: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      const pruneResult = await gitService.pruneRemoteTrackingBranches(repoPath);
+      pruned = pruneResult.success;
+      if (!pruneResult.success) {
+        showToast(
+          `Failed to prune remote branches: ${pruneResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
     }
 
     this.deleting = false;
 
-    if (deleted > 0) {
-      const pruneNote = this.pruneRemotes ? ' (remotes pruned)' : '';
-      const notes: string[] = [];
-      // Carry the per-branch reasons into the PARTIAL outcome too — this is the
-      // common case, and the dialog closes straight after, so a bare count
-      // leaves the user with no way to find out what happened.
-      if (failed > 0) notes.push(`${failed} failed — ${failures.join('; ')}`);
-      if (kept > 0) notes.push(`${kept} kept (not fully merged)`);
+    // ONE composite message covering every combination. Reporting deleted /
+    // failed / kept in mutually exclusive branches silently dropped whichever
+    // outcomes did not match the arm that fired — e.g. a branch the user chose
+    // to keep went unmentioned whenever any other branch also failed, so they
+    // reasonably concluded it had been deleted.
+    // `pruned` is gated on the actual prune result, not on the checkbox.
+    const notes: string[] = [];
+    if (deleted > 0) notes.push(`Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}`);
+    if (failed > 0) notes.push(`${failed} failed — ${failures.join('; ')}`);
+    if (kept > 0) notes.push(`${kept} kept (not fully merged)`);
+    if (pruned) notes.push('remotes pruned');
 
-      const message =
-        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}${pruneNote}` +
-        (notes.length > 0 ? `, ${notes.join(', ')}` : '');
-      showToast(message, failed > 0 || kept > 0 ? 'warning' : 'success');
+    if (notes.length > 0) {
+      showToast(notes.join(', '), failed > 0 ? 'error' : kept > 0 ? 'warning' : 'success');
+    }
 
+    // The prune mutates the repo on its own, so the refresh must fire for it
+    // too — not only when a branch was deleted. Otherwise the sidebar keeps
+    // listing remote-tracking refs that no longer exist.
+    if (deleted > 0 || pruned) {
       this.dispatchEvent(
         new CustomEvent('cleanup-complete', {
           detail: { repositoryPath: repoPath },
@@ -746,19 +772,12 @@ export class LvBranchCleanupDialog extends LitElement {
           composed: true,
         }),
       );
+    }
+
+    // Only close when something was actually deleted; otherwise leave the
+    // dialog up so the user can act on what is still listed.
+    if (deleted > 0) {
       this.close();
-    } else if (failed > 0) {
-      showToast(
-        `Failed to delete ${failed} branch${failed !== 1 ? 'es' : ''} — ${failures.join('; ')}`,
-        'error'
-      );
-    } else if (kept > 0) {
-      // Nothing deleted because the user declined the escalation — that is an
-      // outcome, not an error.
-      showToast(
-        `${kept} branch${kept !== 1 ? 'es' : ''} kept (not fully merged)`,
-        'info'
-      );
     }
   }
 

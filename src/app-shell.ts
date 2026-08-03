@@ -19,25 +19,6 @@ const log = loggers.app;
  *
  * Typed as RepositoryState so a typo or a renamed state is a compile error.
  */
-/**
- * Condense `git fsck` output for a toast.
- *
- * `git fsck --full` prints one line per dangling/unreachable object, which on a
- * repo with rebased or amended history is dozens of lines. A toast is ~400px
- * wide with no max-height and auto-dismisses, so dumping that raw makes it both
- * unreadable and large enough to cover the view. Lead with the count and point
- * at the surface that can show the detail.
- */
-function summariseFsck(message: string | undefined): string {
-  const text = (message ?? '').trim();
-  if (!text) return 'Repository integrity check completed';
-
-  const lines = text.split('\n').filter((l) => l.trim().length > 0);
-  if (lines.length <= 2 && text.length <= 200) return text;
-
-  return `Repository integrity check completed — ${lines.length} notes (${lines[0].trim()}, …). See Repository Health for the full output.`;
-}
-
 const ABORTABLE_STATES: readonly RepositoryState[] = [
   'cherrypick',
   'merge',
@@ -113,7 +94,7 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
-import { confirmGarbageCollection, confirmPrune } from './utils/maintenance-confirms.ts';
+import { confirmGarbageCollection, confirmPrune, summariseFsck } from './utils/maintenance-confirms.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';

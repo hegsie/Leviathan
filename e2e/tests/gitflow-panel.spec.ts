@@ -474,7 +474,7 @@ test.describe('GitFlow Panel - Operations', () => {
   });
 
   test('clicking Finish on a feature should call gitflow_finish_feature', async ({ page }) => {
-    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn:not(.item-squash-btn)').first().click();
 
     await expect
       .poll(async () => {
@@ -529,7 +529,7 @@ test.describe('GitFlow Panel - Operations', () => {
       ).__TAURI_INTERNALS__.invoke = newInvoke;
     });
 
-    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn:not(.item-squash-btn)').first().click();
 
     // After finishing, the feature should be removed and empty message shown
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section').first().locator('.empty-section')).toHaveText(
@@ -620,7 +620,7 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
   });
 
   test('should show error message when finish feature fails', async ({ page }) => {
-    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn').first().click();
+    await page.locator('lv-gitflow-panel#e2e-gitflow .item-finish-btn:not(.item-squash-btn)').first().click();
 
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .error-banner')).toBeVisible();
   });

@@ -8,7 +8,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import { confirmGarbageCollection, confirmPrune } from '../../utils/maintenance-confirms.ts';
+import {
+  confirmGarbageCollection,
+  confirmPrune,
+  summariseFsck,
+} from '../../utils/maintenance-confirms.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -371,8 +375,9 @@ export class LvRepositoryHealthDialog extends LitElement {
 
       if (result.success) {
         // `git fsck` exits 0 while reporting dangling/unreachable objects, so
-        // show its actual output rather than asserting "no issues found".
-        showToast(result.data?.message ?? 'File system check completed', 'success');
+        // show its actual output rather than asserting "no issues found" —
+        // summarised, because that output can run to dozens of lines.
+        showToast(summariseFsck(result.data?.message), 'success');
       } else {
         showToast(`File system check failed: ${result.error?.message}`, 'error');
       }

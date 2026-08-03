@@ -755,6 +755,137 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       ).to.be.true;
     });
 
+    it('reports a failed remote prune instead of claiming it succeeded', async () => {
+      // pruneRemoteTrackingBranches goes through invokeCommand, which never
+      // throws — it resolves { success: false }. The old try/catch was dead
+      // code, so an offline prune was reported as "(remotes pruned)".
+      const el = await renderAndOpen([mergedSafe]);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'delete_branch') return undefined;
+        if (command === 'prune_remote_tracking_branches') {
+          throw { code: 'COMMAND_ERROR', message: 'could not connect to origin' };
+        }
+        return null;
+      };
+
+      uiStore.setState({ toasts: [] });
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = uiStore.getState().toasts.map((t) => t.message);
+      expect(
+        messages.some((m) => /Failed to prune remote branches/i.test(m)),
+        'a failed prune must be reported',
+      ).to.be.true;
+      expect(
+        messages.some((m) => /remotes pruned/i.test(m)),
+        'must not claim a prune that did not happen',
+      ).to.be.false;
+    });
+
+    it('warns of permanent loss for a branch with no remote copy', async () => {
+      // Mirror of the pushed case. A branch with NO upstream loses everything
+      // on a force delete, so the confirm must not imply an upstream fallback.
+      const el = await renderAndOpen([
+        createCandidate('spike/idea', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+
+      // This branch is 'warning', so the risky-branch confirm fires first —
+      // accept it, then decline the escalation.
+      let confirms = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') {
+          confirms++;
+          return confirms === 1 ? 'Ok' : 'Cancel';
+        }
+        if (command === 'delete_branch') {
+          throw {
+            code: 'COMMAND_ERROR',
+            message: 'Branch is not fully merged. Use force to delete anyway.',
+          };
+        }
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const escalation = confirmMessages().find((m) =>
+        /not merged into the current branch/i.test(m),
+      );
+      expect(escalation, 'escalation confirm shown').to.not.be.undefined;
+      expect(escalation!).to.include('no remote copy');
+      expect(escalation!).to.include('discarded permanently');
+      expect(escalation!, 'must not imply an upstream fallback').to.not.match(
+        /can be restored from the remote/i,
+      );
+    });
+
+    it('reports failed and kept outcomes together', async () => {
+      // These were mutually exclusive `else if` arms, so a branch the user
+      // chose to keep went unmentioned whenever another branch also failed —
+      // leaving them to assume it had been deleted.
+      const el = await renderAndOpen([
+        createCandidate('a/fails', 'stale', { aheadBehind: { ahead: 2, behind: 0 } }),
+        createCandidate('b/kept', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      for (const box of Array.from(
+        el.shadowRoot!.querySelectorAll('.branch-item input[type="checkbox"]'),
+      )) {
+        (box as HTMLInputElement).click();
+      }
+      await settle(el);
+
+      let confirms = 0;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') {
+          confirms++;
+          // Confirm the delete, decline the force escalation.
+          return confirms === 1 ? 'Ok' : 'Cancel';
+        }
+        if (command === 'delete_branch') {
+          const name = (args as { name: string }).name;
+          throw name === 'a/fails'
+            ? { code: 'COMMAND_ERROR', message: 'locked by another worktree' }
+            : {
+                code: 'COMMAND_ERROR',
+                message: 'Branch is not fully merged. Use force to delete anyway.',
+              };
+        }
+        return null;
+      };
+
+      uiStore.setState({ toasts: [] });
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = uiStore.getState().toasts.map((t) => t.message);
+      expect(messages.some((m) => /a\/fails/.test(m)), 'the failure is named').to.be.true;
+      expect(messages.some((m) => /kept/i.test(m)), 'the kept branch is named').to.be.true;
+    });
+
     it('does not claim commits "exist nowhere else" for a pushed branch', async () => {
       // "not fully merged" is measured against HEAD; the Safe badge is measured
       // against the UPSTREAM. A branch can be refused here while its commits

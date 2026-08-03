@@ -453,6 +453,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
+    // Re-entrancy guard, matching handleInitialize. The confirm below is
+    // awaited before operationInProgress is set, so without this a second
+    // finish started during that window would run concurrently.
+    if (this.operationInProgress) return;
+
     // Captured BEFORE the awaits: the conflict dialog must pin to the repo
     // the finish actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
