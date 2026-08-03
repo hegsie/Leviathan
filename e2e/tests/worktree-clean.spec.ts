@@ -7,6 +7,7 @@ import {
   injectCommandError,
   injectCommandMock,
   openViaCommandPalette,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -535,6 +536,23 @@ test.describe('Clean Dialog - Operations', () => {
       ],
       clean_files: 2,
     });
+
+    // Deleting untracked files is confirm-gated: they exist in no git object
+    // and there is no recovery path.
+    await autoConfirmDialogs(page);
+  });
+
+  test('declining the delete confirm does not clean', async ({ page }) => {
+    // Untracked files are unlinked with no recovery path anywhere, so the
+    // dialog's checkbox list is a selection UI, not a confirmation.
+    await startCommandCapture(page);
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+    await openCleanDialog(page);
+
+    await page.locator('lv-clean-dialog .btn-danger').click();
+
+    await expect(page.locator('lv-clean-dialog[open] .dialog')).toBeVisible();
+    expect(await findCommand(page, 'clean_files')).toHaveLength(0);
   });
 
   test('clicking Delete Selected calls clean_files with selected paths', async ({ page }) => {
