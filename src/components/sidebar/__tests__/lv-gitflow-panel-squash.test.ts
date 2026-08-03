@@ -100,6 +100,67 @@ describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
     invokeCalls.length = 0;
   });
 
+  it('runs only one squash finish when clicked twice before the confirm resolves', async () => {
+    // There is an IPC round trip between the click and the native confirm
+    // opening, so a double-click lands a second call in that window. Testing
+    // the guard only at function entry let both calls through: two concurrent
+    // squash finishes on one repo can double-merge or mint a duplicate squash
+    // commit, and the Rust command takes no repo-level lock.
+    const el = await createComponent();
+
+    let releaseConfirm!: (v: unknown) => void;
+    mockInvoke = (command: string) => {
+      if (command === 'plugin:dialog|message') {
+        return new Promise((resolve) => {
+          releaseConfirm = resolve;
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    const internal = el as unknown as {
+      handleFinishFeature: (item: { name: string; branch: string }, squash?: boolean) => Promise<void>;
+    };
+
+    invokeCalls.length = 0;
+    const first = internal.handleFinishFeature({ name: 'x', branch: 'feature/x' }, true);
+    // Second click lands while the first confirm is still pending.
+    const second = internal.handleFinishFeature({ name: 'x', branch: 'feature/x' }, true);
+
+    releaseConfirm('Ok');
+    await Promise.all([first, second]);
+
+    expect(
+      invokeCalls.filter((c) => c.command === 'plugin:dialog|message'),
+      'the second click must not raise a second confirm',
+    ).to.have.length(1);
+    expect(
+      invokeCalls.filter((c) => c.command === 'gitflow_finish_feature'),
+      'only one squash finish may run',
+    ).to.have.length(1);
+  });
+
+  it('releases the re-entrancy guard when the squash confirm is declined', async () => {
+    const el = await createComponent();
+
+    mockInvoke = (command: string) => {
+      if (command === 'plugin:dialog|message') return Promise.resolve('Cancel');
+      return defaultMockInvoke(command);
+    };
+
+    const internal = el as unknown as {
+      handleFinishFeature: (item: { name: string; branch: string }, squash?: boolean) => Promise<void>;
+      operationInProgress: boolean;
+    };
+
+    await internal.handleFinishFeature({ name: 'x', branch: 'feature/x' }, true);
+
+    expect(
+      internal.operationInProgress,
+      'declining must not leave the panel wedged',
+    ).to.equal(false);
+  });
+
   it('does not squash-finish when the confirm is declined', async () => {
     // A squash finish collapses the branch to one commit and deletes it, so
     // every original commit becomes unreachable. gitflow deletes via git2

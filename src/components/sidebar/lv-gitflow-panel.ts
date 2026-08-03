@@ -453,10 +453,17 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
-    // Re-entrancy guard, matching handleInitialize. The confirm below is
-    // awaited before operationInProgress is set, so without this a second
-    // finish started during that window would run concurrently.
     if (this.operationInProgress) return;
+
+    // Claim the guard SYNCHRONOUSLY, before the confirm's await.
+    //
+    // Testing it at function entry alone does not close the race: there is an
+    // IPC round trip between the click and the native dialog actually opening
+    // and taking focus, so a double-click lands a second call while the flag is
+    // still false and both pass the check. Two concurrent squash finishes on
+    // one repo can double-merge or mint a duplicate squash commit — the Rust
+    // command takes no repo-level lock. Claim first, release on decline.
+    this.operationInProgress = true;
 
     // Captured BEFORE the awaits: the conflict dialog must pin to the repo
     // the finish actually ran on, even if the prop is rebound mid-flight.
@@ -477,11 +484,13 @@ export class LvGitflowPanel extends LitElement {
           `branch.\n\nThis cannot be undone.`,
         'warning',
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.operationInProgress = false;
+        return;
+      }
     }
 
     this.error = null;
-    this.operationInProgress = true;
     try {
       const result = await gitService.gitFlowFinishFeature(repoPath, item.name, true, squash);
       if (result.success) {
@@ -553,6 +562,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
+    // Same re-entrancy guard as handleFinishFeature: these await a prompt
+    // before setting operationInProgress, and they are strictly MORE
+    // destructive (merge to master, tag, merge develop, delete branch).
+    if (this.operationInProgress) return;
+
     // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
     // this prop while it is open): the finish must run on the repo whose
     // release the user clicked, and the conflict dialog must pin to it.
@@ -642,6 +656,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
+    // Same re-entrancy guard as handleFinishFeature: these await a prompt
+    // before setting operationInProgress, and they are strictly MORE
+    // destructive (merge to master, tag, merge develop, delete branch).
+    if (this.operationInProgress) return;
+
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
     const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);

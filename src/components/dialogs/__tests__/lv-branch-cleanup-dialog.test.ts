@@ -755,6 +755,73 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       ).to.be.true;
     });
 
+    it('reloads its list when it stays open after a successful prune', async () => {
+      // The prune removes remote-tracking refs that the risk badges and the
+      // Gone Upstream tab are derived from. The dialog now survives that
+      // (deleted === 0), so what it shows must be refreshed — otherwise the
+      // next Delete click acts on labels the prune already invalidated.
+      const el = await renderAndOpen([
+        createCandidate('spike/idea', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+
+      let confirms = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') {
+          confirms++;
+          return confirms === 1 ? 'Ok' : 'Cancel';
+        }
+        if (command === 'delete_branch') {
+          throw {
+            code: 'COMMAND_ERROR',
+            message: 'Branch is not fully merged. Use force to delete anyway.',
+          };
+        }
+        if (command === 'prune_remote_tracking_branches') {
+          return { success: true, pruned: ['origin/gone'], count: 1 };
+        }
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      expect(
+        findCommands('get_cleanup_candidates'),
+        'the visible list must be refreshed after the prune',
+      ).to.have.length.greaterThan(0);
+    });
+
+    it('ignores open() while a delete is in flight', async () => {
+      // The command palette can dispatch open-branch-cleanup over the modal.
+      // reset() would clear `deleting`, re-enabling Delete mid-flight so a
+      // second concurrent loop could start, and re-pin the repo path.
+      const el = await renderAndOpen([mergedSafe]);
+      (el as unknown as { deleting: boolean }).deleting = true;
+      (el as unknown as { selectedBranches: Set<string> }).selectedBranches = new Set(['keep/me']);
+
+      await el.open();
+
+      expect(
+        (el as unknown as { deleting: boolean }).deleting,
+        'an in-flight delete must not be cleared',
+      ).to.equal(true);
+      expect(
+        (el as unknown as { selectedBranches: Set<string> }).selectedBranches.has('keep/me'),
+        'the in-flight selection must survive',
+      ).to.be.true;
+    });
+
     it('reports a failed remote prune instead of claiming it succeeded', async () => {
       // pruneRemoteTrackingBranches goes through invokeCommand, which never
       // throws — it resolves { success: false }. The old try/catch was dead

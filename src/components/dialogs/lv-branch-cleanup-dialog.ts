@@ -307,6 +307,13 @@ export class LvBranchCleanupDialog extends LitElement {
   @query('lv-modal') private modal!: LvModal;
 
   public async open(): Promise<void> {
+    // Re-entry while a delete loop is running would reset() away `deleting`
+    // (re-enabling the Delete button mid-flight, so a second concurrent loop
+    // can start), clear the selection, and re-pin pinnedRepoPath from the live
+    // prop. The command palette can dispatch open-branch-cleanup over the open
+    // modal, so this is reachable.
+    if (this.deleting) return;
+
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
@@ -688,6 +695,16 @@ export class LvBranchCleanupDialog extends LitElement {
           if (!upstream) {
             return `${cb.branch.name} (no remote copy)`;
           }
+          // Measured and non-zero: say how much is at risk rather than
+          // falling through to "unknown", which understates a loss we can
+          // quantify. Reachable when the Safe label went stale (e.g. an
+          // external reset while this modal sat open) and the backend then
+          // refused the delete — exactly the case the withheld force exists
+          // to catch.
+          if (aheadBehind && aheadBehind.ahead > 0) {
+            const n = aheadBehind.ahead;
+            return `${cb.branch.name} (${n} commit${n === 1 ? '' : 's'} not on ${upstream})`;
+          }
           return `${cb.branch.name} (unpushed work unknown)`;
         })
         .join(', ');
@@ -774,10 +791,18 @@ export class LvBranchCleanupDialog extends LitElement {
       );
     }
 
-    // Only close when something was actually deleted; otherwise leave the
-    // dialog up so the user can act on what is still listed.
     if (deleted > 0) {
       this.close();
+      return;
+    }
+
+    // The dialog stays open, so refresh what it shows. A successful prune
+    // removes remote-tracking refs that the risk badges and the Gone Upstream
+    // tab are derived from, and a failure may have been caused by state that
+    // has since changed — either way the list on screen is no longer what the
+    // next Delete click would act on.
+    if (pruned || failed > 0) {
+      await this.loadCleanupData();
     }
   }
 

@@ -2167,25 +2167,39 @@ export class AppShell extends LitElement {
     // tabs (rebinding activeRepository) while the confirm is up.
     const repoPath = this.activeRepository.repository.path;
 
-    // Confirm reset based on mode
+    // Confirm reset based on mode.
+    //
+    // EVERY mode drops the commits after the target off this branch — that is
+    // what a reset is — so every confirm has to say so and name the recovery
+    // path. Describing only what happens to the working tree made soft/mixed
+    // read as harmless and understated hard, which is the loudest of them.
+    const droppedNote =
+      `Commits after "${commit.summary}" are removed from this branch and will be ` +
+      `recoverable only through the reflog.`;
+
     if (mode === 'hard') {
       const confirmed = await showConfirm(
         'Hard Reset',
-        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`,
+        `Hard reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `All uncommitted changes are also discarded permanently — those are not ` +
+          `in the reflog and cannot be recovered.`,
         'warning'
       );
       if (!confirmed) return;
     } else if (mode === 'mixed') {
       const confirmed = await showConfirm(
         'Mixed Reset',
-        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will be unstaged but preserved in the working directory.`,
+        `Reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `Your working-directory changes are kept, but unstaged.`,
         'warning'
       );
       if (!confirmed) return;
     } else if (mode === 'soft') {
       const confirmed = await showConfirm(
         'Soft Reset',
-        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will remain staged.`
+        `Reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `Your changes remain staged.`,
+        'warning'
       );
       if (!confirmed) return;
     }
@@ -2199,6 +2213,10 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
+      // Without this the user cannot tell a completed reset from a click that
+      // did nothing — failure was reported, success was silent. Every sibling
+      // destructive handler in this file toasts on success.
+      showToast(`Reset to ${commit.shortId} (${mode})`, 'success');
       this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Reset failed:', result.error);

@@ -486,46 +486,6 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect((renameCall!.args as { newName: string }).newName).to.equal('feature/new');
   });
 
-  it('handleDeleteMergedBranches deletes from the origin repo after a mid-confirm switch', async () => {
-    // Irreversible bulk delete. repoPath must be captured before the confirm —
-    // a mid-confirm tab switch must not redirect the deletes to another repo.
-    const el = await createComponent();
-
-    const merged = makeBranch({ name: 'feature/merged', shorthand: 'feature/merged', isHead: false });
-    (el as unknown as { localBranchGroups: Array<{ branches: unknown[] }> }).localBranchGroups = [
-      { branches: [merged] },
-    ];
-    (el as unknown as { mergedBranchNames: Set<string> }).mergedBranchNames = new Set([
-      'feature/merged',
-    ]);
-
-    let resolveConfirm!: (v: unknown) => void;
-    mockInvoke = (command: string) => {
-      if (command === 'plugin:dialog|message') {
-        return new Promise((resolve) => {
-          resolveConfirm = resolve;
-        });
-      }
-      if (command === 'delete_branch') return Promise.resolve(null);
-      return defaultMockInvoke(command);
-    };
-
-    invokeCalls.length = 0;
-    const promise = (
-      el as unknown as { handleDeleteMergedBranches: () => Promise<void> }
-    ).handleDeleteMergedBranches();
-
-    await new Promise((r) => setTimeout(r, 10));
-    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
-
-    resolveConfirm('Ok');
-    await promise;
-
-    const deleteCall = invokeCalls.find((c) => c.command === 'delete_branch');
-    expect(deleteCall, 'delete_branch called').to.not.be.undefined;
-    expect((deleteCall!.args as { path: string }).path).to.equal(REPO_PATH);
-  });
-
   it('handleBranchCreated refreshes the origin repo, not the tab switched to during the reload', async () => {
     const el = await createComponent();
 

@@ -1037,68 +1037,6 @@ export class LvBranchList extends LitElement {
   /**
    * Delete all branches that are merged into HEAD
    */
-  private async handleDeleteMergedBranches(): Promise<void> {
-    // Captured BEFORE the confirm await: these irreversible deletes (and the
-    // refresh) must target the repo they were invoked on, even if the user
-    // switches tabs while the confirm is up and this.repositoryPath rebinds.
-    const repoPath = this.repositoryPath;
-    const mergedBranches = this.getMergedBranches();
-
-    if (mergedBranches.length === 0) {
-      await showConfirm(
-        'No Merged Branches',
-        'There are no local branches that are fully merged into the current branch.',
-        'info'
-      );
-      return;
-    }
-
-    const branchNames = mergedBranches.map(b => `  • ${b.shorthand}`).join('\n');
-    const confirmed = await showConfirm(
-      'Delete Merged Branches',
-      `The following ${mergedBranches.length} branch${mergedBranches.length > 1 ? 'es are' : ' is'} merged and will be deleted:\n\n${branchNames}\n\nThis action cannot be undone.`,
-      'warning'
-    );
-
-    if (!confirmed) return;
-
-    // Delete branches one by one
-    let deleted = 0;
-    let failed = 0;
-    const failures: string[] = [];
-
-    for (const branch of mergedBranches) {
-      const result = await gitService.deleteBranch(
-        repoPath,
-        branch.name,
-        false
-      );
-      if (result.success) {
-        deleted++;
-      } else {
-        failed++;
-        // Keep the reason. A bare count cannot distinguish a protection rule
-        // from an unmerged tip or a branch checked out in a worktree, and
-        // branch rules made "refused on purpose" a routine outcome here.
-        failures.push(`${branch.name}: ${result.error?.message ?? 'unknown error'}`);
-        console.error(`Failed to delete ${branch.name}:`, result.error);
-      }
-    }
-
-    if (deleted > 0) {
-      await this.loadBranches();
-      this.dispatchBranchesChanged(repoPath);
-    }
-
-    if (failed > 0) {
-      await showConfirm(
-        'Partial Success',
-        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, but ${failed} failed to delete.\n\n${failures.join('\n')}`,
-        'warning'
-      );
-    }
-  }
-
   private async handleBranchCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
     // The dialog pins to the repo it was opened for and reports it here. The
     // user may have switched tabs while the dialog was open (rebinding our live
