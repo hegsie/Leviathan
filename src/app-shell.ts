@@ -4122,7 +4122,10 @@ export class AppShell extends LitElement {
           ?open=${this.showReflog}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showReflog = false; }}
-          @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
+          @undo-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
+            this.showReflog = false;
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
+          }}
           @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
       ` : ''}
@@ -4148,7 +4151,8 @@ export class AppShell extends LitElement {
           ?open=${this.showClean}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showClean = false; }}
-          @files-cleaned=${() => this.handleRefresh()}
+          @files-cleaned=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-clean-dialog>
       ` : ''}
 

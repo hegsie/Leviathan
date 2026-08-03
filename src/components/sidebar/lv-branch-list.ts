@@ -573,6 +573,14 @@ export class LvBranchList extends LitElement {
   // graph_descendant_of detection, including tip==HEAD). Refreshed by
   // loadBranches; used for the "Delete Merged Branches" flow and its badge.
   @state() private mergedBranchNames = new Set<string>();
+  /**
+   * Every branch the cleanup dialog would list, by name and across ALL
+   * categories. The button used merged+stale computed locally, which
+   * double-counted a branch that is both and hid the button entirely for a
+   * repo whose only candidates are gone-upstream — while the command-palette
+   * entry still opened the dialog, so the two surfaces disagreed.
+   */
+  @state() private cleanupCandidateNames = new Set<string>();
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -887,6 +895,10 @@ export class LvBranchList extends LitElement {
         ? new Set(cleanupResult.data.filter(c => c.category === 'merged').map(c => c.name))
         : new Set();
 
+      this.cleanupCandidateNames = cleanupResult.success && cleanupResult.data
+        ? new Set(cleanupResult.data.map(c => c.name))
+        : new Set();
+
     } catch (err) {
       if (this.repositoryPath === loadedPath) {
         this.error = err instanceof Error ? err.message : 'Unknown error';
@@ -999,18 +1011,16 @@ export class LvBranchList extends LitElement {
    * unmerged branches (ahead-of-upstream 0 right after a push) as merged, and it
    * missed merged branches that have no upstream at all (aheadBehind undefined).
    */
-  private getMergedBranches(): Branch[] {
-    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
-    return allLocal.filter(b => !b.isHead && this.mergedBranchNames.has(b.name));
+  /**
+   * Distinct local branches the cleanup dialog would list.
+   *
+   * Counted by NAME: merged and stale are independent filters over the same
+   * list, so a branch that is both was counted twice by the badge.
+   */
+  private getCleanupCandidateCount(): number {
+    return this.cleanupCandidateNames.size;
   }
 
-  /**
-   * Find all local branches that are stale (older than staleBranchDays setting)
-   */
-  private getStaleBranches(): Branch[] {
-    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
-    return allLocal.filter(b => !b.isHead && this.isBranchStale(b));
-  }
 
   /**
    * Open the branch cleanup dialog
@@ -2183,18 +2193,18 @@ export class LvBranchList extends LitElement {
       ${this.localBranchGroups.length > 0 ? html`
         <div class="local-header">
           <span class="local-header-title">Local Branches</span>
-          ${this.getMergedBranches().length + this.getStaleBranches().length > 0 ? html`
+          ${this.getCleanupCandidateCount() > 0 ? html`
             <button
               class="cleanup-btn"
               @click=${this.handleOpenCleanupDialog}
-              title="${this.getMergedBranches().length} merged + ${this.getStaleBranches().length} stale branches can be safely deleted"
+              title="${this.getCleanupCandidateCount()} branch${this.getCleanupCandidateCount() === 1 ? '' : 'es'} can be reviewed for cleanup"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
               </svg>
               Clean up
-              <span class="badge">${this.getMergedBranches().length + this.getStaleBranches().length}</span>
+              <span class="badge">${this.getCleanupCandidateCount()}</span>
             </button>
           ` : nothing}
         </div>

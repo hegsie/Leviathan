@@ -445,13 +445,18 @@ export class LvBranchCleanupDialog extends LitElement {
         // Don't auto-select stale branches (they require more deliberate action)
       }
 
-      // Select the first non-empty tab
-      if (this.mergedBranches.length > 0) {
-        this.activeTab = 'merged';
-      } else if (this.staleBranches.length > 0) {
-        this.activeTab = 'stale';
-      } else if (this.goneUpstreamBranches.length > 0) {
-        this.activeTab = 'gone';
+      // Select the first non-empty tab — only on a fresh open(). On a reload
+      // the user is mid-task on a tab they chose; snapping back to 'merged'
+      // showed them an empty selection while the footer still counted it, and
+      // the next Delete would act on branches they could not see.
+      if (!preserveSelection) {
+        if (this.mergedBranches.length > 0) {
+          this.activeTab = 'merged';
+        } else if (this.staleBranches.length > 0) {
+          this.activeTab = 'stale';
+        } else if (this.goneUpstreamBranches.length > 0) {
+          this.activeTab = 'gone';
+        }
       }
 
       this.requestUpdate();

@@ -340,6 +340,10 @@ export class LvCleanDialog extends LitElement {
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('open') && this.open) {
+      // A prior operation may still be running against this component; its
+      // completion handler will close the dialog, so do not start a fresh
+      // session on top of it.
+      if (this.cleaning) return;
       await this.loadFiles();
     }
   }
@@ -377,15 +381,27 @@ export class LvCleanDialog extends LitElement {
     }
   }
 
+  /**
+   * User-initiated dismissal. Blocked while the operation is in flight:
+   * closing mid-delete leaves it running with no visible surface, and when it
+   * finishes its success path calls close() — yanking shut whatever session
+   * the user had reopened in the meantime and discarding their new selection.
+   * close() itself stays unguarded because that success path needs it.
+   */
+  private dismiss(): void {
+    if (this.cleaning) return;
+    this.close();
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
-      this.close();
+      this.dismiss();
     }
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
-      this.close();
+      this.dismiss();
     }
   };
 
@@ -498,7 +514,9 @@ export class LvCleanDialog extends LitElement {
         );
 
         this.dispatchEvent(new CustomEvent('files-cleaned', {
-          detail: { count: removed },
+          // repositoryPath so the host refreshes the repo the clean ran on —
+          // the user may have switched tabs during the IPC await.
+          detail: { count: removed, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -583,7 +601,7 @@ export class LvCleanDialog extends LitElement {
             </svg>
             <span class="title">Clean Working Directory</span>
           </div>
-          <button class="close-btn" @click=${this.close}>
+          <button class="close-btn" @click=${this.dismiss}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -669,7 +687,7 @@ export class LvCleanDialog extends LitElement {
             ` : html`No files selected`}
           </div>
           <div class="footer-right">
-            <button class="btn btn-secondary" @click=${this.close}>Cancel</button>
+            <button class="btn btn-secondary" ?disabled=${this.cleaning} @click=${this.dismiss}>Cancel</button>
             <button
               class="btn btn-danger"
               ?disabled=${!someSelected || this.cleaning}

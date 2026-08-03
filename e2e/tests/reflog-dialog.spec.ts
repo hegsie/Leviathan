@@ -5,6 +5,7 @@ import {
   findCommand,
   injectCommandError,
   openViaCommandPalette,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -52,6 +53,8 @@ async function openReflogDialog(page: import('@playwright/test').Page): Promise<
 test.describe('Reflog Dialog', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -166,6 +169,8 @@ test.describe('Reflog Dialog', () => {
 test.describe('Reflog Dialog - repository-refresh after undo', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -195,6 +200,8 @@ test.describe('Reflog Dialog - repository-refresh after undo', () => {
 test.describe('Reflog Dialog - Error handling', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -214,6 +221,8 @@ test.describe('Reflog Dialog - Error handling', () => {
 test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -238,6 +247,8 @@ test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
 test.describe('Reflog Dialog - Extended Tests', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,

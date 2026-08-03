@@ -110,9 +110,17 @@ describe('lv-branch-list merged detection (Finding 13)', () => {
       [{ name: 'merged-no-upstream', shorthand: 'merged-no-upstream', category: 'merged' }],
     );
 
-    const merged = (el as unknown as { getMergedBranches: () => Array<{ name: string }> }).getMergedBranches();
-    const names = merged.map((b) => b.name).sort();
-    expect(names).to.deep.equal(['merged-no-upstream']);
+    // Assert the user-visible surface rather than a private helper: the
+    // Clean up badge is driven by the backend's candidate list, so a branch
+    // that is merely fully pushed must not be counted, and one that is merged
+    // without an upstream must be.
+    const candidates = (el as unknown as { cleanupCandidateNames: Set<string> })
+      .cleanupCandidateNames;
+    expect([...candidates].sort()).to.deep.equal(['merged-no-upstream']);
+
+    const badge = el.shadowRoot!.querySelector('.cleanup-btn .badge');
+    expect(badge, 'Clean up button rendered').to.not.be.null;
+    expect(badge!.textContent!.trim()).to.equal('1');
   });
 });
 

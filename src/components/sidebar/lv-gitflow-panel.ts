@@ -586,7 +586,17 @@ export class LvGitflowPanel extends LitElement {
     // capture it with the path.
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
-    const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
+    // showPrompt dynamically imports the prompt component; a chunk-load
+    // failure rejects here, and the flag is already claimed while the try that
+    // releases it starts below — leaving every button in this panel disabled
+    // for the session. Same wrapping as handleFinishFeature's confirm.
+    let tagMessage: string | null = null;
+    try {
+      tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
+    } catch {
+      this.operationInProgress = false;
+      return;
+    }
     if (tagMessage === null) {
       this.operationInProgress = false;
       return;
@@ -680,7 +690,17 @@ export class LvGitflowPanel extends LitElement {
 
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
-    const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
+    // showPrompt dynamically imports the prompt component; a chunk-load
+    // failure rejects here, and the flag is already claimed while the try that
+    // releases it starts below — leaving every button in this panel disabled
+    // for the session. Same wrapping as handleFinishFeature's confirm.
+    let tagMessage: string | null = null;
+    try {
+      tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
+    } catch {
+      this.operationInProgress = false;
+      return;
+    }
     if (tagMessage === null) {
       this.operationInProgress = false;
       return;
