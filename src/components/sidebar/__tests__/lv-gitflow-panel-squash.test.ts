@@ -47,6 +47,12 @@ function cleanupMockPrompt(): void {
 }
 
 function defaultMockInvoke(command: string): Promise<unknown> {
+  // A squash finish discards the branch's individual commits, so it is gated
+  // by a confirm. plugin-dialog routes confirm() through `message` and treats
+  // the OK button label as confirmed.
+  if (command === 'plugin:dialog|message') {
+    return Promise.resolve('Ok');
+  }
   if (command === 'get_gitflow_config') {
     return Promise.resolve({
       initialized: true,
@@ -92,6 +98,43 @@ interface ConflictDetail {
 describe('lv-gitflow-panel squash finish conflict (Fix 6)', () => {
   beforeEach(() => {
     invokeCalls.length = 0;
+  });
+
+  it('does not squash-finish when the confirm is declined', async () => {
+    // A squash finish collapses the branch to one commit and deletes it, so
+    // every original commit becomes unreachable. gitflow deletes via git2
+    // directly, bypassing delete_branch's merged-check, so this confirm is the
+    // only gate on the whole path.
+    const el = await createComponent();
+
+    mockInvoke = (command: string) => {
+      if (command === 'plugin:dialog|message') return Promise.resolve('Cancel');
+      return defaultMockInvoke(command);
+    };
+
+    invokeCalls.length = 0;
+    await (el as unknown as {
+      handleFinishFeature: (item: { name: string; branch: string }, squash?: boolean) => Promise<void>;
+    }).handleFinishFeature({ name: 'x', branch: 'feature/x' }, true);
+
+    expect(
+      invokeCalls.filter((c) => c.command === 'gitflow_finish_feature'),
+      'declining must not run the squash finish',
+    ).to.have.length(0);
+  });
+
+  it('does not confirm for an ordinary (non-squash) finish', async () => {
+    // The plain finish keeps the branch's commits reachable via the merge, so
+    // it must not acquire a gate the squash path needs.
+    const el = await createComponent();
+    invokeCalls.length = 0;
+
+    await (el as unknown as {
+      handleFinishFeature: (item: { name: string; branch: string }, squash?: boolean) => Promise<void>;
+    }).handleFinishFeature({ name: 'x', branch: 'feature/x' }, false);
+
+    expect(invokeCalls.filter((c) => c.command === 'plugin:dialog|message')).to.have.length(0);
+    expect(invokeCalls.filter((c) => c.command === 'gitflow_finish_feature')).to.have.length(1);
   });
 
   it('dispatches squash=true when a squash finish hits a merge conflict', async () => {

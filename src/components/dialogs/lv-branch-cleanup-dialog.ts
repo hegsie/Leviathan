@@ -383,7 +383,7 @@ export class LvBranchCleanupDialog extends LitElement {
 
         const isProtected = candidate.isProtected || this.isBuiltinProtected(candidate.name);
         const protectedReason = isProtected ? this.getProtectedReason(candidate) : undefined;
-        const risk = this.assessRisk(byName.get(candidate.name) ?? [candidate]);
+        const risk = this.assessRisk(byName.get(candidate.name)!);
 
         const entry: CleanupBranch = {
           branch,
@@ -459,9 +459,9 @@ export class LvBranchCleanupDialog extends LitElement {
       return { risk: 'safe', riskReason: 'Fully merged into current branch' };
     }
 
-    // Prefer an entry that actually carries a measurement; the categories a
-    // branch appears in do not all populate aheadBehind.
-    const candidate = group.find((c) => c.aheadBehind) ?? group[0];
+    // branch_cleanup.rs computes ahead_behind once per branch and clones it
+    // into every category entry, so any entry of the group carries it.
+    const candidate = group[0];
 
     // aheadBehind is null when divergence could not be measured at all — a
     // branch that neither tracks an upstream nor is "gone". Coercing that to 0
@@ -479,13 +479,10 @@ export class LvBranchCleanupDialog extends LitElement {
     const isGone = group.some((c) => c.category === 'gone');
 
     if (ahead === 0) {
-      // A 'gone' branch is measured against HEAD (its upstream is gone), so
-      // ahead === 0 genuinely means merged; otherwise it is measured against
-      // the upstream, where it means nothing left to push.
-      return {
-        risk: 'safe',
-        riskReason: isGone ? 'Fully merged into current branch' : 'No unpushed work',
-      };
+      // A 'gone' branch with ahead === 0 is measured against HEAD, so it is
+      // also emitted as 'merged' and the early return above already fired —
+      // reaching here always means "nothing left to push to the upstream".
+      return { risk: 'safe', riskReason: 'No unpushed work' };
     }
 
     if (isGone) {
@@ -627,6 +624,7 @@ export class LvBranchCleanupDialog extends LitElement {
     this.deleting = true;
     let deleted = 0;
     let failed = 0;
+    let kept = 0;
     const failures: string[] = [];
 
     // Pinned at open(): these irreversible force-deletes and the remote prune
@@ -641,13 +639,20 @@ export class LvBranchCleanupDialog extends LitElement {
     const unmergedRefusals: CleanupBranch[] = [];
 
     for (const cb of toDelete) {
-      // Force only when we have MEASURED unpushed commits. Deriving this from
-      // the risk label instead would mean any branch labelled 'warning' — including
-      // one labelled that way precisely BECAUSE its divergence could not be
-      // measured — bypasses delete_branch's merged-check (branch.rs), turning a
-      // safe refusal into permanent commit loss. Unknown divergence must fall
-      // through to the backend and let it refuse.
-      const force = cb.risk === 'danger' || (cb.branch.aheadBehind?.ahead ?? 0) > 0;
+      // NEVER force a branch the dialog labelled Safe. Two reasons: a merged
+      // branch deletes fine without force, and the confirm above only fires for
+      // risky branches — so forcing a safe one would be an UNCONFIRMED force
+      // delete. Withholding force also keeps delete_branch's merged-check,
+      // which is the only thing that catches the label having gone stale (an
+      // external reset or checkout while this modal sat open).
+      //
+      // Among risky branches, force only on MEASURED unpushed commits. Deriving
+      // it from the label alone would force-delete a branch labelled 'warning'
+      // precisely BECAUSE its divergence could not be measured, turning the
+      // backend's safe refusal into permanent commit loss.
+      const force =
+        cb.risk !== 'safe' &&
+        (cb.risk === 'danger' || (cb.branch.aheadBehind?.ahead ?? 0) > 0);
       const result = await gitService.deleteBranch(repoPath, cb.branch.name, force);
       if (result.success) {
         deleted++;
@@ -666,20 +671,36 @@ export class LvBranchCleanupDialog extends LitElement {
     // user already confirmed the delete, so ask once about the subset git
     // refused rather than reporting a failure they cannot act on.
     if (unmergedRefusals.length > 0) {
-      const names = unmergedRefusals.map((cb) => cb.branch.name).join(', ');
+      // Name each branch's actual exposure. "not fully merged" is measured
+      // against HEAD, while the Safe/Warning badge is measured against the
+      // UPSTREAM — so a branch can be refused here while its commits sit safely
+      // on its remote. Claiming they "exist nowhere else" would be false for
+      // exactly those, and a confirm that overstates trains users to dismiss it.
+      const names = unmergedRefusals
+        .map((cb) => {
+          const pushed =
+            cb.branch.upstream && (cb.branch.aheadBehind?.ahead ?? 0) === 0
+              ? ` (pushed to ${cb.branch.upstream})`
+              : '';
+          return `${cb.branch.name}${pushed}`;
+        })
+        .join(', ');
+      const plural = unmergedRefusals.length !== 1;
       const forceConfirmed = await showConfirm(
         'Branches Not Fully Merged',
-        `${unmergedRefusals.length} branch${unmergedRefusals.length !== 1 ? 'es' : ''} ` +
-          `(${names}) ${unmergedRefusals.length === 1 ? 'is' : 'are'} not fully merged, so ` +
-          `deleting ${unmergedRefusals.length === 1 ? 'it' : 'them'} discards commits that ` +
-          `exist nowhere else. Force delete anyway?`,
+        `${unmergedRefusals.length} branch${plural ? 'es' : ''} (${names}) ` +
+          `${plural ? 'are' : 'is'} not merged into the current branch. Any commits ` +
+          `not also on their upstream will be discarded permanently.\n\n` +
+          `Force delete anyway?`,
         'warning',
       );
 
       for (const cb of unmergedRefusals) {
         if (!forceConfirmed) {
-          failed++;
-          failures.push(`${cb.branch.name}: not fully merged (kept)`);
+          // Declining is the safe choice the dialog just offered — counting it
+          // as a failure would report the user's own decision back to them as
+          // a red error.
+          kept++;
           continue;
         }
         const retry = await gitService.deleteBranch(repoPath, cb.branch.name, true);
@@ -706,11 +727,17 @@ export class LvBranchCleanupDialog extends LitElement {
 
     if (deleted > 0) {
       const pruneNote = this.pruneRemotes ? ' (remotes pruned)' : '';
+      const notes: string[] = [];
+      // Carry the per-branch reasons into the PARTIAL outcome too — this is the
+      // common case, and the dialog closes straight after, so a bare count
+      // leaves the user with no way to find out what happened.
+      if (failed > 0) notes.push(`${failed} failed — ${failures.join('; ')}`);
+      if (kept > 0) notes.push(`${kept} kept (not fully merged)`);
+
       const message =
-        failed > 0
-          ? `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, ${failed} failed${pruneNote}`
-          : `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}${pruneNote}`;
-      showToast(message, failed > 0 ? 'warning' : 'success');
+        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}${pruneNote}` +
+        (notes.length > 0 ? `, ${notes.join(', ')}` : '');
+      showToast(message, failed > 0 || kept > 0 ? 'warning' : 'success');
 
       this.dispatchEvent(
         new CustomEvent('cleanup-complete', {
@@ -724,6 +751,13 @@ export class LvBranchCleanupDialog extends LitElement {
       showToast(
         `Failed to delete ${failed} branch${failed !== 1 ? 'es' : ''} — ${failures.join('; ')}`,
         'error'
+      );
+    } else if (kept > 0) {
+      // Nothing deleted because the user declined the escalation — that is an
+      // outcome, not an error.
+      showToast(
+        `${kept} branch${kept !== 1 ? 'es' : ''} kept (not fully merged)`,
+        'info'
       );
     }
   }

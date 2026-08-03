@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { showPrompt } from '../../services/dialog.service.ts';
+import { showPrompt, showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
@@ -453,12 +453,30 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
-    this.error = null;
-    this.operationInProgress = true;
-
     // Captured BEFORE the awaits: the conflict dialog must pin to the repo
     // the finish actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
+
+    // A squash finish collapses the branch into ONE commit on develop and then
+    // deletes it. Because a squash commit never makes the feature tip an
+    // ancestor of develop, every original commit becomes unreachable
+    // immediately — and gitflow deletes the branch with git2 directly, so
+    // delete_branch's merged-check never runs. This button sits next to the
+    // ordinary finish with only a tooltip between them, so it needs its own
+    // gate; the plain finish is non-destructive by comparison.
+    if (squash) {
+      const confirmed = await showConfirm(
+        'Squash and Finish',
+        `"${item.name}" will be squashed into a single commit on develop and then ` +
+          `deleted. Its individual commits will no longer be reachable from any ` +
+          `branch.\n\nThis cannot be undone.`,
+        'warning',
+      );
+      if (!confirmed) return;
+    }
+
+    this.error = null;
+    this.operationInProgress = true;
     try {
       const result = await gitService.gitFlowFinishFeature(repoPath, item.name, true, squash);
       if (result.success) {

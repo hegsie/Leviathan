@@ -24,6 +24,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import { settingsStore } from '../../../stores/settings.store.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 import type { CleanupCandidate } from '../../../types/git.types.ts';
 
 // Import the actual component — registers <lv-branch-cleanup-dialog>
@@ -161,6 +162,7 @@ const allCandidates: CleanupCandidate[] = [
 describe('lv-branch-cleanup-dialog (fixture)', () => {
   beforeEach(() => {
     clearHistory();
+    uiStore.setState({ toasts: [] });
     // Ensure settings store has staleBranchDays set
     settingsStore.setState({ staleBranchDays: 90 });
   });
@@ -612,6 +614,80 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(deleteBtn.disabled).to.be.true;
     });
 
+    it('never issues a force delete without a confirm', async () => {
+      // Invariant guard. force=true skips delete_branch's merged-check, so it
+      // must never happen on a path the user was not asked about. A merged
+      // branch with upstream drift is labelled Safe (correctly) and therefore
+      // bypasses the risky-branch confirm — it must not be forced.
+      const el = await renderAndOpen([
+        createCandidate('feature/merged-drift', 'merged', {
+          aheadBehind: { ahead: 5, behind: 0 },
+          upstream: 'origin/feature/merged-drift',
+        }),
+      ]);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const forced = findCommands('delete_branch').filter(
+        (c) => (c.args as { force?: boolean }).force === true,
+      );
+      expect(
+        forced.length === 0 || confirmMessages().length > 0,
+        'a forced delete must be preceded by a confirm',
+      ).to.be.true;
+      expect(forced, 'a Safe branch must never be force-deleted').to.have.length(0);
+    });
+
+    it('reports declining the escalation as kept, not as a failure', async () => {
+      const el = await renderAndOpen([
+        createCandidate('spike/idea', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+
+      // Confirm the delete, then DECLINE the force escalation.
+      let confirms = 0;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') {
+          confirms++;
+          return confirms === 1 ? 'Ok' : 'Cancel';
+        }
+        if (command === 'delete_branch') {
+          throw {
+            code: 'COMMAND_ERROR',
+            message: 'Branch is not fully merged. Use force to delete anyway.',
+          };
+        }
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const forced = findCommands('delete_branch').filter(
+        (c) => (c.args as { force?: boolean }).force === true,
+      );
+      expect(forced, 'declining must not force-delete').to.have.length(0);
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'error'),
+        "the user's own decision must not be reported as an error",
+      ).to.be.false;
+      expect(toasts.some((t) => /kept/i.test(t.message))).to.be.true;
+    });
+
     it('never shows a confirm with an empty clause', async () => {
       // A branch emitted as BOTH merged and stale used to get two labels; the
       // gate read the un-deduplicated union (saw 'warning') while the message
@@ -674,9 +750,55 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect((calls[0].args as { force?: boolean }).force).to.not.equal(true);
       expect((calls[1].args as { force?: boolean }).force).to.equal(true);
       expect(
-        confirmMessages().some((m) => /not fully merged/i.test(m)),
+        confirmMessages().some((m) => /not merged into the current branch/i.test(m)),
         'the escalation must be confirmed explicitly',
       ).to.be.true;
+    });
+
+    it('does not claim commits "exist nowhere else" for a pushed branch', async () => {
+      // "not fully merged" is measured against HEAD; the Safe badge is measured
+      // against the UPSTREAM. A branch can be refused here while its commits
+      // sit safely on its remote, so the confirm must not overstate the loss.
+      const el = await renderAndOpen([
+        createCandidate('feature/pushed', 'stale', {
+          aheadBehind: { ahead: 0, behind: 0 },
+          upstream: 'origin/feature/pushed',
+        }),
+      ]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'plugin:dialog|message') return 'Cancel';
+        if (command === 'delete_branch') {
+          throw {
+            code: 'COMMAND_ERROR',
+            message: 'Branch is not fully merged. Use force to delete anyway.',
+          };
+        }
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const escalation = confirmMessages().find((m) =>
+        /not merged into the current branch/i.test(m),
+      );
+      expect(escalation, 'escalation confirm shown').to.not.be.undefined;
+      expect(escalation!).to.not.match(/nowhere else/i);
+      expect(escalation!, 'should name where the commits actually are').to.include(
+        'origin/feature/pushed',
+      );
     });
 
     it('does NOT force-delete a branch whose divergence could not be measured', async () => {

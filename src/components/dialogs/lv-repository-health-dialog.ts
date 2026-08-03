@@ -341,6 +341,8 @@ export class LvRepositoryHealthDialog extends LitElement {
       const result = await gitService.runGc({
         path: repoPath,
         aggressive,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {
@@ -363,6 +365,8 @@ export class LvRepositoryHealthDialog extends LitElement {
       const result = await gitService.runFsck({
         path: this.repositoryPath,
         full: true,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {
@@ -389,6 +393,8 @@ export class LvRepositoryHealthDialog extends LitElement {
     try {
       const result = await gitService.runPrune({
         path: repoPath,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {

@@ -19,6 +19,25 @@ const log = loggers.app;
  *
  * Typed as RepositoryState so a typo or a renamed state is a compile error.
  */
+/**
+ * Condense `git fsck` output for a toast.
+ *
+ * `git fsck --full` prints one line per dangling/unreachable object, which on a
+ * repo with rebased or amended history is dozens of lines. A toast is ~400px
+ * wide with no max-height and auto-dismisses, so dumping that raw makes it both
+ * unreadable and large enough to cover the view. Lead with the count and point
+ * at the surface that can show the detail.
+ */
+function summariseFsck(message: string | undefined): string {
+  const text = (message ?? '').trim();
+  if (!text) return 'Repository integrity check completed';
+
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length <= 2 && text.length <= 200) return text;
+
+  return `Repository integrity check completed — ${lines.length} notes (${lines[0].trim()}, …). See Repository Health for the full output.`;
+}
+
 const ABORTABLE_STATES: readonly RepositoryState[] = [
   'cherrypick',
   'merge',
@@ -3466,7 +3485,8 @@ export class AppShell extends LitElement {
     // this command cannot drift apart on whether it is gated.
     if (!(await confirmGarbageCollection(aggressive))) return;
 
-    const result = await gitService.runGc({ path: repoPath, aggressive });
+    // silent: the service toasts by default; this handler owns the message.
+    const result = await gitService.runGc({ path: repoPath, aggressive, silent: true });
     showToast(
       result.success
         ? aggressive
@@ -3481,7 +3501,8 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.runFsck({ path: repoPath, full: true });
+    // silent: the service toasts by default; this handler owns the message.
+    const result = await gitService.runFsck({ path: repoPath, full: true, silent: true });
 
     // Reporting IS this command's purpose, so report what git actually said.
     // `git fsck` exits 0 while printing "dangling commit" / "unreachable blob"
@@ -3489,7 +3510,7 @@ export class AppShell extends LitElement {
     // clean bill of health from the exit code alone would hide it.
     showToast(
       result.success
-        ? (result.data?.message ?? 'Repository integrity check completed')
+        ? summariseFsck(result.data?.message)
         : `Repository integrity check failed: ${result.error?.message ?? 'Unknown error'}`,
       result.success ? 'success' : 'error'
     );
@@ -3502,7 +3523,8 @@ export class AppShell extends LitElement {
 
     if (!(await confirmPrune())) return;
 
-    const result = await gitService.runPrune({ path: repoPath });
+    // silent: the service toasts by default; this handler owns the message.
+    const result = await gitService.runPrune({ path: repoPath, silent: true });
     showToast(
       result.success
         ? 'Pruned unreachable objects'
