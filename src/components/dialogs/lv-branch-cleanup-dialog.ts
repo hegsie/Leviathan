@@ -430,6 +430,13 @@ export class LvBranchCleanupDialog extends LitElement {
     // is simply unknown, which is a false safety claim in the unsafe direction:
     // it also clears the confirm gate in handleDelete. Unknown is a warning.
     if (!candidate.aheadBehind) {
+      // The backend independently proved this branch merged (graph_descendant_of
+      // / tip equality, branch_cleanup.rs) to put it in the 'merged' category.
+      // That is a stronger signal than the missing upstream comparison, so
+      // trust it rather than warning about work we know is already merged.
+      if (candidate.category === 'merged') {
+        return { risk: 'safe', riskReason: 'Fully merged into current branch' };
+      }
       return {
         risk: 'warning',
         riskReason: candidate.upstream
@@ -563,14 +570,28 @@ export class LvBranchCleanupDialog extends LitElement {
 
     const toDelete = Array.from(selectedMap.values());
 
-    // Confirm if any are warning/danger
+    // Confirm if any are warning/danger. Distinguish MEASURED unpushed commits
+    // from unmeasurable divergence — claiming "has unpushed commits" about a
+    // branch we could not compare is the same false-precision the risk badge
+    // used to have, just in the other direction.
     if (this.hasWarningOrDanger) {
-      const dangerCount = toDelete.filter(
-        (cb) => cb.risk === 'warning' || cb.risk === 'danger',
-      ).length;
+      const risky = toDelete.filter((cb) => cb.risk === 'warning' || cb.risk === 'danger');
+      const unpushed = risky.filter((cb) => (cb.branch.aheadBehind?.ahead ?? 0) > 0).length;
+      const unknown = risky.length - unpushed;
+
+      const parts: string[] = [];
+      if (unpushed > 0) {
+        parts.push(`${unpushed} have unpushed commits that will be lost`);
+      }
+      if (unknown > 0) {
+        parts.push(
+          `${unknown} could not be checked for unmerged work (no upstream to compare against)`,
+        );
+      }
+
       const confirmed = await showConfirm(
         'Delete Branches with Unpushed Work?',
-        `${dangerCount} of the selected branches have unpushed commits that may be lost.\n\nThis action cannot be undone. Continue?`,
+        `Of the selected branches, ${parts.join(', and ')}.\n\nThis action cannot be undone. Continue?`,
         'warning',
       );
       if (!confirmed) return;
@@ -587,8 +608,13 @@ export class LvBranchCleanupDialog extends LitElement {
     // (which rebinds the live repositoryPath prop).
     const repoPath = this.pinnedRepoPath;
     for (const cb of toDelete) {
-      // Use force delete for warning/danger branches (not fully merged)
-      const force = cb.risk === 'warning' || cb.risk === 'danger';
+      // Force only when we have MEASURED unpushed commits. Deriving this from
+      // the risk label instead would mean any branch labelled 'warning' — including
+      // one labelled that way precisely BECAUSE its divergence could not be
+      // measured — bypasses delete_branch's merged-check (branch.rs), turning a
+      // safe refusal into permanent commit loss. Unknown divergence must fall
+      // through to the backend and let it refuse.
+      const force = cb.risk === 'danger' || (cb.branch.aheadBehind?.ahead ?? 0) > 0;
       const result = await gitService.deleteBranch(repoPath, cb.branch.name, force);
       if (result.success) {
         deleted++;

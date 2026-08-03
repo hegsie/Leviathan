@@ -9,6 +9,7 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { join } from "@tauri-apps/api/path";
 import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
 import { repositoryStore } from "../../stores/repository.store.ts";
+import { settingsStore } from "../../stores/settings.store.ts";
 
 interface FileContextMenuState {
   visible: boolean;
@@ -716,9 +717,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const { title, message } = this.discardConfirmCopy(entries, dirPath);
-    const confirmed = await showConfirm(title, message, "warning");
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard(entries, dirPath))) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
@@ -1212,6 +1211,27 @@ export class LvFileStatus extends LitElement {
    * understates that, and in bulk "discard changes to 12 files" can mean 12
    * permanent deletions. Name the deletion whenever one is involved.
    */
+  /**
+   * Prompt for a discard, honouring the "Confirm Before Discard" setting.
+   *
+   * Returns true when the caller should proceed.
+   *
+   * The setting only suppresses the prompt for TRACKED files, whose content is
+   * restored from the index and is therefore recoverable. Any selection that
+   * includes an untracked file always prompts: those are deleted from disk with
+   * no git object and no trash, and a preference for fewer dialogs must not
+   * silently become unrecoverable deletion.
+   */
+  private async confirmDiscard(files: StatusEntry[], scope?: string): Promise<boolean> {
+    const hasUntracked = files.some((f) => f.status === 'untracked');
+    if (!hasUntracked && !settingsStore.getState().confirmBeforeDiscard) {
+      return true;
+    }
+
+    const { title, message } = this.discardConfirmCopy(files, scope);
+    return showConfirm(title, message, 'warning');
+  }
+
   private discardConfirmCopy(
     files: StatusEntry[],
     scope?: string,
@@ -1320,10 +1340,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const { title, message } = this.discardConfirmCopy([file]);
-    const confirmed = await showConfirm(title, message, "warning");
-
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard([file]))) return;
 
     const result = await gitService.discardChanges(repoPath, [
       file.path,
@@ -1461,9 +1478,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const { title, message } = this.discardConfirmCopy(entries);
-    const confirmed = await showConfirm(title, message, "warning");
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard(entries))) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
@@ -1589,9 +1604,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const { title, message } = this.discardConfirmCopy([file]);
-    const confirmed = await showConfirm(title, message, "warning");
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard([file]))) return;
     const result = await gitService.discardChanges(repoPath, [
       file.path,
     ]);

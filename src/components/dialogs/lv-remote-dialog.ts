@@ -626,6 +626,11 @@ export class LvRemoteDialog extends LitElement {
   }
 
   private async handleRemove(remote: Remote): Promise<void> {
+    // Captured BEFORE the confirm await: this dialog is bound to the active
+    // repository and rebinds live, so a mid-confirm tab switch would otherwise
+    // remove the remote from the repo the user switched TO.
+    const repoPath = this.repositoryPath;
+
     const confirmed = await showConfirm(
       'Remove Remote',
       `Are you sure you want to remove the remote "${remote.name}"?\n\nThis will not delete the remote repository, only the local reference.`,
@@ -640,7 +645,7 @@ export class LvRemoteDialog extends LitElement {
     this.error = null;
 
     try {
-      const result = await gitService.removeRemote(this.repositoryPath, remote.name);
+      const result = await gitService.removeRemote(repoPath, remote.name);
 
       if (result.success) {
         await this.loadRemotes();

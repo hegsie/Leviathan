@@ -470,9 +470,16 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   private async handleRemove(submodule: Submodule): Promise<void> {
+    // Captured BEFORE the confirm await: removal runs `git submodule deinit -f`
+    // + `git rm -f`, deleting the submodule's working tree (including any
+    // uncommitted work inside it). This dialog is bound to the active
+    // repository and rebinds live, so a mid-confirm tab switch would otherwise
+    // aim that at the repo the user switched TO.
+    const repoPath = this.repositoryPath;
+
     const confirmed = await showConfirm(
       'Remove Submodule',
-      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis will remove the submodule from your repository.`,
+      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis deletes its working directory, including any uncommitted changes inside it. This cannot be undone.`,
       'warning'
     );
 
@@ -481,7 +488,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.removeSubmodule(this.repositoryPath, submodule.path);
+    const result = await gitService.removeSubmodule(repoPath, submodule.path);
 
     if (result.success) {
       this.success = 'Submodule removed successfully';

@@ -424,6 +424,11 @@ export class LvReflogDialog extends LitElement {
         this.close();
       } else {
         showToast(`Reset failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // The backend refuses when the reflog shifted under us and tells the
+        // user to "refresh and try again" — but this dialog loads once and has
+        // no refresh affordance, so without this the stale indices persist and
+        // every retry fails identically. Reload so the advice is actionable.
+        await this.loadReflog();
       }
     } catch (err) {
       console.error('Reset failed:', err);

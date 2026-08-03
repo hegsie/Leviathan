@@ -225,6 +225,23 @@ test.describe('Operation Banner', () => {
     await expect(successToast).toContainText(/Aborted|abort/i);
   });
 
+  test('no Abort button for states that have no abort command', async ({ page }) => {
+    // The banner used to render Abort for every non-clean state, so during a
+    // bisect it was a permanent dead end — clicking it could only ever produce
+    // "Cannot abort operation: bisect".
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'bisect',
+      },
+    });
+
+    await expect(page.locator('.operation-banner')).toBeVisible();
+    await expect(page.locator('.operation-abort-btn')).toHaveCount(0);
+  });
+
   test('declining the abort confirm does not abort', async ({ page }) => {
     app = new AppPage(page);
 

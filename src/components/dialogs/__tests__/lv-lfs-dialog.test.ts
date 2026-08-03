@@ -7,11 +7,22 @@
 import { expect, fixture, html } from '@open-wc/testing';
 
 let failingCommands: Set<string> = new Set();
+/** Result of the app's showConfirm(); prune is gated behind it. */
+let confirmResult = true;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 const mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  if (
+    command === 'plugin:dialog|message' ||
+    command === 'plugin:dialog|confirm' ||
+    command === 'plugin:dialog|ask'
+  ) {
+    // plugin-dialog's confirm() resolves true only for the OK button label.
+    return confirmResult ? 'Ok' : 'Cancel';
+  }
 
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Operation failed' };
@@ -48,6 +59,7 @@ import type { LvLfsDialog } from '../lv-lfs-dialog.ts';
 describe('lv-lfs-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
+    confirmResult = true;
   });
 
   it('renders when open', async () => {
@@ -98,6 +110,24 @@ describe('lv-lfs-dialog', () => {
     await (el as any).handlePrune();
 
     expect(eventFired).to.be.true;
+  });
+
+  it('does not prune when the confirm is declined', async () => {
+    // `git lfs prune` deletes local LFS objects; blobs from a commit that was
+    // never pushed have no copy anywhere else.
+    confirmResult = false;
+
+    const el = await fixture<LvLfsDialog>(
+      html`<lv-lfs-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-lfs-dialog>`,
+    );
+
+    let eventFired = false;
+    el.addEventListener('lfs-changed', () => { eventFired = true; });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handlePrune();
+
+    expect(eventFired, 'declining must not prune').to.be.false;
   });
 
   it('does not dispatch lfs-changed on pull failure', async () => {

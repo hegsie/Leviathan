@@ -144,6 +144,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
+    uiStore.setState({ toasts: [] });
   });
 
   describe('handleRefCheckout', () => {
@@ -362,6 +363,37 @@ describe('app-shell ref context menu handlers (integration)', () => {
       await (el as any).handleRefDeleteBranch();
 
       expect(findCommands('delete_branch')).to.have.length(0);
+    });
+  });
+
+  describe('maintenance commands', () => {
+    it('does not run gc or prune when the confirm is declined', async () => {
+      declineConfirms();
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunGc(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunPrune();
+
+      expect(findCommands('run_gc')).to.have.length(0);
+      expect(findCommands('run_prune')).to.have.length(0);
+    });
+
+    it('reports the outcome of gc, prune and fsck', async () => {
+      // Each of these previously discarded its result, so the palette entry
+      // produced no observable effect on success OR failure.
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunGc(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunPrune();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunFsck();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.length, 'each maintenance command reports an outcome').to.be.greaterThan(2);
     });
   });
 

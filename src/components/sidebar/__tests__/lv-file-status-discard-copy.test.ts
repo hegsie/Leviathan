@@ -35,6 +35,7 @@ import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-file-status.ts';
 import type { LvFileStatus } from '../lv-file-status.ts';
 import type { StatusEntry } from '../../../types/git.types.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 const REPO_PATH = '/test/repo';
 
@@ -80,6 +81,42 @@ describe('lv-file-status discard confirm copy', () => {
   beforeEach(() => {
     invokeHistory.length = 0;
     lastConfirm = null;
+    settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  afterEach(() => {
+    settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  it('skips the confirm for a tracked file when the setting is off', async () => {
+    settingsStore.setState({ confirmBeforeDiscard: false });
+    const tracked = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([tracked]);
+    invokeHistory.length = 0;
+    lastConfirm = null;
+
+    await internalOf(el).handleDiscardFile(tracked, new Event('click'));
+
+    expect(lastConfirm, 'setting should suppress the prompt').to.be.null;
+    expect(
+      invokeHistory.filter((h) => h.command === 'discard_changes'),
+      'the discard should still run',
+    ).to.have.length(1);
+  });
+
+  it('still confirms an untracked file even when the setting is off', async () => {
+    // Untracked files are DELETED with no git object and no trash. A "fewer
+    // dialogs" preference must never silently become unrecoverable deletion.
+    settingsStore.setState({ confirmBeforeDiscard: false });
+    const untracked = makeEntry({ path: 'notes.md', status: 'untracked' });
+    const el = await render([untracked]);
+    invokeHistory.length = 0;
+    lastConfirm = null;
+
+    await internalOf(el).handleDiscardFile(untracked, new Event('click'));
+
+    expect(lastConfirm, 'permanent deletion must always prompt').to.not.be.null;
+    expect(lastConfirm!.message!.toLowerCase()).to.include('permanently delete');
   });
 
   it('says "permanently delete" for a single untracked file', async () => {

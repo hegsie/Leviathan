@@ -7,6 +7,26 @@ import { loggers } from './utils/logger.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
+
+/**
+ * Repository states that have a working abort command.
+ *
+ * The operation banner's Abort button and handleAbortOperation BOTH read this,
+ * so the UI can never offer an abort the handler will refuse. The banner used
+ * to render for every non-clean state, which made Abort a permanent dead end
+ * during a bisect or an in-progress mailbox apply — those have no abort command
+ * here (a bisect exits via the bisect dialog's Reset).
+ *
+ * Typed as RepositoryState so a typo or a renamed state is a compile error.
+ */
+const ABORTABLE_STATES: readonly RepositoryState[] = [
+  'cherrypick',
+  'merge',
+  'rebase',
+  'rebase-interactive',
+  'rebase-merge',
+  'revert',
+];
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -61,7 +81,7 @@ import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dia
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
-import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
+import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
 import * as gitService from './services/git.service.ts';
@@ -74,6 +94,7 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
+import { confirmGarbageCollection, confirmPrune } from './utils/maintenance-confirms.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -1934,8 +1955,7 @@ export class AppShell extends LitElement {
 
     // Reject an unabortable state BEFORE prompting — otherwise the user
     // confirms a destructive action that was never going to run.
-    const ABORTABLE = ['cherrypick', 'merge', 'rebase', 'rebase-interactive', 'rebase-merge', 'revert'];
-    if (!ABORTABLE.includes(state)) {
+    if (!ABORTABLE_STATES.includes(state)) {
       showToast(`Cannot abort operation: ${state}`, 'error');
       return;
     }
@@ -1971,9 +1991,15 @@ export class AppShell extends LitElement {
         case 'rebase-merge':
           result = await gitService.abortRebase({ path });
           break;
-        default:
+        case 'revert':
           result = await gitService.abortRevert({ path });
           break;
+        default:
+          // Unreachable while ABORTABLE_STATES gates entry above. Kept explicit
+          // so that adding a state to that list without adding a case here
+          // fails loudly instead of silently running an unrelated abort.
+          showToast(`Cannot abort operation: ${state}`, 'error');
+          return;
       }
 
       if (result.success) {
@@ -3431,53 +3457,56 @@ export class AppShell extends LitElement {
   private async handleRunGc(aggressive = false): Promise<void> {
     if (!this.activeRepository) return;
 
-    // GC prunes unreachable objects, which is exactly the set that keeps
-    // dropped stashes, deleted branches, amended commits and hard resets
-    // recoverable. From the command palette this is two keystrokes, so it needs
-    // the same gate every other destructive palette entry has.
-    const confirmed = await showConfirm(
-      aggressive ? 'Run Garbage Collection (Aggressive)' : 'Run Garbage Collection',
-      'This permanently removes unreachable objects. Work recoverable only ' +
-        'through the reflog — dropped stashes, deleted branches, amended ' +
-        'commits — will become unrecoverable. Continue?',
-      'warning'
+    // Pinned before the confirm await, like every other destructive handler —
+    // and because reading it afterwards would also re-dereference a possibly
+    // null activeRepository inside a floating promise.
+    const repoPath = this.activeRepository.repository.path;
+
+    // Shared with the Repository Health dialog so the two surfaces that reach
+    // this command cannot drift apart on whether it is gated.
+    if (!(await confirmGarbageCollection(aggressive))) return;
+
+    const result = await gitService.runGc({ path: repoPath, aggressive });
+    showToast(
+      result.success
+        ? aggressive
+          ? 'Aggressive garbage collection completed'
+          : 'Garbage collection completed'
+        : `Garbage collection failed: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'error'
     );
-
-    if (!confirmed) return;
-
-    await gitService.runGc({
-      path: this.activeRepository.repository.path,
-      aggressive,
-    });
   }
 
   private async handleRunFsck(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.runFsck({
-      path: this.activeRepository.repository.path,
-      full: true,
-    });
+
+    const repoPath = this.activeRepository.repository.path;
+    const result = await gitService.runFsck({ path: repoPath, full: true });
+
+    // Reporting IS this command's purpose — without a toast the palette entry
+    // does nothing observable at all.
+    showToast(
+      result.success
+        ? 'Repository integrity check completed — no issues found'
+        : `Repository integrity check found issues: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'warning'
+    );
   }
 
   private async handleRunPrune(): Promise<void> {
     if (!this.activeRepository) return;
 
-    // Same irreversibility as GC — see handleRunGc. `Ctrl+P → "prune" → Enter`
-    // must not be a shorter path to destroying the reflog safety net than any
-    // of the operations that net exists to protect.
-    const confirmed = await showConfirm(
-      'Prune Unreachable Objects',
-      'This permanently deletes unreachable objects. Work recoverable only ' +
-        'through the reflog — dropped stashes, deleted branches, amended ' +
-        'commits — will become unrecoverable. Continue?',
-      'warning'
+    const repoPath = this.activeRepository.repository.path;
+
+    if (!(await confirmPrune())) return;
+
+    const result = await gitService.runPrune({ path: repoPath });
+    showToast(
+      result.success
+        ? 'Pruned unreachable objects'
+        : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'error'
     );
-
-    if (!confirmed) return;
-
-    await gitService.runPrune({
-      path: this.activeRepository.repository.path,
-    });
   }
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
@@ -3671,7 +3700,7 @@ export class AppShell extends LitElement {
                                 </button>
                               `
                             : ''}
-                          ${this.activeRepository.repository.state !== 'clean'
+                          ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
                                 <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
                                   Abort

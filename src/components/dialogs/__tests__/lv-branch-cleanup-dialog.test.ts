@@ -355,6 +355,21 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(warningBadge!.textContent).to.include('Warning');
     });
 
+    it('merged branch with no upstream stays .risk-badge.safe', async () => {
+      // The backend proved it merged (graph_descendant_of) to put it in the
+      // 'merged' category; a missing upstream comparison must not override that
+      // and label it risky.
+      const mergedNoUpstream = createCandidate('feature/done', 'merged', {
+        aheadBehind: null,
+        upstream: null,
+      });
+      const el = await renderAndOpen([mergedNoUpstream]);
+
+      const safeBadge = el.shadowRoot!.querySelector('.risk-badge.safe');
+      expect(safeBadge, 'merged branch must stay safe').to.not.be.null;
+      expect(safeBadge!.textContent).to.include('Safe');
+    });
+
     it('branch with unmeasurable divergence shows .risk-badge.warning, not "safe"', async () => {
       // aheadBehind is null when the backend could not compare at all — a
       // branch that neither tracks an upstream nor is gone. Treating that as
@@ -545,6 +560,58 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
       expect(deleteBtn).to.not.be.null;
       expect(deleteBtn.disabled).to.be.true;
+    });
+
+    it('does NOT force-delete a branch whose divergence could not be measured', async () => {
+      // Regression guard. `force` must not be derived from the risk LABEL:
+      // a branch is labelled 'warning' precisely BECAUSE its ahead/behind is
+      // unknown, and force-deleting it bypasses delete_branch's merged-check —
+      // turning the backend's safe refusal into permanent commit loss.
+      const unknownDivergence = createCandidate('spike/old-idea', 'stale', {
+        aheadBehind: null,
+        upstream: null,
+      });
+      const el = await renderAndOpen([unknownDivergence]);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const staleTab = Array.from(tabs).find((t) => t.textContent!.includes('Stale'));
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+
+      const checkbox = el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement;
+      checkbox.click();
+      await settle(el);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const calls = findCommands('delete_branch');
+      expect(calls, 'delete_branch invoked').to.have.length(1);
+      expect(
+        (calls[0].args as { force?: boolean }).force,
+        'unknown divergence must fall through to the backend merged-check',
+      ).to.not.equal(true);
+    });
+
+    it('force-deletes only when unpushed commits were actually measured', async () => {
+      const el = await renderAndOpen([mergedWarning]);
+
+      const checkbox = el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement;
+      checkbox.click();
+      await settle(el);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const calls = findCommands('delete_branch');
+      expect(calls).to.have.length(1);
+      expect((calls[0].args as { force?: boolean }).force).to.equal(true);
     });
 
     it('clicking delete calls delete_branch for each selected branch', async () => {

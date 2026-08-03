@@ -7,6 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
 
@@ -495,11 +496,28 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async handlePrune(): Promise<void> {
+    // Captured BEFORE the confirm await: this dialog is bound to the active
+    // repository and rebinds live on a tab switch.
+    const repoPath = this.repositoryPath;
+
+    // `git lfs prune` deletes local LFS objects that recent commits don't
+    // reference. Unless lfs.pruneverifyremotealways is configured it does not
+    // verify the objects exist on the remote first, so blobs from a commit that
+    // was never pushed can be deleted with no copy left anywhere.
+    const confirmed = await showConfirm(
+      'Prune LFS Files',
+      'This permanently deletes local LFS objects that recent commits do not ' +
+        'reference. Objects that were never pushed cannot be recovered. Continue?',
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPrune(this.repositoryPath);
+    const result = await gitService.lfsPrune(repoPath);
 
     if (result.success) {
       this.success = result.data || 'LFS files pruned';

@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { confirmGarbageCollection, confirmPrune } from '../../utils/maintenance-confirms.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -326,11 +327,19 @@ export class LvRepositoryHealthDialog extends LitElement {
   private async runGc(aggressive: boolean): Promise<void> {
     if (!this.repositoryPath || this.runningAction) return;
 
+    // Pinned before the confirm await: this dialog is bound to the active
+    // repository and rebinds live on a tab switch.
+    const repoPath = this.repositoryPath;
+
+    // Same gate as the command palette (shared helper) — this dialog reaches
+    // the identical irreversible command and must not be the unguarded route.
+    if (!(await confirmGarbageCollection(aggressive))) return;
+
     this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
 
     try {
       const result = await gitService.runGc({
-        path: this.repositoryPath,
+        path: repoPath,
         aggressive,
       });
 
@@ -369,11 +378,15 @@ export class LvRepositoryHealthDialog extends LitElement {
   private async runPrune(): Promise<void> {
     if (!this.repositoryPath || this.runningAction) return;
 
+    const repoPath = this.repositoryPath;
+
+    if (!(await confirmPrune())) return;
+
     this.runningAction = 'prune';
 
     try {
       const result = await gitService.runPrune({
-        path: this.repositoryPath,
+        path: repoPath,
       });
 
       if (result.success) {
