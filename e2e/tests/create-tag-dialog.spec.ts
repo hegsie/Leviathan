@@ -256,7 +256,13 @@ test.describe('Create Tag Dialog', () => {
     const messageTextarea = dialog.locator('#message-input');
     await messageTextarea.fill('Duplicate tag');
 
+    // Assert the field actually took the value before clicking. The button is
+    // disabled while the name is empty, so a lost fill() surfaced as a 30s
+    // timeout on a disabled button rather than saying what went wrong.
+    await expect(nameInput).toHaveValue('v1.0.0');
+
     const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
+    await expect(createBtn).toBeEnabled();
     await createBtn.click();
 
     const errorMessage = dialog.locator('.error-message');
