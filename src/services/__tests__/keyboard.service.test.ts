@@ -325,6 +325,50 @@ describe('registerDefaultShortcuts', () => {
       }
     });
 
+    // Space reports ' ' shifted or not, so shift is NOT redundant there — the
+    // first version of this rule collapsed them and made Shift+Space unbindable.
+    it('keeps shift significant for Space', () => {
+      let plain = 0;
+      let shifted = 0;
+      keyboardService.register('test-space', {
+        key: ' ', action: () => { plain++; }, description: 'space', category: 'Test',
+      });
+      keyboardService.register('test-shift-space', {
+        key: ' ', shift: true, action: () => { shifted++; }, description: 'shift space', category: 'Test',
+      });
+
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', shiftKey: false }));
+        expect(plain, 'Space').to.equal(1);
+        expect(shifted, 'Shift+Space must not fire on plain Space').to.equal(0);
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', shiftKey: true }));
+        expect(shifted, 'Shift+Space').to.equal(1);
+        expect(plain, 'Space must not fire again').to.equal(1);
+      } finally {
+        keyboardService.unregister('test-space');
+        keyboardService.unregister('test-shift-space');
+      }
+    });
+
+    // Accented and non-Latin letters have case, so shift stays significant.
+    it('keeps shift significant for non-ASCII letters', () => {
+      let plain = 0;
+      keyboardService.register('test-umlaut', {
+        key: 'ü', action: () => { plain++; }, description: 'umlaut', category: 'Test',
+      });
+
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ü', shiftKey: true }));
+        expect(plain, 'Shift+ü must not fire the plain ü binding').to.equal(0);
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ü', shiftKey: false }));
+        expect(plain, 'plain ü').to.equal(1);
+      } finally {
+        keyboardService.unregister('test-umlaut');
+      }
+    });
+
     // Letters must keep the distinction: shift+a and a are different bindings.
     it('keeps shift significant for letter shortcuts', () => {
       let plain = 0;

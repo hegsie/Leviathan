@@ -31,7 +31,9 @@ export default tseslint.config(
     // Enforced rather than remembered: the overlay stack's membership was a
     // hand-written list once, and it went stale in the same round it was
     // written. See eslint-rules/overlay-stack-membership.mjs.
-    files: ['src/components/dialogs/*.ts'],
+    // Every component, not just dialogs: lv-toolbar owns a document capture
+    // Escape handler that stopPropagation()s, and sat outside the old glob.
+    files: ['src/components/**/*.ts'],
     plugins: { leviathan: { rules: { 'overlay-stack-membership': overlayStackMembership } } },
     rules: {
       'leviathan/overlay-stack-membership': 'error',

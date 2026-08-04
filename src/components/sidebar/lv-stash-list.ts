@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { Stash } from '../../types/git.types.ts';
+import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 interface ContextMenuState {
   visible: boolean;
@@ -179,6 +180,9 @@ export class LvStashList extends LitElement {
   };
 
   private handleKeydown = (e: KeyboardEvent): void => {
+    // A context menu must not eat an Escape aimed at a dialog opened over
+    // it: every global keydown listener fires on the same keypress.
+    if (!isTopOverlay(this)) return;
     if (e.key === 'Escape' && this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }

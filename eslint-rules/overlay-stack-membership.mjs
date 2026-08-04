@@ -22,9 +22,11 @@ const rule = {
     schema: [],
     messages: {
       missingPush:
-        'This dialog adds a document-level keydown listener but never calls pushOverlay(). ' +
-        'A dialog opened over another one will then dismiss BOTH on a single Escape. ' +
-        'Register with src/utils/overlay-stack.ts (push on open, remove on close and disconnect).',
+        'This component dismisses on Escape from a global keydown listener but never ' +
+        'consults isTopOverlay(). Every such listener fires on the same keypress, so a ' +
+        'dialog opened over this one will dismiss BOTH. Gate the Escape branch on ' +
+        'isTopOverlay(this) from src/utils/overlay-stack.ts; if this component is itself ' +
+        'an overlay, also push on open and remove on close and disconnect.',
       missingRemove:
         'This dialog calls pushOverlay() but never removeOverlay(). A leaked entry sits on ' +
         'top of the stack forever and takes Escape away from every dialog below it.',
@@ -36,6 +38,8 @@ const rule = {
     if (filename.endsWith('lv-modal.ts')) return {};
 
     let addsDocumentKeydown = false;
+    let handlesEscape = false;
+    let consultsStack = false;
     let pushes = false;
     let removes = false;
     let firstNode = null;
@@ -49,7 +53,10 @@ const rule = {
         if (
           callee.type === 'MemberExpression' &&
           callee.object.type === 'Identifier' &&
-          callee.object.name === 'document' &&
+          // `window` counts too. The first version matched only `document`,
+          // so a window+capture listener — which pre-empts every document
+          // listener in the app — sailed straight past the rule.
+          (callee.object.name === 'document' || callee.object.name === 'window') &&
           callee.property.type === 'Identifier' &&
           callee.property.name === 'addEventListener' &&
           node.arguments[0]?.type === 'Literal' &&
@@ -59,9 +66,17 @@ const rule = {
         }
         if (callee.type === 'Identifier' && callee.name === 'pushOverlay') pushes = true;
         if (callee.type === 'Identifier' && callee.name === 'removeOverlay') removes = true;
+        if (callee.type === 'Identifier' && callee.name === 'isTopOverlay') consultsStack = true;
+      },
+      Literal(node) {
+        if (node.value === 'Escape') handlesEscape = true;
       },
       'Program:exit'() {
-        if (addsDocumentKeydown && !pushes) {
+        // The invariant is about DISMISSAL, not about listening. A component
+        // that listens for navigation keys only (j/k, arrows) is not an
+        // overlay and must not be dragged into the stack; one that acts on
+        // Escape must first check that the key is aimed at it.
+        if (addsDocumentKeydown && handlesEscape && !consultsStack) {
           context.report({ node: firstNode, messageId: 'missingPush' });
         }
         if (pushes && !removes) {

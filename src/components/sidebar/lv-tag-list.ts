@@ -13,6 +13,7 @@ import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import '../dialogs/lv-create-tag-dialog.ts';
 import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
+import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
 
@@ -369,6 +370,9 @@ export class LvTagList extends LitElement {
   };
 
   private handleKeydown = (e: KeyboardEvent): void => {
+    // A context menu must not eat an Escape aimed at a dialog opened over
+    // it: every global keydown listener fires on the same keypress.
+    if (!isTopOverlay(this)) return;
     if (e.key === 'Escape' && this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }

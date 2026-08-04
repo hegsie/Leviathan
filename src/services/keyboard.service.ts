@@ -120,7 +120,14 @@ class KeyboardService {
     // depending on the layout — and made the "?" shortcut match only when the
     // event happened to carry shiftKey. Letters and digits still need it,
     // since "shift+a" and "a" are genuinely different bindings.
-    const shiftIsRedundant = key.length === 1 && !/[a-z0-9]/.test(key);
+    // Caselessness, not "non-alphanumeric". The ASCII test this replaced was
+    // true for ' ' — collapsing Shift+Space onto Space and making Shift+Space
+    // unbindable — and for every accented or non-Latin letter, so Shift+ü and
+    // ü collided too. A character with no case distinction is one whose shift
+    // state is already baked into the character; Space is the exception, since
+    // shifted and unshifted both report ' '.
+    const shiftIsRedundant =
+      key.length === 1 && key !== ' ' && key.toUpperCase() === key.toLowerCase();
 
     const parts: string[] = [];
     if (ctrl || meta) parts.push('mod');

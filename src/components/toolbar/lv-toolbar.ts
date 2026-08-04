@@ -22,6 +22,7 @@ import './lv-search-bar.ts';
 import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
+import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-toolbar')
 export class LvToolbar extends LitElement {
@@ -703,6 +704,11 @@ export class LvToolbar extends LitElement {
   // Close the tab menus on Escape, matching the other context menus in the
   // app (e.g. lv-file-status). Registered only while a menu is open.
   private handleMenuEscape = (e: KeyboardEvent): void => {
+    // Capture phase on `document` runs before every dialog's listener, and
+    // this handler calls stopPropagation() — so without this check, closing
+    // the tab menu swallowed an Escape aimed at whatever dialog was open on
+    // top, and that dialog simply stopped responding to the key.
+    if (!isTopOverlay(this)) return;
     if (e.key === 'Escape') {
       e.stopPropagation();
       this.tabListAnchor = null;

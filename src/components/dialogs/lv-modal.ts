@@ -129,6 +129,19 @@ export class LvModal extends LitElement {
 
   private previouslyFocused: HTMLElement | null = null;
 
+  /**
+   * True when focus already sits inside this modal, following shadow
+   * boundaries. `document.activeElement` only ever names the outermost host,
+   * so a slotted input reads as its own dialog element, not as the input.
+   */
+  private containsDeepActiveElement(): boolean {
+    let el: Element | null = document.activeElement;
+    while (el?.shadowRoot?.activeElement) {
+      el = el.shadowRoot.activeElement;
+    }
+    return !!el && el !== document.body && this.contains(el);
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
       this.close();
@@ -210,6 +223,15 @@ export class LvModal extends LitElement {
         this.previouslyFocused = document.activeElement as HTMLElement;
         // Focus the dialog after render
         requestAnimationFrame(() => {
+          // Do not override a host that already focused something of its own.
+          // getFocusableElements queries this shadow root BEFORE walking the
+          // slot, so index 0 is our own header close button — and this rAF
+          // lands after a host's microtask focus, so it was silently stealing
+          // focus from every slotted field. lv-prompt-dialog focused its text
+          // input and lost it every time: typing a branch rename went to the
+          // global shortcut handler instead, where "s" ran Stage All Changes.
+          if (this.containsDeepActiveElement()) return;
+
           const dialog = this.shadowRoot?.querySelector('.dialog') as HTMLElement;
           if (dialog) {
             const focusable = this.getFocusableElements(dialog);

@@ -15,6 +15,7 @@ import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase
 import '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
+import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type BranchSortMode = 'name' | 'date' | 'date-asc';
 
@@ -661,6 +662,9 @@ export class LvBranchList extends LitElement {
   };
 
   private handleKeydown = (e: KeyboardEvent): void => {
+    // A context menu must not eat an Escape aimed at a dialog opened over
+    // it: every global keydown listener fires on the same keypress.
+    if (!isTopOverlay(this)) return;
     if (e.key === 'Escape' && this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }

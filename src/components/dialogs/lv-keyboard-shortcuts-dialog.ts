@@ -375,8 +375,10 @@ export class LvKeyboardShortcutsDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    // Handle recording mode
-    if (this.editingId) {
+    // Handle recording mode. Gated on `open` as well as editingId: close()
+    // cancels recording, but a stale flag must never let a closed dialog eat
+    // keystrokes and rewrite bindings.
+    if (this.editingId && this.open) {
       e.preventDefault();
       e.stopPropagation();
 
@@ -464,6 +466,14 @@ export class LvKeyboardShortcutsDialog extends LitElement {
   }
 
   private close(): void {
+    // Recording MUST be cancelled here. The recording branch of handleKeyDown
+    // is gated on editingId alone, and this element is rendered
+    // unconditionally, so its document listener stays live forever. Dismissing
+    // mid-recording via the x or the backdrop (neither of which went through
+    // cancelEditing) left editingId set — and every subsequent keystroke
+    // anywhere in the app was then swallowed AND silently rebound that
+    // shortcut, persisted to localStorage, with no dialog on screen to show it.
+    this.cancelEditing();
     this.open = false;
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }
