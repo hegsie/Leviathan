@@ -149,6 +149,10 @@ export class LvCreateBranchDialog extends LitElement {
   @query('#branch-name-input') private inputEl!: HTMLInputElement;
 
   public open(startPoint?: string): void {
+    // Branch creation already in flight owns this component; reset() would
+    // clear `isCreating` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isCreating) return;
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;

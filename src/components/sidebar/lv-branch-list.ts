@@ -596,11 +596,16 @@ export class LvBranchList extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     this.loadHiddenBranches();
-    await this.loadBranches();
+    // Registered BEFORE the load, not after. loadBranches() awaits three IPC
+    // round-trips, and every event dispatched in that window was dropped on
+    // the floor: the command palette's "Clean up branches" silently did
+    // nothing, and a repository-refresh raised during initial load was lost.
+    // None of these handlers depend on branch data being present.
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
+    await this.loadBranches();
     // Close our OWN embedded interactive-rebase dialog when its pinned repo's
     // tab is closed — mirrors app-shell's guard for the app-level dialogs.
     // Without it, the dialog (kept alive across refreshes by the single

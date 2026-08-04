@@ -83,6 +83,7 @@ import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-man
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
 import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
+import type { LvRepositoryHealthDialog } from './components/dialogs/lv-repository-health-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -177,6 +178,18 @@ export class AppShell extends LitElement {
         background: var(--color-bg-secondary);
         border-right: 1px solid var(--color-border);
         overflow: hidden;
+      }
+
+      /* Hidden, NOT unmounted. The panel owns the interactive-rebase,
+         branch-cleanup and create-branch dialogs; removing it from the
+         template tore down an in-progress rebase plan on Ctrl+B, and worse,
+         detached the subtree mid-execute, so the open-conflict-dialog event
+         it raises on REBASE_CONFLICT never reached app-shell's listener and
+         the repo was left mid-rebase with no conflict dialog. Keeping it
+         mounted also means lv-branch-list's window listeners stay registered. */
+      .left-panel.hidden,
+      .resize-handle-h.hidden {
+        display: none;
       }
 
       .center-panel {
@@ -630,7 +643,6 @@ export class AppShell extends LitElement {
   @state() private showLfs = false;
 
   // Changelog dialog
-  @state() private showChangelog = false;
 
   // GPG dialog
   @state() private showGpg = false;
@@ -710,6 +722,7 @@ export class AppShell extends LitElement {
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
   @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
+  @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -1186,6 +1199,33 @@ export class AppShell extends LitElement {
         showToast('The repository tab was closed — remote management closed', 'warning');
       }
 
+      // The remaining pinned dialogs, swept the same way. Every one of these
+      // exposes pinnedRepositoryPathIfOpen but nothing read it, so Repository
+      // Health would still run `git gc --aggressive`, and the worktree /
+      // submodule dialogs still remove, against a repo whose tab is gone.
+      // Driven off the DOM element so a dialog cannot be added to the app and
+      // silently miss the sweep.
+      const pinnedFlagDialogs: Array<[string, () => void, string]> = [
+        ['lv-repository-health-dialog', () => { this.showRepositoryHealth = false; }, 'repository health closed'],
+        ['lv-worktree-dialog', () => { this.showWorktrees = false; }, 'worktrees closed'],
+        ['lv-submodule-dialog', () => { this.showSubmodules = false; }, 'submodules closed'],
+        ['lv-lfs-dialog', () => { this.showLfs = false; }, 'Git LFS closed'],
+        ['lv-gpg-dialog', () => { this.showGpg = false; }, 'signing settings closed'],
+        ['lv-config-dialog', () => { this.showConfig = false; }, 'configuration closed'],
+        ['lv-credentials-dialog', () => { this.showCredentials = false; }, 'credentials closed'],
+        ['lv-hooks-dialog', () => { this.showHooksDialog = false; }, 'hooks closed'],
+      ];
+      for (const [tag, close, label] of pinnedFlagDialogs) {
+        const el = this.renderRoot.querySelector(tag) as
+          | (Element & { pinnedRepositoryPathIfOpen?: string | null })
+          | null;
+        const pinned = el?.pinnedRepositoryPathIfOpen ?? null;
+        if (pinned && !repoOpen(pinned)) {
+          close();
+          showToast(`The repository tab was closed — ${label}`, 'warning');
+        }
+      }
+
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the
       // click (e.g. a merge run in an external terminal) hits the diff view's
@@ -1565,38 +1605,55 @@ export class AppShell extends LitElement {
   }
 
   /**
-   * True when any dialog rendering a blocking overlay is open. Those dialogs
-   * handle their own Escape, so handleCloseOverlay must not keep walking its
-   * chain and dismiss something behind them. Excludes the flags that already
-   * have their own arm in that chain (shortcuts, command palette, reflog).
+   * True when any dialog is showing a blocking overlay.
+   *
+   * Asks the DOM rather than enumerating flags. The previous hand-maintained
+   * list drifted immediately: it covered only the flag-driven dialogs, so the
+   * seven opened by an .open() method call (cherry-pick, interactive-rebase,
+   * create-tag, create-branch, clone, init, changelog) still leaked Escape
+   * through to close the diff behind them — and it carried a `showChangelog`
+   * entry that is never set true, which is exactly why the list LOOKED
+   * complete. A dialog is open if it reflects `open` on its host (the
+   * self-overlay dialogs) or wraps an open lv-modal.
    */
   private hasModalDialogOpen(): boolean {
-    return (
-      this.showSettings ||
-      this.showConflictDialog ||
-      this.showRemotes ||
-      this.showClean ||
-      this.showRepositoryHealth ||
-      this.showBisect ||
-      this.showSubmodules ||
-      this.showWorktrees ||
-      this.showLfs ||
-      this.showChangelog ||
-      this.showGpg ||
-      this.showSsh ||
-      this.showConfig ||
-      this.showCredentials ||
-      this.showGitHub ||
-      this.showGitLab ||
-      this.showBitbucket ||
-      this.showAzureDevOps ||
-      this.showOidc ||
-      this.showProfileManager ||
-      this.showMigrationDialog ||
-      this.showWorkspaceManager ||
-      this.showHooksDialog
-    );
+    for (const el of this.renderRoot.querySelectorAll('*')) {
+      const tag = el.tagName;
+      if (!tag.startsWith('LV-') || !tag.endsWith('-DIALOG')) continue;
+      if (el.hasAttribute('open')) return true;
+      const modal = el.shadowRoot?.querySelector('lv-modal');
+      if (modal?.hasAttribute('open')) return true;
+    }
+    // The sidebar owns three more (interactive-rebase, branch-cleanup,
+    // create-branch) inside its own shadow root, which the sweep above
+    // cannot see through.
+    const panel = this.renderRoot.querySelector('lv-left-panel');
+    for (const el of panel?.shadowRoot?.querySelectorAll('*') ?? []) {
+      const nested = el.shadowRoot?.querySelectorAll('*') ?? [];
+      for (const inner of nested) {
+        if (!inner.tagName.endsWith('-DIALOG')) continue;
+        if (inner.hasAttribute('open')) return true;
+        if (inner.shadowRoot?.querySelector('lv-modal')?.hasAttribute('open')) return true;
+      }
+    }
+    return false;
   }
+
+  /**
+   * Closing this dialog DESTROYS it (its whole block is behind a conditional),
+   * so a dismissal mid-gc leaves `git gc --aggressive` running with no surface
+   * and lets a reopened, freshly-constructed dialog start a second one. Refuse
+   * while an action is in flight and re-assert the modal, mirroring the
+   * in-flight guards on the clean and reflog dialogs.
+   */
+  private handleRepositoryHealthClose = (): void => {
+    if (this.repositoryHealthDialog?.isRunning) {
+      const modal = this.renderRoot.querySelector('lv-modal[modalTitle="Repository Health"]');
+      if (modal) (modal as HTMLElement & { open: boolean }).open = true;
+      return;
+    }
+    this.showRepositoryHealth = false;
+  };
 
   private handleCloseOverlay(): void {
     // Close any open overlay in priority order
@@ -3780,23 +3837,21 @@ export class AppShell extends LitElement {
             ></lv-context-dashboard>
 
             <div class="main-content">
-              ${this.leftPanelVisible ? html`
-                <aside
-                  class="left-panel"
-                  style="width: ${this.leftPanelWidth}px"
-                  @tag-selected=${this.handleTagSelected}
-                  @branch-selected=${this.handleBranchSelected}
-                  @repository-changed=${() => this.handleRefresh()}
-                  @create-tag=${() => this.createTagDialog?.open()}
-                >
-                  <lv-left-panel></lv-left-panel>
-                </aside>
+              <aside
+                class="left-panel ${this.leftPanelVisible ? '' : 'hidden'}"
+                style="width: ${this.leftPanelWidth}px"
+                @tag-selected=${this.handleTagSelected}
+                @branch-selected=${this.handleBranchSelected}
+                @repository-changed=${() => this.handleRefresh()}
+                @create-tag=${() => this.createTagDialog?.open()}
+              >
+                <lv-left-panel></lv-left-panel>
+              </aside>
 
-                <div
-                  class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''}"
-                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
-                ></div>
-              ` : ''}
+              <div
+                class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''} ${this.leftPanelVisible ? '' : 'hidden'}"
+                @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
+              ></div>
 
               <main id="main-content" class="center-panel" tabindex="-1">
                 ${this.activeRepository.repository.state !== 'clean' || this.hasConflictedFiles
@@ -4256,7 +4311,6 @@ export class AppShell extends LitElement {
       ${this.activeRepository ? html`
         <lv-changelog-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showChangelog = false; }}
         ></lv-changelog-dialog>
       ` : ''}
 
@@ -4264,11 +4318,11 @@ export class AppShell extends LitElement {
         <lv-modal
           modalTitle="Repository Health"
           ?open=${this.showRepositoryHealth}
-          @close=${() => { this.showRepositoryHealth = false; }}
+          @close=${this.handleRepositoryHealthClose}
         >
           <lv-repository-health-dialog
             .repositoryPath=${this.activeRepository.repository.path}
-            @close=${() => { this.showRepositoryHealth = false; }}
+            @close=${this.handleRepositoryHealthClose}
           ></lv-repository-health-dialog>
         </lv-modal>
       ` : ''}

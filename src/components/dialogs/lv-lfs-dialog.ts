@@ -387,11 +387,29 @@ export class LvLfsDialog extends LitElement {
   @state() private newPattern = '';
   @state() private showFiles = false;
 
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain now stops at the
+   * dialog layer (so a keypress cannot also close the diff behind it), which
+   * made Escape a completely dead key here. Dismiss like every sibling.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && this.open) {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.loadStatus();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   /**

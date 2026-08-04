@@ -187,6 +187,10 @@ export class LvInitDialog extends LitElement {
   @query('lv-modal') private modal!: LvModal;
 
   public open(): void {
+    // An init already in flight owns this component; reset() would
+    // clear `isInitializing` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isInitializing) return;
     this.reset();
     this.modal.open = true;
   }

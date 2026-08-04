@@ -233,6 +233,17 @@ export class LvRepositoryHealthDialog extends LitElement {
    */
   private pinnedRepoPath = '';
 
+  /**
+   * True while gc / prune / fsck is running. The host must refuse to close on
+   * it: this dialog is inside an `${cond ? html : ''}` block, so dismissing it
+   * DESTROYS the element rather than hiding it — an aggressive gc kept running
+   * with no surface, and reopening built a fresh element with runningAction
+   * null, re-enabling every button for a second concurrent gc on the same repo.
+   */
+  public get isRunning(): boolean {
+    return this.runningAction !== null;
+  }
+
   /** The repo this dialog is pinned to, for the host's tab-close sweep. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.pinnedRepoPath || null;

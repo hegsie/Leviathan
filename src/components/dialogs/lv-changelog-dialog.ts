@@ -172,8 +172,26 @@ export class LvChangelogDialog extends LitElement {
 
   @query('lv-modal') private modal!: HTMLElement & { open: boolean };
 
+  /**
+   * Repo captured at open. `repositoryPath` is live-bound to the ACTIVE
+   * repository and rebinds on a Ctrl+Tab this dialog's overlay does not block,
+   * so generating after a switch ran repo B against repo A's tag refs —
+   * an unresolvable-revision error, or worse a silently wrong changelog when
+   * both repos use conventional tags like v1.0.0.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.modal?.open ? this.pinnedRepoPath : null;
+  }
+
   public async open(): Promise<void> {
+    // A generation already running owns this component; reset() would clear
+    // isGenerating and re-enable Generate for a second concurrent run.
+    if (this.isGenerating) return;
     this.reset();
+    this.pinnedRepoPath = this.repositoryPath;
     (this.modal as HTMLElement & { open: boolean }).open = true;
     await this.loadTags();
     this.aiAvailable = await aiService.isAiAvailable();
@@ -192,7 +210,7 @@ export class LvChangelogDialog extends LitElement {
   }
 
   private async loadTags(): Promise<void> {
-    const result = await gitService.getTags(this.repositoryPath);
+    const result = await gitService.getTags(this.pinnedRepoPath);
     if (result.success && result.data) {
       this.tags = result.data;
       // Default baseRef to the second most recent tag (previous release)
@@ -217,7 +235,7 @@ export class LvChangelogDialog extends LitElement {
     this.result = '';
 
     const changelogResult = await aiService.generateChangelog(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       this.baseRef,
       this.compareRef,
     );

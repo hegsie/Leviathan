@@ -206,6 +206,10 @@ export class LvCreateTagDialog extends LitElement {
   @query('#tag-name-input') private inputEl!: HTMLInputElement;
 
   public open(targetRef?: string): void {
+    // Tag creation already in flight owns this component; reset() would
+    // clear `isCreating` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isCreating) return;
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;

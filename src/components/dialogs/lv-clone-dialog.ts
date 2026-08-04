@@ -193,6 +193,10 @@ export class LvCloneDialog extends LitElement {
   private unlistenProgress?: UnlistenFn;
 
   public open(): void {
+    // A clone already in flight owns this component; reset() would
+    // clear `isCloning` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isCloning) return;
     this.reset();
     this.destination = settingsStore.getState().defaultClonePath;
     this.modal.open = true;
