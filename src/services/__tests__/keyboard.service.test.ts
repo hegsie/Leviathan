@@ -1,5 +1,6 @@
 import { expect } from '@open-wc/testing';
 import type { Shortcut } from '../keyboard.service.ts';
+import { keyboardService } from '../keyboard.service.ts';
 
 // Clear localStorage before tests
 const STORAGE_KEY = 'leviathan-keyboard-settings';
@@ -163,10 +164,28 @@ describe('keyboard.service', () => {
   describe('setEnabled', () => {
     it('can disable keyboard shortcuts', async () => {
       const { keyboardService } = await import('../keyboard.service.ts');
-      keyboardService.setEnabled(false);
-      // When disabled, shortcuts shouldn't fire (tested via integration)
-      // Just verify the method exists and doesn't throw
-      expect(() => keyboardService.setEnabled(true)).to.not.throw;
+
+      let fired = 0;
+      keyboardService.register('test-disabled', {
+        key: 'y', action: () => { fired++; }, description: 'disabled probe', category: 'Test',
+      });
+
+      try {
+        keyboardService.setEnabled(false);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+        expect(fired, 'disabled shortcuts must not fire').to.equal(0);
+
+        // Re-enabled in the same test, and asserted. This used to be
+        // `expect(() => setEnabled(true)).to.not.throw` — a property access,
+        // never invoked — so the service was left DISABLED for every later
+        // test in this file, silently neutering any that dispatch a key.
+        keyboardService.setEnabled(true);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+        expect(fired, 'shortcuts fire again once re-enabled').to.equal(1);
+      } finally {
+        keyboardService.setEnabled(true);
+        keyboardService.unregister('test-disabled');
+      }
     });
   });
 
@@ -274,5 +293,61 @@ describe('registerDefaultShortcuts', () => {
     expect(descriptions).to.include('Push to remote');
     expect(descriptions).to.include('Create new branch');
     expect(descriptions).to.include('Create stash');
+  });
+
+  describe('shifted punctuation shortcuts', () => {
+    beforeEach(() => {
+      keyboardService.setEnabled(true);
+    });
+
+    // "?" cannot be typed without a modifier, and which modifier depends on the
+    // layout. Hashing the shift state into the binding made the shortcut match
+    // only when the event happened to carry shiftKey — so a keypress that
+    // produced the character still missed the binding.
+    it('fires a "?" shortcut whether or not the event carries shiftKey', () => {
+      let fired = 0;
+      keyboardService.register('test-question', {
+        key: '?',
+        shift: true,
+        action: () => { fired++; },
+        description: 'Test question mark',
+        category: 'Test',
+      });
+
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', shiftKey: true }));
+        expect(fired, 'with shiftKey').to.equal(1);
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', shiftKey: false }));
+        expect(fired, 'without shiftKey').to.equal(2);
+      } finally {
+        keyboardService.unregister('test-question');
+      }
+    });
+
+    // Letters must keep the distinction: shift+a and a are different bindings.
+    it('keeps shift significant for letter shortcuts', () => {
+      let plain = 0;
+      let shifted = 0;
+      keyboardService.register('test-plain', {
+        key: 'q', action: () => { plain++; }, description: 'plain', category: 'Test',
+      });
+      keyboardService.register('test-shifted', {
+        key: 'q', shift: true, action: () => { shifted++; }, description: 'shifted', category: 'Test',
+      });
+
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'q', shiftKey: false }));
+        expect(plain, 'plain q').to.equal(1);
+        expect(shifted, 'shifted must not fire').to.equal(0);
+
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'q', shiftKey: true }));
+        expect(shifted, 'shift+q').to.equal(1);
+        expect(plain, 'plain must not fire again').to.equal(1);
+      } finally {
+        keyboardService.unregister('test-plain');
+        keyboardService.unregister('test-shifted');
+      }
+    });
   });
 });

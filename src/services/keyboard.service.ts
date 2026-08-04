@@ -113,9 +113,18 @@ class KeyboardService {
     const meta = 'metaKey' in e ? e.metaKey : e.meta;
     const key = e.key.toLowerCase();
 
+    // For a single non-alphanumeric character the shift state is already
+    // encoded in the character itself: you cannot type "?" without whatever
+    // modifier your layout requires, and on some layouts that is not Shift at
+    // all. Including it would make the same keypress hash differently
+    // depending on the layout — and made the "?" shortcut match only when the
+    // event happened to carry shiftKey. Letters and digits still need it,
+    // since "shift+a" and "a" are genuinely different bindings.
+    const shiftIsRedundant = key.length === 1 && !/[a-z0-9]/.test(key);
+
     const parts: string[] = [];
     if (ctrl || meta) parts.push('mod');
-    if (shift) parts.push('shift');
+    if (shift && !shiftIsRedundant) parts.push('shift');
     if (alt) parts.push('alt');
     parts.push(key);
 
