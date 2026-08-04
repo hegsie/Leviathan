@@ -260,7 +260,15 @@ export class LvChangelogDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
+    // The `close` event this used to dispatch had no listener anywhere — the
+    // one binding was removed with the dead showChangelog flag. Rather than
+    // re-adding a no-op listener, this handler now does the job its siblings'
+    // do: lv-modal.close() clears `open` BEFORE dispatching, so dismissing
+    // mid-generation left the AI request running with no visible surface, and
+    // its result landed on a hidden dialog.
+    if (this.isGenerating) {
+      this.modal.open = true;
+    }
   }
 
   render() {

@@ -445,6 +445,28 @@ export class LvMigrationDialog extends LitElement {
     this.isLoading = false;
   }
 
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain stops at the dialog
+   * layer (so one keypress cannot also close the diff behind it), which left
+   * Escape completely dead here. handleClose already refuses mid-migration.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && this.open) {
+      this.handleClose();
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
   private handleClose(): void {
     if (this.viewMode === 'migrating') return; // Don't allow closing during migration
     this.open = false;

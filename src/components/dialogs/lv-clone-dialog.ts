@@ -204,6 +204,12 @@ export class LvCloneDialog extends LitElement {
 
   public close(): void {
     this.modal.open = false;
+    // Cleared HERE, not just on the failure paths. The success branch closes
+    // via setTimeout without clearing it, so `isCloning` stayed true for the
+    // life of the component — and open()'s re-entrancy guard returns before
+    // reset() can clear it, which made "Clone Repository" silently dead for
+    // the rest of the session after the first successful clone.
+    this.isCloning = false;
     this.cleanupListener();
   }
 

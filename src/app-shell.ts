@@ -84,6 +84,7 @@ import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
 import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
 import type { LvRepositoryHealthDialog } from './components/dialogs/lv-repository-health-dialog.ts';
+import type { LvChangelogDialog } from './components/dialogs/lv-changelog-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -723,6 +724,7 @@ export class AppShell extends LitElement {
   @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
   @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
+  @query('lv-changelog-dialog') private changelogDialog?: LvChangelogDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -1205,23 +1207,31 @@ export class AppShell extends LitElement {
       // submodule dialogs still remove, against a repo whose tab is gone.
       // Driven off the DOM element so a dialog cannot be added to the app and
       // silently miss the sweep.
-      const pinnedFlagDialogs: Array<[string, () => void, string]> = [
-        ['lv-repository-health-dialog', () => { this.showRepositoryHealth = false; }, 'repository health closed'],
-        ['lv-worktree-dialog', () => { this.showWorktrees = false; }, 'worktrees closed'],
-        ['lv-submodule-dialog', () => { this.showSubmodules = false; }, 'submodules closed'],
-        ['lv-lfs-dialog', () => { this.showLfs = false; }, 'Git LFS closed'],
-        ['lv-gpg-dialog', () => { this.showGpg = false; }, 'signing settings closed'],
-        ['lv-config-dialog', () => { this.showConfig = false; }, 'configuration closed'],
-        ['lv-credentials-dialog', () => { this.showCredentials = false; }, 'credentials closed'],
-        ['lv-hooks-dialog', () => { this.showHooksDialog = false; }, 'hooks closed'],
+      // Each closer returns whether it actually closed: Repository Health
+      // refuses while gc/prune is in flight (closing DESTROYS the element and
+      // would leave the operation running with no surface), so the sweep must
+      // not announce a dismissal that did not happen.
+      const pinnedFlagDialogs: Array<[string, () => boolean, string]> = [
+        ['lv-repository-health-dialog', () => {
+          if (this.repositoryHealthDialog?.isRunning) return false;
+          this.showRepositoryHealth = false;
+          return true;
+        }, 'repository health closed'],
+        ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
+        ['lv-submodule-dialog', () => { this.showSubmodules = false; return true; }, 'submodules closed'],
+        ['lv-lfs-dialog', () => { this.showLfs = false; return true; }, 'Git LFS closed'],
+        ['lv-gpg-dialog', () => { this.showGpg = false; return true; }, 'signing settings closed'],
+        ['lv-config-dialog', () => { this.showConfig = false; return true; }, 'configuration closed'],
+        ['lv-credentials-dialog', () => { this.showCredentials = false; return true; }, 'credentials closed'],
+        ['lv-hooks-dialog', () => { this.showHooksDialog = false; return true; }, 'hooks closed'],
+        ['lv-changelog-dialog', () => { this.changelogDialog?.close(); return true; }, 'changelog closed'],
       ];
       for (const [tag, close, label] of pinnedFlagDialogs) {
         const el = this.renderRoot.querySelector(tag) as
           | (Element & { pinnedRepositoryPathIfOpen?: string | null })
           | null;
         const pinned = el?.pinnedRepositoryPathIfOpen ?? null;
-        if (pinned && !repoOpen(pinned)) {
-          close();
+        if (pinned && !repoOpen(pinned) && close()) {
           showToast(`The repository tab was closed — ${label}`, 'warning');
         }
       }
@@ -1418,7 +1428,7 @@ export class AppShell extends LitElement {
       search: () => this.handleToggleSearch(),
       openSettings: () => { this.showSettings = true; },
       openShortcuts: () => { this.showShortcuts = true; },
-      toggleLeftPanel: () => uiStore.getState().togglePanel('left'),
+      toggleLeftPanel: () => this.toggleLeftPanel(),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
       openReflog: () => { this.showReflog = true; },
@@ -1607,36 +1617,72 @@ export class AppShell extends LitElement {
   /**
    * True when any dialog is showing a blocking overlay.
    *
-   * Asks the DOM rather than enumerating flags. The previous hand-maintained
-   * list drifted immediately: it covered only the flag-driven dialogs, so the
-   * seven opened by an .open() method call (cherry-pick, interactive-rebase,
-   * create-tag, create-branch, clone, init, changelog) still leaked Escape
-   * through to close the diff behind them — and it carried a `showChangelog`
-   * entry that is never set true, which is exactly why the list LOOKED
-   * complete. A dialog is open if it reflects `open` on its host (the
-   * self-overlay dialogs) or wraps an open lv-modal.
+   * Walks every shadow root under app-shell rather than enumerating dialogs.
+   * Two earlier attempts drifted: a hand-written list of `show*` flags missed
+   * the seven dialogs opened by an .open() call, and a fixed two-level walk
+   * (renderRoot plus lv-left-panel) missed BOTH the toolbar's clone/init
+   * dialogs and the two dialogs wrapped by app-shell's OWN lv-modal — Settings
+   * and Repository Health, whose modal is their parent, not a child of their
+   * shadow root, and which declare no `open` property at all. Any fixed shape
+   * is the same bug waiting to happen, so this asks the whole tree: a blocking
+   * overlay is an open lv-modal anywhere, or a dialog reflecting `open`.
    */
   private hasModalDialogOpen(): boolean {
-    for (const el of this.renderRoot.querySelectorAll('*')) {
-      const tag = el.tagName;
-      if (!tag.startsWith('LV-') || !tag.endsWith('-DIALOG')) continue;
-      if (el.hasAttribute('open')) return true;
-      const modal = el.shadowRoot?.querySelector('lv-modal');
-      if (modal?.hasAttribute('open')) return true;
-    }
-    // The sidebar owns three more (interactive-rebase, branch-cleanup,
-    // create-branch) inside its own shadow root, which the sweep above
-    // cannot see through.
-    const panel = this.renderRoot.querySelector('lv-left-panel');
-    for (const el of panel?.shadowRoot?.querySelectorAll('*') ?? []) {
-      const nested = el.shadowRoot?.querySelectorAll('*') ?? [];
-      for (const inner of nested) {
-        if (!inner.tagName.endsWith('-DIALOG')) continue;
-        if (inner.hasAttribute('open')) return true;
-        if (inner.shadowRoot?.querySelector('lv-modal')?.hasAttribute('open')) return true;
+    const seen = new Set<ShadowRoot>();
+    const walk = (root: ShadowRoot | Element, depth: number): boolean => {
+      if (depth > 8) return false;
+      for (const el of root.querySelectorAll('*')) {
+        const tag = el.tagName;
+        if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
+        if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
+        const shadow = el.shadowRoot;
+        if (shadow && !seen.has(shadow)) {
+          seen.add(shadow);
+          if (walk(shadow, depth + 1)) return true;
+        }
       }
+      return false;
+    };
+    return walk(this.renderRoot as ShadowRoot, 0);
+  }
+
+  /**
+   * True when a dialog owned by the LEFT PANEL is open. Hiding the panel with
+   * one of those up makes it invisible without closing it — the overlay is
+   * inside the `display: none` subtree — while it still owns Escape, so the
+   * key goes dead app-wide with no visible cause.
+   */
+  private hasSidebarDialogOpen(): boolean {
+    const panel = this.renderRoot.querySelector('lv-left-panel');
+    if (!panel) return false;
+    const seen = new Set<ShadowRoot>();
+    const walk = (root: ShadowRoot | Element, depth: number): boolean => {
+      if (depth > 6) return false;
+      for (const el of root.querySelectorAll('*')) {
+        const tag = el.tagName;
+        if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
+        if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
+        const shadow = el.shadowRoot;
+        if (shadow && !seen.has(shadow)) {
+          seen.add(shadow);
+          if (walk(shadow, depth + 1)) return true;
+        }
+      }
+      return false;
+    };
+    return panel.shadowRoot ? walk(panel.shadowRoot, 0) : false;
+  }
+
+  /**
+   * Hiding the left panel is refused while it hosts an open dialog — see
+   * hasSidebarDialogOpen. Revealing it is always allowed.
+   */
+  private toggleLeftPanel(): void {
+    if (this.leftPanelVisible && this.hasSidebarDialogOpen()) {
+      showToast('Close the open dialog before hiding the sidebar', 'info');
+      return;
     }
-    return false;
+    uiStore.getState().togglePanel('left');
   }
 
   /**
@@ -3264,7 +3310,7 @@ export class AppShell extends LitElement {
         label: 'Toggle left panel',
         category: 'navigation',
         shortcut: `${mod}B`,
-        action: () => uiStore.getState().togglePanel('left'),
+        action: () => this.toggleLeftPanel(),
       },
       {
         id: 'toggle-right-panel',

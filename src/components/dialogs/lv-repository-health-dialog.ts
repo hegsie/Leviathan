@@ -612,7 +612,15 @@ export class LvRepositoryHealthDialog extends LitElement {
       </div>
 
       <div class="footer">
-        <button class="primary" @click=${this.handleClose}>Done</button>
+        <!-- Disabled while an action runs: the host refuses to close mid-gc
+             (closing destroys this element and would orphan the operation), so
+             an enabled Done was a button that silently did nothing. Every
+             sibling dialog with this guard disables its cancel control too. -->
+        <button
+          class="primary"
+          ?disabled=${!!this.runningAction}
+          @click=${this.handleClose}
+        >Done</button>
       </div>
     `;
   }
