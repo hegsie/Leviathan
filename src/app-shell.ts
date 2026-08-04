@@ -1219,7 +1219,20 @@ export class AppShell extends LitElement {
           // once the first finished.
           const running = this.repositoryHealthDialog?.isRunning ?? false;
           this.repositoryHealthDialog?.closeWhenIdle();
-          if (!running) this.showRepositoryHealth = false;
+          // The flag must never outlive the element. Its render block is also
+          // gated on activeRepository, so closing the LAST tab removes the
+          // element regardless of the deferral — leaving showRepositoryHealth
+          // true meant the dialog sprang open unbidden over the next repo the
+          // user opened, freshly constructed with every button re-enabled.
+          if (!running || state.openRepositories.length === 0) {
+            this.showRepositoryHealth = false;
+          }
+          if (running) {
+            showToast(
+              'The repository tab was closed — repository health will close when the current maintenance finishes',
+              'warning',
+            );
+          }
           return !running;
         }, 'repository health closed'],
         ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
@@ -1229,7 +1242,15 @@ export class AppShell extends LitElement {
         ['lv-config-dialog', () => { this.showConfig = false; return true; }, 'configuration closed'],
         ['lv-credentials-dialog', () => { this.showCredentials = false; return true; }, 'credentials closed'],
         ['lv-hooks-dialog', () => { this.showHooksDialog = false; return true; }, 'hooks closed'],
-        ['lv-changelog-dialog', () => { this.changelogDialog?.close(); return true; }, 'changelog closed'],
+        // close() here is a bare modal.open = false — it does NOT apply the
+        // in-flight re-assert handleModalClose does for Escape/overlay/x.
+        // Dismissing mid-generation hid a running AI call and then reported
+        // "changelog closed", which was simply untrue.
+        ['lv-changelog-dialog', () => {
+          if (this.changelogDialog?.generationInFlight) return false;
+          this.changelogDialog?.close();
+          return true;
+        }, 'changelog closed'],
       ];
       for (const [tag, close, label] of pinnedFlagDialogs) {
         const el = this.renderRoot.querySelector(tag) as
@@ -1620,35 +1641,43 @@ export class AppShell extends LitElement {
   }
 
   /**
+   * Walk a DOM subtree, descending through shadow roots, for a blocking
+   * overlay: any open lv-modal, or any dialog reflecting `open`.
+   */
+  private static containsOpenModal(
+    root: ParentNode,
+    seen: Set<ShadowRoot>,
+    depth = 0,
+  ): boolean {
+    if (depth > 10) return false;
+    for (const el of root.querySelectorAll('*')) {
+      const tag = el.tagName;
+      if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
+      if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
+      const shadow = el.shadowRoot;
+      if (shadow && !seen.has(shadow)) {
+        seen.add(shadow);
+        if (AppShell.containsOpenModal(shadow, seen, depth + 1)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * True when any dialog is showing a blocking overlay.
    *
-   * Walks every shadow root under app-shell rather than enumerating dialogs.
-   * Two earlier attempts drifted: a hand-written list of `show*` flags missed
-   * the seven dialogs opened by an .open() call, and a fixed two-level walk
-   * (renderRoot plus lv-left-panel) missed BOTH the toolbar's clone/init
-   * dialogs and the two dialogs wrapped by app-shell's OWN lv-modal — Settings
-   * and Repository Health, whose modal is their parent, not a child of their
-   * shadow root, and which declare no `open` property at all. Any fixed shape
-   * is the same bug waiting to happen, so this asks the whole tree: a blocking
-   * overlay is an open lv-modal anywhere, or a dialog reflecting `open`.
+   * Walks from document.body, not from this element. Two earlier attempts
+   * drifted by enumerating dialogs; the third fixed that but still hard-coded
+   * its ROOT as app-shell's renderRoot, which made lv-prompt-dialog invisible
+   * by construction — showPrompt appends that singleton to document.body, so
+   * it is app-shell's SIBLING. Escape then closed the diff behind an open
+   * prompt as soon as focus left its autofocused input (the keyboard service's
+   * composedPath bail only covers the input itself). Starting at the document
+   * subsumes app-shell, the sidebar, the toolbar and anything body-level, so
+   * the root is no longer a choice that can be wrong.
    */
   private hasModalDialogOpen(): boolean {
-    const seen = new Set<ShadowRoot>();
-    const walk = (root: ShadowRoot | Element, depth: number): boolean => {
-      if (depth > 8) return false;
-      for (const el of root.querySelectorAll('*')) {
-        const tag = el.tagName;
-        if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
-        if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
-        const shadow = el.shadowRoot;
-        if (shadow && !seen.has(shadow)) {
-          seen.add(shadow);
-          if (walk(shadow, depth + 1)) return true;
-        }
-      }
-      return false;
-    };
-    return walk(this.renderRoot as ShadowRoot, 0);
+    return AppShell.containsOpenModal(document.body, new Set<ShadowRoot>());
   }
 
   /**
@@ -1659,23 +1688,9 @@ export class AppShell extends LitElement {
    */
   private hasSidebarDialogOpen(): boolean {
     const panel = this.renderRoot.querySelector('lv-left-panel');
-    if (!panel) return false;
-    const seen = new Set<ShadowRoot>();
-    const walk = (root: ShadowRoot | Element, depth: number): boolean => {
-      if (depth > 6) return false;
-      for (const el of root.querySelectorAll('*')) {
-        const tag = el.tagName;
-        if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
-        if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
-        const shadow = el.shadowRoot;
-        if (shadow && !seen.has(shadow)) {
-          seen.add(shadow);
-          if (walk(shadow, depth + 1)) return true;
-        }
-      }
-      return false;
-    };
-    return panel.shadowRoot ? walk(panel.shadowRoot, 0) : false;
+    return panel?.shadowRoot
+      ? AppShell.containsOpenModal(panel.shadowRoot, new Set<ShadowRoot>())
+      : false;
   }
 
   /**
@@ -1712,23 +1727,17 @@ export class AppShell extends LitElement {
       this.showShortcuts = false;
     } else if (this.showCommandPalette) {
       this.showCommandPalette = false;
-    } else if (this.showReflog) {
-      // The keyboard service registers its own document-level Escape handler,
-      // so this path can flip the dialog's `open` binding without going
-      // through the dialog's dismiss() guard. Honour that guard here too:
-      // closing mid-reset hides a running operation whose success path then
-      // calls close() on whatever the user reopened. Swallow the Escape
-      // either way, so a blocked dismissal cannot fall through and close the
-      // diff sitting behind the dialog.
-      if (!this.reflogDialog?.isResetting) {
-        this.showReflog = false;
-      }
     } else if (this.hasModalDialogOpen()) {
-      // A modal dialog owns this Escape and dismisses itself — through
-      // lv-modal's own document handler, or its own keydown listener. Stop
-      // here so one Escape cannot ALSO close the diff sitting behind it, and
-      // so a dialog that deliberately BLOCKS dismissal mid-operation doesn't
-      // leak the keypress to the diff either.
+      // A modal owns this Escape and dismisses itself, through lv-modal's
+      // handler or its own — each now gated on being the TOPMOST overlay.
+      // Stop here so one keypress cannot also close the diff behind it, and
+      // so a dialog that deliberately blocks dismissal mid-operation does not
+      // leak the key either.
+      //
+      // This subsumes the old showReflog arm, which assumed reflog was always
+      // topmost: a dialog opened over it (via the palette) made Escape discard
+      // the reflog session underneath. The dialog's own handler applies the
+      // isResetting guard and its `close` event clears showReflog.
       return;
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };

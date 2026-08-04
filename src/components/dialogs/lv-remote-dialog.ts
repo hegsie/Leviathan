@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { Remote } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type DialogMode = 'list' | 'add' | 'edit' | 'rename';
 
@@ -399,6 +400,10 @@ export class LvRemoteDialog extends LitElement {
   }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
       await this.loadRemotes();
@@ -432,6 +437,9 @@ export class LvRemoteDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
       if (this.mode !== 'list') {
         this.resetForm();
@@ -448,6 +456,7 @@ export class LvRemoteDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 

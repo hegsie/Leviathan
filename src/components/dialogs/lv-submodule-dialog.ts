@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import type { Submodule } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -364,7 +365,10 @@ export class LvSubmoduleDialog extends LitElement {
    * made Escape a completely dead key here. Dismiss like every sibling.
    */
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && this.open) {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
       this.handleClose();
     }
   };
@@ -379,6 +383,7 @@ export class LvSubmoduleDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
@@ -398,6 +403,10 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
       this.mode = 'list';

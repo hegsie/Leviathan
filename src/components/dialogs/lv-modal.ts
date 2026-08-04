@@ -6,6 +6,7 @@
 import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-modal')
 export class LvModal extends LitElement {
@@ -142,6 +143,12 @@ export class LvModal extends LitElement {
     // looking at. The Tab trap below already guarded on `open`.
     if (!this.open) return;
 
+    // Only the topmost overlay owns Escape. Every dialog listens on
+    // `document`, so without this one keypress ran all of them — dismissing
+    // the command palette opened over another dialog dismissed that dialog
+    // too, discarding whatever the user had built there.
+    if (!isTopOverlay(this)) return;
+
     if (e.key === 'Escape') {
       this.close();
     }
@@ -192,10 +199,12 @@ export class LvModal extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.handleKeyDown);
+    removeOverlay(this);
   }
 
   updated(changedProperties: PropertyValues): void {
     if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
       if (this.open) {
         // Save the currently focused element for restoration
         this.previouslyFocused = document.activeElement as HTMLElement;

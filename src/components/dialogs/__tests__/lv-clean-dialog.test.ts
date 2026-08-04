@@ -5,6 +5,7 @@
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
+import { pushOverlay, removeOverlay, resetOverlayStack } from '../../../utils/overlay-stack.ts';
 
 let failingCommands: Set<string> = new Set();
 let cleanableEntries: unknown[] = [];
@@ -160,6 +161,36 @@ describe('lv-clean-dialog', () => {
       await new Promise(r => setTimeout(r, 0));
     }
   }
+
+  // Every dialog listens for Escape on `document`, so before the overlay stack
+  // one keypress ran all of them: dismissing the command palette opened over
+  // this dialog also dismissed this dialog, discarding the user's selection.
+  it('ignores Escape while another overlay is on top', async () => {
+    cleanableEntries = [
+      { path: 'a.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    // Something opens over it (the command palette registers the same way).
+    const palette = {};
+    pushOverlay(palette);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    expect(el.open, 'dialog underneath must survive the palette dismissal').to.be.true;
+
+    // Once the overlay above closes, Escape belongs to this dialog again.
+    removeOverlay(palette);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    expect(el.open, 'dialog closes once it is topmost').to.be.false;
+  });
 
   // `repositoryPath` is live-bound to the ACTIVE repository and rebinds the
   // instant the user Ctrl+Tabs — a document-level shortcut this dialog's

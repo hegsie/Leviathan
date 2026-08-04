@@ -197,6 +197,11 @@ export class LvChangelogDialog extends LitElement {
     this.aiAvailable = await aiService.isAiAvailable();
   }
 
+  /** True while the AI call is in flight, for the host's tab-close sweep. */
+  public get generationInFlight(): boolean {
+    return this.isGenerating;
+  }
+
   public close(): void {
     this.modal.open = false;
   }

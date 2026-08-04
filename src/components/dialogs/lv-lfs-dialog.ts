@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-lfs-dialog')
 export class LvLfsDialog extends LitElement {
@@ -394,7 +395,10 @@ export class LvLfsDialog extends LitElement {
    * made Escape a completely dead key here. Dismiss like every sibling.
    */
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && this.open) {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
       this.handleClose();
     }
   };
@@ -409,6 +413,7 @@ export class LvLfsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
@@ -428,6 +433,10 @@ export class LvLfsDialog extends LitElement {
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
       await this.loadStatus();

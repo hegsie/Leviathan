@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -440,7 +441,10 @@ export class LvBisectDialog extends LitElement {
    * the diff behind it while this stayed put.
    */
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && this.open && !this.loading) {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape' && !this.loading) {
       this.handleClose();
     }
   };
@@ -455,10 +459,15 @@ export class LvBisectDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     // `repositoryPath` is live-bound to the ACTIVE repository, and repo
     // switching (Ctrl+Tab / Ctrl+1-9) is a document-level shortcut that fires
     // straight through this dialog's own overlay. Without re-reading status on

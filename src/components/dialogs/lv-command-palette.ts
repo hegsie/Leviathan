@@ -8,6 +8,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { fuzzyScore, highlightMatch } from '../../utils/fuzzy-search.ts';
 import type { Branch, Commit } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay } from '../../utils/overlay-stack.ts';
 
 export interface PaletteCommand {
   id: string;
@@ -218,6 +219,12 @@ export class LvCommandPalette extends LitElement {
   }
 
   updated(changedProps: Map<string, unknown>): void {
+    // The palette opens OVER other dialogs, so it must take ownership of
+    // Escape while it is up — otherwise dismissing it also dismissed the
+    // dialog underneath, discarding whatever the user had built there.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
       this.searchQuery = '';
       this.selectedIndex = 0;

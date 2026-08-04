@@ -10,6 +10,7 @@ import { getHooks, getHook, saveHook, deleteHook, toggleHook } from '../../servi
 import type { GitHook } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 const HOOK_TEMPLATES: Record<string, string> = {
   'pre-commit': `#!/bin/sh
@@ -738,6 +739,10 @@ export class LvHooksDialog extends LitElement {
   }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
       this.pinnedRepoPath = this.repoPath;
       await this.loadHooks();
@@ -936,6 +941,9 @@ export class LvHooksDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
       if (this.confirmingDelete) {
         this.cancelDelete();
@@ -952,6 +960,7 @@ export class LvHooksDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
@@ -960,6 +969,11 @@ export class LvHooksDialog extends LitElement {
       const discard = await showConfirm('Unsaved Changes', 'You have unsaved changes. Discard them?', 'warning');
       if (!discard) return;
     }
+    // Cleared HERE: close() left them set, and the element stays mounted, so
+    // one discarded session made EVERY later Escape anywhere in the app pop
+    // the same native "Unsaved Changes" confirm out of nowhere.
+    this.hasUnsavedChanges = false;
+    this.confirmingDelete = null;
     this.open = false;
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }

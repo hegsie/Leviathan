@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -347,6 +348,10 @@ export class LvReflogDialog extends LitElement {
   }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
       // A prior operation may still be running against this component; its
       // completion handler will close the dialog, so do not start a fresh
@@ -382,15 +387,6 @@ export class LvReflogDialog extends LitElement {
   }
 
   /**
-   * True while a reset is in flight. Exposed so the app-shell-level Escape
-   * handler — a second, independent path that flips this dialog's `open`
-   * binding — can honour the same guard `dismiss()` applies.
-   */
-  public get isResetting(): boolean {
-    return this.resetting;
-  }
-
-  /**
    * User-initiated dismissal. Blocked while the operation is in flight:
    * closing mid-reset leaves it running with no visible surface, and when it
    * finishes its success path calls close() — yanking shut whatever session
@@ -409,6 +405,9 @@ export class LvReflogDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
       this.dismiss();
     }
@@ -422,6 +421,7 @@ export class LvReflogDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
   }
