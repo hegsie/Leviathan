@@ -657,8 +657,24 @@ export class LvGpgDialog extends LitElement {
     }
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadData();
     }
   }
@@ -669,8 +685,8 @@ export class LvGpgDialog extends LitElement {
     this.platform = getPlatform();
 
     const [configResult, keysResult] = await Promise.all([
-      gitService.getGpgConfig(this.repositoryPath),
-      gitService.getGpgKeys(this.repositoryPath),
+      gitService.getGpgConfig(this.pinnedRepoPath),
+      gitService.getGpgKeys(this.pinnedRepoPath),
     ]);
 
     if (configResult.success && configResult.data) {
@@ -737,7 +753,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setCommitSigning(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       !this.config.signCommits,
       this.globalScope
     );
@@ -760,7 +776,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setTagSigning(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       !this.config.signTags,
       this.globalScope
     );
@@ -781,7 +797,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setSigningKey(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       keyId,
       this.globalScope
     );

@@ -313,10 +313,17 @@ export class LvCreateTagDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    this.isOpen = false;
-    if (!this.isCreating) {
-      this.reset();
+    // Escape, the overlay and the × must honour the same rule as the disabled
+    // Cancel button. lv-modal.close() sets open=false BEFORE dispatching, and
+    // this handler additionally dropped `isOpen`, so tag creation carried on with
+    // no visible surface and reported failure into a hidden dialog.
+    if (this.isCreating) {
+      this.modal.open = true;
+      return;
     }
+
+    this.isOpen = false;
+    this.reset();
   }
 
   private get canCreate(): boolean {

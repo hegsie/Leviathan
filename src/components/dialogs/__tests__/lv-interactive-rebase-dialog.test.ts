@@ -494,6 +494,54 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       await el.updateComplete;
     });
 
+    // Cancel is disabled during execution, but Escape and the overlay reached
+    // lv-modal.close() directly — which sets open=false BEFORE dispatching, so
+    // the rebase carried on with no visible surface and wrote any failure into
+    // `error` on a hidden dialog. Reopening then called reset(), clearing
+    // `executing` and re-enabling Start Rebase for a second concurrent rebase.
+    it('cannot be dismissed while the rebase is executing', async () => {
+      let resolveExec!: (value: unknown) => void;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_rebase_commits':
+            return mockCommits;
+          case 'execute_interactive_rebase':
+            return new Promise((resolve) => { resolveExec = resolve; });
+          default:
+            return null;
+        }
+      };
+
+      const el = await createDialog();
+      await openAndWait(el);
+
+      (el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement).click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+      expect(modal.open, 'modal open while rebasing').to.be.true;
+
+      // Escape reaches lv-modal's own document listener.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+
+      expect(modal.open, 'modal stays open mid-rebase').to.be.true;
+
+      // And a second open() must not restart the session under the running one.
+      await el.open('main');
+      await el.updateComplete;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).executing, 'still executing after a re-open attempt').to.be.true;
+
+      resolveExec(undefined);
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+    });
+
     it('execute calls execute_interactive_rebase with correct path, onto, and todo string', async () => {
       const el = await createDialog();
       await openAndWait(el);

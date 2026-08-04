@@ -349,9 +349,17 @@ export class LvCloneDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    if (!this.isCloning) {
-      this.reset();
+    // Cancel is disabled while isCloning is in flight; Escape, the overlay and the
+    // × must honour the same rule. lv-modal.close() sets open=false BEFORE
+    // dispatching, so without re-asserting it here the clone kept running with no
+    // visible surface — and reported any failure into `error` on a hidden
+    // dialog. Mirrors lv-branch-cleanup-dialog.handleModalClose.
+    if (this.isCloning) {
+      this.modal.open = true;
+      return;
     }
+
+    this.reset();
   }
 
   private get fullPath(): string {

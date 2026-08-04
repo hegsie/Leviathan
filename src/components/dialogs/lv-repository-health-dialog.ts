@@ -221,25 +221,43 @@ export class LvRepositoryHealthDialog extends LitElement {
   @state() private runningAction: string | null = null;
   @state() private stats: HealthStats | null = null;
 
+  /**
+   * Repo captured when the dialog opened. app-shell recreates this element on
+   * every open, so connectedCallback IS the open moment. `repositoryPath` is
+   * live-bound to the ACTIVE repository and rebinds the instant the user
+   * Ctrl+Tabs — a document-level shortcut this dialog's overlay does not
+   * block — while the stats on screen still describe the repo that was active
+   * at open. Reading the live prop ran `git gc`/`git prune` against a
+   * different repository than the one whose loose-object count justified it,
+   * destroying unreachable objects the user never chose to expire.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to, for the host's tab-close sweep. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.pinnedRepoPath || null;
+  }
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.pinnedRepoPath = this.repositoryPath;
     await this.loadHealthStats();
   }
 
   private async loadHealthStats(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
 
     try {
       // Get repository statistics
       const [countResult, packsResult, branchesResult, tagsResult, stashesResult, repoStatsResult] = await Promise.all([
-        gitService.getRepositoryStats(this.repositoryPath),
-        gitService.getPackInfo(this.repositoryPath),
-        gitService.getBranches(this.repositoryPath),
-        gitService.getTags(this.repositoryPath),
-        gitService.getStashes(this.repositoryPath),
-        gitService.getRepoStats(this.repositoryPath, 10000),
+        gitService.getRepositoryStats(this.pinnedRepoPath),
+        gitService.getPackInfo(this.pinnedRepoPath),
+        gitService.getBranches(this.pinnedRepoPath),
+        gitService.getTags(this.pinnedRepoPath),
+        gitService.getStashes(this.pinnedRepoPath),
+        gitService.getRepoStats(this.pinnedRepoPath, 10000),
       ]);
 
       // Calculate recommendations
@@ -329,11 +347,11 @@ export class LvRepositoryHealthDialog extends LitElement {
   }
 
   private async runGc(aggressive: boolean): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction) return;
 
     // Pinned before the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
-    const repoPath = this.repositoryPath;
+    const repoPath = this.pinnedRepoPath;
 
     // Same gate as the command palette (shared helper) — this dialog reaches
     // the identical irreversible command and must not be the unguarded route.
@@ -361,13 +379,13 @@ export class LvRepositoryHealthDialog extends LitElement {
   }
 
   private async runFsck(): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction) return;
 
     this.runningAction = 'fsck';
 
     try {
       const result = await gitService.runFsck({
-        path: this.repositoryPath,
+        path: this.pinnedRepoPath,
         full: true,
         // silent: the service toasts by default; this dialog owns the message.
         silent: true,
@@ -387,9 +405,9 @@ export class LvRepositoryHealthDialog extends LitElement {
   }
 
   private async runPrune(): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction) return;
 
-    const repoPath = this.repositoryPath;
+    const repoPath = this.pinnedRepoPath;
 
     if (!(await confirmPrune())) return;
 

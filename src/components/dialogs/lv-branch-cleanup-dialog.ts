@@ -296,6 +296,8 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   @state() private loading = true;
+  /** The candidate scan failed — render that, not "nothing to clean up". */
+  @state() private loadFailed = false;
   @state() private mergedBranches: CleanupBranch[] = [];
   @state() private staleBranches: CleanupBranch[] = [];
   @state() private goneUpstreamBranches: CleanupBranch[] = [];
@@ -349,9 +351,16 @@ export class LvBranchCleanupDialog extends LitElement {
 
       if (!result.success || !result.data) {
         showToast('Failed to load cleanup candidates', 'error');
+        // Distinct from "no candidates": leaving the three lists empty made
+        // every tab assert "No merged branches found", i.e. claim there is
+        // nothing to clean up when the scan simply could not tell us. The
+        // sidebar badge stopped telling that lie; the surface it opens must
+        // not repeat it.
+        this.loadFailed = true;
         this.loading = false;
         return;
       }
+      this.loadFailed = false;
 
       // Build CleanupBranch entries from backend candidates
       const merged: CleanupBranch[] = [];
@@ -936,6 +945,22 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private renderBranchList(branches: CleanupBranch[]) {
+    if (this.loadFailed) {
+      return html`
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span>Could not load cleanup candidates</span>
+          <button class="btn btn-secondary" @click=${() => void this.loadCleanupData()}>
+            Retry
+          </button>
+        </div>
+      `;
+    }
+
     if (branches.length === 0) {
       const messages: Record<CleanupTab, string> = {
         merged: 'No merged branches found',

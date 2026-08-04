@@ -383,20 +383,36 @@ export class LvRemoteDialog extends LitElement {
   @state() private fetchingRemote: string | null = null;
   @state() private pruningRemote: string | null = null;
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block. The remotes
+   * on screen belong to the repo that was active at open, so removing or
+   * pruning one must target THAT repo: reading the live prop removed "origin"
+   * from whichever repo the user had switched to.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadRemotes();
     }
   }
 
   private async loadRemotes(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
     this.error = null;
 
     try {
-      const result = await gitService.getRemotes(this.repositoryPath);
+      const result = await gitService.getRemotes(this.pinnedRepoPath);
       if (result.success && result.data) {
         this.remotes = result.data;
       } else {
@@ -483,7 +499,7 @@ export class LvRemoteDialog extends LitElement {
 
     try {
       const result = await gitService.addRemote(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.formName.trim(),
         this.formUrl.trim()
       );
@@ -511,7 +527,7 @@ export class LvRemoteDialog extends LitElement {
     try {
       // Update fetch URL
       let result = await gitService.setRemoteUrl(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.editingRemote.name,
         this.formUrl.trim(),
         false
@@ -525,7 +541,7 @@ export class LvRemoteDialog extends LitElement {
       // Update push URL if different
       if (this.formPushUrl.trim() && this.formPushUrl.trim() !== this.formUrl.trim()) {
         result = await gitService.setRemoteUrl(
-          this.repositoryPath,
+          this.pinnedRepoPath,
           this.editingRemote.name,
           this.formPushUrl.trim(),
           true
@@ -559,7 +575,7 @@ export class LvRemoteDialog extends LitElement {
 
     try {
       const result = await gitService.renameRemote(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.editingRemote.name,
         this.formName.trim()
       );
@@ -582,7 +598,7 @@ export class LvRemoteDialog extends LitElement {
     this.fetchingRemote = remote.name;
     try {
       const result = await gitService.fetch({
-        path: this.repositoryPath,
+        path: this.pinnedRepoPath,
         remote: remote.name,
         silent: true,
       });
@@ -603,7 +619,7 @@ export class LvRemoteDialog extends LitElement {
     this.pruningRemote = remote.name;
     try {
       const result = await gitService.pruneRemoteTrackingBranches(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         remote.name,
       );
       if (result.success && result.data) {
@@ -626,10 +642,10 @@ export class LvRemoteDialog extends LitElement {
   }
 
   private async handleRemove(remote: Remote): Promise<void> {
-    // Captured BEFORE the confirm await: this dialog is bound to the active
-    // repository and rebinds live, so a mid-confirm tab switch would otherwise
-    // remove the remote from the repo the user switched TO.
-    const repoPath = this.repositoryPath;
+    // The repo the listed remotes were read from — NOT the live prop, which
+    // rebinds on a tab switch and would remove "origin" from the repo the
+    // user switched to while this list still showed the old one's.
+    const repoPath = this.pinnedRepoPath;
 
     const confirmed = await showConfirm(
       'Remove Remote',

@@ -512,6 +512,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   public async open(onto: string, options?: { rewordCommitOid?: string }): Promise<void> {
+    // A rebase already running owns this component; reset() would clear
+    // `executing` and re-enable Start Rebase, allowing a second concurrent
+    // execute_interactive_rebase against the same repository.
+    if (this.executing) return;
     this.reset();
     this.onto = onto;
     this.pinnedRepoPath = this.repositoryPath;
@@ -880,9 +884,17 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    if (!this.executing) {
-      this.reset();
+    // Cancel is disabled while executing is in flight; Escape, the overlay and the
+    // × must honour the same rule. lv-modal.close() sets open=false BEFORE
+    // dispatching, so without re-asserting it here the rebase kept running with no
+    // visible surface — and reported any failure into `error` on a hidden
+    // dialog. Mirrors lv-branch-cleanup-dialog.handleModalClose.
+    if (this.executing) {
+      this.modal.open = true;
+      return;
     }
+
+    this.reset();
   }
 
   private get canExecute(): boolean {

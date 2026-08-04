@@ -364,8 +364,24 @@ export class LvSubmoduleDialog extends LitElement {
     }
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       this.mode = 'list';
       this.addUrl = '';
       this.addPath = '';
@@ -378,7 +394,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getSubmodules(this.repositoryPath);
+    const result = await gitService.getSubmodules(this.pinnedRepoPath);
 
     if (result.success && result.data) {
       this.submodules = result.data;
@@ -399,7 +415,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.addSubmodule(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       this.addUrl,
       this.addPath,
       this.addBranch || undefined
@@ -426,11 +442,11 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initSubmodules(this.repositoryPath, [submodule.path]);
+    const result = await gitService.initSubmodules(this.pinnedRepoPath, [submodule.path]);
 
     if (result.success) {
       // Also update after init
-      const updateResult = await gitService.updateSubmodules(this.repositoryPath, {
+      const updateResult = await gitService.updateSubmodules(this.pinnedRepoPath, {
         submodulePaths: [submodule.path],
       });
       if (!updateResult.success) {
@@ -454,7 +470,7 @@ export class LvSubmoduleDialog extends LitElement {
     // superproject has recorded for this submodule, leaving the superproject
     // clean. (Passing remote:true would run `--remote`, checking out the
     // upstream branch tip instead and dirtying the working tree.)
-    const result = await gitService.updateSubmodules(this.repositoryPath, {
+    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
       submodulePaths: [submodule.path],
     });
 
@@ -475,7 +491,7 @@ export class LvSubmoduleDialog extends LitElement {
     // uncommitted work inside it). This dialog is bound to the active
     // repository and rebinds live, so a mid-confirm tab switch would otherwise
     // aim that at the repo the user switched TO.
-    const repoPath = this.repositoryPath;
+    const repoPath = this.pinnedRepoPath;
 
     const confirmed = await showConfirm(
       'Remove Submodule',
@@ -507,7 +523,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.updateSubmodules(this.repositoryPath, {
+    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
       init: true,
       recursive: true,
     });

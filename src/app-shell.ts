@@ -81,6 +81,8 @@ import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dia
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
+import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
+import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -706,6 +708,8 @@ export class AppShell extends LitElement {
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
+  @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
+  @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -764,6 +768,27 @@ export class AppShell extends LitElement {
   };
 
   // Cycle the active repository tab by offset (wraps around both ends)
+  /**
+   * Open the branch-cleanup dialog from the command palette.
+   *
+   * Unlike every sibling palette action, this one cannot just flip a flag on
+   * app-shell: the dialog is owned by `lv-branch-list`, which is rendered only
+   * while the left panel is visible. With the panel hidden (Ctrl+B) the
+   * `open-branch-cleanup` event had no listener at all and the command
+   * silently did nothing. Reveal the panel first, then wait for the panel AND
+   * its branch list to render — `lv-branch-list` registers the window listener
+   * in connectedCallback, so dispatching before it exists is the same dead end.
+   */
+  private async openBranchCleanup(): Promise<void> {
+    if (!this.leftPanelVisible) {
+      uiStore.getState().togglePanel('left');
+      await this.updateComplete;
+      const panel = this.renderRoot.querySelector('lv-left-panel') as LitElement | null;
+      await panel?.updateComplete;
+    }
+    window.dispatchEvent(new CustomEvent('open-branch-cleanup'));
+  }
+
   private cycleRepositoryTab(offset: number): void {
     const state = repositoryStore.getState();
     const count = state.openRepositories.length;
@@ -1139,6 +1164,26 @@ export class AppShell extends LitElement {
       if (cbPinned && !repoOpen(cbPinned)) {
         this.createBranchDialog?.close();
         showToast('The repository tab was closed — branch creation cancelled', 'warning');
+      }
+
+      // The repo-scoped dialogs hosted directly by app-shell pin their repo on
+      // open for the same reason, so they need the same sweep: the clean
+      // dialog would otherwise delete files from — and the reflog dialog reset
+      // — a repository that is no longer in the tab bar.
+      const cleanPinned = this.cleanDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cleanPinned && !repoOpen(cleanPinned)) {
+        this.showClean = false;
+        showToast('The repository tab was closed — clean cancelled', 'warning');
+      }
+      const rfPinned = this.reflogDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rfPinned && !repoOpen(rfPinned)) {
+        this.showReflog = false;
+        showToast('The repository tab was closed — undo history closed', 'warning');
+      }
+      const rmPinned = this.remoteDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rmPinned && !repoOpen(rmPinned)) {
+        this.showRemotes = false;
+        showToast('The repository tab was closed — remote management closed', 'warning');
       }
 
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
@@ -1519,6 +1564,40 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * True when any dialog rendering a blocking overlay is open. Those dialogs
+   * handle their own Escape, so handleCloseOverlay must not keep walking its
+   * chain and dismiss something behind them. Excludes the flags that already
+   * have their own arm in that chain (shortcuts, command palette, reflog).
+   */
+  private hasModalDialogOpen(): boolean {
+    return (
+      this.showSettings ||
+      this.showConflictDialog ||
+      this.showRemotes ||
+      this.showClean ||
+      this.showRepositoryHealth ||
+      this.showBisect ||
+      this.showSubmodules ||
+      this.showWorktrees ||
+      this.showLfs ||
+      this.showChangelog ||
+      this.showGpg ||
+      this.showSsh ||
+      this.showConfig ||
+      this.showCredentials ||
+      this.showGitHub ||
+      this.showGitLab ||
+      this.showBitbucket ||
+      this.showAzureDevOps ||
+      this.showOidc ||
+      this.showProfileManager ||
+      this.showMigrationDialog ||
+      this.showWorkspaceManager ||
+      this.showHooksDialog
+    );
+  }
+
   private handleCloseOverlay(): void {
     // Close any open overlay in priority order
     if (this.showShortcuts) {
@@ -1536,6 +1615,13 @@ export class AppShell extends LitElement {
       if (!this.reflogDialog?.isResetting) {
         this.showReflog = false;
       }
+    } else if (this.hasModalDialogOpen()) {
+      // A modal dialog owns this Escape and dismisses itself — through
+      // lv-modal's own document handler, or its own keydown listener. Stop
+      // here so one Escape cannot ALSO close the diff sitting behind it, and
+      // so a dialog that deliberately BLOCKS dismissal mid-operation doesn't
+      // leak the keypress to the diff either.
+      return;
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     } else if (this.refContextMenu.visible) {
@@ -2958,7 +3044,7 @@ export class AppShell extends LitElement {
         label: 'Clean up branches',
         category: 'action',
         icon: 'git-branch',
-        action: this.requiresRepository(() => { window.dispatchEvent(new CustomEvent('open-branch-cleanup')); }),
+        action: this.requiresRepository(() => { void this.openBranchCleanup(); }),
       },
       {
         id: 'bisect',

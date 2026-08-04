@@ -338,18 +338,35 @@ export class LvCleanDialog extends LitElement {
   @state() private includeIgnored = false;
   @state() private includeDirectories = true;
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block. The file
+   * list on screen belongs to the repo that was active at open, so every
+   * operation must use THIS value: reading the live prop deleted the listed
+   * paths out of whichever repo the user had switched to, and untracked files
+   * have no trash and no recovery path.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     if (changedProps.has('open') && this.open) {
       // A prior operation may still be running against this component; its
       // completion handler will close the dialog, so do not start a fresh
       // session on top of it.
       if (this.cleaning) return;
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadFiles();
     }
   }
 
   private async loadFiles(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
     this.entries = [];
@@ -357,7 +374,7 @@ export class LvCleanDialog extends LitElement {
 
     try {
       const result = await gitService.getCleanableFiles(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.includeIgnored,
         this.includeDirectories
       );
@@ -445,10 +462,10 @@ export class LvCleanDialog extends LitElement {
   private async handleClean(): Promise<void> {
     if (this.selectedPaths.size === 0) return;
 
-    // Captured BEFORE the nested-repo confirm await: this dialog is bound to
-    // the active repository and rebinds live, so a mid-confirm tab switch would
-    // otherwise delete files from the repo the user switched TO.
-    const repoPath = this.repositoryPath;
+    // The repo the listed files were read from — NOT the live prop. Pinning
+    // only at click time still deleted from the wrong repository whenever the
+    // tab switch happened before the click rather than during the confirm.
+    const repoPath = this.pinnedRepoPath;
 
     // Captured BEFORE the confirms too. loadFiles() reassigns selectedPaths on
     // every option change and on its own initial load, so reading it after an

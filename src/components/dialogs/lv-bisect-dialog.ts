@@ -433,11 +433,29 @@ export class LvBisectDialog extends LitElement {
   @state() private message = '';
   @state() private currentCommitInfo: Commit | null = null;
 
+  /**
+   * This dialog renders its own overlay rather than using lv-modal, so it got
+   * no Escape handling at all — the one dialog in the app that Escape could
+   * not dismiss. Worse, app-shell's Escape chain then fell through and closed
+   * the diff behind it while this stayed put.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && this.open && !this.loading) {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.checkBisectStatus();
     }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
@@ -550,11 +568,14 @@ export class LvBisectDialog extends LitElement {
     // `git bisect start` checks out the midpoint, so HEAD has moved just as
     // surely as it does on good/bad/skip. Without this the graph, branch list
     // and status all keep showing the pre-bisect HEAD.
-    if (result.success) {
-      this.dispatchEvent(
-        new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
-      );
-    }
+    //
+    // Dispatched even on failure, matching good/bad/skip: the command can fail
+    // partway through having already moved HEAD, and the handler only triggers
+    // an idempotent refresh. (bisect-complete is different — it also CLOSES
+    // the dialog, so it stays gated on success or the error is never read.)
+    this.dispatchEvent(
+      new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
+    );
   }
 
   private async handleBad(): Promise<void> {

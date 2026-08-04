@@ -394,8 +394,24 @@ export class LvLfsDialog extends LitElement {
     }
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadStatus();
     }
   }
@@ -404,7 +420,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getLfsStatus(this.repositoryPath);
+    const result = await gitService.getLfsStatus(this.pinnedRepoPath);
 
     if (result.success && result.data) {
       this.status = result.data;
@@ -419,7 +435,7 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async loadFiles(): Promise<void> {
-    const result = await gitService.getLfsFiles(this.repositoryPath);
+    const result = await gitService.getLfsFiles(this.pinnedRepoPath);
     if (result.success && result.data) {
       this.files = result.data;
     }
@@ -429,7 +445,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initLfs(this.repositoryPath);
+    const result = await gitService.initLfs(this.pinnedRepoPath);
 
     if (result.success) {
       this.success = 'Git LFS initialized';
@@ -448,7 +464,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsTrack(this.repositoryPath, this.newPattern);
+    const result = await gitService.lfsTrack(this.pinnedRepoPath, this.newPattern);
 
     if (result.success) {
       this.newPattern = '';
@@ -465,7 +481,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsUntrack(this.repositoryPath, pattern);
+    const result = await gitService.lfsUntrack(this.pinnedRepoPath, pattern);
 
     if (result.success) {
       await this.loadStatus();
@@ -482,7 +498,7 @@ export class LvLfsDialog extends LitElement {
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPull(this.repositoryPath);
+    const result = await gitService.lfsPull(this.pinnedRepoPath);
 
     if (result.success) {
       this.success = 'LFS files pulled successfully';
@@ -498,7 +514,7 @@ export class LvLfsDialog extends LitElement {
   private async handlePrune(): Promise<void> {
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
-    const repoPath = this.repositoryPath;
+    const repoPath = this.pinnedRepoPath;
 
     // `git lfs prune` deletes local LFS objects that recent commits don't
     // reference. Unless lfs.pruneverifyremotealways is configured it does not

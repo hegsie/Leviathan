@@ -161,6 +161,56 @@ describe('lv-clean-dialog', () => {
     }
   }
 
+  // `repositoryPath` is live-bound to the ACTIVE repository and rebinds the
+  // instant the user Ctrl+Tabs — a document-level shortcut this dialog's
+  // overlay does not block. The listed files belong to the repo that was
+  // active at OPEN, so the delete must target that repo. Pinning only at click
+  // time (the previous fix) still deleted from the wrong repository whenever
+  // the switch happened before the click. Untracked files have no trash and no
+  // recovery path, so this is the one deletion in the app that cannot be undone.
+  it('deletes from the repository the listed files were read from, not the newly active one', async () => {
+    cleanableEntries = [
+      { path: 'dist/', isDirectory: true, isIgnored: true, isNestedRepo: false, size: 100 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/repo/a'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    // The user Ctrl+Tabs to another repo; the dialog stays open showing A's files.
+    el.repositoryPath = '/repo/b';
+    await el.updateComplete;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(lastCleanFilesArgs).to.not.be.null;
+    expect(lastCleanFilesArgs!.path).to.equal('/repo/a');
+  });
+
+  it('reads the file list from the repo active at open, ignoring a later rebind', async () => {
+    cleanableEntries = [
+      { path: 'a.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/repo/a'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    el.repositoryPath = '/repo/b';
+    await el.updateComplete;
+    await new Promise(r => setTimeout(r, 0));
+
+    // A tab switch must not silently swap the list out from under the
+    // selection the user already made.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(((el as any).entries as unknown[]).length).to.equal(1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).pinnedRepositoryPathIfOpen).to.equal('/repo/a');
+  });
+
   it('does not pre-select untracked nested repositories', async () => {
     cleanableEntries = [
       { path: 'untracked.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 100 },

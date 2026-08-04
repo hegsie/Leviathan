@@ -135,6 +135,13 @@ export class LvModal extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // This listener lives on `document` for the element's whole lifetime, but
+    // host dialogs keep their <lv-modal> mounted while closed. Without this
+    // check every closed modal in the tree answered each Escape press by
+    // dispatching `close`, firing host handlers for dialogs the user was not
+    // looking at. The Tab trap below already guarded on `open`.
+    if (!this.open) return;
+
     if (e.key === 'Escape') {
       this.close();
     }

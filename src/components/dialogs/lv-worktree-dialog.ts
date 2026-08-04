@@ -362,8 +362,24 @@ export class LvWorktreeDialog extends LitElement {
     }
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       this.mode = 'list';
       await this.loadWorktrees();
       await this.loadBranches();
@@ -374,7 +390,7 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getWorktrees(this.repositoryPath);
+    const result = await gitService.getWorktrees(this.pinnedRepoPath);
 
     if (result.success && result.data) {
       this.worktrees = result.data;
@@ -386,7 +402,7 @@ export class LvWorktreeDialog extends LitElement {
   }
 
   private async loadBranches(): Promise<void> {
-    const result = await gitService.getBranches(this.repositoryPath);
+    const result = await gitService.getBranches(this.pinnedRepoPath);
     if (result.success && result.data) {
       // Filter out branches already checked out in other worktrees
       const usedBranches = new Set(this.worktrees.map((wt) => wt.branch).filter(Boolean));
@@ -415,7 +431,7 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.addWorktree(this.repositoryPath, this.addPath, {
+    const result = await gitService.addWorktree(this.pinnedRepoPath, this.addPath, {
       branch: this.createNewBranch ? undefined : this.addBranch,
       newBranch: this.createNewBranch ? this.newBranchName : undefined,
     });
@@ -445,7 +461,7 @@ export class LvWorktreeDialog extends LitElement {
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live, so a mid-confirm tab switch would otherwise
     // run the removal against the repo the user switched TO.
-    const repoPath = this.repositoryPath;
+    const repoPath = this.pinnedRepoPath;
 
     const confirmed = await showConfirm(
       'Remove Worktree',
@@ -475,7 +491,7 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lockWorktree(this.repositoryPath, worktree.path);
+    const result = await gitService.lockWorktree(this.pinnedRepoPath, worktree.path);
 
     if (result.success) {
       this.success = 'Worktree locked successfully';
@@ -492,7 +508,7 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.unlockWorktree(this.repositoryPath, worktree.path);
+    const result = await gitService.unlockWorktree(this.pinnedRepoPath, worktree.path);
 
     if (result.success) {
       this.success = 'Worktree unlocked successfully';

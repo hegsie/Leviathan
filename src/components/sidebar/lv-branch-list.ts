@@ -751,7 +751,15 @@ export class LvBranchList extends LitElement {
       const [branchesResult, , cleanupResult] = await Promise.all([
         gitService.getBranches(loadedPath),
         gitService.getRemotes(loadedPath),
-        gitService.getCleanupCandidates(loadedPath),
+        // The staleDays argument is what makes the badge and the cleanup
+        // dialog agree. Omitting it fell back to the backend's 90-day default,
+        // so the badge counted stale branches the dialog's Stale tab did not
+        // list (and kept counting them when the user set the window to 0 to
+        // disable staleness entirely).
+        gitService.getCleanupCandidates(
+          loadedPath,
+          settingsStore.getState().staleBranchDays,
+        ),
       ]);
 
       // A newer load for the SAME path supersedes this one entirely (its
