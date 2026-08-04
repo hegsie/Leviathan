@@ -8,6 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { tryAcquireMaintenance, releaseMaintenance } from '../../utils/maintenance-confirms.ts';
 import {
   confirmGarbageCollection,
   confirmPrune,
@@ -395,6 +396,14 @@ export class LvRepositoryHealthDialog extends LitElement {
     // the identical irreversible command and must not be the unguarded route.
     if (!(await confirmGarbageCollection(aggressive))) return;
 
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
 
     try {
@@ -413,12 +422,22 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
       this.settleClosePending();
     }
   }
 
   private async runFsck(): Promise<void> {
     if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
+
+    const repoPath = this.pinnedRepoPath;
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     this.runningAction = 'fsck';
 
@@ -440,6 +459,7 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
       this.settleClosePending();
     }
   }
@@ -450,6 +470,14 @@ export class LvRepositoryHealthDialog extends LitElement {
     const repoPath = this.pinnedRepoPath;
 
     if (!(await confirmPrune())) return;
+
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     this.runningAction = 'prune';
 
@@ -468,6 +496,7 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
       this.settleClosePending();
     }
   }

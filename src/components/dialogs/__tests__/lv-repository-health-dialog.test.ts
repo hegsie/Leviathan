@@ -15,7 +15,7 @@ const invokeHistory: Array<{ command: string; args?: unknown }> = [];
 /** plugin-dialog's confirm() resolves true only for the OK button label. */
 let confirmResult = true;
 
-let mockInvoke: MockInvoke = async (command: string) => {
+const defaultMockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (
     command === 'plugin:dialog|message' ||
@@ -30,6 +30,8 @@ let mockInvoke: MockInvoke = async (command: string) => {
   return null;
 };
 
+let mockInvoke: MockInvoke = defaultMockInvoke;
+
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
     invokeHistory.push({ command, args });
@@ -41,6 +43,11 @@ let mockInvoke: MockInvoke = async (command: string) => {
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-repository-health-dialog.ts';
+import {
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  resetMaintenanceLocks,
+} from '../../../utils/maintenance-confirms.ts';
 import type { LvRepositoryHealthDialog } from '../lv-repository-health-dialog.ts';
 
 const REPO_PATH = '/test/repo';
@@ -158,5 +165,42 @@ describe('lv-repository-health-dialog deferred close', () => {
     await el.updateComplete;
 
     expect(closed, 'closed once the gc landed').to.equal(1);
+  });
+});
+
+describe('lv-repository-health-dialog maintenance lock', () => {
+  beforeEach(() => {
+    resetMaintenanceLocks();
+    // An earlier suite swaps in a hanging gc mock; restore the default so
+    // these tests are not left waiting on it.
+    mockInvoke = defaultMockInvoke;
+  });
+
+  // gc/prune/fsck have two implementations — this dialog and the command
+  // palette — and only this one tracked concurrency, so a palette run could
+  // start a second maintenance command against the same repo. git's pid lock
+  // catches gc-vs-gc with a raw error; it does not serialise gc-vs-prune.
+  it('refuses to start when the palette already holds the repo', async () => {
+    const el = await render();
+    invokeHistory.length = 0;
+
+    // The palette claims the slot first.
+    expect(tryAcquireMaintenance(REPO_PATH)).to.be.true;
+
+    await internalOf(el).runGc(true);
+
+    expect(findCommands('run_gc'), 'no second gc while one is running').to.have.length(0);
+  });
+
+  it('releases the slot so the next run is allowed', async () => {
+    const el = await render();
+    invokeHistory.length = 0;
+
+    await internalOf(el).runGc(false);
+    expect(findCommands('run_gc')).to.have.length(1);
+
+    // Slot released in the finally, so the palette can claim it afterwards.
+    expect(tryAcquireMaintenance(REPO_PATH), 'slot free after the run').to.be.true;
+    releaseMaintenance(REPO_PATH);
   });
 });

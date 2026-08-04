@@ -66,3 +66,40 @@ export function summariseFsck(message: string | undefined): string {
 
   return `Repository integrity check completed — ${lines.length} notes reported (${lines[0].trim()}, …)`;
 }
+
+/**
+ * Which repositories currently have a maintenance command running.
+ *
+ * `gc`, `prune` and `fsck` each have TWO implementations — the command palette
+ * (app-shell) and the Repository Health dialog — and only the dialog tracked
+ * whether one was already running. So a palette "Run Garbage Collection"
+ * launched a second concurrent gc over the dialog's, defeating the
+ * runningAction machinery entirely. For gc-vs-gc git's own pid lock rejects
+ * the second with a raw, unhelpful error; for gc-vs-prune there is no such
+ * serialization at all and the two race on the objects directory.
+ *
+ * Keyed by repository path: maintenance on different repos is independent.
+ */
+const maintenanceInFlight = new Set<string>();
+
+/** Claim the maintenance slot for a repo. False when one is already running. */
+export function tryAcquireMaintenance(repoPath: string): boolean {
+  if (maintenanceInFlight.has(repoPath)) return false;
+  maintenanceInFlight.add(repoPath);
+  return true;
+}
+
+/** Release the slot. Safe to call for a repo that never held one. */
+export function releaseMaintenance(repoPath: string): void {
+  maintenanceInFlight.delete(repoPath);
+}
+
+/** True while a maintenance command is running against `repoPath`. */
+export function isMaintenanceRunning(repoPath: string): boolean {
+  return maintenanceInFlight.has(repoPath);
+}
+
+/** Test seam: drop all claims. */
+export function resetMaintenanceLocks(): void {
+  maintenanceInFlight.clear();
+}

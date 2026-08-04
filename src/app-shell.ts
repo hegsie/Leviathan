@@ -99,7 +99,13 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
-import { confirmGarbageCollection, confirmPrune, summariseFsck } from './utils/maintenance-confirms.ts';
+import {
+  confirmGarbageCollection,
+  confirmPrune,
+  summariseFsck,
+  tryAcquireMaintenance,
+  releaseMaintenance,
+} from './utils/maintenance-confirms.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -3707,24 +3713,46 @@ export class AppShell extends LitElement {
     // this command cannot drift apart on whether it is gated.
     if (!(await confirmGarbageCollection(aggressive))) return;
 
-    // silent: the service toasts by default; this handler owns the message.
-    const result = await gitService.runGc({ path: repoPath, aggressive, silent: true });
-    showToast(
-      result.success
-        ? aggressive
-          ? 'Aggressive garbage collection completed'
-          : 'Garbage collection completed'
-        : `Garbage collection failed: ${result.error?.message ?? 'Unknown error'}`,
-      result.success ? 'success' : 'error'
-    );
+    // Claimed AFTER the confirm (a declined confirm must not hold the slot) and
+    // shared with the Repository Health dialog, which reaches the same three
+    // commands. Only the dialog tracked concurrency, so a palette run could
+    // start a second gc over the dialog's — or race a prune against it on the
+    // objects directory, which git does not serialise at all.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    try {
+      // silent: the service toasts by default; this handler owns the message.
+      const result = await gitService.runGc({ path: repoPath, aggressive, silent: true });
+      showToast(
+        result.success
+          ? aggressive
+            ? 'Aggressive garbage collection completed'
+            : 'Garbage collection completed'
+          : `Garbage collection failed: ${result.error?.message ?? 'Unknown error'}`,
+        result.success ? 'success' : 'error'
+      );
+    } finally {
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handleRunFsck(): Promise<void> {
     if (!this.activeRepository) return;
 
     const repoPath = this.activeRepository.repository.path;
+
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     // silent: the service toasts by default; this handler owns the message.
-    const result = await gitService.runFsck({ path: repoPath, full: true, silent: true });
+    const result = await gitService
+      .runFsck({ path: repoPath, full: true, silent: true })
+      .finally(() => releaseMaintenance(repoPath));
 
     // Reporting IS this command's purpose, so report what git actually said.
     // `git fsck` exits 0 while printing "dangling commit" / "unreachable blob"
@@ -3745,8 +3773,15 @@ export class AppShell extends LitElement {
 
     if (!(await confirmPrune())) return;
 
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     // silent: the service toasts by default; this handler owns the message.
-    const result = await gitService.runPrune({ path: repoPath, silent: true });
+    const result = await gitService
+      .runPrune({ path: repoPath, silent: true })
+      .finally(() => releaseMaintenance(repoPath));
     showToast(
       result.success
         ? 'Pruned unreachable objects'
