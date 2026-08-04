@@ -369,6 +369,11 @@ export class LvKeyboardShortcutsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    // Never leave the service disabled: being torn down mid-capture would
+    // otherwise kill every shortcut in the app with no way back.
+    if (this.editingId) {
+      keyboardService.setEnabled(true);
+    }
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     this.settingsUnsubscribe?.();
@@ -404,6 +409,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       // Try to rebind
       const success = keyboardService.rebind(this.editingId, binding);
       if (success) {
+        keyboardService.setEnabled(true);
         this.editingId = null;
         this.recordedBinding = null;
         this.conflictError = null;
@@ -434,12 +440,22 @@ export class LvKeyboardShortcutsDialog extends LitElement {
   };
 
   private startEditing(id: string): void {
+    // Silence the shortcut service for the duration of the capture. Its
+    // document listener is registered at MODULE EVALUATION, so it always runs
+    // before this dialog's (registered in connectedCallback) — and
+    // stopPropagation cannot suppress a listener on the same node. So the key
+    // being recorded was first EXECUTED: pressing "s" to rebind something
+    // staged the entire working tree, Ctrl+Shift+S stashed including
+    // untracked files, Ctrl+Shift+U pushed. It also ate the "Esc to cancel"
+    // this dialog advertises, closing the whole dialog instead.
+    keyboardService.setEnabled(false);
     this.editingId = id;
     this.recordedBinding = null;
     this.conflictError = null;
   }
 
   private cancelEditing(): void {
+    keyboardService.setEnabled(true);
     this.editingId = null;
     this.recordedBinding = null;
     this.conflictError = null;

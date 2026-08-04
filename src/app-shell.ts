@@ -1749,13 +1749,16 @@ export class AppShell extends LitElement {
 
   private handleCloseOverlay(): void {
     // Close any open overlay in priority order
-    if (this.showShortcuts) {
-      this.showShortcuts = false;
-    } else if (this.showCommandPalette) {
-      this.showCommandPalette = false;
-    } else if (this.hasModalDialogOpen()) {
+    if (this.hasModalDialogOpen()) {
       // A modal owns this Escape and dismisses itself, through lv-modal's
       // handler or its own — each now gated on being the TOPMOST overlay.
+      //
+      // This arm is FIRST. The showShortcuts and showCommandPalette arms used
+      // to precede it and closed unconditionally, without consulting the
+      // stack: opening the undo-history dialog over the shortcuts dialog and
+      // pressing Escape once closed BOTH. Both dialogs clear their own flag
+      // through their `close` event, so letting the topmost one dismiss itself
+      // is all that is needed.
       // Stop here so one keypress cannot also close the diff behind it, and
       // so a dialog that deliberately blocks dismissal mid-operation does not
       // leak the key either.
