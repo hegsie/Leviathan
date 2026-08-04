@@ -60,13 +60,18 @@ function makeBranch(b: MockBranch) {
 async function createComponent(
   branches: ReturnType<typeof makeBranch>[],
   cleanupCandidates: Array<{ name: string; shorthand: string; category: string }> = [],
+  failCleanup = false,
 ): Promise<LvBranchList> {
   mockInvoke = (command: string) => {
     if (command === 'get_branches') return Promise.resolve(branches);
     if (command === 'get_remotes') return Promise.resolve([]);
     if (command === 'get_hidden_branches') return Promise.resolve([]);
     if (command === 'get_branch_sort_mode') return Promise.resolve('name');
-    if (command === 'get_cleanup_candidates') return Promise.resolve(cleanupCandidates);
+    if (command === 'get_cleanup_candidates') {
+      return failCleanup
+        ? Promise.reject(new Error('candidate scan failed'))
+        : Promise.resolve(cleanupCandidates);
+    }
     if (command === 'plugin:dialog|message') return Promise.resolve('Ok');
     return Promise.resolve(null);
   };
@@ -121,6 +126,35 @@ describe('lv-branch-list merged detection (Finding 13)', () => {
     const badge = el.shadowRoot!.querySelector('.cleanup-btn .badge');
     expect(badge, 'Clean up button rendered').to.not.be.null;
     expect(badge!.textContent!.trim()).to.equal('1');
+  });
+
+  // A failed candidate scan is NOT the same as "no candidates". Collapsing
+  // both to an empty set made the Clean up button vanish from the sidebar with
+  // no error, telling the user there is nothing to clean up when we simply
+  // could not find out.
+  it('keeps the Clean up button reachable when the candidate scan fails', async () => {
+    const el = await createComponent(
+      [
+        makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+        makeBranch({ name: 'feature', shorthand: 'feature' }),
+      ],
+      [],
+      true,
+    );
+
+    const btn = el.shadowRoot!.querySelector('.cleanup-btn');
+    expect(btn, 'Clean up button still rendered after a failed scan').to.not.be.null;
+    expect(btn!.getAttribute('title')).to.contain('Could not check');
+    // No count is known, so no badge may claim one.
+    expect(el.shadowRoot!.querySelector('.cleanup-btn .badge')).to.be.null;
+  });
+
+  it('hides the Clean up button when the scan succeeds with no candidates', async () => {
+    const el = await createComponent([
+      makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+    ]);
+
+    expect(el.shadowRoot!.querySelector('.cleanup-btn')).to.be.null;
   });
 });
 

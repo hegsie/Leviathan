@@ -80,6 +80,7 @@ import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
+import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
 import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
@@ -704,6 +705,7 @@ export class AppShell extends LitElement {
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
+  @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -1524,7 +1526,16 @@ export class AppShell extends LitElement {
     } else if (this.showCommandPalette) {
       this.showCommandPalette = false;
     } else if (this.showReflog) {
-      this.showReflog = false;
+      // The keyboard service registers its own document-level Escape handler,
+      // so this path can flip the dialog's `open` binding without going
+      // through the dialog's dismiss() guard. Honour that guard here too:
+      // closing mid-reset hides a running operation whose success path then
+      // calls close() on whatever the user reopened. Swallow the Escape
+      // either way, so a blocked dismissal cannot fall through and close the
+      // diff sitting behind the dialog.
+      if (!this.reflogDialog?.isResetting) {
+        this.showReflog = false;
+      }
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     } else if (this.refContextMenu.visible) {
@@ -4181,8 +4192,12 @@ export class AppShell extends LitElement {
           ?open=${this.showBisect}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showBisect = false; }}
-          @bisect-step=${() => this.handleRefresh()}
-          @bisect-complete=${() => { this.showBisect = false; this.handleRefresh(); }}
+          @bisect-step=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
+          @bisect-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
+            this.showBisect = false;
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
+          }}
         ></lv-bisect-dialog>
       ` : ''}
 

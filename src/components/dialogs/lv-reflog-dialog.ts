@@ -365,6 +365,15 @@ export class LvReflogDialog extends LitElement {
   }
 
   /**
+   * True while a reset is in flight. Exposed so the app-shell-level Escape
+   * handler — a second, independent path that flips this dialog's `open`
+   * binding — can honour the same guard `dismiss()` applies.
+   */
+  public get isResetting(): boolean {
+    return this.resetting;
+  }
+
+  /**
    * User-initiated dismissal. Blocked while the operation is in flight:
    * closing mid-reset leaves it running with no visible surface, and when it
    * finishes its success path calls close() — yanking shut whatever session

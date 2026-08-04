@@ -569,10 +569,6 @@ export class LvBranchList extends LitElement {
   @state() private hiddenBranches = new Set<string>();
   @state() private showSortMenu = false;
   @state() private operationInProgress = false;
-  // Names of local branches the backend reports as merged into HEAD (real
-  // graph_descendant_of detection, including tip==HEAD). Refreshed by
-  // loadBranches; used for the "Delete Merged Branches" flow and its badge.
-  @state() private mergedBranchNames = new Set<string>();
   /**
    * Every branch the cleanup dialog would list, by name and across ALL
    * categories. The button used merged+stale computed locally, which
@@ -581,6 +577,13 @@ export class LvBranchList extends LitElement {
    * entry still opened the dialog, so the two surfaces disagreed.
    */
   @state() private cleanupCandidateNames = new Set<string>();
+  /**
+   * The candidate fetch failed for the current repo. Distinct from "no
+   * candidates": an empty set renders as "nothing to clean up", which is a
+   * lie when we simply could not find out. Keeps the button reachable and
+   * says so, instead of the feature silently vanishing from the sidebar.
+   */
+  @state() private cleanupCheckFailed = false;
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -886,15 +889,11 @@ export class LvBranchList extends LitElement {
         };
       });
 
-      // Track the set of branches the backend considers merged into HEAD, so
-      // the "Delete Merged Branches" flow and its badge reflect real
-      // `git branch --merged` semantics rather than an ahead-of-upstream guess.
-      // Fetched in the Promise.all above to keep loadBranches to a single await
-      // point (extra await points perturb render timing for callers).
-      this.mergedBranchNames = cleanupResult.success && cleanupResult.data
-        ? new Set(cleanupResult.data.filter(c => c.category === 'merged').map(c => c.name))
-        : new Set();
-
+      // The badge and the cleanup dialog share one source of truth: the
+      // backend's candidate list. Fetched in the Promise.all above to keep
+      // loadBranches to a single await point (extra await points perturb
+      // render timing for callers).
+      this.cleanupCheckFailed = !cleanupResult.success;
       this.cleanupCandidateNames = cleanupResult.success && cleanupResult.data
         ? new Set(cleanupResult.data.map(c => c.name))
         : new Set();
@@ -2193,18 +2192,22 @@ export class LvBranchList extends LitElement {
       ${this.localBranchGroups.length > 0 ? html`
         <div class="local-header">
           <span class="local-header-title">Local Branches</span>
-          ${this.getCleanupCandidateCount() > 0 ? html`
+          ${this.getCleanupCandidateCount() > 0 || this.cleanupCheckFailed ? html`
             <button
               class="cleanup-btn"
               @click=${this.handleOpenCleanupDialog}
-              title="${this.getCleanupCandidateCount()} branch${this.getCleanupCandidateCount() === 1 ? '' : 'es'} can be reviewed for cleanup"
+              title=${this.cleanupCheckFailed
+                ? 'Could not check for cleanup candidates — open to retry'
+                : `${this.getCleanupCandidateCount()} branch${this.getCleanupCandidateCount() === 1 ? '' : 'es'} can be reviewed for cleanup`}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
               </svg>
               Clean up
-              <span class="badge">${this.getCleanupCandidateCount()}</span>
+              ${this.cleanupCheckFailed
+                ? nothing
+                : html`<span class="badge">${this.getCleanupCandidateCount()}</span>`}
             </button>
           ` : nothing}
         </div>
