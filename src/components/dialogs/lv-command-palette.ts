@@ -8,7 +8,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { fuzzyScore, highlightMatch } from '../../utils/fuzzy-search.ts';
 import type { Branch, Commit } from '../../types/git.types.ts';
-import { pushOverlay, removeOverlay } from '../../utils/overlay-stack.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 export interface PaletteCommand {
   id: string;
@@ -216,13 +216,33 @@ export class LvCommandPalette extends LitElement {
 
   private recentCommands: string[] = [];
 
+  /**
+   * Escape at the document level, gated on being the topmost overlay.
+   *
+   * The palette's other key handling hangs off @keydown on the search input,
+   * so it only fires once that input has focus — which happens in a rAF after
+   * open. app-shell used to paper over the gap with an unconditional
+   * `showCommandPalette = false` arm ahead of every other check, but that arm
+   * closed the palette even when it was NOT the overlay the user was aiming
+   * at. Owning Escape here, stack-gated, is what every other overlay does.
+   */
+  private handleDocumentKeyDown = (e: KeyboardEvent): void => {
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.close();
+    }
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleDocumentKeyDown);
     this.loadRecentCommands();
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleDocumentKeyDown);
     // Withdraw on teardown as every sibling does. Unreachable while the
     // palette is rendered unconditionally, but a leaked entry sits on top
     // of the stack forever and takes Escape away from every dialog below.
