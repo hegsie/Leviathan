@@ -218,6 +218,14 @@ export class LvCommandPalette extends LitElement {
     this.loadRecentCommands();
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    // Withdraw on teardown as every sibling does. Unreachable while the
+    // palette is rendered unconditionally, but a leaked entry sits on top
+    // of the stack forever and takes Escape away from every dialog below.
+    removeOverlay(this);
+  }
+
   updated(changedProps: Map<string, unknown>): void {
     // The palette opens OVER other dialogs, so it must take ownership of
     // Escape while it is up — otherwise dismissing it also dismissed the

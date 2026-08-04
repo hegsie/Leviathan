@@ -105,6 +105,7 @@ import {
   summariseFsck,
   tryAcquireMaintenance,
   releaseMaintenance,
+  isMaintenanceRunning,
 } from './utils/maintenance-confirms.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
@@ -1233,9 +1234,17 @@ export class AppShell extends LitElement {
           if (!running || state.openRepositories.length === 0) {
             this.showRepositoryHealth = false;
           }
-          if (running) {
+          if (running && state.openRepositories.length > 0) {
             showToast(
               'The repository tab was closed — repository health will close when the current maintenance finishes',
+              'warning',
+            );
+          } else if (running) {
+            // Last tab: the force-close above already removed the dialog, so
+            // promising a later dismissal would describe something that just
+            // did not happen. The gc itself keeps running to completion.
+            showToast(
+              'The repository tab was closed — the maintenance operation will finish in the background',
               'warning',
             );
           }
@@ -1253,7 +1262,17 @@ export class AppShell extends LitElement {
         // Dismissing mid-generation hid a running AI call and then reported
         // "changelog closed", which was simply untrue.
         ['lv-changelog-dialog', () => {
-          if (this.changelogDialog?.generationInFlight) return false;
+          if (this.changelogDialog?.generationInFlight) {
+            // Say so. This block is also gated on activeRepository, so on the
+            // LAST tab the element is destroyed on the next render regardless
+            // and the generation completes into a detached component — the
+            // user would otherwise get silence: no changelog, no error.
+            showToast(
+              'The repository tab was closed — changelog generation was abandoned',
+              'warning',
+            );
+            return false;
+          }
           this.changelogDialog?.close();
           return true;
         }, 'changelog closed'],
@@ -1634,16 +1653,17 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleKeyDown(e: KeyboardEvent): void {
-    // Keyboard shortcuts are now handled by the keyboard service
-    // Only handle special cases here
-
-    // ? to show shortcuts help (need to handle separately due to shift key)
-    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      this.showShortcuts = true;
-      return;
-    }
+  private handleKeyDown(_e: KeyboardEvent): void {
+    // Keyboard shortcuts are handled by the keyboard service.
+    //
+    // There used to be a `?` arm here "because of the shift key". It matched
+    // with no input-focus check and called preventDefault(), so typing a
+    // question mark ANYWHERE — commit message, search, branch-rename prompt,
+    // hook editor — was impossible: the character was swallowed and the
+    // shortcuts dialog opened instead. keyboard.service registers the same
+    // shortcut and does bail inside inputs, but it bails by returning, and
+    // stopPropagation cannot suppress a sibling listener on the same node,
+    // so this copy always won. The guarded registration is the only one now.
   }
 
   /**
@@ -3709,6 +3729,13 @@ export class AppShell extends LitElement {
     // null activeRepository inside a floating promise.
     const repoPath = this.activeRepository.repository.path;
 
+    // Checked before the confirm so a destructive prompt is never shown for a
+    // run the shared claim below was always going to refuse.
+    if (isMaintenanceRunning(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     // Shared with the Repository Health dialog so the two surfaces that reach
     // this command cannot drift apart on whether it is gated.
     if (!(await confirmGarbageCollection(aggressive))) return;
@@ -3770,6 +3797,11 @@ export class AppShell extends LitElement {
     if (!this.activeRepository) return;
 
     const repoPath = this.activeRepository.repository.path;
+
+    if (isMaintenanceRunning(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     if (!(await confirmPrune())) return;
 

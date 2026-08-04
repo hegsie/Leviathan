@@ -13,6 +13,7 @@ import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -417,11 +418,19 @@ export class LvConflictResolutionDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   protected updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
+
+    // Announce/withdraw overlay ownership of Escape. Missing this made a
+    // dialog opened over another one dismiss BOTH on a single keypress: the
+    // one underneath was still stack-top, so its own guard passed.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
 
     // When open changes to true, load conflicts
     if (changedProperties.has('open') && this.open) {
@@ -467,7 +476,9 @@ export class LvConflictResolutionDialog extends LitElement {
   private stashCaptureEpoch = 0;
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (!this.open) return;
+    // Only the topmost overlay owns Escape. This handler only swallows the
+    // key today, but it must not swallow one aimed at a dialog above it.
+    if (!this.open || !isTopOverlay(this)) return;
 
     if (e.key === 'Escape') {
       e.preventDefault();

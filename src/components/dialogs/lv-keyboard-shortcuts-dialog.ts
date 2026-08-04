@@ -9,6 +9,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { keyboardService, type Shortcut, type ShortcutBinding } from '../../services/keyboard.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-keyboard-shortcuts-dialog')
 export class LvKeyboardShortcutsDialog extends LitElement {
@@ -348,6 +349,15 @@ export class LvKeyboardShortcutsDialog extends LitElement {
 
   private settingsUnsubscribe?: () => void;
 
+  updated(changedProps: Map<string, unknown>): void {
+    // Announce/withdraw overlay ownership of Escape. Missing this made a
+    // dialog opened over another one dismiss BOTH on a single keypress:
+    // the one underneath was still stack-top, so its own guard passed.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
+  }
+
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
@@ -359,6 +369,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     this.settingsUnsubscribe?.();
   }
@@ -408,8 +419,14 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       return;
     }
 
-    // Normal mode: close on Escape
-    if (e.key === 'Escape' && this.open) {
+    // Normal mode: close on Escape, but only when this dialog is the topmost
+    // overlay. Without that, pressing ? over the clean dialog and then Escape
+    // dismissed BOTH — the clean dialog was still stack-top, so its own guard
+    // passed and it discarded the user's file selection.
+    //
+    // The recording branch above is deliberately NOT gated: it is an explicit
+    // capture mode inside this dialog and already stops propagation.
+    if (e.key === 'Escape' && this.open && isTopOverlay(this)) {
       this.close();
     }
   };

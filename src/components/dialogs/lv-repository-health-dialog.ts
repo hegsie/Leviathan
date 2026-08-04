@@ -8,7 +8,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import { tryAcquireMaintenance, releaseMaintenance } from '../../utils/maintenance-confirms.ts';
+import {
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  isMaintenanceRunning,
+} from '../../utils/maintenance-confirms.ts';
 import {
   confirmGarbageCollection,
   confirmPrune,
@@ -388,6 +392,15 @@ export class LvRepositoryHealthDialog extends LitElement {
   private async runGc(aggressive: boolean): Promise<void> {
     if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
 
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     // Pinned before the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
@@ -430,6 +443,15 @@ export class LvRepositoryHealthDialog extends LitElement {
   private async runFsck(): Promise<void> {
     if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
 
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
     const repoPath = this.pinnedRepoPath;
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
@@ -466,6 +488,15 @@ export class LvRepositoryHealthDialog extends LitElement {
 
   private async runPrune(): Promise<void> {
     if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
+
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     const repoPath = this.pinnedRepoPath;
 
