@@ -66,10 +66,36 @@ const rule = {
         }
         if (callee.type === 'Identifier' && callee.name === 'pushOverlay') pushes = true;
         if (callee.type === 'Identifier' && callee.name === 'removeOverlay') removes = true;
-        if (callee.type === 'Identifier' && callee.name === 'isTopOverlay') consultsStack = true;
+        // NOTE: a bare call is deliberately NOT enough — see IfStatement below.
       },
       Literal(node) {
         if (node.value === 'Escape') handlesEscape = true;
+      },
+      /**
+       * The guard must actually GUARD. Counting any call to isTopOverlay let a
+       * component satisfy the rule with `void isTopOverlay(this);` and then
+       * close on Escape unconditionally — reintroducing the exact double
+       * dismissal the stack exists to prevent, with a green lint. Require the
+       * call to sit in the test of an `if` that bails.
+       */
+      IfStatement(node) {
+        const testMentionsGuard = (n) => {
+          if (!n || typeof n !== 'object') return false;
+          if (n.type === 'CallExpression' && n.callee?.name === 'isTopOverlay') return true;
+          return ['argument', 'left', 'right', 'expression', 'test', 'consequent', 'alternate']
+            .some((k) => testMentionsGuard(n[k]));
+        };
+        // Any `if` whose TEST consults the stack counts, whichever way round
+        // it is written — both of these are correct and both appear in the
+        // codebase:
+        //   if (!this.open || !isTopOverlay(this)) return;      // bail form
+        //   if (e.key === 'Escape' && isTopOverlay(this)) {...} // inline form
+        // What this rejects is the call appearing only as a standalone
+        // expression whose result is thrown away, which "consults" the stack
+        // without letting it decide anything.
+        if (testMentionsGuard(node.test)) {
+          consultsStack = true;
+        }
       },
       'Program:exit'() {
         // The invariant is about DISMISSAL, not about listening. A component
