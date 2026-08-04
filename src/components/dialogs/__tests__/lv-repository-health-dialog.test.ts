@@ -15,7 +15,7 @@ const invokeHistory: Array<{ command: string; args?: unknown }> = [];
 /** plugin-dialog's confirm() resolves true only for the OK button label. */
 let confirmResult = true;
 
-const mockInvoke: MockInvoke = async (command: string) => {
+let mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (
     command === 'plugin:dialog|message' ||
@@ -109,5 +109,54 @@ describe('lv-repository-health-dialog destructive actions', () => {
     await internalOf(el).runPrune();
 
     expect(findCommands('run_prune')).to.have.length(1);
+  });
+});
+
+describe('lv-repository-health-dialog deferred close', () => {
+  // Closing this dialog DESTROYS the element, so the host refuses while gc is
+  // in flight. Refusing alone left it open and pinned to a repo whose tab was
+  // gone — and its own guard (!pinnedRepoPath || runningAction) then allowed a
+  // SECOND gc against that repo once the first finished.
+  it('closes immediately when idle', async () => {
+    const el = await render();
+    let closed = 0;
+    el.addEventListener('close', () => { closed++; });
+
+    el.closeWhenIdle();
+
+    expect(closed).to.equal(1);
+  });
+
+  it('defers the close until the running action lands, and blocks new ones', async () => {
+    let resolveGc!: (v: unknown) => void;
+    mockInvoke = async (command: string) => {
+      if (command === 'run_gc') return new Promise((r) => { resolveGc = r; });
+      if (command === 'plugin:dialog|message') return 'Ok';
+      return null;
+    };
+
+    const el = await render();
+    let closed = 0;
+    el.addEventListener('close', () => { closed++; });
+
+    const gc = internalOf(el).runGc(true);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(el.isRunning, 'gc in flight').to.be.true;
+
+    el.closeWhenIdle();
+    await el.updateComplete;
+    expect(closed, 'not closed while gc runs').to.equal(0);
+
+    // A second action must be refused while the close is pending.
+    invokeHistory.length = 0;
+    await internalOf(el).runPrune();
+    expect(findCommands('run_prune'), 'no new action once closing').to.have.length(0);
+
+    resolveGc(null);
+    await gc;
+    await el.updateComplete;
+
+    expect(closed, 'closed once the gc landed').to.equal(1);
   });
 });

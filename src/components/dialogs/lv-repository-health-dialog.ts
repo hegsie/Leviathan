@@ -244,6 +244,33 @@ export class LvRepositoryHealthDialog extends LitElement {
     return this.runningAction !== null;
   }
 
+  /**
+   * The pinned repo's tab was closed while an action was in flight. We cannot
+   * close now — that destroys the element and orphans the running gc — so
+   * refuse any FURTHER action and dismiss as soon as the current one lands.
+   * Without this the host's refusal merely deferred the problem: the dialog
+   * stayed open pinned to a repo with no tab, and its guard
+   * (`!pinnedRepoPath || runningAction`) happily allowed a second gc on it
+   * once the first finished.
+   */
+  @state() private closePending = false;
+
+  public closeWhenIdle(): void {
+    if (!this.runningAction) {
+      this.handleClose();
+      return;
+    }
+    this.closePending = true;
+  }
+
+  /** Called from every action's finally: honour a deferred close. */
+  private settleClosePending(): void {
+    if (this.closePending && !this.runningAction) {
+      this.closePending = false;
+      this.handleClose();
+    }
+  }
+
   /** The repo this dialog is pinned to, for the host's tab-close sweep. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.pinnedRepoPath || null;
@@ -358,7 +385,7 @@ export class LvRepositoryHealthDialog extends LitElement {
   }
 
   private async runGc(aggressive: boolean): Promise<void> {
-    if (!this.pinnedRepoPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
 
     // Pinned before the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
@@ -386,11 +413,12 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      this.settleClosePending();
     }
   }
 
   private async runFsck(): Promise<void> {
-    if (!this.pinnedRepoPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
 
     this.runningAction = 'fsck';
 
@@ -412,11 +440,12 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      this.settleClosePending();
     }
   }
 
   private async runPrune(): Promise<void> {
-    if (!this.pinnedRepoPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
 
     const repoPath = this.pinnedRepoPath;
 
@@ -439,6 +468,7 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      this.settleClosePending();
     }
   }
 

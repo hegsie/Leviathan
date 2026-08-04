@@ -1213,9 +1213,14 @@ export class AppShell extends LitElement {
       // not announce a dismissal that did not happen.
       const pinnedFlagDialogs: Array<[string, () => boolean, string]> = [
         ['lv-repository-health-dialog', () => {
-          if (this.repositoryHealthDialog?.isRunning) return false;
-          this.showRepositoryHealth = false;
-          return true;
+          // Hands the close to the dialog: it dismisses now if idle, or after
+          // the running gc/prune lands. Merely refusing left it open and
+          // pinned to a repo with no tab, where a SECOND gc could be started
+          // once the first finished.
+          const running = this.repositoryHealthDialog?.isRunning ?? false;
+          this.repositoryHealthDialog?.closeWhenIdle();
+          if (!running) this.showRepositoryHealth = false;
+          return !running;
         }, 'repository health closed'],
         ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
         ['lv-submodule-dialog', () => { this.showSubmodules = false; return true; }, 'submodules closed'],
