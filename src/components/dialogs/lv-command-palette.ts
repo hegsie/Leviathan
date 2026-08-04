@@ -198,6 +198,9 @@ export class LvCommandPalette extends LitElement {
   ];
 
   @property({ type: Boolean, reflect: true }) open = false;
+
+  /** Focus owner at open time, restored on close. */
+  private previouslyFocused: HTMLElement | null = null;
   @property({ type: Array }) commands: PaletteCommand[] = [];
   @property({ type: Array }) branches: Branch[] = [];
   @property({ type: Array }) files: string[] = [];
@@ -234,12 +237,26 @@ export class LvCommandPalette extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProps.has('open') && this.open) {
+      // Remembered so focus can go back where it was. Leaving it in the
+      // search input after closing left document focus inside a hidden field:
+      // every keydown's composedPath still contained an INPUT, so
+      // keyboard.service's in-input bail swallowed EVERY single-key shortcut
+      // app-wide until the user happened to click something.
+      this.previouslyFocused = document.activeElement as HTMLElement | null;
       this.searchQuery = '';
       this.selectedIndex = 0;
       this.updateFilteredCommands();
       requestAnimationFrame(() => {
         this.searchInput?.focus();
       });
+    }
+    if (changedProps.has('open') && !this.open) {
+      this.searchInput?.blur();
+      const restore = this.previouslyFocused;
+      this.previouslyFocused = null;
+      if (restore && restore.isConnected) {
+        restore.focus();
+      }
     }
     if (
       changedProps.has('commands') ||

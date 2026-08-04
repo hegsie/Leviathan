@@ -37,6 +37,21 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('?');
     await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
   });
+
+  // Closing the palette used to leave document focus inside its hidden search
+  // input, so every keydown's composedPath still contained an INPUT and
+  // keyboard.service's in-input bail swallowed every single-key shortcut until
+  // the user clicked something.
+  test('single-key shortcuts still work after closing the command palette', async ({ page }) => {
+    await page.keyboard.press('Meta+p');
+    await expect(dialogs.commandPalette.palette).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+  });
 });
 
 test.describe('Command Palette', () => {
