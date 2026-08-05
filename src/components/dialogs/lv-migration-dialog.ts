@@ -16,6 +16,7 @@ import type {
   UnifiedMigrationResult,
 } from '../../types/unified-profile.types.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type ViewMode = 'intro' | 'preview' | 'migrating' | 'complete';
 
@@ -432,6 +433,10 @@ export class LvMigrationDialog extends LitElement {
   @state() private migrationResult: UnifiedMigrationResult | null = null;
 
   updated(changedProperties: Map<string, unknown>): void {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
       this.resetState();
     }
@@ -443,6 +448,32 @@ export class LvMigrationDialog extends LitElement {
     this.accountAssignments = {};
     this.migrationResult = null;
     this.isLoading = false;
+  }
+
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain stops at the dialog
+   * layer (so one keypress cannot also close the diff behind it), which left
+   * Escape completely dead here. handleClose already refuses mid-migration.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      this.handleClose();
+    }
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    removeOverlay(this);
+    document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   private handleClose(): void {

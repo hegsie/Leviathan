@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import type { CleanEntry } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-clean-dialog')
 export class LvCleanDialog extends LitElement {
@@ -338,14 +339,39 @@ export class LvCleanDialog extends LitElement {
   @state() private includeIgnored = false;
   @state() private includeDirectories = true;
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block. The file
+   * list on screen belongs to the repo that was active at open, so every
+   * operation must use THIS value: reading the live prop deleted the listed
+   * paths out of whichever repo the user had switched to, and untracked files
+   * have no trash and no recovery path.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
+      // A prior operation may still be running against this component; its
+      // completion handler will close the dialog, so do not start a fresh
+      // session on top of it.
+      if (this.cleaning) return;
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadFiles();
     }
   }
 
   private async loadFiles(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
     this.entries = [];
@@ -353,7 +379,7 @@ export class LvCleanDialog extends LitElement {
 
     try {
       const result = await gitService.getCleanableFiles(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.includeIgnored,
         this.includeDirectories
       );
@@ -377,15 +403,30 @@ export class LvCleanDialog extends LitElement {
     }
   }
 
+  /**
+   * User-initiated dismissal. Blocked while the operation is in flight:
+   * closing mid-delete leaves it running with no visible surface, and when it
+   * finishes its success path calls close() — yanking shut whatever session
+   * the user had reopened in the meantime and discarding their new selection.
+   * close() itself stays unguarded because that success path needs it.
+   */
+  private dismiss(): void {
+    if (this.cleaning) return;
+    this.close();
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
-      this.close();
+      this.dismiss();
     }
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
-      this.close();
+      this.dismiss();
     }
   };
 
@@ -396,6 +437,7 @@ export class LvCleanDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
@@ -429,12 +471,39 @@ export class LvCleanDialog extends LitElement {
   private async handleClean(): Promise<void> {
     if (this.selectedPaths.size === 0) return;
 
-    // If any selected entry is an untracked nested git repository, require an
-    // explicit confirmation before force-deleting it (this destroys the nested
-    // repo's history, which `git clean` guards behind a second `-f`).
+    // The repo the listed files were read from — NOT the live prop. Pinning
+    // only at click time still deleted from the wrong repository whenever the
+    // tab switch happened before the click rather than during the confirm.
+    const repoPath = this.pinnedRepoPath;
+
+    // Captured BEFORE the confirms too. loadFiles() reassigns selectedPaths on
+    // every option change and on its own initial load, so reading it after an
+    // await can yield a set the user never chose — or an empty one. Pinning it
+    // also guarantees the count named in the confirm is exactly what gets
+    // deleted.
+    const paths = Array.from(this.selectedPaths);
     const nestedRepos = this.entries.filter(
-      e => this.selectedPaths.has(e.path) && e.isNestedRepo
+      e => paths.includes(e.path) && e.isNestedRepo
     );
+
+    // Untracked files are unlinked outright: they exist in no git object and
+    // there is no trash, so this is the one deletion in the app with no
+    // recovery path at all. Discarding a SINGLE untracked file from the file
+    // list raises a confirm the user cannot even switch off
+    // (lv-file-status.ts confirmDiscard), so deleting 200 of them here must
+    // not be the ungated route. The dialog's checkboxes are a selection UI,
+    // not a confirmation.
+    const confirmedDelete = await showConfirm(
+      'Delete Untracked Files',
+      `Permanently delete ${paths.length} item${paths.length === 1 ? '' : 's'}? ` +
+        `They are not in Git and cannot be recovered.`,
+      'warning'
+    );
+    if (!confirmedDelete) return;
+
+    // A nested git repository additionally destroys that repo's whole history,
+    // which `git clean` itself guards behind a second `-f` — so it gets its own
+    // gate on top of the deletion confirm above.
     if (nestedRepos.length > 0) {
       const names = nestedRepos.map(e => e.path).join(', ');
       const confirmed = await showConfirm(
@@ -453,12 +522,27 @@ export class LvCleanDialog extends LitElement {
     this.cleaning = true;
 
     try {
-      const paths = Array.from(this.selectedPaths);
-      const result = await gitService.cleanFiles(this.repositoryPath, paths, forceNested);
+      const result = await gitService.cleanFiles(repoPath, paths, forceNested);
 
       if (result.success) {
+        // clean_files skips entries it cannot remove — nested repos without
+        // force, directories holding tracked content, locked files — and
+        // reports how many it actually deleted. The dialog closes immediately,
+        // so without this the user sees no feedback at all and assumes every
+        // selected file is gone.
+        const removed = result.data ?? 0;
+        const shortfall = paths.length - removed;
+        showToast(
+          shortfall > 0
+            ? `Deleted ${removed} of ${paths.length} items — ${shortfall} could not be removed`
+            : `Deleted ${removed} item${removed === 1 ? '' : 's'}`,
+          shortfall > 0 ? 'warning' : 'success'
+        );
+
         this.dispatchEvent(new CustomEvent('files-cleaned', {
-          detail: { count: result.data },
+          // repositoryPath so the host refreshes the repo the clean ran on —
+          // the user may have switched tabs during the IPC await.
+          detail: { count: removed, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -543,7 +627,7 @@ export class LvCleanDialog extends LitElement {
             </svg>
             <span class="title">Clean Working Directory</span>
           </div>
-          <button class="close-btn" @click=${this.close}>
+          <button class="close-btn" @click=${this.dismiss}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -629,7 +713,7 @@ export class LvCleanDialog extends LitElement {
             ` : html`No files selected`}
           </div>
           <div class="footer-right">
-            <button class="btn btn-secondary" @click=${this.close}>Cancel</button>
+            <button class="btn btn-secondary" ?disabled=${this.cleaning} @click=${this.dismiss}>Cancel</button>
             <button
               class="btn btn-danger"
               ?disabled=${!someSelected || this.cleaning}

@@ -36,8 +36,11 @@ function makeStash(index: number) {
   return { index, message: `WIP on main ${index}`, oid: `oid${index}` };
 }
 
+/** Live stash list the handlers re-resolve against; seeded by setContextMenu. */
+let mockStashes: unknown[] = [];
+
 function defaultMockInvoke(command: string): Promise<unknown> {
-  if (command === 'get_stashes') return Promise.resolve([]);
+  if (command === 'get_stashes') return Promise.resolve(mockStashes);
   // Tauri confirm() dialogs resolve via plugin:dialog|message; a truthy value =
   // confirmed.
   if (command === 'plugin:dialog|message') return Promise.resolve('Ok');
@@ -68,6 +71,11 @@ function listenForConflict(el: LvStashList): { detail: ConflictDetail | null } {
 }
 
 function setContextMenu(el: LvStashList, stash: ReturnType<typeof makeStash>): void {
+  // The handlers re-resolve the right-clicked stash by oid against the live
+  // list before acting, so the mocked list must actually hold it at its index.
+  mockStashes = Array.from({ length: stash.index + 1 }, (_, i) =>
+    i === stash.index ? stash : makeStash(i)
+  );
   (el as unknown as { contextMenu: unknown }).contextMenu = {
     visible: true, x: 0, y: 0, stash,
   };

@@ -4,10 +4,11 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state, property } from 'lit/decorators.js';
+import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { cherryPick } from '../../services/git.service.ts';
 import './lv-modal.ts';
+import type { LvModal } from './lv-modal.ts';
 import type { Commit } from '../../types/git.types.ts';
 
 @customElement('lv-cherry-pick-dialog')
@@ -199,6 +200,8 @@ export class LvCherryPickDialog extends LitElement {
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) currentBranch = '';
 
+  @query('lv-modal') private modal!: LvModal;
+
   @state() private commit: Commit | null = null;
   @state() private noCommit = false;
   @state() private mainline = 1;
@@ -217,6 +220,10 @@ export class LvCherryPickDialog extends LitElement {
   @state() private pinnedCurrentBranch = '';
 
   public open(commit: Commit): void {
+    // A cherry-pick already running owns this component; reset() would clear
+    // isExecuting and re-enable the button for a second concurrent run against
+    // the same repo.
+    if (this.isExecuting) return;
     this.reset();
     this.commit = commit;
     this.pinnedRepoPath = this.repositoryPath;
@@ -327,9 +334,16 @@ export class LvCherryPickDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    if (!this.isExecuting) {
-      this.close();
+    // Cancel is disabled while the cherry-pick runs; Escape, the overlay and
+    // the × must honour the same rule. lv-modal.close() sets open=false BEFORE
+    // dispatching, so without re-asserting it the operation kept running with
+    // no visible surface and reported failure into a hidden dialog.
+    if (this.isExecuting) {
+      this.modal.open = true;
+      return;
     }
+
+    this.close();
   }
 
   private formatDate(timestamp: number): string {

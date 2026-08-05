@@ -193,6 +193,10 @@ export class LvCloneDialog extends LitElement {
   private unlistenProgress?: UnlistenFn;
 
   public open(): void {
+    // A clone already in flight owns this component; reset() would
+    // clear `isCloning` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isCloning) return;
     this.reset();
     this.destination = settingsStore.getState().defaultClonePath;
     this.modal.open = true;
@@ -200,6 +204,12 @@ export class LvCloneDialog extends LitElement {
 
   public close(): void {
     this.modal.open = false;
+    // Cleared HERE, not just on the failure paths. The success branch closes
+    // via setTimeout without clearing it, so `isCloning` stayed true for the
+    // life of the component — and open()'s re-entrancy guard returns before
+    // reset() can clear it, which made "Clone Repository" silently dead for
+    // the rest of the session after the first successful clone.
+    this.isCloning = false;
     this.cleanupListener();
   }
 
@@ -349,9 +359,17 @@ export class LvCloneDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    if (!this.isCloning) {
-      this.reset();
+    // Cancel is disabled while isCloning is in flight; Escape, the overlay and the
+    // × must honour the same rule. lv-modal.close() sets open=false BEFORE
+    // dispatching, so without re-asserting it here the clone kept running with no
+    // visible surface — and reported any failure into `error` on a hidden
+    // dialog. Mirrors lv-branch-cleanup-dialog.handleModalClose.
+    if (this.isCloning) {
+      this.modal.open = true;
+      return;
     }
+
+    this.reset();
   }
 
   private get fullPath(): string {

@@ -149,6 +149,10 @@ export class LvCreateBranchDialog extends LitElement {
   @query('#branch-name-input') private inputEl!: HTMLInputElement;
 
   public open(startPoint?: string): void {
+    // Branch creation already in flight owns this component; reset() would
+    // clear `isCreating` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isCreating) return;
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
@@ -236,10 +240,17 @@ export class LvCreateBranchDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    this.isOpen = false;
-    if (!this.isCreating) {
-      this.reset();
+    // Escape, the overlay and the × must honour the same rule as the disabled
+    // Cancel button. lv-modal.close() sets open=false BEFORE dispatching, and
+    // this handler additionally dropped `isOpen`, so branch creation carried on with
+    // no visible surface and reported failure into a hidden dialog.
+    if (this.isCreating) {
+      this.modal.open = true;
+      return;
     }
+
+    this.isOpen = false;
+    this.reset();
   }
 
   private get canCreate(): boolean {

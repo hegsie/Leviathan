@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -330,20 +331,45 @@ export class LvReflogDialog extends LitElement {
     }
   };
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block. The entries
+   * on screen belong to the repo that was active at open, so a reset must
+   * target THAT repo: reading the live prop aimed the reset at whichever repo
+   * the user had switched to, while the confirm still named the old repo's
+   * commit.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
+      // A prior operation may still be running against this component; its
+      // completion handler will close the dialog, so do not start a fresh
+      // session on top of it.
+      if (this.resetting) return;
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadReflog();
     }
   }
 
   private async loadReflog(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
     this.entries = [];
 
     try {
-      const result = await gitService.getReflog(this.repositoryPath, 50);
+      const result = await gitService.getReflog(this.pinnedRepoPath, 50);
       if (result.success && result.data) {
         this.entries = result.data;
       } else if (!result.success) {
@@ -360,15 +386,30 @@ export class LvReflogDialog extends LitElement {
     }
   }
 
+  /**
+   * User-initiated dismissal. Blocked while the operation is in flight:
+   * closing mid-reset leaves it running with no visible surface, and when it
+   * finishes its success path calls close() — yanking shut whatever session
+   * the user had reopened in the meantime and discarding their new selection.
+   * close() itself stays unguarded because that success path needs it.
+   */
+  private dismiss(): void {
+    if (this.resetting) return;
+    this.close();
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
-      this.close();
+      this.dismiss();
     }
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
-      this.close();
+      this.dismiss();
     }
   };
 
@@ -380,42 +421,80 @@ export class LvReflogDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
   }
 
   public close(): void {
     this.open = false;
+    // Only handleDocumentClick clears this, and Escape is not a click — so a
+    // menu left open at dismissal was repainted at its old coordinates over
+    // the next session's freshly loaded list, still holding the PREVIOUS
+    // entry. Clicking it ran a reset the user never re-selected.
+    this.contextMenu = { visible: false, x: 0, y: 0, entry: null };
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }
 
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
 
-    // Confirm hard reset
-    if (mode === 'hard') {
-      const confirmed = await showConfirm(
-        'Hard Reset',
-        `Are you sure you want to hard reset to ${entry.shortId}? This will discard all uncommitted changes.`,
-        'warning'
-      );
-      if (!confirmed) return;
-    }
+    // The repo the listed entries were read from — NOT the live prop. Pinning
+    // only at click time still reset the wrong repository whenever the tab
+    // switch happened before the click rather than during the confirm.
+    const repoPath = this.pinnedRepoPath;
+
+    // EVERY mode is a reset — the "Undo" button runs a mixed one — so every
+    // mode repoints the branch and drops commits off it. Gating the confirm on
+    // `hard` alone meant clicking Undo in a dialog opened just to LOOK at
+    // history silently reset the branch. The same operation from the graph
+    // context menu confirms for all three modes; this surface must match.
+    const droppedNote =
+      `This branch will point at ${entry.shortId}. Any commit no longer reachable ` +
+      `from it is recoverable only through the reflog.`;
+
+    const modeNote =
+      mode === 'hard'
+        ? 'All uncommitted changes are also discarded permanently — those are not in the reflog and cannot be recovered.'
+        : mode === 'mixed'
+          ? 'Your working-directory changes are kept, but unstaged.'
+          : 'Your changes remain staged.';
+
+    const titles = { hard: 'Hard Reset', mixed: 'Undo to This State', soft: 'Soft Reset' };
+
+    const confirmed = await showConfirm(
+      titles[mode],
+      `Reset to ${entry.shortId}?\n\n${droppedNote}\n\n${modeNote}`,
+      'warning'
+    );
+    if (!confirmed) return;
 
     this.resetting = true;
 
     try {
-      const result = await gitService.resetToReflog(this.repositoryPath, entry.index, mode);
+      // entry.oid pins the reset to the commit the user was actually shown:
+      // this dialog loads the reflog once and never reloads, so an external
+      // commit or checkout shifts entry.index onto a different commit.
+      const result = await gitService.resetToReflog(repoPath, entry.index, mode, entry.oid);
 
       if (result.success) {
         this.dispatchEvent(new CustomEvent('undo-complete', {
-          detail: { entry: result.data, mode },
+          // repositoryPath so the host refreshes the repo the reset ran on —
+          // the user may have switched tabs during the IPC await.
+          detail: { entry: result.data, mode, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
         this.close();
       } else {
         showToast(`Reset failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // The backend refuses when the reflog shifted under us and tells the
+        // user to "refresh and try again" — but this dialog loads once and has
+        // no refresh affordance, so without this the stale indices persist and
+        // every retry fails identically. Reload so the advice is actionable.
+        // Safe unconditionally now the dialog is pinned: the reload reads the
+        // same repo the failed reset targeted, whichever tab is active.
+        await this.loadReflog();
       }
     } catch (err) {
       console.error('Reset failed:', err);
@@ -543,7 +622,7 @@ export class LvReflogDialog extends LitElement {
               <div class="subtitle">Reflog - recover previous states</div>
             </div>
           </div>
-          <button class="close-btn" @click=${this.close}>
+          <button class="close-btn" @click=${this.dismiss}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18"></line>
               <line x1="6" y1="6" x2="18" y2="18"></line>

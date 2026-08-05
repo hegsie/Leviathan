@@ -9,6 +9,8 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { join } from "@tauri-apps/api/path";
 import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
 import { repositoryStore } from "../../stores/repository.store.ts";
+import { settingsStore } from "../../stores/settings.store.ts";
+import { isTopOverlay } from "../../utils/overlay-stack.ts";
 
 interface FileContextMenuState {
   visible: boolean;
@@ -535,6 +537,9 @@ export class LvFileStatus extends LitElement {
   };
 
   private handleKeydownForContextMenu = (e: KeyboardEvent): void => {
+    // A context menu must not eat an Escape aimed at a dialog opened over it:
+    // every global keydown listener fires on the same keypress.
+    if (!isTopOverlay(this)) return;
     if (e.key === "Escape" && this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }
@@ -709,18 +714,14 @@ export class LvFileStatus extends LitElement {
     const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
     if (filesToDiscard.length === 0) return;
 
-    const paths = this.discardablePaths(filesToDiscard);
-    if (paths.length === 0) return;
+    const entries = this.discardableEntries(filesToDiscard);
+    if (entries.length === 0) return;
+    const paths = entries.map((f) => f.path);
     // Captured BEFORE the confirm await: discarding is irreversible and must
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""} in "${dirPath}"? This cannot be undone.`,
-      "warning",
-    );
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard(entries, dirPath))) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
@@ -1193,7 +1194,7 @@ export class LvFileStatus extends LitElement {
    * the index stays conflicted — either way the conflict must be resolved
    * (or the operation aborted) in the merge editor instead.
    */
-  private discardablePaths(files: StatusEntry[]): string[] {
+  private discardableEntries(files: StatusEntry[]): StatusEntry[] {
     const conflicted = files.filter((f) => f.isConflicted);
     if (conflicted.length > 0) {
       showToast(
@@ -1201,7 +1202,79 @@ export class LvFileStatus extends LitElement {
         'warning',
       );
     }
-    return files.filter((f) => !f.isConflicted).map((f) => f.path);
+    return files.filter((f) => !f.isConflicted);
+  }
+
+  /**
+   * Confirm title/message for a discard.
+   *
+   * Discarding an UNTRACKED file deletes it from disk — staging.rs classifies
+   * anything absent from both the index and HEAD as untracked and removes it.
+   * There is no git object and no trash, so the file is unrecoverable. "Discard
+   * changes to X" reads as "restore X to its previous state", which materially
+   * understates that, and in bulk "discard changes to 12 files" can mean 12
+   * permanent deletions. Name the deletion whenever one is involved.
+   */
+  /**
+   * Prompt for a discard, honouring the "Confirm Before Discard" setting.
+   *
+   * Returns true when the caller should proceed.
+   *
+   * The setting only suppresses the prompt for TRACKED files, whose content is
+   * restored from the index and is therefore recoverable. Any selection that
+   * includes an untracked file always prompts: those are deleted from disk with
+   * no git object and no trash, and a preference for fewer dialogs must not
+   * silently become unrecoverable deletion.
+   */
+  private async confirmDiscard(files: StatusEntry[], scope?: string): Promise<boolean> {
+    const hasUntracked = files.some((f) => f.status === 'untracked');
+    if (!hasUntracked && !settingsStore.getState().confirmBeforeDiscard) {
+      return true;
+    }
+
+    const { title, message } = this.discardConfirmCopy(files, scope);
+    return showConfirm(title, message, 'warning');
+  }
+
+  private discardConfirmCopy(
+    files: StatusEntry[],
+    scope?: string,
+  ): { title: string; message: string } {
+    const untracked = files.filter((f) => f.status === 'untracked').length;
+    const tracked = files.length - untracked;
+    const where = scope ? ` in "${scope}"` : '';
+    const plural = (n: number) => (n === 1 ? '' : 's');
+
+    if (files.length === 1) {
+      return untracked === 1
+        ? {
+            title: 'Delete Untracked File',
+            message: `Permanently delete the untracked file "${files[0].path}"? It is not in Git and cannot be recovered.`,
+          }
+        : {
+            title: 'Discard Changes',
+            message: `Discard changes to "${files[0].path}"? This cannot be undone.`,
+          };
+    }
+
+    if (untracked === 0) {
+      return {
+        title: 'Discard Changes',
+        message: `Discard changes to ${tracked} file${plural(tracked)}${where}? This cannot be undone.`,
+      };
+    }
+
+    if (tracked === 0) {
+      return {
+        title: 'Delete Untracked Files',
+        message: `Permanently delete ${untracked} untracked file${plural(untracked)}${where}? They are not in Git and cannot be recovered.`,
+      };
+    }
+
+    return {
+      title: 'Discard Changes',
+      message: `Discard changes to ${tracked} file${plural(tracked)} and permanently delete ${untracked} untracked file${plural(untracked)}${where}? This cannot be undone.`,
+    };
   }
 
   private async handleStageFile(file: StatusEntry, e: Event): Promise<void> {
@@ -1271,13 +1344,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Are you sure you want to discard changes to "${file.path}"? This action cannot be undone.`,
-      "warning",
-    );
-
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard([file]))) return;
 
     const result = await gitService.discardChanges(repoPath, [
       file.path,
@@ -1405,21 +1472,17 @@ export class LvFileStatus extends LitElement {
   }
 
   private async handleDiscardSelected(): Promise<void> {
-    const paths = this.discardablePaths(
+    const entries = this.discardableEntries(
       this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
     );
-    if (paths.length === 0) return;
+    if (entries.length === 0) return;
+    const paths = entries.map((f) => f.path);
 
     // Captured BEFORE the confirm await: discarding is irreversible and must
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to ${paths.length} file${paths.length > 1 ? "s" : ""}? This cannot be undone.`,
-      "warning",
-    );
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard(entries))) return;
 
     const result = await gitService.discardChanges(repoPath, paths);
     if (result.success) {
@@ -1545,12 +1608,7 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      "Discard Changes",
-      `Discard changes to "${file.path}"? This cannot be undone.`,
-      "warning",
-    );
-    if (!confirmed) return;
+    if (!(await this.confirmDiscard([file]))) return;
     const result = await gitService.discardChanges(repoPath, [
       file.path,
     ]);

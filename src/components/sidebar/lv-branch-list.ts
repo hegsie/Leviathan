@@ -15,6 +15,7 @@ import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase
 import '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
+import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type BranchSortMode = 'name' | 'date' | 'date-asc';
 
@@ -569,10 +570,21 @@ export class LvBranchList extends LitElement {
   @state() private hiddenBranches = new Set<string>();
   @state() private showSortMenu = false;
   @state() private operationInProgress = false;
-  // Names of local branches the backend reports as merged into HEAD (real
-  // graph_descendant_of detection, including tip==HEAD). Refreshed by
-  // loadBranches; used for the "Delete Merged Branches" flow and its badge.
-  @state() private mergedBranchNames = new Set<string>();
+  /**
+   * Every branch the cleanup dialog would list, by name and across ALL
+   * categories. The button used merged+stale computed locally, which
+   * double-counted a branch that is both and hid the button entirely for a
+   * repo whose only candidates are gone-upstream — while the command-palette
+   * entry still opened the dialog, so the two surfaces disagreed.
+   */
+  @state() private cleanupCandidateNames = new Set<string>();
+  /**
+   * The candidate fetch failed for the current repo. Distinct from "no
+   * candidates": an empty set renders as "nothing to clean up", which is a
+   * lie when we simply could not find out. Keeps the button reachable and
+   * says so, instead of the feature silently vanishing from the sidebar.
+   */
+  @state() private cleanupCheckFailed = false;
 
   @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
   @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
@@ -585,11 +597,16 @@ export class LvBranchList extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     this.loadHiddenBranches();
-    await this.loadBranches();
+    // Registered BEFORE the load, not after. loadBranches() awaits three IPC
+    // round-trips, and every event dispatched in that window was dropped on
+    // the floor: the command palette's "Clean up branches" silently did
+    // nothing, and a repository-refresh raised during initial load was lost.
+    // None of these handlers depend on branch data being present.
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
+    await this.loadBranches();
     // Close our OWN embedded interactive-rebase dialog when its pinned repo's
     // tab is closed — mirrors app-shell's guard for the app-level dialogs.
     // Without it, the dialog (kept alive across refreshes by the single
@@ -645,6 +662,9 @@ export class LvBranchList extends LitElement {
   };
 
   private handleKeydown = (e: KeyboardEvent): void => {
+    // A context menu must not eat an Escape aimed at a dialog opened over
+    // it: every global keydown listener fires on the same keypress.
+    if (!isTopOverlay(this)) return;
     if (e.key === 'Escape' && this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     }
@@ -740,7 +760,15 @@ export class LvBranchList extends LitElement {
       const [branchesResult, , cleanupResult] = await Promise.all([
         gitService.getBranches(loadedPath),
         gitService.getRemotes(loadedPath),
-        gitService.getCleanupCandidates(loadedPath),
+        // The staleDays argument is what makes the badge and the cleanup
+        // dialog agree. Omitting it fell back to the backend's 90-day default,
+        // so the badge counted stale branches the dialog's Stale tab did not
+        // list (and kept counting them when the user set the window to 0 to
+        // disable staleness entirely).
+        gitService.getCleanupCandidates(
+          loadedPath,
+          settingsStore.getState().staleBranchDays,
+        ),
       ]);
 
       // A newer load for the SAME path supersedes this one entirely (its
@@ -878,13 +906,13 @@ export class LvBranchList extends LitElement {
         };
       });
 
-      // Track the set of branches the backend considers merged into HEAD, so
-      // the "Delete Merged Branches" flow and its badge reflect real
-      // `git branch --merged` semantics rather than an ahead-of-upstream guess.
-      // Fetched in the Promise.all above to keep loadBranches to a single await
-      // point (extra await points perturb render timing for callers).
-      this.mergedBranchNames = cleanupResult.success && cleanupResult.data
-        ? new Set(cleanupResult.data.filter(c => c.category === 'merged').map(c => c.name))
+      // The badge and the cleanup dialog share one source of truth: the
+      // backend's candidate list. Fetched in the Promise.all above to keep
+      // loadBranches to a single await point (extra await points perturb
+      // render timing for callers).
+      this.cleanupCheckFailed = !cleanupResult.success;
+      this.cleanupCandidateNames = cleanupResult.success && cleanupResult.data
+        ? new Set(cleanupResult.data.map(c => c.name))
         : new Set();
 
     } catch (err) {
@@ -999,18 +1027,16 @@ export class LvBranchList extends LitElement {
    * unmerged branches (ahead-of-upstream 0 right after a push) as merged, and it
    * missed merged branches that have no upstream at all (aheadBehind undefined).
    */
-  private getMergedBranches(): Branch[] {
-    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
-    return allLocal.filter(b => !b.isHead && this.mergedBranchNames.has(b.name));
+  /**
+   * Distinct local branches the cleanup dialog would list.
+   *
+   * Counted by NAME: merged and stale are independent filters over the same
+   * list, so a branch that is both was counted twice by the badge.
+   */
+  private getCleanupCandidateCount(): number {
+    return this.cleanupCandidateNames.size;
   }
 
-  /**
-   * Find all local branches that are stale (older than staleBranchDays setting)
-   */
-  private getStaleBranches(): Branch[] {
-    const allLocal = this.localBranchGroups.flatMap(g => g.branches);
-    return allLocal.filter(b => !b.isHead && this.isBranchStale(b));
-  }
 
   /**
    * Open the branch cleanup dialog
@@ -1032,66 +1058,6 @@ export class LvBranchList extends LitElement {
       await this.loadBranches();
     }
     this.dispatchBranchesChanged(repoPath);
-  }
-
-  /**
-   * Delete all branches that are merged into HEAD
-   */
-  private async handleDeleteMergedBranches(): Promise<void> {
-    // Captured BEFORE the confirm await: these irreversible deletes (and the
-    // refresh) must target the repo they were invoked on, even if the user
-    // switches tabs while the confirm is up and this.repositoryPath rebinds.
-    const repoPath = this.repositoryPath;
-    const mergedBranches = this.getMergedBranches();
-
-    if (mergedBranches.length === 0) {
-      await showConfirm(
-        'No Merged Branches',
-        'There are no local branches that are fully merged into the current branch.',
-        'info'
-      );
-      return;
-    }
-
-    const branchNames = mergedBranches.map(b => `  • ${b.shorthand}`).join('\n');
-    const confirmed = await showConfirm(
-      'Delete Merged Branches',
-      `The following ${mergedBranches.length} branch${mergedBranches.length > 1 ? 'es are' : ' is'} merged and will be deleted:\n\n${branchNames}\n\nThis action cannot be undone.`,
-      'warning'
-    );
-
-    if (!confirmed) return;
-
-    // Delete branches one by one
-    let deleted = 0;
-    let failed = 0;
-
-    for (const branch of mergedBranches) {
-      const result = await gitService.deleteBranch(
-        repoPath,
-        branch.name,
-        false
-      );
-      if (result.success) {
-        deleted++;
-      } else {
-        failed++;
-        console.error(`Failed to delete ${branch.name}:`, result.error);
-      }
-    }
-
-    if (deleted > 0) {
-      await this.loadBranches();
-      this.dispatchBranchesChanged(repoPath);
-    }
-
-    if (failed > 0) {
-      await showConfirm(
-        'Partial Success',
-        `Deleted ${deleted} branch${deleted !== 1 ? 'es' : ''}, but ${failed} failed to delete.`,
-        'warning'
-      );
-    }
   }
 
   private async handleBranchCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
@@ -2243,18 +2209,22 @@ export class LvBranchList extends LitElement {
       ${this.localBranchGroups.length > 0 ? html`
         <div class="local-header">
           <span class="local-header-title">Local Branches</span>
-          ${this.getMergedBranches().length + this.getStaleBranches().length > 0 ? html`
+          ${this.getCleanupCandidateCount() > 0 || this.cleanupCheckFailed ? html`
             <button
               class="cleanup-btn"
               @click=${this.handleOpenCleanupDialog}
-              title="${this.getMergedBranches().length} merged + ${this.getStaleBranches().length} stale branches can be safely deleted"
+              title=${this.cleanupCheckFailed
+                ? 'Could not check for cleanup candidates — open to retry'
+                : `${this.getCleanupCandidateCount()} branch${this.getCleanupCandidateCount() === 1 ? '' : 'es'} can be reviewed for cleanup`}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
               </svg>
               Clean up
-              <span class="badge">${this.getMergedBranches().length + this.getStaleBranches().length}</span>
+              ${this.cleanupCheckFailed
+                ? nothing
+                : html`<span class="badge">${this.getCleanupCandidateCount()}</span>`}
             </button>
           ` : nothing}
         </div>

@@ -13,6 +13,7 @@ import type { LvMergeEditor } from '../panels/lv-merge-editor.ts';
 import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -417,11 +418,19 @@ export class LvConflictResolutionDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
   protected updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
+
+    // Announce/withdraw overlay ownership of Escape. Missing this made a
+    // dialog opened over another one dismiss BOTH on a single keypress: the
+    // one underneath was still stack-top, so its own guard passed.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
 
     // When open changes to true, load conflicts
     if (changedProperties.has('open') && this.open) {
@@ -467,7 +476,9 @@ export class LvConflictResolutionDialog extends LitElement {
   private stashCaptureEpoch = 0;
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    if (!this.open) return;
+    // Only the topmost overlay owns Escape. This handler only swallows the
+    // key today, but it must not swallow one aimed at a dialog above it.
+    if (!this.open || !isTopOverlay(this)) return;
 
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -1251,8 +1262,14 @@ export class LvConflictResolutionDialog extends LitElement {
       if (ctx.deleteBranch) {
         const del = await gitService.deleteBranch(this.repositoryPath, ctx.branchName, true);
         if (!del.success) {
-          showToast(del.error?.message ?? 'Failed to delete feature branch', 'error');
-          return false;
+          // The squash commit has already landed — deleting the branch is the
+          // optional last step. Treating its failure (e.g. a preventDeletion
+          // branch rule) as "finish incomplete" left the dialog stuck on a
+          // fully-resolved conflict list with no way forward but closing it.
+          showToast(
+            `${del.error?.message ?? 'Failed to delete feature branch'} — the squash commit landed`,
+            'warning',
+          );
         }
       }
       return true;
@@ -1262,7 +1279,7 @@ export class LvConflictResolutionDialog extends LitElement {
     // re-invoking the (now idempotent) backend finish skips the up-to-date
     // master/develop merges, creates the version tag (release/hotfix), and deletes
     // the branch.
-    let result: CommandResult<void>;
+    let result: CommandResult<gitService.GitFlowFinishResult>;
     switch (ctx.kind) {
       case 'feature':
         result = await gitService.gitFlowFinishFeature(
@@ -1319,6 +1336,12 @@ export class LvConflictResolutionDialog extends LitElement {
       }
       showToast(result.error?.message ?? 'Failed to complete Git Flow finish', 'error');
       return false;
+    }
+
+    // The finish can succeed while a branch rule blocks its branch deletion —
+    // say so, or the branch silently survives the finish.
+    if (result.data?.branchKeptReason) {
+      showToast(result.data.branchKeptReason, 'warning');
     }
     return true;
   }

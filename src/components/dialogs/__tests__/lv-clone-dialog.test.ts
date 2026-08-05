@@ -469,4 +469,44 @@ describe('lv-clone-dialog', () => {
       expect(internal.url).to.equal('');
     });
   });
+
+  describe('re-entrancy guard', () => {
+    // open() refuses while a clone is in flight, so the in-flight flag MUST be
+    // cleared on every terminating path. The success branch closes via
+    // setTimeout and never cleared it, and open()'s guard returns before
+    // reset() can — so one successful clone made "Clone Repository" a silent
+    // no-op for the rest of the session.
+    it('can be reopened after a clone succeeds', async () => {
+      const internal = el as unknown as {
+        url: string;
+        destination: string;
+        isCloning: boolean;
+        handleClone: () => Promise<void>;
+      };
+
+      mockInvoke = (command: string) => {
+        if (command === 'clone_repository') {
+          return Promise.resolve({ path: '/cloned/repo', name: 'repo' });
+        }
+        return Promise.resolve(null);
+      };
+
+      internal.url = 'https://github.com/user/repo.git';
+      internal.destination = '/dest';
+      await internal.handleClone();
+      await el.updateComplete;
+
+      // The success path schedules close() on a 500ms timer.
+      await new Promise((r) => setTimeout(r, 600));
+      await el.updateComplete;
+
+      expect(internal.isCloning, 'in-flight flag cleared after success').to.be.false;
+
+      el.open();
+      await el.updateComplete;
+
+      const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+      expect(modal.open, 'dialog reopens after a successful clone').to.be.true;
+    });
+  });
 });

@@ -9,6 +9,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { keyboardService, type Shortcut, type ShortcutBinding } from '../../services/keyboard.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-keyboard-shortcuts-dialog')
 export class LvKeyboardShortcutsDialog extends LitElement {
@@ -348,6 +349,15 @@ export class LvKeyboardShortcutsDialog extends LitElement {
 
   private settingsUnsubscribe?: () => void;
 
+  updated(changedProps: Map<string, unknown>): void {
+    // Announce/withdraw overlay ownership of Escape. Missing this made a
+    // dialog opened over another one dismiss BOTH on a single keypress:
+    // the one underneath was still stack-top, so its own guard passed.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
+  }
+
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
@@ -359,13 +369,21 @@ export class LvKeyboardShortcutsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    // Never leave the service disabled: being torn down mid-capture would
+    // otherwise kill every shortcut in the app with no way back.
+    if (this.editingId) {
+      keyboardService.setEnabled(true);
+    }
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     this.settingsUnsubscribe?.();
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
-    // Handle recording mode
-    if (this.editingId) {
+    // Handle recording mode. Gated on `open` as well as editingId: close()
+    // cancels recording, but a stale flag must never let a closed dialog eat
+    // keystrokes and rewrite bindings.
+    if (this.editingId && this.open) {
       e.preventDefault();
       e.stopPropagation();
 
@@ -391,6 +409,7 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       // Try to rebind
       const success = keyboardService.rebind(this.editingId, binding);
       if (success) {
+        keyboardService.setEnabled(true);
         this.editingId = null;
         this.recordedBinding = null;
         this.conflictError = null;
@@ -408,19 +427,35 @@ export class LvKeyboardShortcutsDialog extends LitElement {
       return;
     }
 
-    // Normal mode: close on Escape
-    if (e.key === 'Escape' && this.open) {
+    // Normal mode: close on Escape, but only when this dialog is the topmost
+    // overlay. Without that, pressing ? over the clean dialog and then Escape
+    // dismissed BOTH — the clean dialog was still stack-top, so its own guard
+    // passed and it discarded the user's file selection.
+    //
+    // The recording branch above is deliberately NOT gated: it is an explicit
+    // capture mode inside this dialog and already stops propagation.
+    if (e.key === 'Escape' && this.open && isTopOverlay(this)) {
       this.close();
     }
   };
 
   private startEditing(id: string): void {
+    // Silence the shortcut service for the duration of the capture. Its
+    // document listener is registered at MODULE EVALUATION, so it always runs
+    // before this dialog's (registered in connectedCallback) — and
+    // stopPropagation cannot suppress a listener on the same node. So the key
+    // being recorded was first EXECUTED: pressing "s" to rebind something
+    // staged the entire working tree, Ctrl+Shift+S stashed including
+    // untracked files, Ctrl+Shift+U pushed. It also ate the "Esc to cancel"
+    // this dialog advertises, closing the whole dialog instead.
+    keyboardService.setEnabled(false);
     this.editingId = id;
     this.recordedBinding = null;
     this.conflictError = null;
   }
 
   private cancelEditing(): void {
+    keyboardService.setEnabled(true);
     this.editingId = null;
     this.recordedBinding = null;
     this.conflictError = null;
@@ -447,6 +482,14 @@ export class LvKeyboardShortcutsDialog extends LitElement {
   }
 
   private close(): void {
+    // Recording MUST be cancelled here. The recording branch of handleKeyDown
+    // is gated on editingId alone, and this element is rendered
+    // unconditionally, so its document listener stays live forever. Dismissing
+    // mid-recording via the x or the backdrop (neither of which went through
+    // cancelEditing) left editingId set — and every subsequent keystroke
+    // anywhere in the app was then swallowed AND silently rebound that
+    // shortcut, persisted to localStorage, with no dialog on screen to show it.
+    this.cancelEditing();
     this.open = false;
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }

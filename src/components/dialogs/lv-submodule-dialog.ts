@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import type { Submodule } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -357,15 +358,57 @@ export class LvSubmoduleDialog extends LitElement {
   @state() private addPath = '';
   @state() private addBranch = '';
 
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain now stops at the
+   * dialog layer (so a keypress cannot also close the diff behind it), which
+   * made Escape a completely dead key here. Dismiss like every sibling.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.loadSubmodules();
     }
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    removeOverlay(this);
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       this.mode = 'list';
       this.addUrl = '';
       this.addPath = '';
@@ -378,7 +421,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getSubmodules(this.repositoryPath);
+    const result = await gitService.getSubmodules(this.pinnedRepoPath);
 
     if (result.success && result.data) {
       this.submodules = result.data;
@@ -399,7 +442,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.addSubmodule(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       this.addUrl,
       this.addPath,
       this.addBranch || undefined
@@ -426,11 +469,11 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initSubmodules(this.repositoryPath, [submodule.path]);
+    const result = await gitService.initSubmodules(this.pinnedRepoPath, [submodule.path]);
 
     if (result.success) {
       // Also update after init
-      const updateResult = await gitService.updateSubmodules(this.repositoryPath, {
+      const updateResult = await gitService.updateSubmodules(this.pinnedRepoPath, {
         submodulePaths: [submodule.path],
       });
       if (!updateResult.success) {
@@ -454,7 +497,7 @@ export class LvSubmoduleDialog extends LitElement {
     // superproject has recorded for this submodule, leaving the superproject
     // clean. (Passing remote:true would run `--remote`, checking out the
     // upstream branch tip instead and dirtying the working tree.)
-    const result = await gitService.updateSubmodules(this.repositoryPath, {
+    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
       submodulePaths: [submodule.path],
     });
 
@@ -470,9 +513,16 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   private async handleRemove(submodule: Submodule): Promise<void> {
+    // Captured BEFORE the confirm await: removal runs `git submodule deinit -f`
+    // + `git rm -f`, deleting the submodule's working tree (including any
+    // uncommitted work inside it). This dialog is bound to the active
+    // repository and rebinds live, so a mid-confirm tab switch would otherwise
+    // aim that at the repo the user switched TO.
+    const repoPath = this.pinnedRepoPath;
+
     const confirmed = await showConfirm(
       'Remove Submodule',
-      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis will remove the submodule from your repository.`,
+      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis deletes its working directory, including any uncommitted changes inside it. This cannot be undone.`,
       'warning'
     );
 
@@ -481,7 +531,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.removeSubmodule(this.repositoryPath, submodule.path);
+    const result = await gitService.removeSubmodule(repoPath, submodule.path);
 
     if (result.success) {
       this.success = 'Submodule removed successfully';
@@ -500,7 +550,7 @@ export class LvSubmoduleDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.updateSubmodules(this.repositoryPath, {
+    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
       init: true,
       recursive: true,
     });

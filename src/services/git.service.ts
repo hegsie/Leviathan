@@ -1698,15 +1698,25 @@ export async function getReflog(
   return invokeCommand<ReflogEntry[]>("get_reflog", { path: repoPath, limit });
 }
 
+/**
+ * Reset HEAD to a reflog entry.
+ *
+ * `expectedOid` guards against the reflog shifting between listing and reset
+ * (a commit or checkout from another window renumbers every entry). Pass the
+ * oid the user was shown; the backend refuses if the position no longer holds
+ * it. Omitting it skips the check.
+ */
 export async function resetToReflog(
   repoPath: string,
   reflogIndex: number,
   mode: "soft" | "mixed" | "hard" = "mixed",
+  expectedOid?: string,
 ): Promise<CommandResult<ReflogEntry>> {
   return invokeCommand<ReflogEntry>("reset_to_reflog", {
     path: repoPath,
     reflogIndex,
     mode,
+    expectedOid,
   });
 }
 
@@ -4739,13 +4749,19 @@ export async function gitFlowStartFeature(
   return invokeCommand<Branch>("gitflow_start_feature", { path: repoPath, name });
 }
 
+/** Outcome of a git-flow finish; branchKeptReason is set when a branch rule blocked the delete. */
+export interface GitFlowFinishResult {
+  branchDeleted: boolean;
+  branchKeptReason: string | null;
+}
+
 export async function gitFlowFinishFeature(
   repoPath: string,
   name: string,
   deleteBranch?: boolean,
   squash?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_feature", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_feature", {
     path: repoPath,
     name,
     deleteBranch,
@@ -4765,8 +4781,8 @@ export async function gitFlowFinishRelease(
   version: string,
   tagMessage?: string,
   deleteBranch?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_release", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_release", {
     path: repoPath,
     version,
     tagMessage,
@@ -4786,8 +4802,8 @@ export async function gitFlowFinishHotfix(
   version: string,
   tagMessage?: string,
   deleteBranch?: boolean,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("gitflow_finish_hotfix", {
+): Promise<CommandResult<GitFlowFinishResult>> {
+  return invokeCommand<GitFlowFinishResult>("gitflow_finish_hotfix", {
     path: repoPath,
     version,
     tagMessage,

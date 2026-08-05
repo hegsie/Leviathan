@@ -8,6 +8,16 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import {
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  isMaintenanceRunning,
+} from '../../utils/maintenance-confirms.ts';
+import {
+  confirmGarbageCollection,
+  confirmPrune,
+  summariseFsck,
+} from '../../utils/maintenance-confirms.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -216,25 +226,81 @@ export class LvRepositoryHealthDialog extends LitElement {
   @state() private runningAction: string | null = null;
   @state() private stats: HealthStats | null = null;
 
+  /**
+   * Repo captured when the dialog opened. app-shell recreates this element on
+   * every open, so connectedCallback IS the open moment. `repositoryPath` is
+   * live-bound to the ACTIVE repository and rebinds the instant the user
+   * Ctrl+Tabs — a document-level shortcut this dialog's overlay does not
+   * block — while the stats on screen still describe the repo that was active
+   * at open. Reading the live prop ran `git gc`/`git prune` against a
+   * different repository than the one whose loose-object count justified it,
+   * destroying unreachable objects the user never chose to expire.
+   */
+  private pinnedRepoPath = '';
+
+  /**
+   * True while gc / prune / fsck is running. The host must refuse to close on
+   * it: this dialog is inside an `${cond ? html : ''}` block, so dismissing it
+   * DESTROYS the element rather than hiding it — an aggressive gc kept running
+   * with no surface, and reopening built a fresh element with runningAction
+   * null, re-enabling every button for a second concurrent gc on the same repo.
+   */
+  public get isRunning(): boolean {
+    return this.runningAction !== null;
+  }
+
+  /**
+   * The pinned repo's tab was closed while an action was in flight. We cannot
+   * close now — that destroys the element and orphans the running gc — so
+   * refuse any FURTHER action and dismiss as soon as the current one lands.
+   * Without this the host's refusal merely deferred the problem: the dialog
+   * stayed open pinned to a repo with no tab, and its guard
+   * (`!pinnedRepoPath || runningAction`) happily allowed a second gc on it
+   * once the first finished.
+   */
+  @state() private closePending = false;
+
+  public closeWhenIdle(): void {
+    if (!this.runningAction) {
+      this.handleClose();
+      return;
+    }
+    this.closePending = true;
+  }
+
+  /** Called from every action's finally: honour a deferred close. */
+  private settleClosePending(): void {
+    if (this.closePending && !this.runningAction) {
+      this.closePending = false;
+      this.handleClose();
+    }
+  }
+
+  /** The repo this dialog is pinned to, for the host's tab-close sweep. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.pinnedRepoPath || null;
+  }
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.pinnedRepoPath = this.repositoryPath;
     await this.loadHealthStats();
   }
 
   private async loadHealthStats(): Promise<void> {
-    if (!this.repositoryPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
 
     try {
       // Get repository statistics
       const [countResult, packsResult, branchesResult, tagsResult, stashesResult, repoStatsResult] = await Promise.all([
-        gitService.getRepositoryStats(this.repositoryPath),
-        gitService.getPackInfo(this.repositoryPath),
-        gitService.getBranches(this.repositoryPath),
-        gitService.getTags(this.repositoryPath),
-        gitService.getStashes(this.repositoryPath),
-        gitService.getRepoStats(this.repositoryPath, 10000),
+        gitService.getRepositoryStats(this.pinnedRepoPath),
+        gitService.getPackInfo(this.pinnedRepoPath),
+        gitService.getBranches(this.pinnedRepoPath),
+        gitService.getTags(this.pinnedRepoPath),
+        gitService.getStashes(this.pinnedRepoPath),
+        gitService.getRepoStats(this.pinnedRepoPath, 10000),
       ]);
 
       // Calculate recommendations
@@ -324,14 +390,41 @@ export class LvRepositoryHealthDialog extends LitElement {
   }
 
   private async runGc(aggressive: boolean): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
+
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    // Pinned before the confirm await: this dialog is bound to the active
+    // repository and rebinds live on a tab switch.
+    const repoPath = this.pinnedRepoPath;
+
+    // Same gate as the command palette (shared helper) — this dialog reaches
+    // the identical irreversible command and must not be the unguarded route.
+    if (!(await confirmGarbageCollection(aggressive))) return;
+
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
 
     try {
       const result = await gitService.runGc({
-        path: this.repositoryPath,
+        path: repoPath,
         aggressive,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {
@@ -342,38 +435,88 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
+      this.settleClosePending();
     }
   }
 
   private async runFsck(): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
+
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    const repoPath = this.pinnedRepoPath;
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     this.runningAction = 'fsck';
 
     try {
       const result = await gitService.runFsck({
-        path: this.repositoryPath,
+        path: this.pinnedRepoPath,
         full: true,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {
-        showToast('File system check completed - no issues found', 'success');
+        // `git fsck` exits 0 while reporting dangling/unreachable objects, so
+        // show its actual output rather than asserting "no issues found" —
+        // summarised, because that output can run to dozens of lines.
+        showToast(summariseFsck(result.data?.message), 'success');
       } else {
-        showToast(`File system check found issues: ${result.error?.message}`, 'warning');
+        showToast(`File system check failed: ${result.error?.message}`, 'error');
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
+      this.settleClosePending();
     }
   }
 
   private async runPrune(): Promise<void> {
-    if (!this.repositoryPath || this.runningAction) return;
+    if (!this.pinnedRepoPath || this.runningAction || this.closePending) return;
+
+    // Checked BEFORE the confirm. The claim below is what actually
+    // serialises, but taking it only after the prompt meant the user read a
+    // full "this permanently deletes unreachable objects" warning, clicked
+    // through it, and only then got told the run was refused.
+    if (isMaintenanceRunning(this.pinnedRepoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    const repoPath = this.pinnedRepoPath;
+
+    if (!(await confirmPrune())) return;
+
+    // Shared with the command palette, which reaches these same three
+    // commands: runningAction only ever covered THIS dialog, so a palette run
+    // could start a second maintenance command against the same repo.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
 
     this.runningAction = 'prune';
 
     try {
       const result = await gitService.runPrune({
-        path: this.repositoryPath,
+        path: repoPath,
+        // silent: the service toasts by default; this dialog owns the message.
+        silent: true,
       });
 
       if (result.success) {
@@ -384,6 +527,8 @@ export class LvRepositoryHealthDialog extends LitElement {
       }
     } finally {
       this.runningAction = null;
+      releaseMaintenance(repoPath);
+      this.settleClosePending();
     }
   }
 
@@ -557,7 +702,15 @@ export class LvRepositoryHealthDialog extends LitElement {
       </div>
 
       <div class="footer">
-        <button class="primary" @click=${this.handleClose}>Done</button>
+        <!-- Disabled while an action runs: the host refuses to close mid-gc
+             (closing destroys this element and would orphan the operation), so
+             an enabled Done was a button that silently did nothing. Every
+             sibling dialog with this guard disables its cancel control too. -->
+        <button
+          class="primary"
+          ?disabled=${!!this.runningAction}
+          @click=${this.handleClose}
+        >Done</button>
       </div>
     `;
   }

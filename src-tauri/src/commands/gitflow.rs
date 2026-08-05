@@ -182,6 +182,88 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     })
 }
 
+/// Outcome of a git-flow finish.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFlowFinishResult {
+    /// True when the source branch was deleted as part of the finish.
+    pub branch_deleted: bool,
+    /// Set when deletion was requested but skipped, explaining why.
+    pub branch_kept_reason: Option<String>,
+}
+
+/// Delete the finished branch unless a protection rule forbids it.
+///
+/// Branch rules are enforced here as well as in `delete_branch` because these
+/// finishes delete the branch themselves rather than going through that
+/// command — without this, a `preventDeletion` rule the UI displays as active
+/// is inert on every git-flow finish.
+///
+/// NO failure here may fail the whole finish. The merge and (for release and
+/// hotfix) the tag have already been committed by the time this runs, so
+/// deletion is the optional last step — returning `Err` would report a finish
+/// that actually succeeded as failed, leave the item listed as active, and
+/// invite a retry. A squash retry is NOT idempotent (a squash commit never
+/// makes the feature an ancestor of develop), so each retry mints another
+/// duplicate commit. Every path therefore degrades to `branch_kept_reason`.
+fn delete_finished_branch(
+    repo: &git2::Repository,
+    repo_path: &str,
+    branch_name: &str,
+) -> GitFlowFinishResult {
+    let kept = |reason: String| GitFlowFinishResult {
+        branch_deleted: false,
+        branch_kept_reason: Some(reason),
+    };
+
+    // Branch rules are enforced here as well as in `delete_branch` because
+    // these finishes delete the branch themselves rather than going through
+    // that command — without this, a `preventDeletion` rule the UI displays as
+    // active is inert on every git-flow finish.
+    let rules = match super::branch_rules::load_rules(Path::new(repo_path)) {
+        Ok(rules) => rules,
+        // Unreadable rules mean we cannot prove the branch is unprotected.
+        // Keep it: the merge is already safe, and deleting past an unverifiable
+        // protection is the one irreversible mistake available here.
+        Err(e) => {
+            return kept(format!(
+                "The merge completed, but \"{}\" was kept — its branch rules could not be read: {}",
+                branch_name, e
+            ))
+        }
+    };
+
+    if super::branch_rules::is_deletion_prevented(&rules, branch_name) {
+        return kept(format!(
+            "\"{}\" is protected by a branch rule and was kept. The merge completed.",
+            branch_name
+        ));
+    }
+
+    let mut branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
+        Ok(branch) => branch,
+        Err(e) => {
+            return kept(format!(
+                "The merge completed, but \"{}\" could not be opened for deletion: {}",
+                branch_name, e
+            ))
+        }
+    };
+
+    if let Err(e) = branch.delete() {
+        // e.g. the branch is checked out in a linked worktree.
+        return kept(format!(
+            "The merge completed, but \"{}\" could not be deleted: {}",
+            branch_name, e
+        ));
+    }
+
+    GitFlowFinishResult {
+        branch_deleted: true,
+        branch_kept_reason: None,
+    }
+}
+
 /// Finish a git flow feature branch (merge into develop)
 #[command]
 pub async fn gitflow_finish_feature(
@@ -189,7 +271,7 @@ pub async fn gitflow_finish_feature(
     name: String,
     delete_branch: Option<bool>,
     squash: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -280,13 +362,13 @@ pub async fn gitflow_finish_feature(
 
     // Delete feature branch if requested
     if delete_branch.unwrap_or(true) {
-        let mut branch = repo
-            .find_branch(&branch_name, git2::BranchType::Local)
-            .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
-        branch.delete()?;
+        return Ok(delete_finished_branch(&repo, &path, &branch_name));
     }
 
-    Ok(())
+    Ok(GitFlowFinishResult {
+        branch_deleted: false,
+        branch_kept_reason: None,
+    })
 }
 
 /// Start a git flow release branch
@@ -338,7 +420,7 @@ pub async fn gitflow_finish_release(
     version: String,
     tag_message: Option<String>,
     delete_branch: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     finish_release_like(
         path,
         version,
@@ -360,7 +442,7 @@ async fn finish_release_like(
     delete_branch: Option<bool>,
     prefix_key: &str,
     prefix_default: &str,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let config = repo.config()?;
 
@@ -489,13 +571,13 @@ async fn finish_release_like(
 
     // Delete release branch
     if delete_branch.unwrap_or(true) {
-        let mut branch = repo
-            .find_branch(&branch_name, git2::BranchType::Local)
-            .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
-        branch.delete()?;
+        return Ok(delete_finished_branch(&repo, &path, &branch_name));
     }
 
-    Ok(())
+    Ok(GitFlowFinishResult {
+        branch_deleted: false,
+        branch_kept_reason: None,
+    })
 }
 
 /// Start a git flow hotfix branch
@@ -547,7 +629,7 @@ pub async fn gitflow_finish_hotfix(
     version: String,
     tag_message: Option<String>,
     delete_branch: Option<bool>,
-) -> Result<()> {
+) -> Result<GitFlowFinishResult> {
     // Same flow as release finish, but the branch lives under the hotfix
     // prefix — delegating with the release prefix made every hotfix finish
     // fail with BranchNotFound.
@@ -574,6 +656,109 @@ mod tests {
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(!config.initialized);
+    }
+
+    /// A preventDeletion rule must survive a git-flow finish. These finishes
+    /// delete the branch themselves rather than going through delete_branch, so
+    /// without an explicit check the rule is inert on this surface.
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_respects_branch_rule() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "protected-work".to_string())
+            .await
+            .unwrap();
+
+        crate::commands::branch_rules::set_branch_rule(
+            repo.path_str(),
+            crate::commands::branch_rules::BranchRule {
+                pattern: "feature/*".to_string(),
+                prevent_deletion: true,
+                prevent_force_push: false,
+                require_pull_request: false,
+                prevent_direct_push: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "protected-work".to_string(),
+            Some(true),
+            None,
+        )
+        .await;
+
+        // The merge must still succeed — only the optional delete is skipped.
+        assert!(result.is_ok(), "finish should complete despite the rule");
+        let outcome = result.unwrap();
+        assert!(!outcome.branch_deleted, "protected branch must be kept");
+        assert!(
+            outcome.branch_kept_reason.is_some(),
+            "the caller must be told why the branch survived"
+        );
+
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("feature/protected-work", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    /// A delete failure must never fail the whole finish: the merge is already
+    /// committed, and a squash retry is not idempotent — it would mint a second
+    /// squash commit every time the user retried.
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_survives_unreadable_branch_rules() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "work".to_string())
+            .await
+            .unwrap();
+
+        // save_rules is a non-atomic write, so a crash mid-save can leave this
+        // truncated.
+        let git_repo = repo.repo();
+        let rules_dir = git_repo.path().join("leviathan");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        std::fs::write(rules_dir.join("branch_rules.json"), "{ not json").unwrap();
+
+        let result =
+            gitflow_finish_feature(repo.path_str(), "work".to_string(), Some(true), None).await;
+
+        assert!(
+            result.is_ok(),
+            "an unreadable rules file must not fail a finish whose merge already landed"
+        );
+        let outcome = result.unwrap();
+        assert!(!outcome.branch_deleted);
+        assert!(
+            outcome.branch_kept_reason.is_some(),
+            "the caller must be told the branch survived and why"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_deletes_unprotected_branch() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "ordinary".to_string())
+            .await
+            .unwrap();
+
+        let outcome =
+            gitflow_finish_feature(repo.path_str(), "ordinary".to_string(), Some(true), None)
+                .await
+                .unwrap();
+
+        assert!(outcome.branch_deleted);
+        assert!(outcome.branch_kept_reason.is_none());
     }
 
     #[tokio::test]

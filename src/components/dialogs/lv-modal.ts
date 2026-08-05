@@ -6,6 +6,7 @@
 import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-modal')
 export class LvModal extends LitElement {
@@ -128,6 +129,19 @@ export class LvModal extends LitElement {
 
   private previouslyFocused: HTMLElement | null = null;
 
+  /**
+   * True when focus already sits inside this modal, following shadow
+   * boundaries. `document.activeElement` only ever names the outermost host,
+   * so a slotted input reads as its own dialog element, not as the input.
+   */
+  private containsDeepActiveElement(): boolean {
+    let el: Element | null = document.activeElement;
+    while (el?.shadowRoot?.activeElement) {
+      el = el.shadowRoot.activeElement;
+    }
+    return !!el && el !== document.body && this.contains(el);
+  }
+
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
       this.close();
@@ -135,6 +149,19 @@ export class LvModal extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // This listener lives on `document` for the element's whole lifetime, but
+    // host dialogs keep their <lv-modal> mounted while closed. Without this
+    // check every closed modal in the tree answered each Escape press by
+    // dispatching `close`, firing host handlers for dialogs the user was not
+    // looking at. The Tab trap below already guarded on `open`.
+    if (!this.open) return;
+
+    // Only the topmost overlay owns Escape. Every dialog listens on
+    // `document`, so without this one keypress ran all of them — dismissing
+    // the command palette opened over another dialog dismissed that dialog
+    // too, discarding whatever the user had built there.
+    if (!isTopOverlay(this)) return;
+
     if (e.key === 'Escape') {
       this.close();
     }
@@ -185,15 +212,26 @@ export class LvModal extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.handleKeyDown);
+    removeOverlay(this);
   }
 
   updated(changedProperties: PropertyValues): void {
     if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
       if (this.open) {
         // Save the currently focused element for restoration
         this.previouslyFocused = document.activeElement as HTMLElement;
         // Focus the dialog after render
         requestAnimationFrame(() => {
+          // Do not override a host that already focused something of its own.
+          // getFocusableElements queries this shadow root BEFORE walking the
+          // slot, so index 0 is our own header close button — and this rAF
+          // lands after a host's microtask focus, so it was silently stealing
+          // focus from every slotted field. lv-prompt-dialog focused its text
+          // input and lost it every time: typing a branch rename went to the
+          // global shortcut handler instead, where "s" ran Stage All Changes.
+          if (this.containsDeepActiveElement()) return;
+
           const dialog = this.shadowRoot?.querySelector('.dialog') as HTMLElement;
           if (dialog) {
             const focusable = this.getFocusableElements(dialog);

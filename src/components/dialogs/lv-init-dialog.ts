@@ -187,6 +187,10 @@ export class LvInitDialog extends LitElement {
   @query('lv-modal') private modal!: LvModal;
 
   public open(): void {
+    // An init already in flight owns this component; reset() would
+    // clear `isInitializing` and re-enable the button for a second concurrent run,
+    // and the first run's close() would then yank shut the reopened session.
+    if (this.isInitializing) return;
     this.reset();
     this.modal.open = true;
   }
@@ -261,9 +265,17 @@ export class LvInitDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    if (!this.isInitializing) {
-      this.reset();
+    // Cancel is disabled while isInitializing is in flight; Escape, the overlay and the
+    // × must honour the same rule. lv-modal.close() sets open=false BEFORE
+    // dispatching, so without re-asserting it here the init kept running with no
+    // visible surface — and reported any failure into `error` on a hidden
+    // dialog. Mirrors lv-branch-cleanup-dialog.handleModalClose.
+    if (this.isInitializing) {
+      this.modal.open = true;
+      return;
     }
+
+    this.reset();
   }
 
   private get canInit(): boolean {

@@ -172,11 +172,34 @@ export class LvChangelogDialog extends LitElement {
 
   @query('lv-modal') private modal!: HTMLElement & { open: boolean };
 
+  /**
+   * Repo captured at open. `repositoryPath` is live-bound to the ACTIVE
+   * repository and rebinds on a Ctrl+Tab this dialog's overlay does not block,
+   * so generating after a switch ran repo B against repo A's tag refs —
+   * an unresolvable-revision error, or worse a silently wrong changelog when
+   * both repos use conventional tags like v1.0.0.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.modal?.open ? this.pinnedRepoPath : null;
+  }
+
   public async open(): Promise<void> {
+    // A generation already running owns this component; reset() would clear
+    // isGenerating and re-enable Generate for a second concurrent run.
+    if (this.isGenerating) return;
     this.reset();
+    this.pinnedRepoPath = this.repositoryPath;
     (this.modal as HTMLElement & { open: boolean }).open = true;
     await this.loadTags();
     this.aiAvailable = await aiService.isAiAvailable();
+  }
+
+  /** True while the AI call is in flight, for the host's tab-close sweep. */
+  public get generationInFlight(): boolean {
+    return this.isGenerating;
   }
 
   public close(): void {
@@ -192,7 +215,7 @@ export class LvChangelogDialog extends LitElement {
   }
 
   private async loadTags(): Promise<void> {
-    const result = await gitService.getTags(this.repositoryPath);
+    const result = await gitService.getTags(this.pinnedRepoPath);
     if (result.success && result.data) {
       this.tags = result.data;
       // Default baseRef to the second most recent tag (previous release)
@@ -217,7 +240,7 @@ export class LvChangelogDialog extends LitElement {
     this.result = '';
 
     const changelogResult = await aiService.generateChangelog(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       this.baseRef,
       this.compareRef,
     );
@@ -242,7 +265,15 @@ export class LvChangelogDialog extends LitElement {
   }
 
   private handleModalClose(): void {
-    this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
+    // The `close` event this used to dispatch had no listener anywhere — the
+    // one binding was removed with the dead showChangelog flag. Rather than
+    // re-adding a no-op listener, this handler now does the job its siblings'
+    // do: lv-modal.close() clears `open` BEFORE dispatching, so dismissing
+    // mid-generation left the AI request running with no visible surface, and
+    // its result landed on a hidden dialog.
+    if (this.isGenerating) {
+      this.modal.open = true;
+    }
   }
 
   render() {

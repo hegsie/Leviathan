@@ -7,7 +7,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { showPrompt } from '../../services/dialog.service.ts';
+import { showPrompt, showConfirm } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
@@ -452,15 +453,62 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
-    this.error = null;
+    if (this.operationInProgress) return;
+
+    // Claim the guard SYNCHRONOUSLY, before the confirm's await.
+    //
+    // Testing it at function entry alone does not close the race: there is an
+    // IPC round trip between the click and the native dialog actually opening
+    // and taking focus, so a double-click lands a second call while the flag is
+    // still false and both pass the check. Two concurrent squash finishes on
+    // one repo can double-merge or mint a duplicate squash commit — the Rust
+    // command takes no repo-level lock. Claim first, release on decline.
     this.operationInProgress = true;
 
     // Captured BEFORE the awaits: the conflict dialog must pin to the repo
     // the finish actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
+
+    // A squash finish collapses the branch into ONE commit on develop and then
+    // deletes it. Because a squash commit never makes the feature tip an
+    // ancestor of develop, every original commit becomes unreachable
+    // immediately — and gitflow deletes the branch with git2 directly, so
+    // delete_branch's merged-check never runs. This button sits next to the
+    // ordinary finish with only a tooltip between them, so it needs its own
+    // gate; the plain finish is non-destructive by comparison.
+    if (squash) {
+      // The guard flag is claimed above but the try/finally that releases it
+      // starts below, so a rejecting confirm would leave operationInProgress
+      // stuck true — which disables every button in this panel. Treat a failed
+      // prompt as declined.
+      let confirmed = false;
+      try {
+        confirmed = await showConfirm(
+        'Squash and Finish',
+        `"${item.name}" will be squashed into a single commit on develop and then ` +
+          `deleted. Its individual commits will no longer be reachable from any ` +
+          `branch.\n\nThis cannot be undone.`,
+        'warning',
+        );
+      } catch {
+        confirmed = false;
+      }
+      if (!confirmed) {
+        this.operationInProgress = false;
+        return;
+      }
+    }
+
+    this.error = null;
     try {
       const result = await gitService.gitFlowFinishFeature(repoPath, item.name, true, squash);
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-feature', name: item.name, repositoryPath: repoPath },
@@ -523,6 +571,14 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishRelease(item: ActiveItem): Promise<void> {
+    // Claimed BEFORE the prompt, like handleFinishFeature. showPrompt is a
+    // singleton whose open() overwrites its resolver, so a second click during
+    // the prompt strands the first call on a promise that never settles rather
+    // than racing it — claiming up front prevents that hang and keeps the three
+    // finish handlers consistent.
+    if (this.operationInProgress) return;
+    this.operationInProgress = true;
+
     // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
     // this prop while it is open): the finish must run on the repo whose
     // release the user clicked, and the conflict dialog must pin to it.
@@ -530,11 +586,23 @@ export class LvGitflowPanel extends LitElement {
     // capture it with the path.
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
-    const tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
-    if (tagMessage === null) return;
+    // showPrompt dynamically imports the prompt component; a chunk-load
+    // failure rejects here, and the flag is already claimed while the try that
+    // releases it starts below — leaving every button in this panel disabled
+    // for the session. Same wrapping as handleFinishFeature's confirm.
+    let tagMessage: string | null = null;
+    try {
+      tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
+    } catch {
+      this.operationInProgress = false;
+      return;
+    }
+    if (tagMessage === null) {
+      this.operationInProgress = false;
+      return;
+    }
 
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowFinishRelease(
@@ -544,6 +612,12 @@ export class LvGitflowPanel extends LitElement {
         true,
       );
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-release', name: item.name, repositoryPath: repoPath },
@@ -606,13 +680,33 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleFinishHotfix(item: ActiveItem): Promise<void> {
+    // Claimed BEFORE the prompt, like handleFinishFeature. showPrompt is a
+    // singleton whose open() overwrites its resolver, so a second click during
+    // the prompt strands the first call on a promise that never settles rather
+    // than racing it — claiming up front prevents that hang and keeps the three
+    // finish handlers consistent.
+    if (this.operationInProgress) return;
+    this.operationInProgress = true;
+
     const repoPath = this.repositoryPath;
     const developBranch = this.config?.developBranch ?? 'develop';
-    const tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
-    if (tagMessage === null) return;
+    // showPrompt dynamically imports the prompt component; a chunk-load
+    // failure rejects here, and the flag is already claimed while the try that
+    // releases it starts below — leaving every button in this panel disabled
+    // for the session. Same wrapping as handleFinishFeature's confirm.
+    let tagMessage: string | null = null;
+    try {
+      tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
+    } catch {
+      this.operationInProgress = false;
+      return;
+    }
+    if (tagMessage === null) {
+      this.operationInProgress = false;
+      return;
+    }
 
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowFinishHotfix(
@@ -622,6 +716,12 @@ export class LvGitflowPanel extends LitElement {
         true,
       );
       if (result.success) {
+        // A branch rule can block the finish's branch deletion. The merge and
+        // tag still landed, so this is a warning about what was KEPT, not a
+        // failure — but it must be said, or the branch silently survives.
+        if (result.data?.branchKeptReason) {
+          showToast(result.data.branchKeptReason, 'warning');
+        }
         await this.loadActiveItems();
         this.dispatchEvent(new CustomEvent('gitflow-operation', {
           detail: { type: 'finish-hotfix', name: item.name, repositoryPath: repoPath },

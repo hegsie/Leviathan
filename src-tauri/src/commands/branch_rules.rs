@@ -53,6 +53,33 @@ pub(crate) fn load_rules(repo_path: &Path) -> Result<Vec<BranchRule>> {
     })
 }
 
+/// Match a branch name against a rule pattern.
+///
+/// Supports a single `*` wildcard, e.g. `release/*` matches `release/v1`.
+pub(crate) fn pattern_matches(pattern: &str, branch_name: &str) -> bool {
+    if pattern.contains('*') {
+        // Simple glob matching: "release/*" matches "release/v1"
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            return branch_name.starts_with(parts[0]) && branch_name.ends_with(parts[1]);
+        }
+    }
+    pattern == branch_name
+}
+
+/// True when `branch_name` matches a rule that prevents deletion.
+///
+/// Shared by the cleanup dialog's candidate listing and by `delete_branch`
+/// itself. Enforcing it in the command rather than only where candidates are
+/// listed is what makes the rule real: the sidebar and the graph ref menu call
+/// `delete_branch` directly and never load the rules, so a rule the UI shows as
+/// "Protected" was previously inert on both of those surfaces.
+pub(crate) fn is_deletion_prevented(rules: &[BranchRule], branch_name: &str) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule.prevent_deletion && pattern_matches(&rule.pattern, branch_name))
+}
+
 /// Save branch rules to the repository config
 fn save_rules(repo_path: &Path, rules: &[BranchRule]) -> Result<()> {
     let rules_path = get_rules_path(repo_path)?;

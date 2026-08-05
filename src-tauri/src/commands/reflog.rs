@@ -104,6 +104,7 @@ pub async fn reset_to_reflog(
     path: String,
     reflog_index: usize,
     mode: String,
+    expected_oid: Option<String>,
 ) -> Result<ReflogEntry> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -118,6 +119,21 @@ pub async fn reset_to_reflog(
         })?;
 
         let oid_str = entry.id_new().to_string();
+
+        // `reflog_index` is a POSITION: anything that writes HEAD's reflog (a
+        // commit or checkout from a terminal, or a second window) shifts every
+        // entry down by one. The caller listed the reflog earlier and showed the
+        // user a specific commit, so verify the position still holds that commit
+        // before resetting — otherwise a hard reset discards uncommitted work to
+        // land somewhere the user never chose.
+        if let Some(expected) = &expected_oid {
+            if &oid_str != expected {
+                return Err(crate::error::LeviathanError::OperationFailed(
+                    "The reflog changed since this entry was listed — refresh and try again."
+                        .to_string(),
+                ));
+            }
+        }
         let msg = entry.message().ok().flatten().unwrap_or("").to_string();
         let committer = entry.committer();
         let ts = committer.when().seconds();
@@ -309,7 +325,7 @@ mod tests {
         assert_ne!(first_oid, second_oid);
 
         // Reset soft to first commit (reflog index 1)
-        let result = reset_to_reflog(repo.path_str(), 1, "soft".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 1, "soft".to_string(), None).await;
         assert!(result.is_ok());
 
         let entry = result.unwrap();
@@ -334,7 +350,7 @@ mod tests {
         repo.create_commit("Second commit", &[("file2.txt", "content2")]);
 
         // Reset mixed to first commit
-        let result = reset_to_reflog(repo.path_str(), 1, "mixed".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 1, "mixed".to_string(), None).await;
         assert!(result.is_ok());
 
         // HEAD should now point to first commit
@@ -350,7 +366,7 @@ mod tests {
         assert!(repo.path.join("file2.txt").exists());
 
         // Reset hard to first commit
-        let result = reset_to_reflog(repo.path_str(), 1, "hard".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 1, "hard".to_string(), None).await;
         assert!(result.is_ok());
 
         // HEAD should point to first commit
@@ -368,7 +384,7 @@ mod tests {
         repo.create_commit("Second", &[("f.txt", "c")]);
 
         // Invalid mode should default to mixed
-        let result = reset_to_reflog(repo.path_str(), 1, "invalid".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 1, "invalid".to_string(), None).await;
         assert!(result.is_ok());
         assert_eq!(repo.head_oid(), first_oid);
     }
@@ -378,7 +394,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
 
         // Try to reset to a nonexistent reflog entry
-        let result = reset_to_reflog(repo.path_str(), 9999, "mixed".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 9999, "mixed".to_string(), None).await;
         assert!(result.is_err());
 
         let err = result.unwrap_err();
@@ -386,11 +402,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_reset_to_reflog_refuses_when_entry_shifted() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("f2.txt", "2")]);
+
+        // What the UI listed and showed the user at index 1.
+        let listed = get_reflog(repo.path_str(), None).await.unwrap();
+        let expected_oid = listed[1].oid.clone();
+
+        // A commit from a terminal / second window pushes every entry down one,
+        // so index 1 now names a DIFFERENT commit than the user selected.
+        repo.create_commit("Third", &[("f3.txt", "3")]);
+
+        let head_before = repo.head_oid();
+        let result = reset_to_reflog(
+            repo.path_str(),
+            1,
+            "hard".to_string(),
+            Some(expected_oid.clone()),
+        )
+        .await;
+
+        assert!(result.is_err(), "a shifted entry must not be reset to");
+        assert!(result.unwrap_err().to_string().contains("reflog changed"));
+        assert_eq!(
+            repo.head_oid(),
+            head_before,
+            "HEAD must be untouched when the guard trips"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_to_reflog_proceeds_when_oid_matches() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Second", &[("f2.txt", "2")]);
+
+        let listed = get_reflog(repo.path_str(), None).await.unwrap();
+        let expected_oid = listed[1].oid.clone();
+
+        // Nothing shifted, so the pinned oid still matches index 1.
+        let result = reset_to_reflog(
+            repo.path_str(),
+            1,
+            "mixed".to_string(),
+            Some(expected_oid.clone()),
+        )
+        .await;
+
+        assert!(result.is_ok(), "a matching oid must not be blocked");
+        assert_eq!(result.unwrap().oid, expected_oid);
+    }
+
+    #[tokio::test]
     async fn test_reset_to_reflog_returns_correct_entry_info() {
         let repo = TestRepo::with_initial_commit();
         repo.create_commit("Second", &[("f2.txt", "2")]);
 
-        let result = reset_to_reflog(repo.path_str(), 1, "mixed".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 1, "mixed".to_string(), None).await;
         assert!(result.is_ok());
 
         let entry = result.unwrap();
@@ -446,11 +514,11 @@ mod tests {
         assert_eq!(repo.repo().state(), git2::RepositoryState::Bisect);
 
         // Hard reset must be refused.
-        let hard = reset_to_reflog(repo.path_str(), 1, "hard".to_string()).await;
+        let hard = reset_to_reflog(repo.path_str(), 1, "hard".to_string(), None).await;
         assert!(hard.is_err(), "hard reset must refuse during a bisect");
 
         // Mixed reset must be refused.
-        let mixed = reset_to_reflog(repo.path_str(), 1, "mixed".to_string()).await;
+        let mixed = reset_to_reflog(repo.path_str(), 1, "mixed".to_string(), None).await;
         assert!(mixed.is_err(), "mixed reset must refuse during a bisect");
 
         // HEAD and the bisect state are both preserved.
@@ -466,7 +534,7 @@ mod tests {
         repo.create_commit("Second", &[("f.txt", "c")]);
 
         // Reset to index 0 (current HEAD) should be a no-op essentially
-        let result = reset_to_reflog(repo.path_str(), 0, "mixed".to_string()).await;
+        let result = reset_to_reflog(repo.path_str(), 0, "mixed".to_string(), None).await;
         assert!(result.is_ok());
 
         // Should point to the second commit (most recent)

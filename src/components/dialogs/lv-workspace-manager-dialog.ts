@@ -14,6 +14,7 @@ import { repositoryStore } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 const WORKSPACE_COLORS = [
   '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
@@ -693,6 +694,12 @@ export class LvWorkspaceManagerDialog extends LitElement {
   @state() private editColor = WORKSPACE_COLORS[0];
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape. Missing this made a
+    // dialog opened over another one dismiss BOTH on a single keypress:
+    // the one underneath was still stack-top, so its own guard passed.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
       await this.loadWorkspaces();
     }
@@ -1039,6 +1046,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape.
+    if (!this.open || !isTopOverlay(this)) return;
+
     if (e.key === 'Escape') {
       this.close();
     }
@@ -1051,6 +1061,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 

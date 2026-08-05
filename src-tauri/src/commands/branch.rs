@@ -155,6 +155,26 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
         .find_branch(&name, git2::BranchType::Local)
         .map_err(|_| LeviathanError::BranchNotFound(name.clone()))?;
 
+    // Enforce preventDeletion branch rules HERE rather than only in the cleanup
+    // dialog's candidate listing: the sidebar and the graph ref menu call this
+    // command directly, so a rule the UI displays as active was inert on both
+    // of those surfaces. Checked before the force branch so force cannot bypass
+    // an explicit protection rule.
+    // Propagated, NOT unwrap_or_default: load_rules errors both when the file
+    // is unreadable and when it fails to parse (save_rules is a non-atomic
+    // write, so a crash mid-save can truncate it). Defaulting to "no rules"
+    // would make an unreadable rule set indistinguishable from an empty one and
+    // silently disable every protection in the repo — a protection that fails
+    // open is worse than none, because the UI still shows the branch as
+    // protected.
+    let rules = super::branch_rules::load_rules(Path::new(&path))?;
+    if super::branch_rules::is_deletion_prevented(&rules, &name) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Branch \"{}\" is protected by a branch rule and cannot be deleted. Remove the rule first.",
+            name
+        )));
+    }
+
     if force.unwrap_or(false) {
         branch.delete()?;
     } else {
@@ -1042,6 +1062,92 @@ mod tests {
         assert!(git_repo
             .find_branch("at-head", git2::BranchType::Local)
             .is_err());
+    }
+
+    /// A preventDeletion rule must be enforced by the COMMAND, not only by the
+    /// cleanup dialog's listing — the sidebar and graph ref menu call
+    /// delete_branch directly and never load the rules.
+    #[tokio::test]
+    async fn test_delete_branch_refuses_protected_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("release/v1");
+
+        crate::commands::branch_rules::set_branch_rule(
+            repo.path_str(),
+            crate::commands::branch_rules::BranchRule {
+                pattern: "release/*".to_string(),
+                prevent_deletion: true,
+                prevent_force_push: false,
+                require_pull_request: false,
+                prevent_direct_push: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = delete_branch(repo.path_str(), "release/v1".to_string(), Some(false)).await;
+        assert!(result.is_err(), "protected branch must not be deleted");
+        assert!(result.unwrap_err().to_string().contains("protected"));
+
+        let git_repo = repo.repo();
+        assert!(
+            git_repo
+                .find_branch("release/v1", git2::BranchType::Local)
+                .is_ok(),
+            "branch must still exist"
+        );
+    }
+
+    /// Force must not be an escape hatch around an explicit protection rule.
+    #[tokio::test]
+    async fn test_delete_branch_force_cannot_bypass_protection() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("protected-branch");
+
+        crate::commands::branch_rules::set_branch_rule(
+            repo.path_str(),
+            crate::commands::branch_rules::BranchRule {
+                pattern: "protected-branch".to_string(),
+                prevent_deletion: true,
+                prevent_force_push: false,
+                require_pull_request: false,
+                prevent_direct_push: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result =
+            delete_branch(repo.path_str(), "protected-branch".to_string(), Some(true)).await;
+        assert!(result.is_err(), "force must not bypass a protection rule");
+
+        let git_repo = repo.repo();
+        assert!(git_repo
+            .find_branch("protected-branch", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    /// An unrelated branch must be unaffected by a rule that does not match it.
+    #[tokio::test]
+    async fn test_delete_branch_allows_unmatched_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature/x");
+
+        crate::commands::branch_rules::set_branch_rule(
+            repo.path_str(),
+            crate::commands::branch_rules::BranchRule {
+                pattern: "release/*".to_string(),
+                prevent_deletion: true,
+                prevent_force_push: false,
+                require_pull_request: false,
+                prevent_direct_push: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = delete_branch(repo.path_str(), "feature/x".to_string(), Some(true)).await;
+        assert!(result.is_ok(), "non-matching branch must still delete");
     }
 
     #[tokio::test]

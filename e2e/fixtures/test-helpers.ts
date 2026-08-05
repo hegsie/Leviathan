@@ -172,6 +172,33 @@ export async function injectCommandMock(
 }
 
 /**
+ * Make a command hang forever, so the caller stays in its "in flight" state
+ * for the rest of the test. Use this to exercise mid-operation guards — the
+ * affordances a component must refuse while a destructive command is running.
+ */
+export async function injectCommandHang(page: Page, command: string): Promise<void> {
+  await page.evaluate((cmd) => {
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (c: string, args?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const originalInvoke = internals.invoke;
+
+    internals.invoke = (c: string, args?: unknown) => {
+      if (c === cmd) {
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) {
+          captured.push({ command: c, args });
+        }
+        return new Promise<unknown>(() => {});
+      }
+      return originalInvoke(c, args);
+    };
+  }, command);
+}
+
+/**
  * Wait for a specific Tauri command to be invoked.
  * Useful when you need to wait for an async action to trigger a backend call.
  */
@@ -196,6 +223,10 @@ export async function autoConfirmDialogs(page: Page): Promise<void> {
   await injectCommandMock(page, {
     'plugin:dialog|confirm': true,
     'plugin:dialog|ask': true,
+    // plugin-dialog 2.x routes confirm() through `message` and resolves true
+    // only when the command returns the OK button label. Without this, every
+    // showConfirm() in the app reads as "declined" under test.
+    'plugin:dialog|message': 'Ok',
   });
 }
 

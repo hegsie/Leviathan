@@ -5,6 +5,7 @@
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
+import { pushOverlay, removeOverlay, resetOverlayStack } from '../../../utils/overlay-stack.ts';
 
 let failingCommands: Set<string> = new Set();
 let cleanableEntries: unknown[] = [];
@@ -13,6 +14,8 @@ let lastCleanFilesArgs: Record<string, unknown> | null = null;
 // confirm() routes through `plugin:dialog|message` and treats a truthy return
 // as "confirmed").
 let confirmResult = true;
+/** When set, clean_files reports this many removed instead of all requested. */
+let partialCleanCount: number | null = null;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
@@ -39,6 +42,9 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 
   if (command === 'clean_files') {
     lastCleanFilesArgs = args as Record<string, unknown>;
+    // partialCleanCount simulates the backend skipping entries it cannot
+    // remove, which it reports by returning a count lower than the request.
+    if (partialCleanCount !== null) return partialCleanCount;
     return (args as { paths?: unknown[] }).paths?.length ?? 1;
   }
 
@@ -60,6 +66,7 @@ describe('lv-clean-dialog', () => {
     cleanableEntries = [];
     lastCleanFilesArgs = null;
     confirmResult = true;
+    partialCleanCount = null;
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -89,6 +96,44 @@ describe('lv-clean-dialog', () => {
     expect(eventFired).to.be.true;
   });
 
+  it('toasts what was deleted on success', async () => {
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['a.txt', 'b.txt']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    const toast = uiStore.getState().toasts.find(t => t.type === 'success');
+    expect(toast, 'success toast shown').to.not.be.undefined;
+    expect(toast!.message).to.include('2');
+  });
+
+  it('warns when clean_files removed fewer items than were selected', async () => {
+    // clean_files silently skips nested repos without force, directories with
+    // tracked content, and locked files. The dialog closes immediately, so the
+    // shortfall must be surfaced or the user assumes everything was deleted.
+    cleanableEntries = [];
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['a.txt', 'b.txt', 'c.txt']);
+    // Backend reports only 1 of the 3 actually removed.
+    partialCleanCount = 1;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+    partialCleanCount = null;
+
+    const toast = uiStore.getState().toasts.find(t => t.type === 'warning');
+    expect(toast, 'warning toast shown').to.not.be.undefined;
+    expect(toast!.message).to.include('1 of 3');
+    expect(toast!.message).to.include('2 could not be removed');
+  });
+
   it('shows error toast on API failure', async () => {
     failingCommands.add('clean_files');
 
@@ -116,6 +161,86 @@ describe('lv-clean-dialog', () => {
       await new Promise(r => setTimeout(r, 0));
     }
   }
+
+  // Every dialog listens for Escape on `document`, so before the overlay stack
+  // one keypress ran all of them: dismissing the command palette opened over
+  // this dialog also dismissed this dialog, discarding the user's selection.
+  it('ignores Escape while another overlay is on top', async () => {
+    cleanableEntries = [
+      { path: 'a.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    // Something opens over it (the command palette registers the same way).
+    const palette = {};
+    pushOverlay(palette);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    expect(el.open, 'dialog underneath must survive the palette dismissal').to.be.true;
+
+    // Once the overlay above closes, Escape belongs to this dialog again.
+    removeOverlay(palette);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    expect(el.open, 'dialog closes once it is topmost').to.be.false;
+  });
+
+  // `repositoryPath` is live-bound to the ACTIVE repository and rebinds the
+  // instant the user Ctrl+Tabs — a document-level shortcut this dialog's
+  // overlay does not block. The listed files belong to the repo that was
+  // active at OPEN, so the delete must target that repo. Pinning only at click
+  // time (the previous fix) still deleted from the wrong repository whenever
+  // the switch happened before the click. Untracked files have no trash and no
+  // recovery path, so this is the one deletion in the app that cannot be undone.
+  it('deletes from the repository the listed files were read from, not the newly active one', async () => {
+    cleanableEntries = [
+      { path: 'dist/', isDirectory: true, isIgnored: true, isNestedRepo: false, size: 100 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/repo/a'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    // The user Ctrl+Tabs to another repo; the dialog stays open showing A's files.
+    el.repositoryPath = '/repo/b';
+    await el.updateComplete;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(lastCleanFilesArgs).to.not.be.null;
+    expect(lastCleanFilesArgs!.path).to.equal('/repo/a');
+  });
+
+  it('reads the file list from the repo active at open, ignoring a later rebind', async () => {
+    cleanableEntries = [
+      { path: 'a.txt', isDirectory: false, isIgnored: false, isNestedRepo: false, size: 1 },
+    ];
+
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/repo/a'}></lv-clean-dialog>`,
+    );
+    await waitForEntries(el);
+
+    el.repositoryPath = '/repo/b';
+    await el.updateComplete;
+    await new Promise(r => setTimeout(r, 0));
+
+    // A tab switch must not silently swap the list out from under the
+    // selection the user already made.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(((el as any).entries as unknown[]).length).to.equal(1);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).pinnedRepositoryPathIfOpen).to.equal('/repo/a');
+  });
 
   it('does not pre-select untracked nested repositories', async () => {
     cleanableEntries = [

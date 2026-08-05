@@ -4,7 +4,10 @@ import {
   startCommandCaptureWithMocks,
   findCommand,
   injectCommandError,
+  injectCommandHang,
   openViaCommandPalette,
+  autoConfirmDialogs,
+  waitForCommand,
 } from '../fixtures/test-helpers';
 
 /**
@@ -52,6 +55,8 @@ async function openReflogDialog(page: import('@playwright/test').Page): Promise<
 test.describe('Reflog Dialog', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -150,6 +155,25 @@ test.describe('Reflog Dialog', () => {
     await expect(page.locator('lv-reflog-dialog[open]')).not.toBeAttached();
   });
 
+  // The dialog's own dismiss() refuses to close mid-reset, but the keyboard
+  // service registers a SEPARATE document-level Escape handler that reaches
+  // app-shell and flips the dialog's `open` binding directly. That second path
+  // has to honour the same guard, or the reset carries on with no visible
+  // surface and its success path later slams shut whatever the user reopened.
+  test('Escape must not close the dialog while a reset is in flight', async ({ page }) => {
+    await injectCommandHang(page, 'reset_to_reflog');
+
+    await page.locator('lv-reflog-dialog .reset-btn:not(.hard)').first().click();
+    await waitForCommand(page, 'reset_to_reflog');
+
+    await page.keyboard.press('Escape');
+
+    await expect(page.locator('lv-reflog-dialog[open]')).toBeAttached();
+    // Still mid-reset (so the guard is what kept it open, not a stalled test):
+    // the reset affordances stay disabled for the same reason.
+    await expect(page.locator('lv-reflog-dialog .reset-btn').first()).toBeDisabled();
+  });
+
   test('dialog should close when clicking the close button', async ({ page }) => {
     await page.locator('lv-reflog-dialog .close-btn').click();
 
@@ -166,6 +190,8 @@ test.describe('Reflog Dialog', () => {
 test.describe('Reflog Dialog - repository-refresh after undo', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -195,6 +221,8 @@ test.describe('Reflog Dialog - repository-refresh after undo', () => {
 test.describe('Reflog Dialog - Error handling', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -214,6 +242,8 @@ test.describe('Reflog Dialog - Error handling', () => {
 test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,
@@ -238,6 +268,8 @@ test.describe('Reflog Dialog - Injected reset_to_reflog error', () => {
 test.describe('Reflog Dialog - Extended Tests', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
+    // Every reset mode is confirm-gated now, not just hard.
+    await autoConfirmDialogs(page);
 
     await startCommandCaptureWithMocks(page, {
       get_reflog: REFLOG_ENTRIES,

@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -433,24 +434,76 @@ export class LvBisectDialog extends LitElement {
   @state() private message = '';
   @state() private currentCommitInfo: Commit | null = null;
 
+  /**
+   * This dialog renders its own overlay rather than using lv-modal, so it got
+   * no Escape handling at all — the one dialog in the app that Escape could
+   * not dismiss. Worse, app-shell's Escape chain then fell through and closed
+   * the diff behind it while this stayed put.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape' && !this.loading) {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.checkBisectStatus();
     }
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    removeOverlay(this);
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
-    if (changedProperties.has('open') && this.open) {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
+    // `repositoryPath` is live-bound to the ACTIVE repository, and repo
+    // switching (Ctrl+Tab / Ctrl+1-9) is a document-level shortcut that fires
+    // straight through this dialog's own overlay. Without re-reading status on
+    // that change the dialog keeps displaying repo A's session while every
+    // button now targets repo B — "Bad" would mark a commit bad in the repo
+    // the user is not looking at.
+    if (this.open && (changedProperties.has('open') || changedProperties.has('repositoryPath'))) {
+      if (changedProperties.has('repositoryPath')) {
+        this.resetSessionState();
+      }
       await this.checkBisectStatus();
     }
   }
 
+  /** Drop every field describing the previous repository's session. */
+  private resetSessionState(): void {
+    this.step = 'setup';
+    this.status = null;
+    this.culprit = null;
+    this.currentCommitInfo = null;
+    this.badCommitInput = '';
+    this.goodCommitInput = '';
+    this.message = '';
+    this.error = '';
+  }
+
   private async checkBisectStatus(): Promise<void> {
+    const loadedPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getBisectStatus(this.repositoryPath);
+    const result = await gitService.getBisectStatus(loadedPath);
+
+    // The tab may have switched while the fetch was in flight; a stale result
+    // must not be painted over the now-active repository's session.
+    if (this.repositoryPath !== loadedPath) return;
 
     if (result.success && result.data) {
       this.status = result.data;
@@ -468,11 +521,14 @@ export class LvBisectDialog extends LitElement {
       this.error = result.error?.message || 'Failed to get bisect status';
     }
 
+    if (this.repositoryPath !== loadedPath) return;
     this.loading = false;
   }
 
   private async fetchCurrentCommitInfo(oid: string): Promise<void> {
-    const result = await gitService.getCommit(this.repositoryPath, oid);
+    const loadedPath = this.repositoryPath;
+    const result = await gitService.getCommit(loadedPath, oid);
+    if (this.repositoryPath !== loadedPath) return;
     if (result.success && result.data) {
       this.currentCommitInfo = result.data;
     } else {
@@ -488,121 +544,165 @@ export class LvBisectDialog extends LitElement {
       return;
     }
 
+    const repoPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectStart(
-      this.repositoryPath,
+      repoPath,
       this.badCommitInput,
       this.goodCommitInput
     );
 
-    if (result.success && result.data) {
-      this.status = result.data.status;
-      this.message = result.data.message;
+    if (this.repositoryPath === repoPath) {
+      if (result.success && result.data) {
+        this.status = result.data.status;
+        this.message = result.data.message;
 
-      if (result.data.status.active) {
-        this.step = 'in-progress';
-        if (result.data.status.currentCommit) {
-          await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        if (result.data.status.active) {
+          this.step = 'in-progress';
+          if (result.data.status.currentCommit) {
+            await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+          }
         }
+      } else {
+        this.error = result.error?.message || 'Failed to start bisect';
       }
-    } else {
-      this.error = result.error?.message || 'Failed to start bisect';
+
+      if (this.repositoryPath === repoPath) {
+        this.loading = false;
+      }
     }
 
-    this.loading = false;
+    // `git bisect start` checks out the midpoint, so HEAD has moved just as
+    // surely as it does on good/bad/skip. Without this the graph, branch list
+    // and status all keep showing the pre-bisect HEAD.
+    //
+    // Dispatched even on failure, matching good/bad/skip: the command can fail
+    // partway through having already moved HEAD, and the handler only triggers
+    // an idempotent refresh. (bisect-complete is different — it also CLOSES
+    // the dialog, so it stays gated on success or the error is never read.)
+    this.dispatchEvent(
+      new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
+    );
   }
 
   private async handleBad(): Promise<void> {
+    const repoPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.bisectBad(this.repositoryPath);
+    const result = await gitService.bisectBad(repoPath);
 
-    if (result.success && result.data) {
-      this.status = result.data.status;
-      this.message = result.data.message;
+    if (this.repositoryPath === repoPath) {
+      if (result.success && result.data) {
+        this.status = result.data.status;
+        this.message = result.data.message;
 
-      if (result.data.culprit) {
-        this.culprit = result.data.culprit;
-        this.step = 'complete';
-      } else if (result.data.status.currentCommit) {
-        await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        if (result.data.culprit) {
+          this.culprit = result.data.culprit;
+          this.step = 'complete';
+        } else if (result.data.status.currentCommit) {
+          await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        }
+      } else {
+        this.error = result.error?.message || 'Failed to mark as bad';
       }
-    } else {
-      this.error = result.error?.message || 'Failed to mark as bad';
+
+      if (this.repositoryPath === repoPath) {
+        this.loading = false;
+      }
     }
 
-    this.loading = false;
-    this.dispatchEvent(new CustomEvent('bisect-step'));
+    this.dispatchEvent(
+      new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
+    );
   }
 
   private async handleGood(): Promise<void> {
+    const repoPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.bisectGood(this.repositoryPath);
+    const result = await gitService.bisectGood(repoPath);
 
-    if (result.success && result.data) {
-      this.status = result.data.status;
-      this.message = result.data.message;
+    if (this.repositoryPath === repoPath) {
+      if (result.success && result.data) {
+        this.status = result.data.status;
+        this.message = result.data.message;
 
-      if (result.data.culprit) {
-        this.culprit = result.data.culprit;
-        this.step = 'complete';
-      } else if (result.data.status.currentCommit) {
-        await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        if (result.data.culprit) {
+          this.culprit = result.data.culprit;
+          this.step = 'complete';
+        } else if (result.data.status.currentCommit) {
+          await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        }
+      } else {
+        this.error = result.error?.message || 'Failed to mark as good';
       }
-    } else {
-      this.error = result.error?.message || 'Failed to mark as good';
+
+      if (this.repositoryPath === repoPath) {
+        this.loading = false;
+      }
     }
 
-    this.loading = false;
-    this.dispatchEvent(new CustomEvent('bisect-step'));
+    this.dispatchEvent(
+      new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
+    );
   }
 
   private async handleSkip(): Promise<void> {
+    const repoPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.bisectSkip(this.repositoryPath);
+    const result = await gitService.bisectSkip(repoPath);
 
-    if (result.success && result.data) {
-      this.status = result.data.status;
-      this.message = result.data.message;
+    if (this.repositoryPath === repoPath) {
+      if (result.success && result.data) {
+        this.status = result.data.status;
+        this.message = result.data.message;
 
-      if (result.data.status.currentCommit) {
-        await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        if (result.data.status.currentCommit) {
+          await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
+        }
+      } else {
+        this.error = result.error?.message || 'Failed to skip commit';
       }
-    } else {
-      this.error = result.error?.message || 'Failed to skip commit';
+
+      if (this.repositoryPath === repoPath) {
+        this.loading = false;
+      }
     }
 
-    this.loading = false;
-    this.dispatchEvent(new CustomEvent('bisect-step'));
+    this.dispatchEvent(
+      new CustomEvent('bisect-step', { detail: { repositoryPath: repoPath } })
+    );
   }
 
   private async handleReset(): Promise<void> {
+    const repoPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.bisectReset(this.repositoryPath);
+    const result = await gitService.bisectReset(repoPath);
 
-    if (result.success) {
-      this.step = 'setup';
-      this.status = null;
-      this.culprit = null;
-      this.currentCommitInfo = null;
-      this.badCommitInput = '';
-      this.goodCommitInput = '';
-      this.message = '';
-      this.dispatchEvent(new CustomEvent('bisect-complete'));
-    } else {
-      this.error = result.error?.message || 'Failed to reset bisect';
+    if (this.repositoryPath === repoPath) {
+      if (result.success) {
+        this.resetSessionState();
+      } else {
+        this.error = result.error?.message || 'Failed to reset bisect';
+      }
+      this.loading = false;
     }
 
-    this.loading = false;
+    // `git bisect reset` checks the original HEAD back out, so the refresh has
+    // to land on the repo the reset ran against, not whichever tab is active.
+    if (result.success) {
+      this.dispatchEvent(
+        new CustomEvent('bisect-complete', { detail: { repositoryPath: repoPath } })
+      );
+    }
   }
 
   private handleClose(): void {

@@ -14,6 +14,7 @@ import type { UnifiedProfile, IntegrationAccount, IntegrationType, IntegrationCo
 import { PROFILE_COLORS, ACCOUNT_COLORS, INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type ViewMode = 'list' | 'edit' | 'create' | 'select-account' | 'edit-account' | 'assign-repos' | 'accounts';
 
@@ -716,6 +717,7 @@ export class LvProfileManagerDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     this.unsubscribeStore?.();
     this.unsubscribeRepoStore?.();
     window.removeEventListener('keydown', this.handleKeyDown, true);
@@ -727,6 +729,11 @@ export class LvProfileManagerDialog extends LitElement {
     // is set via `?open=${...}` from the parent and reliably reflects there.
     const isOpen = this.hasAttribute('open');
     if (!isOpen || this.demoted) return;
+    // window + capture runs before EVERY document listener in the app, and
+    // this handler stopPropagation()s — so opening the command palette over
+    // this dialog and pressing Escape closed the dialog underneath while the
+    // palette, the actual topmost overlay, kept ignoring the key.
+    if (!isTopOverlay(this)) return;
     e.preventDefault();
     e.stopPropagation();
     if (this.viewMode === 'list') {
@@ -737,6 +744,10 @@ export class LvProfileManagerDialog extends LitElement {
   };
 
   willUpdate(changedProperties: Map<string, unknown>): void {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     // Land on the requested view before render so opening doesn't flash the
     // list view first (and avoids a redundant update if set in updated()).
     if (changedProperties.has('open') && this.open) {

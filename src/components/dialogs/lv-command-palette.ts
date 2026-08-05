@@ -8,6 +8,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { fuzzyScore, highlightMatch } from '../../utils/fuzzy-search.ts';
 import type { Branch, Commit } from '../../types/git.types.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 export interface PaletteCommand {
   id: string;
@@ -197,6 +198,9 @@ export class LvCommandPalette extends LitElement {
   ];
 
   @property({ type: Boolean, reflect: true }) open = false;
+
+  /** Focus owner at open time, restored on close. */
+  private previouslyFocused: HTMLElement | null = null;
   @property({ type: Array }) commands: PaletteCommand[] = [];
   @property({ type: Array }) branches: Branch[] = [];
   @property({ type: Array }) files: string[] = [];
@@ -212,19 +216,67 @@ export class LvCommandPalette extends LitElement {
 
   private recentCommands: string[] = [];
 
+  /**
+   * Escape at the document level, gated on being the topmost overlay.
+   *
+   * The palette's other key handling hangs off @keydown on the search input,
+   * so it only fires once that input has focus — which happens in a rAF after
+   * open. app-shell used to paper over the gap with an unconditional
+   * `showCommandPalette = false` arm ahead of every other check, but that arm
+   * closed the palette even when it was NOT the overlay the user was aiming
+   * at. Owning Escape here, stack-gated, is what every other overlay does.
+   */
+  private handleDocumentKeyDown = (e: KeyboardEvent): void => {
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.close();
+    }
+  };
+
   connectedCallback(): void {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleDocumentKeyDown);
     this.loadRecentCommands();
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('keydown', this.handleDocumentKeyDown);
+    // Withdraw on teardown as every sibling does. Unreachable while the
+    // palette is rendered unconditionally, but a leaked entry sits on top
+    // of the stack forever and takes Escape away from every dialog below.
+    removeOverlay(this);
+  }
+
   updated(changedProps: Map<string, unknown>): void {
+    // The palette opens OVER other dialogs, so it must take ownership of
+    // Escape while it is up — otherwise dismissing it also dismissed the
+    // dialog underneath, discarding whatever the user had built there.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
+      // Remembered so focus can go back where it was. Leaving it in the
+      // search input after closing left document focus inside a hidden field:
+      // every keydown's composedPath still contained an INPUT, so
+      // keyboard.service's in-input bail swallowed EVERY single-key shortcut
+      // app-wide until the user happened to click something.
+      this.previouslyFocused = document.activeElement as HTMLElement | null;
       this.searchQuery = '';
       this.selectedIndex = 0;
       this.updateFilteredCommands();
       requestAnimationFrame(() => {
         this.searchInput?.focus();
       });
+    }
+    if (changedProps.has('open') && !this.open) {
+      this.searchInput?.blur();
+      const restore = this.previouslyFocused;
+      this.previouslyFocused = null;
+      if (restore && restore.isConnected) {
+        restore.focus();
+      }
     }
     if (
       changedProps.has('commands') ||

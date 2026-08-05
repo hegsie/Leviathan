@@ -81,8 +81,12 @@ fn restore_after_abort(repo: &git2::Repository) -> Result<()> {
     }
 
     // Force-checkout only the affected paths; unrelated dirty files survive.
+    // disable_pathspec_match is what makes that true: CheckoutBuilder::path()
+    // takes a pathspec, so an affected file named e.g. `a[1].txt` would
+    // otherwise also force-restore `a1.txt` and destroy its uncommitted work.
     let mut checkout = git2::build::CheckoutBuilder::new();
     checkout.force();
+    checkout.disable_pathspec_match(true);
     for path in &affected {
         checkout.path(path.as_slice());
     }

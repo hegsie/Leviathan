@@ -72,9 +72,23 @@ function commandIndex(name: string): number {
   return invokeHistory.findIndex((h) => h.command === name);
 }
 
+/** Make every showConfirm() in the run resolve to "declined". */
+function declineConfirms(): void {
+  const previous = mockInvoke;
+  mockInvoke = (command: string, args?: unknown) =>
+    command === 'plugin:dialog|message'
+      ? Promise.resolve('Cancel')
+      : previous(command, args);
+}
+
 function setupDefaultMocks(): void {
   mockInvoke = async (command: string) => {
     switch (command) {
+      // Tauri confirm() resolves via plugin:dialog|message; truthy = confirmed.
+      // The destructive ref handlers (delete branch/tag) gate on this, matching
+      // their sidebar counterparts.
+      case 'plugin:dialog|message':
+        return 'Ok';
       case 'checkout_with_autostash':
         return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
       case 'open_repository':
@@ -130,6 +144,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
+    uiStore.setState({ toasts: [] });
   });
 
   describe('handleRefCheckout', () => {
@@ -336,9 +351,92 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
       expect(findCommands('open_repository').length).to.be.greaterThan(0);
     });
+
+    it('does not delete when the confirm is declined', async () => {
+      // The graph ref menu deletes the same branch as the sidebar, which always
+      // confirms — this path must not be the unguarded shortcut.
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'old-feature');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefDeleteBranch();
+
+      expect(findCommands('delete_branch')).to.have.length(0);
+    });
+  });
+
+  describe('maintenance commands', () => {
+    it('does not run gc or prune when the confirm is declined', async () => {
+      declineConfirms();
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunGc(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunPrune();
+
+      expect(findCommands('run_gc')).to.have.length(0);
+      expect(findCommands('run_prune')).to.have.length(0);
+    });
+
+    it('reports the outcome of gc, prune and fsck', async () => {
+      // Each of these previously discarded its result, so the palette entry
+      // produced no observable effect on success OR failure.
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunGc(false);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunPrune();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRunFsck();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.length, 'each maintenance command reports an outcome').to.be.greaterThan(2);
+    });
+  });
+
+  describe('force delete from the error-suggestion toast', () => {
+    it('does not force delete when the confirm is declined', async () => {
+      // One click on a toast button must not discard unmerged commits.
+      declineConfirms();
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).forceDeleteBranch('unmerged-feature');
+
+      expect(findCommands('delete_branch')).to.have.length(0);
+    });
+
+    it('force deletes once confirmed', async () => {
+      const el = createAppShell();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).forceDeleteBranch('unmerged-feature');
+
+      const calls = findCommands('delete_branch');
+      expect(calls).to.have.length(1);
+      expect(calls[0].args).to.deep.include({
+        path: REPO_PATH,
+        name: 'unmerged-feature',
+        force: true,
+      });
+    });
   });
 
   describe('handleRefDeleteTag', () => {
+    it('does not delete when the confirm is declined', async () => {
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'v1.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefDeleteTag();
+
+      expect(findCommands('delete_tag')).to.have.length(0);
+    });
+
     it('calls delete_tag with the correct args', async () => {
       const el = createAppShell();
       setRefContextMenu(el, 'v1.0.0', 'tag');

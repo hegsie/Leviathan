@@ -7,6 +7,26 @@ import { loggers } from './utils/logger.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
+
+/**
+ * Repository states that have a working abort command.
+ *
+ * The operation banner's Abort button and handleAbortOperation BOTH read this,
+ * so the UI can never offer an abort the handler will refuse. The banner used
+ * to render for every non-clean state, which made Abort a permanent dead end
+ * during a bisect or an in-progress mailbox apply — those have no abort command
+ * here (a bisect exits via the bisect dialog's Reset).
+ *
+ * Typed as RepositoryState so a typo or a renamed state is a compile error.
+ */
+const ABORTABLE_STATES: readonly RepositoryState[] = [
+  'cherrypick',
+  'merge',
+  'rebase',
+  'rebase-interactive',
+  'rebase-merge',
+  'revert',
+];
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -60,8 +80,13 @@ import type { LvCreateBranchDialog } from './components/dialogs/lv-create-branch
 import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dialog.ts';
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
+import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
+import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
+import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
+import type { LvRepositoryHealthDialog } from './components/dialogs/lv-repository-health-dialog.ts';
+import type { LvChangelogDialog } from './components/dialogs/lv-changelog-dialog.ts';
 import type { IntegrationOpenContext, IntegrationType } from './types/integration-accounts.types.ts';
-import type { Commit, RefInfo, StatusEntry, Tag, Branch } from './types/git.types.ts';
+import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
 import * as gitService from './services/git.service.ts';
@@ -74,6 +99,14 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
+import {
+  confirmGarbageCollection,
+  confirmPrune,
+  summariseFsck,
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  isMaintenanceRunning,
+} from './utils/maintenance-confirms.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -153,6 +186,18 @@ export class AppShell extends LitElement {
         background: var(--color-bg-secondary);
         border-right: 1px solid var(--color-border);
         overflow: hidden;
+      }
+
+      /* Hidden, NOT unmounted. The panel owns the interactive-rebase,
+         branch-cleanup and create-branch dialogs; removing it from the
+         template tore down an in-progress rebase plan on Ctrl+B, and worse,
+         detached the subtree mid-execute, so the open-conflict-dialog event
+         it raises on REBASE_CONFLICT never reached app-shell's listener and
+         the repo was left mid-rebase with no conflict dialog. Keeping it
+         mounted also means lv-branch-list's window listeners stay registered. */
+      .left-panel.hidden,
+      .resize-handle-h.hidden {
+        display: none;
       }
 
       .center-panel {
@@ -505,6 +550,8 @@ export class AppShell extends LitElement {
 
   // Settings dialog
   @state() private showSettings = false;
+  /** True while an abort is in flight — blocks a double-click firing two. */
+  @state() private abortInProgress = false;
 
   // Search/filter
   @state() private searchFilter: SearchFilter | null = null;
@@ -604,7 +651,6 @@ export class AppShell extends LitElement {
   @state() private showLfs = false;
 
   // Changelog dialog
-  @state() private showChangelog = false;
 
   // GPG dialog
   @state() private showGpg = false;
@@ -681,6 +727,11 @@ export class AppShell extends LitElement {
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
+  @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
+  @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
+  @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
+  @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
+  @query('lv-changelog-dialog') private changelogDialog?: LvChangelogDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -739,6 +790,27 @@ export class AppShell extends LitElement {
   };
 
   // Cycle the active repository tab by offset (wraps around both ends)
+  /**
+   * Open the branch-cleanup dialog from the command palette.
+   *
+   * Unlike every sibling palette action, this one cannot just flip a flag on
+   * app-shell: the dialog is owned by `lv-branch-list`, which is rendered only
+   * while the left panel is visible. With the panel hidden (Ctrl+B) the
+   * `open-branch-cleanup` event had no listener at all and the command
+   * silently did nothing. Reveal the panel first, then wait for the panel AND
+   * its branch list to render — `lv-branch-list` registers the window listener
+   * in connectedCallback, so dispatching before it exists is the same dead end.
+   */
+  private async openBranchCleanup(): Promise<void> {
+    if (!this.leftPanelVisible) {
+      uiStore.getState().togglePanel('left');
+      await this.updateComplete;
+      const panel = this.renderRoot.querySelector('lv-left-panel') as LitElement | null;
+      await panel?.updateComplete;
+    }
+    window.dispatchEvent(new CustomEvent('open-branch-cleanup'));
+  }
+
   private cycleRepositoryTab(offset: number): void {
     const state = repositoryStore.getState();
     const count = state.openRepositories.length;
@@ -1116,6 +1188,105 @@ export class AppShell extends LitElement {
         showToast('The repository tab was closed — branch creation cancelled', 'warning');
       }
 
+      // The repo-scoped dialogs hosted directly by app-shell pin their repo on
+      // open for the same reason, so they need the same sweep: the clean
+      // dialog would otherwise delete files from — and the reflog dialog reset
+      // — a repository that is no longer in the tab bar.
+      const cleanPinned = this.cleanDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (cleanPinned && !repoOpen(cleanPinned)) {
+        this.showClean = false;
+        showToast('The repository tab was closed — clean cancelled', 'warning');
+      }
+      const rfPinned = this.reflogDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rfPinned && !repoOpen(rfPinned)) {
+        this.showReflog = false;
+        showToast('The repository tab was closed — undo history closed', 'warning');
+      }
+      const rmPinned = this.remoteDialog?.pinnedRepositoryPathIfOpen ?? null;
+      if (rmPinned && !repoOpen(rmPinned)) {
+        this.showRemotes = false;
+        showToast('The repository tab was closed — remote management closed', 'warning');
+      }
+
+      // The remaining pinned dialogs, swept the same way. Every one of these
+      // exposes pinnedRepositoryPathIfOpen but nothing read it, so Repository
+      // Health would still run `git gc --aggressive`, and the worktree /
+      // submodule dialogs still remove, against a repo whose tab is gone.
+      // Driven off the DOM element so a dialog cannot be added to the app and
+      // silently miss the sweep.
+      // Each closer returns whether it actually closed: Repository Health
+      // refuses while gc/prune is in flight (closing DESTROYS the element and
+      // would leave the operation running with no surface), so the sweep must
+      // not announce a dismissal that did not happen.
+      const pinnedFlagDialogs: Array<[string, () => boolean, string]> = [
+        ['lv-repository-health-dialog', () => {
+          // Hands the close to the dialog: it dismisses now if idle, or after
+          // the running gc/prune lands. Merely refusing left it open and
+          // pinned to a repo with no tab, where a SECOND gc could be started
+          // once the first finished.
+          const running = this.repositoryHealthDialog?.isRunning ?? false;
+          this.repositoryHealthDialog?.closeWhenIdle();
+          // The flag must never outlive the element. Its render block is also
+          // gated on activeRepository, so closing the LAST tab removes the
+          // element regardless of the deferral — leaving showRepositoryHealth
+          // true meant the dialog sprang open unbidden over the next repo the
+          // user opened, freshly constructed with every button re-enabled.
+          if (!running || state.openRepositories.length === 0) {
+            this.showRepositoryHealth = false;
+          }
+          if (running && state.openRepositories.length > 0) {
+            showToast(
+              'The repository tab was closed — repository health will close when the current maintenance finishes',
+              'warning',
+            );
+          } else if (running) {
+            // Last tab: the force-close above already removed the dialog, so
+            // promising a later dismissal would describe something that just
+            // did not happen. The gc itself keeps running to completion.
+            showToast(
+              'The repository tab was closed — the maintenance operation will finish in the background',
+              'warning',
+            );
+          }
+          return !running;
+        }, 'repository health closed'],
+        ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
+        ['lv-submodule-dialog', () => { this.showSubmodules = false; return true; }, 'submodules closed'],
+        ['lv-lfs-dialog', () => { this.showLfs = false; return true; }, 'Git LFS closed'],
+        ['lv-gpg-dialog', () => { this.showGpg = false; return true; }, 'signing settings closed'],
+        ['lv-config-dialog', () => { this.showConfig = false; return true; }, 'configuration closed'],
+        ['lv-credentials-dialog', () => { this.showCredentials = false; return true; }, 'credentials closed'],
+        ['lv-hooks-dialog', () => { this.showHooksDialog = false; return true; }, 'hooks closed'],
+        // close() here is a bare modal.open = false — it does NOT apply the
+        // in-flight re-assert handleModalClose does for Escape/overlay/x.
+        // Dismissing mid-generation hid a running AI call and then reported
+        // "changelog closed", which was simply untrue.
+        ['lv-changelog-dialog', () => {
+          if (this.changelogDialog?.generationInFlight) {
+            // Say so. This block is also gated on activeRepository, so on the
+            // LAST tab the element is destroyed on the next render regardless
+            // and the generation completes into a detached component — the
+            // user would otherwise get silence: no changelog, no error.
+            showToast(
+              'The repository tab was closed — changelog generation was abandoned',
+              'warning',
+            );
+            return false;
+          }
+          this.changelogDialog?.close();
+          return true;
+        }, 'changelog closed'],
+      ];
+      for (const [tag, close, label] of pinnedFlagDialogs) {
+        const el = this.renderRoot.querySelector(tag) as
+          | (Element & { pinnedRepositoryPathIfOpen?: string | null })
+          | null;
+        const pinned = el?.pinnedRepositoryPathIfOpen ?? null;
+        if (pinned && !repoOpen(pinned) && close()) {
+          showToast(`The repository tab was closed — ${label}`, 'warning');
+        }
+      }
+
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the
       // click (e.g. a merge run in an external terminal) hits the diff view's
@@ -1308,7 +1479,7 @@ export class AppShell extends LitElement {
       search: () => this.handleToggleSearch(),
       openSettings: () => { this.showSettings = true; },
       openShortcuts: () => { this.showShortcuts = true; },
-      toggleLeftPanel: () => uiStore.getState().togglePanel('left'),
+      toggleLeftPanel: () => this.toggleLeftPanel(),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
       openReflog: () => { this.showReflog = true; },
@@ -1482,26 +1653,121 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleKeyDown(e: KeyboardEvent): void {
-    // Keyboard shortcuts are now handled by the keyboard service
-    // Only handle special cases here
+  private handleKeyDown(_e: KeyboardEvent): void {
+    // Keyboard shortcuts are handled by the keyboard service.
+    //
+    // There used to be a `?` arm here "because of the shift key". It matched
+    // with no input-focus check and called preventDefault(), so typing a
+    // question mark ANYWHERE — commit message, search, branch-rename prompt,
+    // hook editor — was impossible: the character was swallowed and the
+    // shortcuts dialog opened instead. keyboard.service registers the same
+    // shortcut and does bail inside inputs, but it bails by returning, and
+    // stopPropagation cannot suppress a sibling listener on the same node,
+    // so this copy always won. The guarded registration is the only one now.
+  }
 
-    // ? to show shortcuts help (need to handle separately due to shift key)
-    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      this.showShortcuts = true;
+  /**
+   * Walk a DOM subtree, descending through shadow roots, for a blocking
+   * overlay: any open lv-modal, or any dialog reflecting `open`.
+   */
+  private static containsOpenModal(
+    root: ParentNode,
+    seen: Set<ShadowRoot>,
+    depth = 0,
+  ): boolean {
+    if (depth > 10) return false;
+    for (const el of root.querySelectorAll('*')) {
+      const tag = el.tagName;
+      if (tag === 'LV-MODAL' && el.hasAttribute('open')) return true;
+      if (tag.startsWith('LV-') && tag.endsWith('-DIALOG') && el.hasAttribute('open')) return true;
+      const shadow = el.shadowRoot;
+      if (shadow && !seen.has(shadow)) {
+        seen.add(shadow);
+        if (AppShell.containsOpenModal(shadow, seen, depth + 1)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True when any dialog is showing a blocking overlay.
+   *
+   * Walks from document.body, not from this element. Two earlier attempts
+   * drifted by enumerating dialogs; the third fixed that but still hard-coded
+   * its ROOT as app-shell's renderRoot, which made lv-prompt-dialog invisible
+   * by construction — showPrompt appends that singleton to document.body, so
+   * it is app-shell's SIBLING. Escape then closed the diff behind an open
+   * prompt as soon as focus left its autofocused input (the keyboard service's
+   * composedPath bail only covers the input itself). Starting at the document
+   * subsumes app-shell, the sidebar, the toolbar and anything body-level, so
+   * the root is no longer a choice that can be wrong.
+   */
+  private hasModalDialogOpen(): boolean {
+    return AppShell.containsOpenModal(document.body, new Set<ShadowRoot>());
+  }
+
+  /**
+   * True when a dialog owned by the LEFT PANEL is open. Hiding the panel with
+   * one of those up makes it invisible without closing it — the overlay is
+   * inside the `display: none` subtree — while it still owns Escape, so the
+   * key goes dead app-wide with no visible cause.
+   */
+  private hasSidebarDialogOpen(): boolean {
+    const panel = this.renderRoot.querySelector('lv-left-panel');
+    return panel?.shadowRoot
+      ? AppShell.containsOpenModal(panel.shadowRoot, new Set<ShadowRoot>())
+      : false;
+  }
+
+  /**
+   * Hiding the left panel is refused while it hosts an open dialog — see
+   * hasSidebarDialogOpen. Revealing it is always allowed.
+   */
+  private toggleLeftPanel(): void {
+    if (this.leftPanelVisible && this.hasSidebarDialogOpen()) {
+      showToast('Close the open dialog before hiding the sidebar', 'info');
       return;
     }
+    uiStore.getState().togglePanel('left');
   }
+
+  /**
+   * Closing this dialog DESTROYS it (its whole block is behind a conditional),
+   * so a dismissal mid-gc leaves `git gc --aggressive` running with no surface
+   * and lets a reopened, freshly-constructed dialog start a second one. Refuse
+   * while an action is in flight and re-assert the modal, mirroring the
+   * in-flight guards on the clean and reflog dialogs.
+   */
+  private handleRepositoryHealthClose = (): void => {
+    if (this.repositoryHealthDialog?.isRunning) {
+      const modal = this.renderRoot.querySelector('lv-modal[modalTitle="Repository Health"]');
+      if (modal) (modal as HTMLElement & { open: boolean }).open = true;
+      return;
+    }
+    this.showRepositoryHealth = false;
+  };
 
   private handleCloseOverlay(): void {
     // Close any open overlay in priority order
-    if (this.showShortcuts) {
-      this.showShortcuts = false;
-    } else if (this.showCommandPalette) {
-      this.showCommandPalette = false;
-    } else if (this.showReflog) {
-      this.showReflog = false;
+    if (this.hasModalDialogOpen()) {
+      // A modal owns this Escape and dismisses itself, through lv-modal's
+      // handler or its own — each now gated on being the TOPMOST overlay.
+      //
+      // This arm is FIRST. The showShortcuts and showCommandPalette arms used
+      // to precede it and closed unconditionally, without consulting the
+      // stack: opening the undo-history dialog over the shortcuts dialog and
+      // pressing Escape once closed BOTH. Both dialogs clear their own flag
+      // through their `close` event, so letting the topmost one dismiss itself
+      // is all that is needed.
+      // Stop here so one keypress cannot also close the diff behind it, and
+      // so a dialog that deliberately blocks dismissal mid-operation does not
+      // leak the key either.
+      //
+      // This subsumes the old showReflog arm, which assumed reflog was always
+      // topmost: a dialog opened over it (via the palette) made Escape discard
+      // the reflog session underneath. The dialog's own handler applies the
+      // isResetting guard and its `close` event clears showReflog.
+      return;
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     } else if (this.refContextMenu.visible) {
@@ -1672,6 +1938,17 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    // Deleting from the graph's ref menu destroys the same branch as the
+    // sidebar's delete, so it must be gated the same way (lv-branch-list.ts
+    // handleDeleteBranch). Without this, one click on a graph label is enough.
+    const confirmed = await showConfirm(
+      'Delete Branch',
+      `Are you sure you want to delete the branch "${branchName}"?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     const result = await gitService.deleteBranch(
       repoPath,
       branchName,
@@ -1695,6 +1972,16 @@ export class AppShell extends LitElement {
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    // Gated to match the sidebar's tag delete (lv-tag-list.ts) — the graph ref
+    // menu deletes the same tag and must not be the one unguarded path.
+    const confirmed = await showConfirm(
+      'Delete Tag',
+      `Are you sure you want to delete the tag "${tagName}"?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
 
     const result = await gitService.deleteTag({
       path: repoPath,
@@ -1903,40 +2190,72 @@ export class AppShell extends LitElement {
   }
 
   private async handleAbortOperation(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.abortInProgress) return;
 
     const state = this.activeRepository.repository.state;
     const path = this.activeRepository.repository.path;
     let result;
 
-    switch (state) {
-      case 'cherrypick':
-        result = await gitService.abortCherryPick({ path });
-        break;
-      case 'merge':
-        result = await gitService.abortMerge({ path });
-        break;
-      case 'rebase':
-      case 'rebase-interactive':
-      case 'rebase-merge':
-        result = await gitService.abortRebase({ path });
-        break;
-      case 'revert':
-        result = await gitService.abortRevert({ path });
-        break;
-      default:
-        showToast(`Cannot abort operation: ${state}`, 'error');
-        return;
+    // Reject an unabortable state BEFORE prompting — otherwise the user
+    // confirms a destructive action that was never going to run.
+    if (!ABORTABLE_STATES.includes(state)) {
+      showToast(`Cannot abort operation: ${state}`, 'error');
+      return;
     }
 
-    if (result.success) {
-      showToast(`Aborted ${state}`, 'success');
-      // `path` was captured before the abort await — pin the refresh to it so a
-      // mid-abort tab switch doesn't refresh the wrong repo.
-      this.refreshConflictDialogRepo(path);
-    } else {
-      log.error('Abort failed:', result.error);
-      showToast(result.error?.message || 'Abort failed', 'error');
+    // Aborting throws away every conflict resolution made so far and restores
+    // the pre-operation working tree. The conflict dialog's own Abort button
+    // gates this behind an explicit confirmation panel; the banner button
+    // reaches the same command, so it needs the same gate rather than being a
+    // one-click path to the identical loss.
+    const confirmed = await showConfirm(
+      `Abort ${state}?`,
+      `This discards all conflict resolutions and restores the working tree to ` +
+        `its state before the ${state} began. This cannot be undone.`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
+    // Guards against a double-click firing two aborts: the second would run
+    // against an already-restored tree and surface a confusing failure.
+    this.abortInProgress = true;
+
+    try {
+      switch (state) {
+        case 'cherrypick':
+          result = await gitService.abortCherryPick({ path });
+          break;
+        case 'merge':
+          result = await gitService.abortMerge({ path });
+          break;
+        case 'rebase':
+        case 'rebase-interactive':
+        case 'rebase-merge':
+          result = await gitService.abortRebase({ path });
+          break;
+        case 'revert':
+          result = await gitService.abortRevert({ path });
+          break;
+        default:
+          // Unreachable while ABORTABLE_STATES gates entry above. Kept explicit
+          // so that adding a state to that list without adding a case here
+          // fails loudly instead of silently running an unrelated abort.
+          showToast(`Cannot abort operation: ${state}`, 'error');
+          return;
+      }
+
+      if (result.success) {
+        showToast(`Aborted ${state}`, 'success');
+        // `path` was captured before the abort await — pin the refresh to it so
+        // a mid-abort tab switch doesn't refresh the wrong repo.
+        this.refreshConflictDialogRepo(path);
+      } else {
+        log.error('Abort failed:', result.error);
+        showToast(result.error?.message || 'Abort failed', 'error');
+      }
+    } finally {
+      this.abortInProgress = false;
     }
   }
 
@@ -1947,21 +2266,46 @@ export class AppShell extends LitElement {
 
   private handleForceDeleteBranch = (e: CustomEvent<{ branchName?: string }>): void => {
     const branchName = e.detail?.branchName;
-    if (!branchName || !this.activeRepository) return;
+    if (branchName) void this.forceDeleteBranch(branchName);
+  };
 
-    // Captured before the delete: the force-delete and its refresh must target
+  private async forceDeleteBranch(branchName: string): Promise<void> {
+    if (!this.activeRepository) return;
+
+    // Captured before the confirm: the force-delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
-    gitService.deleteBranch(repoPath, branchName, true).then(async (result) => {
+
+    // This fires from the "Force Delete" action on an error-suggestion toast,
+    // i.e. one click away from an ordinary delete that just failed as unmerged.
+    // Force-deleting discards commits that exist on no other ref, so it needs
+    // its own gate — the sidebar escalation (lv-branch-list.ts) re-confirms
+    // here too, and the toast button must not be the cheaper route to the same
+    // irreversible outcome.
+    const confirmed = await showConfirm(
+      'Force Delete Branch',
+      `"${branchName}" has commits that are not merged anywhere else. ` +
+        `Force deleting it discards those commits permanently — they will be ` +
+        `recoverable only through the reflog. Continue?`,
+      'warning'
+    );
+
+    if (!confirmed) return;
+
+    try {
+      const result = await gitService.deleteBranch(repoPath, branchName, true);
       if (result.success) {
         this.refreshConflictDialogRepo(repoPath);
         showToast(`Force deleted branch ${branchName}`, 'success');
       } else {
         showToast(result.error?.message || 'Force delete failed', 'error');
       }
-    }).catch((e) => {
-      showToast(`Force delete failed: ${e instanceof Error ? e.message : 'Unknown error'}`, 'error');
-    });
+    } catch (err) {
+      showToast(
+        `Force delete failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error'
+      );
+    }
   };
 
   private handleOpenSettings = (): void => {
@@ -2066,25 +2410,45 @@ export class AppShell extends LitElement {
     // tabs (rebinding activeRepository) while the confirm is up.
     const repoPath = this.activeRepository.repository.path;
 
-    // Confirm reset based on mode
+    // Confirm reset based on mode.
+    //
+    // EVERY mode drops the commits after the target off this branch — that is
+    // what a reset is — so every confirm has to say so and name the recovery
+    // path. Describing only what happens to the working tree made soft/mixed
+    // read as harmless and understated hard, which is the loudest of them.
+    // Phrased for ANY target. The graph context menu offers Reset on every
+    // node, so the target may be a descendant of HEAD (nothing is dropped) or
+    // sit on a diverged branch (the dropped set is not a simple "after X").
+    // Saying "commits after X are removed" is false in the first case and
+    // mischaracterises the second — and a confirm that overstates trains users
+    // to dismiss the one that matters.
+    const droppedNote =
+      `This branch will point at ${commit.shortId}. Any commit no longer reachable ` +
+      `from it is recoverable only through the reflog.`;
+
     if (mode === 'hard') {
       const confirmed = await showConfirm(
         'Hard Reset',
-        `Are you sure you want to hard reset to "${commit.summary}"?\n\nThis will discard all uncommitted changes.`,
+        `Hard reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `All uncommitted changes are also discarded permanently — those are not ` +
+          `in the reflog and cannot be recovered.`,
         'warning'
       );
       if (!confirmed) return;
     } else if (mode === 'mixed') {
       const confirmed = await showConfirm(
         'Mixed Reset',
-        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will be unstaged but preserved in the working directory.`,
+        `Reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `Your working-directory changes are kept, but unstaged.`,
         'warning'
       );
       if (!confirmed) return;
     } else if (mode === 'soft') {
       const confirmed = await showConfirm(
         'Soft Reset',
-        `Reset to "${commit.summary}"?\n\nThis will move HEAD to the selected commit. Your changes will remain staged.`
+        `Reset to "${commit.summary}"?\n\n${droppedNote}\n\n` +
+          `Your changes remain staged.`,
+        'warning'
       );
       if (!confirmed) return;
     }
@@ -2098,6 +2462,10 @@ export class AppShell extends LitElement {
     );
 
     if (result.success) {
+      // Without this the user cannot tell a completed reset from a click that
+      // did nothing — failure was reported, success was silent. Every sibling
+      // destructive handler in this file toasts on success.
+      showToast(`Reset to ${commit.shortId} (${mode})`, 'success');
       this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Reset failed:', result.error);
@@ -2768,10 +3136,35 @@ export class AppShell extends LitElement {
 
           if (result.success && result.data) {
             const match = result.data;
-            const confirmed = await showConfirm('Smart Undo', `${match.description}\n\nReset to HEAD@{${match.index}}? (soft reset — changes preserved as staged)`);
+
+            // Resolve the index to a commit BEFORE the confirm. An AI round
+            // trip plus a prompt plus a confirm all elapse between the reflog
+            // being read and the reset firing, and any commit or checkout in
+            // that window renumbers every entry. Pinning the oid means the
+            // reset either lands on the commit named here or is refused.
+            const git = await import('./services/git.service.ts');
+            const reflog = await git.getReflog(repoPath);
+            const target = reflog.success ? reflog.data?.[match.index] : undefined;
+
+            if (!target) {
+              showToast('Could not resolve that reflog entry — try again', 'error');
+              return;
+            }
+
+            const confirmed = await showConfirm(
+              'Smart Undo',
+              `${match.description}\n\nReset to ${target.shortId} (HEAD@{${match.index}})?\n\n` +
+                `This branch will point at ${target.shortId}. Any commit no longer ` +
+                `reachable from it is recoverable only through the reflog. Your ` +
+                `changes remain staged.`,
+              'warning'
+            );
             if (confirmed) {
-              const resetResult = await import('./services/git.service.ts').then(m =>
-                m.resetToReflog(repoPath, match.index, 'soft')
+              const resetResult = await git.resetToReflog(
+                repoPath,
+                match.index,
+                'soft',
+                target.oid
               );
               if (resetResult.success) {
                 showToast('Undo successful', 'success');
@@ -2797,7 +3190,7 @@ export class AppShell extends LitElement {
         label: 'Clean up branches',
         category: 'action',
         icon: 'git-branch',
-        action: this.requiresRepository(() => { window.dispatchEvent(new CustomEvent('open-branch-cleanup')); }),
+        action: this.requiresRepository(() => { void this.openBranchCleanup(); }),
       },
       {
         id: 'bisect',
@@ -2960,7 +3353,7 @@ export class AppShell extends LitElement {
         label: 'Toggle left panel',
         category: 'navigation',
         shortcut: `${mod}B`,
-        action: () => uiStore.getState().togglePanel('left'),
+        action: () => this.toggleLeftPanel(),
       },
       {
         id: 'toggle-right-panel',
@@ -3310,7 +3703,14 @@ export class AppShell extends LitElement {
     // Pinned: if the user switches tabs while the stash is being created, the
     // refresh must target the repo that was stashed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.createStash({ path: repoPath });
+    // includeUntracked matches the stash-list button (lv-stash-list.ts): both
+    // surfaces report an identical "Stash created", so they must stash the same
+    // set — otherwise the shortcut silently leaves untracked files behind and
+    // the divergence only surfaces during a later checkout or clean.
+    const result = await gitService.createStash({
+      path: repoPath,
+      includeUntracked: true,
+    });
     if (result.success) {
       if (result.data === null) {
         // Clean working tree: nothing to stash — informational, not an error.
@@ -3326,25 +3726,103 @@ export class AppShell extends LitElement {
 
   private async handleRunGc(aggressive = false): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.runGc({
-      path: this.activeRepository.repository.path,
-      aggressive,
-    });
+
+    // Pinned before the confirm await, like every other destructive handler —
+    // and because reading it afterwards would also re-dereference a possibly
+    // null activeRepository inside a floating promise.
+    const repoPath = this.activeRepository.repository.path;
+
+    // Checked before the confirm so a destructive prompt is never shown for a
+    // run the shared claim below was always going to refuse.
+    if (isMaintenanceRunning(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    // Shared with the Repository Health dialog so the two surfaces that reach
+    // this command cannot drift apart on whether it is gated.
+    if (!(await confirmGarbageCollection(aggressive))) return;
+
+    // Claimed AFTER the confirm (a declined confirm must not hold the slot) and
+    // shared with the Repository Health dialog, which reaches the same three
+    // commands. Only the dialog tracked concurrency, so a palette run could
+    // start a second gc over the dialog's — or race a prune against it on the
+    // objects directory, which git does not serialise at all.
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    try {
+      // silent: the service toasts by default; this handler owns the message.
+      const result = await gitService.runGc({ path: repoPath, aggressive, silent: true });
+      showToast(
+        result.success
+          ? aggressive
+            ? 'Aggressive garbage collection completed'
+            : 'Garbage collection completed'
+          : `Garbage collection failed: ${result.error?.message ?? 'Unknown error'}`,
+        result.success ? 'success' : 'error'
+      );
+    } finally {
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handleRunFsck(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.runFsck({
-      path: this.activeRepository.repository.path,
-      full: true,
-    });
+
+    const repoPath = this.activeRepository.repository.path;
+
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    // silent: the service toasts by default; this handler owns the message.
+    const result = await gitService
+      .runFsck({ path: repoPath, full: true, silent: true })
+      .finally(() => releaseMaintenance(repoPath));
+
+    // Reporting IS this command's purpose, so report what git actually said.
+    // `git fsck` exits 0 while printing "dangling commit" / "unreachable blob"
+    // warnings, and run_fsck packs that output into `message` — asserting a
+    // clean bill of health from the exit code alone would hide it.
+    showToast(
+      result.success
+        ? summariseFsck(result.data?.message)
+        : `Repository integrity check failed: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'error'
+    );
   }
 
   private async handleRunPrune(): Promise<void> {
     if (!this.activeRepository) return;
-    await gitService.runPrune({
-      path: this.activeRepository.repository.path,
-    });
+
+    const repoPath = this.activeRepository.repository.path;
+
+    if (isMaintenanceRunning(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    if (!(await confirmPrune())) return;
+
+    if (!tryAcquireMaintenance(repoPath)) {
+      showToast('A maintenance operation is already running on this repository', 'warning');
+      return;
+    }
+
+    // silent: the service toasts by default; this handler owns the message.
+    const result = await gitService
+      .runPrune({ path: repoPath, silent: true })
+      .finally(() => releaseMaintenance(repoPath));
+    showToast(
+      result.success
+        ? 'Pruned unreachable objects'
+        : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
+      result.success ? 'success' : 'error'
+    );
   }
 
   private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
@@ -3489,23 +3967,21 @@ export class AppShell extends LitElement {
             ></lv-context-dashboard>
 
             <div class="main-content">
-              ${this.leftPanelVisible ? html`
-                <aside
-                  class="left-panel"
-                  style="width: ${this.leftPanelWidth}px"
-                  @tag-selected=${this.handleTagSelected}
-                  @branch-selected=${this.handleBranchSelected}
-                  @repository-changed=${() => this.handleRefresh()}
-                  @create-tag=${() => this.createTagDialog?.open()}
-                >
-                  <lv-left-panel></lv-left-panel>
-                </aside>
+              <aside
+                class="left-panel ${this.leftPanelVisible ? '' : 'hidden'}"
+                style="width: ${this.leftPanelWidth}px"
+                @tag-selected=${this.handleTagSelected}
+                @branch-selected=${this.handleBranchSelected}
+                @repository-changed=${() => this.handleRefresh()}
+                @create-tag=${() => this.createTagDialog?.open()}
+              >
+                <lv-left-panel></lv-left-panel>
+              </aside>
 
-                <div
-                  class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''}"
-                  @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
-                ></div>
-              ` : ''}
+              <div
+                class="resize-handle-h ${this.resizing === 'left' ? 'dragging' : ''} ${this.leftPanelVisible ? '' : 'hidden'}"
+                @mousedown=${(e: MouseEvent) => this.handleResizeStart(e, 'left')}
+              ></div>
 
               <main id="main-content" class="center-panel" tabindex="-1">
                 ${this.activeRepository.repository.state !== 'clean' || this.hasConflictedFiles
@@ -3538,10 +4014,20 @@ export class AppShell extends LitElement {
                                 </button>
                               `
                             : ''}
-                          ${this.activeRepository.repository.state !== 'clean'
+                          ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
                                 <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
                                   Abort
+                                </button>
+                              `
+                            : ''}
+                          ${this.activeRepository.repository.state === 'bisect'
+                            ? html`
+                                <button
+                                  class="operation-btn operation-btn-primary"
+                                  @click=${() => { this.showBisect = true; }}
+                                >
+                                  Manage Bisect
                                 </button>
                               `
                             : ''}
@@ -3918,7 +4404,10 @@ export class AppShell extends LitElement {
           ?open=${this.showReflog}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showReflog = false; }}
-          @undo-complete=${() => { this.showReflog = false; this.handleRefresh(); }}
+          @undo-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
+            this.showReflog = false;
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
+          }}
           @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
       ` : ''}
@@ -3944,14 +4433,14 @@ export class AppShell extends LitElement {
           ?open=${this.showClean}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showClean = false; }}
-          @files-cleaned=${() => this.handleRefresh()}
+          @files-cleaned=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-clean-dialog>
       ` : ''}
 
       ${this.activeRepository ? html`
         <lv-changelog-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showChangelog = false; }}
         ></lv-changelog-dialog>
       ` : ''}
 
@@ -3959,11 +4448,11 @@ export class AppShell extends LitElement {
         <lv-modal
           modalTitle="Repository Health"
           ?open=${this.showRepositoryHealth}
-          @close=${() => { this.showRepositoryHealth = false; }}
+          @close=${this.handleRepositoryHealthClose}
         >
           <lv-repository-health-dialog
             .repositoryPath=${this.activeRepository.repository.path}
-            @close=${() => { this.showRepositoryHealth = false; }}
+            @close=${this.handleRepositoryHealthClose}
           ></lv-repository-health-dialog>
         </lv-modal>
       ` : ''}
@@ -3973,8 +4462,12 @@ export class AppShell extends LitElement {
           ?open=${this.showBisect}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showBisect = false; }}
-          @bisect-step=${() => this.handleRefresh()}
-          @bisect-complete=${() => { this.showBisect = false; this.handleRefresh(); }}
+          @bisect-step=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
+          @bisect-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
+            this.showBisect = false;
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
+          }}
         ></lv-bisect-dialog>
       ` : ''}
 

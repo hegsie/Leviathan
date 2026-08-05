@@ -10,6 +10,7 @@ import { getHooks, getHook, saveHook, deleteHook, toggleHook } from '../../servi
 import type { GitHook } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 const HOOK_TEMPLATES: Record<string, string> = {
   'pre-commit': `#!/bin/sh
@@ -721,14 +722,35 @@ export class LvHooksDialog extends LitElement {
   @state() private hasUnsavedChanges = false;
   @state() private confirmingDelete: string | null = null;
 
+  /**
+   * Repo captured when the dialog opened. `repoPath` is live-bound to the
+   * ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * hook list on screen still belongs to the repo active at open. Saving or
+   * deleting through the live prop wrote to, and `std::fs::remove_file`d,
+   * hooks in the other repository. `.git/hooks` is untracked: like the clean
+   * dialog's untracked files, there is no trash and no recovery path.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProps.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProps.has('open') && this.open) {
+      this.pinnedRepoPath = this.repoPath;
       await this.loadHooks();
     }
   }
 
   private async loadHooks(): Promise<void> {
-    if (!this.repoPath) return;
+    if (!this.pinnedRepoPath) return;
 
     this.loading = true;
     this.hooks = [];
@@ -738,7 +760,7 @@ export class LvHooksDialog extends LitElement {
     this.confirmingDelete = null;
 
     try {
-      const result = await getHooks(this.repoPath);
+      const result = await getHooks(this.pinnedRepoPath);
 
       if (result.success && result.data) {
         this.hooks = result.data;
@@ -761,7 +783,7 @@ export class LvHooksDialog extends LitElement {
 
     if (hook.exists) {
       try {
-        const result = await getHook(this.repoPath, hook.name);
+        const result = await getHook(this.pinnedRepoPath, hook.name);
         if (result.success && result.data) {
           this.selectedHook = result.data;
           this.editContent = result.data.content ?? '';
@@ -811,18 +833,18 @@ export class LvHooksDialog extends LitElement {
   }
 
   private async handleSave(): Promise<void> {
-    if (!this.selectedHook || !this.repoPath) return;
+    if (!this.selectedHook || !this.pinnedRepoPath) return;
 
     this.saving = true;
 
     try {
-      const result = await saveHook(this.repoPath, this.selectedHook.name, this.editContent);
+      const result = await saveHook(this.pinnedRepoPath, this.selectedHook.name, this.editContent);
 
       if (result.success) {
         showToast(`Hook "${this.selectedHook.name}" saved successfully`, 'success');
         this.hasUnsavedChanges = false;
         // Reload hooks to update status
-        const hooksResult = await getHooks(this.repoPath);
+        const hooksResult = await getHooks(this.pinnedRepoPath);
         if (hooksResult.success && hooksResult.data) {
           this.hooks = hooksResult.data;
           // Update selected hook reference
@@ -843,10 +865,10 @@ export class LvHooksDialog extends LitElement {
   }
 
   private async handleToggle(hook: GitHook): Promise<void> {
-    if (!this.repoPath || !hook.exists) return;
+    if (!this.pinnedRepoPath || !hook.exists) return;
 
     try {
-      const result = await toggleHook(this.repoPath, hook.name, !hook.enabled);
+      const result = await toggleHook(this.pinnedRepoPath, hook.name, !hook.enabled);
 
       if (result.success) {
         showToast(
@@ -854,7 +876,7 @@ export class LvHooksDialog extends LitElement {
           'success'
         );
         // Reload hooks
-        const hooksResult = await getHooks(this.repoPath);
+        const hooksResult = await getHooks(this.pinnedRepoPath);
         if (hooksResult.success && hooksResult.data) {
           this.hooks = hooksResult.data;
           if (this.selectedHook?.name === hook.name) {
@@ -882,13 +904,13 @@ export class LvHooksDialog extends LitElement {
   }
 
   private async confirmDelete(): Promise<void> {
-    if (!this.confirmingDelete || !this.repoPath) return;
+    if (!this.confirmingDelete || !this.pinnedRepoPath) return;
 
     const hookName = this.confirmingDelete;
     this.confirmingDelete = null;
 
     try {
-      const result = await deleteHook(this.repoPath, hookName);
+      const result = await deleteHook(this.pinnedRepoPath, hookName);
 
       if (result.success) {
         showToast(`Hook "${hookName}" deleted`, 'success');
@@ -899,7 +921,7 @@ export class LvHooksDialog extends LitElement {
           this.hasUnsavedChanges = false;
         }
         // Reload hooks
-        const hooksResult = await getHooks(this.repoPath);
+        const hooksResult = await getHooks(this.pinnedRepoPath);
         if (hooksResult.success && hooksResult.data) {
           this.hooks = hooksResult.data;
         }
@@ -919,6 +941,9 @@ export class LvHooksDialog extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
     if (e.key === 'Escape') {
       if (this.confirmingDelete) {
         this.cancelDelete();
@@ -935,6 +960,7 @@ export class LvHooksDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
 
@@ -943,6 +969,11 @@ export class LvHooksDialog extends LitElement {
       const discard = await showConfirm('Unsaved Changes', 'You have unsaved changes. Discard them?', 'warning');
       if (!discard) return;
     }
+    // Cleared HERE: close() left them set, and the element stays mounted, so
+    // one discarded session made EVERY later Escape anywhere in the app pop
+    // the same native "Unsaved Changes" confirm out of nowhere.
+    this.hasUnsavedChanges = false;
+    this.confirmingDelete = null;
     this.open = false;
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }

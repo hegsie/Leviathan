@@ -37,6 +37,47 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('?');
     await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
   });
+
+  // Closing the palette used to leave document focus inside its hidden search
+  // input, so every keydown's composedPath still contained an INPUT and
+  // keyboard.service's in-input bail swallowed every single-key shortcut until
+  // the user clicked something.
+  // The palette restores focus to wherever it was when it opened. When the
+  // command it ran opens a dialog, that restore must NOT yank focus back out
+  // of the new dialog — lv-modal focuses in a rAF, which lands after the
+  // palette's restore, but the ordering is worth pinning down.
+  test('a dialog opened from the palette keeps focus', async ({ page }) => {
+    await page.keyboard.press('Meta+p');
+    await expect(page.locator('lv-command-palette[open]')).toBeVisible();
+
+    await page.locator('lv-command-palette input').fill('Create tag');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('lv-create-tag-dialog lv-modal[open]')).toBeVisible();
+
+    const focusPath = await page.evaluate(() => {
+      const path: string[] = [];
+      let el: Element | null = document.activeElement;
+      while (el) {
+        path.push(el.tagName);
+        el = (el as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot?.activeElement ?? null;
+      }
+      return path.join(' > ');
+    });
+
+    expect(focusPath, 'focus must stay inside the dialog the command opened')
+      .toContain('LV-CREATE-TAG-DIALOG');
+  });
+
+  test('single-key shortcuts still work after closing the command palette', async ({ page }) => {
+    await page.keyboard.press('Meta+p');
+    await expect(dialogs.commandPalette.palette).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+  });
 });
 
 test.describe('Command Palette', () => {

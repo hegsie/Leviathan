@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import type { GpgConfig, GpgKey } from '../../services/git.service.ts';
 import { getPlatform, type Platform } from '../../utils/platform.ts';
 import { openExternalUrl } from '../../utils/external-link.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type SetupStep = 'install-guide' | 'generate-guide' | 'configure' | 'complete';
 
@@ -650,15 +651,57 @@ export class LvGpgDialog extends LitElement {
   @state() private platform: Platform = 'unknown';
   @state() private copyFeedback: string | null = null;
 
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain now stops at the
+   * dialog layer (so a keypress cannot also close the diff behind it), which
+   * made Escape a completely dead key here. Dismiss like every sibling.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.loadData();
     }
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    removeOverlay(this);
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadData();
     }
   }
@@ -669,8 +712,8 @@ export class LvGpgDialog extends LitElement {
     this.platform = getPlatform();
 
     const [configResult, keysResult] = await Promise.all([
-      gitService.getGpgConfig(this.repositoryPath),
-      gitService.getGpgKeys(this.repositoryPath),
+      gitService.getGpgConfig(this.pinnedRepoPath),
+      gitService.getGpgKeys(this.pinnedRepoPath),
     ]);
 
     if (configResult.success && configResult.data) {
@@ -737,7 +780,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setCommitSigning(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       !this.config.signCommits,
       this.globalScope
     );
@@ -760,7 +803,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setTagSigning(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       !this.config.signTags,
       this.globalScope
     );
@@ -781,7 +824,7 @@ export class LvGpgDialog extends LitElement {
     this.error = '';
 
     const result = await gitService.setSigningKey(
-      this.repositoryPath,
+      this.pinnedRepoPath,
       keyId,
       this.globalScope
     );

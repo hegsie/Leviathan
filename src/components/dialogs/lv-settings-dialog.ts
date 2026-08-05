@@ -1199,7 +1199,7 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Confirm Before Discard</span>
-              <span class="setting-description">Ask for confirmation when discarding changes</span>
+              <span class="setting-description">Ask for confirmation when discarding changes. Deleting untracked files always asks.</span>
             </div>
             ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
           </div>

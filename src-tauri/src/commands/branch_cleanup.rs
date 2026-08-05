@@ -75,24 +75,10 @@ pub async fn get_cleanup_candidates(
     // Load branch protection rules
     let rules = load_rules(Path::new(&path)).unwrap_or_default();
 
-    // Helper: check if a branch name matches any protection rule with prevent_deletion
+    // Shared with delete_branch's enforcement so the badge shown here and the
+    // rule actually applied at delete time can never diverge.
     let is_protected = |branch_name: &str| -> bool {
-        rules.iter().any(|rule| {
-            if !rule.prevent_deletion {
-                return false;
-            }
-            if rule.pattern.contains('*') {
-                // Simple glob matching: "release/*" matches "release/v1"
-                let parts: Vec<&str> = rule.pattern.split('*').collect();
-                if parts.len() == 2 {
-                    branch_name.starts_with(parts[0]) && branch_name.ends_with(parts[1])
-                } else {
-                    rule.pattern == branch_name
-                }
-            } else {
-                rule.pattern == branch_name
-            }
-        })
+        super::branch_rules::is_deletion_prevented(&rules, branch_name)
     };
 
     for branch_result in repo.branches(Some(git2::BranchType::Local))? {

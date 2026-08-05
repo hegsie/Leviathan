@@ -414,8 +414,24 @@ export class LvCredentialsDialog extends LitElement {
     super.connectedCallback();
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       this.loadData();
     }
   }
@@ -426,9 +442,9 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const [helpersResult, availableResult, remotesResult] = await Promise.all([
-        gitService.getCredentialHelpers(this.repositoryPath),
+        gitService.getCredentialHelpers(this.pinnedRepoPath),
         gitService.getAvailableHelpers(),
-        gitService.getRemotes(this.repositoryPath),
+        gitService.getRemotes(this.pinnedRepoPath),
       ]);
 
       if (helpersResult.success && helpersResult.data) {
@@ -449,7 +465,7 @@ export class LvCredentialsDialog extends LitElement {
       // Detect GCM status
       try {
         const { detectCredentialManager } = await import('../../services/credential.service.ts');
-        this.gcmStatus = await detectCredentialManager(this.repositoryPath);
+        this.gcmStatus = await detectCredentialManager(this.pinnedRepoPath);
       } catch {
         // GCM detection is best-effort
       }
@@ -471,7 +487,7 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const result = await gitService.setCredentialHelper(
-        this.newHelperScope === 'local' ? this.repositoryPath : null,
+        this.newHelperScope === 'local' ? this.pinnedRepoPath : null,
         this.newHelper,
         this.newHelperScope === 'global'
       );
@@ -495,7 +511,7 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const result = await gitService.unsetCredentialHelper(
-        helper.scope === 'local' ? this.repositoryPath : null,
+        helper.scope === 'local' ? this.pinnedRepoPath : null,
         helper.scope === 'global',
         helper.urlPattern ?? undefined
       );
@@ -519,7 +535,7 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const result = await gitService.testCredentials(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.selectedRemote.url
       );
 
@@ -549,7 +565,7 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const result = await gitService.eraseCredentials(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         this.testResult.host,
         this.testResult.protocol
       );

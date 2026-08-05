@@ -53,11 +53,13 @@ const mockHooks: GitHook[] = [
 ];
 
 let lastInvokedCommand: string | null = null;
+const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   lastInvokedCommand = command;
+  invokeCalls.push({ command, args });
   const params = args as Record<string, unknown> | undefined;
 
   switch (command) {
@@ -287,5 +289,54 @@ describe('lv-hooks-dialog', () => {
 
     const saveBtn = el.shadowRoot!.querySelector('.btn-primary');
     expect(saveBtn).to.not.be.null;
+  });
+
+  // `repoPath` is live-bound to the ACTIVE repository and rebinds on a
+  // Ctrl+Tab this dialog's overlay does not block. The hook list on screen
+  // belongs to the repo active at open, so saving or deleting must target THAT
+  // repo — .git/hooks is untracked, so a wrong-repo delete is unrecoverable.
+  it('saves to the repository the hook list was read from, not the newly active one', async () => {
+    const el = await fixture<LvHooksDialog>(
+      html`<lv-hooks-dialog ?open=${true} .repoPath=${'/repo/a'}></lv-hooks-dialog>`,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    (el.shadowRoot!.querySelectorAll('.hook-item')[0] as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    // The user Ctrl+Tabs; the dialog stays open showing repo A's hooks.
+    el.repoPath = '/repo/b';
+    await el.updateComplete;
+
+    invokeCalls.length = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSave();
+
+    const save = invokeCalls.find((c) => c.command === 'save_hook');
+    expect(save, 'save_hook issued').to.not.be.undefined;
+    expect((save!.args as { path: string }).path).to.equal('/repo/a');
+  });
+
+  it('deletes from the repository the hook list was read from', async () => {
+    const el = await fixture<LvHooksDialog>(
+      html`<lv-hooks-dialog ?open=${true} .repoPath=${'/repo/a'}></lv-hooks-dialog>`,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    el.repoPath = '/repo/b';
+    await el.updateComplete;
+
+    invokeCalls.length = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).confirmingDelete = 'pre-commit';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).confirmDelete();
+
+    const del = invokeCalls.find((c) => c.command === 'delete_hook');
+    expect(del, 'delete_hook issued').to.not.be.undefined;
+    expect((del!.args as { path: string }).path).to.equal('/repo/a');
   });
 });

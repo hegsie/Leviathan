@@ -380,8 +380,24 @@ export class LvConfigDialog extends LitElement {
     super.connectedCallback();
   }
 
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       this.loadData();
     }
   }
@@ -392,9 +408,9 @@ export class LvConfigDialog extends LitElement {
 
     try {
       const [identityResult, settingsResult, aliasesResult] = await Promise.all([
-        gitService.getUserIdentity(this.repositoryPath),
-        gitService.getCommonSettings(this.repositoryPath),
-        gitService.getAliases(this.repositoryPath),
+        gitService.getUserIdentity(this.pinnedRepoPath),
+        gitService.getCommonSettings(this.pinnedRepoPath),
+        gitService.getAliases(this.pinnedRepoPath),
       ]);
 
       if (identityResult.success && identityResult.data) {
@@ -427,7 +443,7 @@ export class LvConfigDialog extends LitElement {
 
     try {
       const result = await gitService.setUserIdentity(
-        this.saveScope === 'local' ? this.repositoryPath : null,
+        this.saveScope === 'local' ? this.pinnedRepoPath : null,
         this.editName,
         this.editEmail,
         this.saveScope === 'global'
@@ -451,7 +467,7 @@ export class LvConfigDialog extends LitElement {
 
     try {
       const result = await gitService.setConfigValue(
-        this.repositoryPath,
+        this.pinnedRepoPath,
         key,
         value,
         false // local
@@ -479,7 +495,7 @@ export class LvConfigDialog extends LitElement {
 
     try {
       const result = await gitService.setAlias(
-        this.saveScope === 'local' ? this.repositoryPath : null,
+        this.saveScope === 'local' ? this.pinnedRepoPath : null,
         this.newAliasName,
         this.newAliasCommand,
         this.saveScope === 'global'
@@ -506,7 +522,7 @@ export class LvConfigDialog extends LitElement {
 
     try {
       const result = await gitService.deleteAlias(
-        alias.isGlobal ? null : this.repositoryPath,
+        alias.isGlobal ? null : this.pinnedRepoPath,
         alias.name,
         alias.isGlobal
       );

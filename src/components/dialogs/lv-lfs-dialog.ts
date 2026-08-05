@@ -7,8 +7,10 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
+import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 
 @customElement('lv-lfs-dialog')
 export class LvLfsDialog extends LitElement {
@@ -386,15 +388,57 @@ export class LvLfsDialog extends LitElement {
   @state() private newPattern = '';
   @state() private showFiles = false;
 
+  /**
+   * This dialog paints its own overlay instead of using lv-modal, so it had no
+   * Escape handling at all — and app-shell's Escape chain now stops at the
+   * dialog layer (so a keypress cannot also close the diff behind it), which
+   * made Escape a completely dead key here. Dismiss like every sibling.
+   */
+  private handleKeyDown = (e: KeyboardEvent): void => {
+    // Only the topmost overlay owns Escape: every dialog listens on
+    // `document`, so without this one keypress ran all of them.
+    if (!this.open || !isTopOverlay(this)) return;
+    if (e.key === 'Escape') {
+      this.handleClose();
+    }
+  };
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    document.addEventListener('keydown', this.handleKeyDown);
     if (this.open) {
       await this.loadStatus();
     }
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    removeOverlay(this);
+    document.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  /**
+   * Repo captured when the dialog opened. `repositoryPath` is live-bound to
+   * the ACTIVE repository and rebinds the instant the user Ctrl+Tabs — a
+   * document-level shortcut this dialog's overlay does not block — while the
+   * data on screen still belongs to the repo that was active at open. Every
+   * read and every mutation must use THIS value, or the dialog acts on a
+   * repository the user is not looking at.
+   */
+  private pinnedRepoPath = '';
+
+  /** The repo this dialog is pinned to while open, or null when closed. */
+  public get pinnedRepositoryPathIfOpen(): string | null {
+    return this.open ? this.pinnedRepoPath : null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
+    // Announce/withdraw overlay ownership of Escape.
+    if (changedProperties.has('open')) {
+      if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
+    }
     if (changedProperties.has('open') && this.open) {
+      this.pinnedRepoPath = this.repositoryPath;
       await this.loadStatus();
     }
   }
@@ -403,7 +447,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getLfsStatus(this.repositoryPath);
+    const result = await gitService.getLfsStatus(this.pinnedRepoPath);
 
     if (result.success && result.data) {
       this.status = result.data;
@@ -418,7 +462,7 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async loadFiles(): Promise<void> {
-    const result = await gitService.getLfsFiles(this.repositoryPath);
+    const result = await gitService.getLfsFiles(this.pinnedRepoPath);
     if (result.success && result.data) {
       this.files = result.data;
     }
@@ -428,7 +472,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initLfs(this.repositoryPath);
+    const result = await gitService.initLfs(this.pinnedRepoPath);
 
     if (result.success) {
       this.success = 'Git LFS initialized';
@@ -447,7 +491,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsTrack(this.repositoryPath, this.newPattern);
+    const result = await gitService.lfsTrack(this.pinnedRepoPath, this.newPattern);
 
     if (result.success) {
       this.newPattern = '';
@@ -464,7 +508,7 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsUntrack(this.repositoryPath, pattern);
+    const result = await gitService.lfsUntrack(this.pinnedRepoPath, pattern);
 
     if (result.success) {
       await this.loadStatus();
@@ -481,7 +525,7 @@ export class LvLfsDialog extends LitElement {
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPull(this.repositoryPath);
+    const result = await gitService.lfsPull(this.pinnedRepoPath);
 
     if (result.success) {
       this.success = 'LFS files pulled successfully';
@@ -495,11 +539,28 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async handlePrune(): Promise<void> {
+    // Captured BEFORE the confirm await: this dialog is bound to the active
+    // repository and rebinds live on a tab switch.
+    const repoPath = this.pinnedRepoPath;
+
+    // `git lfs prune` deletes local LFS objects that recent commits don't
+    // reference. Unless lfs.pruneverifyremotealways is configured it does not
+    // verify the objects exist on the remote first, so blobs from a commit that
+    // was never pushed can be deleted with no copy left anywhere.
+    const confirmed = await showConfirm(
+      'Prune LFS Files',
+      'This permanently deletes local LFS objects that recent commits do not ' +
+        'reference. Objects that were never pushed cannot be recovered. Continue?',
+      'warning'
+    );
+
+    if (!confirmed) return;
+
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPrune(this.repositoryPath);
+    const result = await gitService.lfsPrune(repoPath);
 
     if (result.success) {
       this.success = result.data || 'LFS files pruned';
