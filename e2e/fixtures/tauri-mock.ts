@@ -1077,7 +1077,7 @@ export async function setupTauriMocks(
       };
 
       // Set up the Tauri internals mock
-      (window as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         invoke: async (command: string, args?: Record<string, unknown>) => {
           return handler(command, args);
         },
@@ -1086,8 +1086,9 @@ export async function setupTauriMocks(
       };
 
       // Also mock the event system
-      (window as Record<string, unknown>).__TAURI_INTERNALS__ = {
-        ...(window as Record<string, unknown>).__TAURI_INTERNALS__,
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+        ...((window as unknown as Record<string, Record<string, unknown>>)
+          .__TAURI_INTERNALS__ ?? {}),
         metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
       };
     },
@@ -1167,13 +1168,13 @@ export async function initializeRepositoryStore(
 
   // Wait for stores to be available
   await page.waitForFunction(() => {
-    return typeof (window as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined';
+    return typeof (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined';
   }, { timeout: 10000 });
 
   // Initialize the repository store with mock data
   await page.evaluate(
     ({ repository, branches, stashes, tags, status }) => {
-      const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
         repositoryStore: {
           getState: () => {
             addRepository: (repo: unknown) => void;
@@ -1217,7 +1218,7 @@ export async function initializeRepositoryStore(
   );
 
   await page.waitForFunction(() => {
-    const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+    const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
       repositoryStore?: { getState: () => { openRepositories: unknown[] } };
     } | undefined;
     return (stores?.repositoryStore?.getState()?.openRepositories?.length ?? 0) > 0;
@@ -1308,14 +1309,14 @@ export async function initializeUnifiedProfileStore(
 ): Promise<void> {
   // Wait for stores to be available
   await page.waitForFunction(() => {
-    return typeof (window as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined' &&
-           typeof ((window as Record<string, unknown>).__LEVIATHAN_STORES__ as Record<string, unknown>).unifiedProfileStore !== 'undefined';
+    return typeof (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined' &&
+           typeof ((window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as Record<string, unknown>).unifiedProfileStore !== 'undefined';
   }, { timeout: 10000 });
 
   // Initialize the unified profile store with test data
   await page.evaluate(
     ({ profiles, accounts, repositoryAssignments, connectedAccounts }) => {
-      const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
         unifiedProfileStore: {
           getState: () => {
             setConfig: (config: unknown) => void;
@@ -1364,7 +1365,7 @@ export async function initializeUnifiedProfileStore(
   );
 
   await page.waitForFunction(() => {
-    const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+    const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
       unifiedProfileStore?: { getState: () => { profiles: unknown[] } };
     } | undefined;
     return (stores?.unifiedProfileStore?.getState()?.profiles?.length ?? 0) > 0;

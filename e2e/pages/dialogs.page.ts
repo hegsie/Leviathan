@@ -5,8 +5,14 @@ import { type Page, type Locator } from '@playwright/test';
  */
 class BaseDialog {
   readonly page: Page;
-  readonly dialog: Locator;
-  readonly closeButton: Locator;
+  // NOT readonly: several subclasses override these in their own constructor
+  // with a more precise locator (a role-based query, or one scoped inside the
+  // dialog). TypeScript only permits assigning a readonly field in the class
+  // that declares it, so those 11 assignments were type errors — invisible
+  // because e2e/ was never typechecked, and harmless at runtime only because
+  // `readonly` is erased.
+  dialog: Locator;
+  closeButton: Locator;
 
   constructor(page: Page, selector: string) {
     this.page = page;

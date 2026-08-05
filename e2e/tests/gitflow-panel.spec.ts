@@ -24,7 +24,12 @@ import {
 /** Inject the gitflow panel component into the page and wait for it to render */
 async function injectGitflowPanel(page: import('@playwright/test').Page): Promise<void> {
   await page.evaluate(async () => {
-    await import('/src/components/sidebar/lv-gitflow-panel.ts');
+    // A dev-server URL resolved by Vite inside the browser, not a module
+    // specifier tsc can follow. Held in a variable so static resolution does
+    // not try — mapping it in tsconfig instead drags all of src/ into this
+    // program under the wrong compiler options.
+    const panelModule = '/src/components/sidebar/lv-gitflow-panel.ts';
+    await import(panelModule);
 
     const existing = document.querySelector('lv-gitflow-panel');
     if (existing) existing.remove();

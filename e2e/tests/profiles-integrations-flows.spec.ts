@@ -27,7 +27,30 @@ import {
 // Test data
 // ---------------------------------------------------------------------------
 
-const workProfile = {
+/**
+ * Shape shared by every profile fixture below.
+ *
+ * Each fixture sets a different provider under `defaultAccounts`, so inferring
+ * the type from `workProfile` and casting the others to it (`as typeof
+ * workProfile`) was never valid — TypeScript rejects it, but e2e/ was never
+ * typechecked so the 13 casts went unnoticed. Naming the type once removes
+ * both the casts and the error.
+ */
+type TestProfile = {
+  id: string;
+  name: string;
+  gitName: string;
+  gitEmail: string;
+  signingKey: string | null;
+  urlPatterns: string[];
+  isDefault: boolean;
+  color: string;
+  defaultAccounts: Partial<
+    Record<'github' | 'gitlab' | 'bitbucket' | 'azure-devops', string | undefined>
+  >;
+};
+
+const workProfile: TestProfile = {
   id: 'profile-work',
   name: 'Work',
   gitName: 'John Doe',
@@ -39,7 +62,7 @@ const workProfile = {
   defaultAccounts: { github: 'account-github-work' },
 };
 
-const personalProfile = {
+const personalProfile: TestProfile = {
   id: 'profile-personal',
   name: 'Personal',
   gitName: 'John D',
@@ -916,7 +939,7 @@ test.describe('Workflow - Profile Manager ↔ Integration dialogs', () => {
       defaultAccounts: { github: 'account-github-work' as string | undefined },
     };
     await setupProfilesAndAccounts(page, {
-      profiles: [p1, p2 as typeof workProfile],
+      profiles: [p1, p2],
       accounts: [githubWork],
     });
     await injectCommandMock(page, {
@@ -1636,7 +1659,7 @@ test.describe('Integration dialog - disconnect & token management', () => {
 
     // The store should no longer contain the deleted account.
     const remainingAccounts = await page.evaluate(() => {
-      const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
         unifiedProfileStore: { getState: () => { accounts: { id: string }[] } };
       };
       return stores.unifiedProfileStore.getState().accounts.map((a) => a.id);
@@ -1771,7 +1794,7 @@ test.describe('Connection statuses', () => {
     // detectProvider() to match a remote URL. Seed the open repository's
     // remotes so the dashboard can pick GitHub as the relevant provider.
     await page.evaluate(() => {
-      const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
         repositoryStore: {
           getState: () => {
             openRepositories: { remotes: { name: string; url: string; pushUrl: string | null }[] }[];
@@ -1963,7 +1986,7 @@ test.describe('Keyboard & a11y', () => {
     // Wait for both checks to settle.
     await expect.poll(async () => {
       return page.evaluate(() => {
-        const stores = (window as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
           unifiedProfileStore: { getState: () => { accountConnectionStatus: Record<string, { status: string }> } };
         };
         const s = stores.unifiedProfileStore.getState().accountConnectionStatus;
@@ -2075,7 +2098,7 @@ const gitlabAccountB = {
   urlPatterns: [],
   isDefault: false,
 };
-const gitlabProfile = {
+const gitlabProfile: TestProfile = {
   ...workProfile,
   defaultAccounts: { gitlab: 'account-gitlab-a' as string | undefined },
 };
@@ -2083,7 +2106,7 @@ const gitlabProfile = {
 test.describe('Parity - GitLab dialog', () => {
   test('GitLab: switching account triggers a fresh check_gitlab_connection', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [gitlabProfile as typeof workProfile],
+      profiles: [gitlabProfile],
       accounts: [gitlabAccountA, gitlabAccountB],
       connectedAccounts: ['account-gitlab-a', 'account-gitlab-b'],
     });
@@ -2119,7 +2142,7 @@ test.describe('Parity - GitLab dialog', () => {
 
   test('GitLab: Delete Integration confirm cancel preserves the account', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [gitlabProfile as typeof workProfile],
+      profiles: [gitlabProfile],
       accounts: [gitlabAccountA],
       connectedAccounts: ['account-gitlab-a'],
     });
@@ -2162,7 +2185,7 @@ test.describe('Parity - GitLab dialog', () => {
       isDefault: false,
     };
     await setupProfilesAndAccounts(page, {
-      profiles: [gitlabProfile as typeof workProfile],
+      profiles: [gitlabProfile],
       accounts: [gitlabAccountA],
       connectedAccounts: ['account-gitlab-a'],
     });
@@ -2224,7 +2247,7 @@ test.describe('Parity - GitLab dialog', () => {
 
   test('GitLab: disconnect clears the stored token', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [gitlabProfile as typeof workProfile],
+      profiles: [gitlabProfile],
       accounts: [gitlabAccountA],
       connectedAccounts: ['account-gitlab-a'],
     });
@@ -2270,7 +2293,7 @@ const bitbucketAccountB = {
   isDefault: false,
   cachedUser: { username: 'bbuser2', displayName: 'BB Two', email: null, avatarUrl: null },
 };
-const bitbucketProfile = {
+const bitbucketProfile: TestProfile = {
   ...workProfile,
   defaultAccounts: { bitbucket: 'account-bb-a' as string | undefined },
 };
@@ -2278,7 +2301,7 @@ const bitbucketProfile = {
 test.describe('Parity - Bitbucket dialog', () => {
   test('Bitbucket: switching account triggers a fresh check_bitbucket_connection', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [bitbucketProfile as typeof workProfile],
+      profiles: [bitbucketProfile],
       accounts: [bitbucketAccount, bitbucketAccountB],
       connectedAccounts: ['account-bb-a', 'account-bb-b'],
     });
@@ -2316,7 +2339,7 @@ test.describe('Parity - Bitbucket dialog', () => {
 
   test('Bitbucket: Delete Integration confirm cancel preserves the account', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [bitbucketProfile as typeof workProfile],
+      profiles: [bitbucketProfile],
       accounts: [bitbucketAccount],
       connectedAccounts: ['account-bb-a'],
     });
@@ -2360,7 +2383,7 @@ test.describe('Parity - Bitbucket dialog', () => {
       isDefault: false,
     };
     await setupProfilesAndAccounts(page, {
-      profiles: [bitbucketProfile as typeof workProfile],
+      profiles: [bitbucketProfile],
       accounts: [bitbucketAccount],
       connectedAccounts: ['account-bb-a'],
     });
@@ -2420,7 +2443,7 @@ test.describe('Parity - Bitbucket dialog', () => {
 
   test('Bitbucket: disconnect clears the stored token', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [bitbucketProfile as typeof workProfile],
+      profiles: [bitbucketProfile],
       accounts: [bitbucketAccount],
       connectedAccounts: ['account-bb-a'],
     });
@@ -2466,7 +2489,7 @@ const adoAccountB = {
   isDefault: false,
   cachedUser: { username: 'adouser2', displayName: 'ADO Two', email: null, avatarUrl: null },
 };
-const adoProfile = {
+const adoProfile: TestProfile = {
   ...workProfile,
   defaultAccounts: { 'azure-devops': 'account-ado-a' as string | undefined },
 };
@@ -2474,7 +2497,7 @@ const adoProfile = {
 test.describe('Parity - Azure DevOps dialog', () => {
   test('Azure DevOps: switching account triggers a fresh check_ado_connection', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [adoProfile as typeof workProfile],
+      profiles: [adoProfile],
       accounts: [adoAccount, adoAccountB],
       connectedAccounts: ['account-ado-a', 'account-ado-b'],
     });
@@ -2510,7 +2533,7 @@ test.describe('Parity - Azure DevOps dialog', () => {
 
   test('Azure DevOps: Delete Integration confirm cancel preserves the account', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [adoProfile as typeof workProfile],
+      profiles: [adoProfile],
       accounts: [adoAccount],
       connectedAccounts: ['account-ado-a'],
     });
@@ -2554,7 +2577,7 @@ test.describe('Parity - Azure DevOps dialog', () => {
       isDefault: false,
     };
     await setupProfilesAndAccounts(page, {
-      profiles: [adoProfile as typeof workProfile],
+      profiles: [adoProfile],
       accounts: [adoAccount],
       connectedAccounts: ['account-ado-a'],
     });
@@ -2607,7 +2630,7 @@ test.describe('Parity - Azure DevOps dialog', () => {
 
   test('Azure DevOps: disconnect clears the stored token', async ({ page }) => {
     await setupProfilesAndAccounts(page, {
-      profiles: [adoProfile as typeof workProfile],
+      profiles: [adoProfile],
       accounts: [adoAccount],
       connectedAccounts: ['account-ado-a'],
     });
