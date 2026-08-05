@@ -159,9 +159,19 @@ export class LvCreateBranchDialog extends LitElement {
     if (startPoint) {
       this.startPoint = startPoint;
     }
-    this.modal.open = true;
-    // Focus input after modal opens
-    setTimeout(() => this.inputEl?.focus(), 100);
+    // Reveal only AFTER the reset above has rendered — same ordering hazard
+    // the tag dialog had: opening synchronously left a render carrying the
+    // cleared field pending, so anything typed in that window was overwritten
+    // when it committed. Guarded on isOpen so a close() that lands while this
+    // is pending cannot be undone by it.
+    void this.updateComplete.then(() => {
+      if (!this.isOpen) return;
+      this.modal.open = true;
+      // Focus input after modal opens
+      setTimeout(() => {
+        if (this.isOpen) this.inputEl?.focus();
+      }, 100);
+    });
   }
 
   public close(): void {

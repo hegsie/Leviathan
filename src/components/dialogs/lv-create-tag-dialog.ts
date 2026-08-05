@@ -222,9 +222,16 @@ export class LvCreateTagDialog extends LitElement {
     // was overwritten by `.value=${this.name}` when it committed — the field
     // silently emptied itself and Create Tag stayed disabled.
     void this.updateComplete.then(() => {
+      // close() may have run while this was pending — for instance the host's
+      // tab-close sweep dismissing the dialog. Re-revealing here would leave
+      // modal.open true with isOpen false: a visible dialog the app believes
+      // is shut.
+      if (!this.isOpen) return;
       this.modal.open = true;
       // Focus input after modal opens
-      setTimeout(() => this.inputEl?.focus(), 100);
+      setTimeout(() => {
+        if (this.isOpen) this.inputEl?.focus();
+      }, 100);
     });
   }
 
