@@ -216,9 +216,16 @@ export class LvCreateTagDialog extends LitElement {
     if (targetRef) {
       this.targetRef = targetRef;
     }
-    this.modal.open = true;
-    // Focus input after modal opens
-    setTimeout(() => this.inputEl?.focus(), 100);
+    // Reveal the modal only AFTER the reset above has rendered. Setting
+    // modal.open synchronously made the dialog visible while a render carrying
+    // the cleared `name` was still pending, so anything typed in that window
+    // was overwritten by `.value=${this.name}` when it committed — the field
+    // silently emptied itself and Create Tag stayed disabled.
+    void this.updateComplete.then(() => {
+      this.modal.open = true;
+      // Focus input after modal opens
+      setTimeout(() => this.inputEl?.focus(), 100);
+    });
   }
 
   public close(): void {
