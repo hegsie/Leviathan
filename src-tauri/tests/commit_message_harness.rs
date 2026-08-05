@@ -329,14 +329,9 @@ async fn test_full_pipeline_with_model() {
                     .filter(|l| l.starts_with('-') || l.starts_with('*'))
                     .map(|l| {
                         let mut s = l;
-                        loop {
-                            if let Some(rest) =
-                                s.strip_prefix("- ").or_else(|| s.strip_prefix("* "))
-                            {
-                                s = rest.trim();
-                            } else {
-                                break;
-                            }
+                        while let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("* "))
+                        {
+                            s = rest.trim();
                         }
                         format!("- {s}")
                     })

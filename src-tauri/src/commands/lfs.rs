@@ -496,8 +496,8 @@ mod tests {
 
         let result = get_lfs_files(repo.path_str()).await;
         // Should either succeed with empty list or fail gracefully
-        if result.is_ok() {
-            assert!(result.unwrap().is_empty());
+        if let Ok(files) = result {
+            assert!(files.is_empty());
         }
     }
 

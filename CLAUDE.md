@@ -16,7 +16,7 @@ Keep review artifacts out of the repo — reviewers return findings in their mes
 
 Run all checks in sequence:
 ```bash
-npm run lint && npm run typecheck && npm test && cd src-tauri && cargo fmt --check && cargo clippy -- -D warnings
+npm run lint && npm run typecheck && npm test && cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
 CI treats all clippy warnings as errors.

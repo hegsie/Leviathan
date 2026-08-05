@@ -339,7 +339,7 @@ mod tests {
         let git_repo = repo.repo();
         let status = git_repo.statuses(None).unwrap();
         // The file from second commit should show as staged
-        assert!(status.len() > 0 || repo.path.join("file2.txt").exists());
+        assert!(!status.is_empty() || repo.path.join("file2.txt").exists());
     }
 
     #[tokio::test]

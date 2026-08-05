@@ -82,8 +82,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path();
 
-        let mut config = AiConfig::default();
-        config.active_provider = Some(AiProviderType::Ollama);
+        let mut config = AiConfig {
+            active_provider: Some(AiProviderType::Ollama),
+            ..Default::default()
+        };
         config.providers.insert(
             AiProviderType::Ollama,
             ProviderSettings {
