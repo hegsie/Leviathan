@@ -75,7 +75,7 @@ test.describe('Welcome Screen with Recent Repositories', () => {
   test.beforeEach(async ({ page }) => {
     // Setup Tauri mocks with some recent repositories
     await page.addInitScript(() => {
-      (window as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         invoke: async (command: string) => {
           switch (command) {
             case 'get_recent_repositories':
