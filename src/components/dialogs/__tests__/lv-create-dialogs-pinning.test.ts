@@ -133,3 +133,59 @@ describe('create-tag / create-branch dialog pinning', () => {
     expect(el.pinnedRepositoryPathIfOpen, 'null after close').to.be.null;
   });
 });
+
+describe('create-tag / create-branch deferred reveal', () => {
+  // open() defers `modal.open = true` until after the reset render commits, so
+  // that a field typed into immediately is not overwritten by the pending
+  // render. That deferral must not resurrect a dialog closed in the meantime —
+  // e.g. by the host's tab-close sweep — which would leave modal.open true
+  // while isOpen is false: a visible dialog the app believes is shut.
+  it('does not re-reveal the tag dialog when close() lands first', async () => {
+    const el = await fixture<LvCreateTagDialog>(
+      html`<lv-create-tag-dialog .repositoryPath=${REPO_A}></lv-create-tag-dialog>`
+    );
+    await el.updateComplete;
+
+    el.open();
+    el.close();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+    expect(modal.open, 'modal must stay closed').to.be.false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).isOpen, 'isOpen agrees with the modal').to.be.false;
+  });
+
+  it('does not re-reveal the branch dialog when close() lands first', async () => {
+    const el = await fixture<LvCreateBranchDialog>(
+      html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`
+    );
+    await el.updateComplete;
+
+    el.open();
+    el.close();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+    expect(modal.open, 'modal must stay closed').to.be.false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).isOpen, 'isOpen agrees with the modal').to.be.false;
+  });
+
+  it('still opens normally when close() does not intervene', async () => {
+    const el = await fixture<LvCreateTagDialog>(
+      html`<lv-create-tag-dialog .repositoryPath=${REPO_A}></lv-create-tag-dialog>`
+    );
+    await el.updateComplete;
+
+    el.open();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & { open: boolean };
+    expect(modal.open, 'deferral still reveals the dialog').to.be.true;
+  });
+});
+
