@@ -1106,7 +1106,7 @@ mod tests {
         assert!(epoch.is_some());
         // Jan 1, 2020 should be around 1577836800
         let val = epoch.unwrap();
-        assert!(val >= 1577836800 && val < 1577923200);
+        assert!((1577836800..1577923200).contains(&val));
 
         // Test date with time
         let epoch2 = parse_iso8601_to_epoch("2023-06-15T12:00:00Z");

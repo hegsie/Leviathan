@@ -7,6 +7,11 @@ use tempfile::TempDir;
 
 /// A temporary git repository for testing
 pub struct TestRepo {
+    /// Held, never read: this is an RAII guard. Dropping the TempDir deletes
+    /// the repository directory, so the field must outlive every test that
+    /// uses `path`. Removing it to satisfy dead-code analysis would delete the
+    /// repo the moment TestRepo is constructed.
+    #[allow(dead_code)]
     pub dir: TempDir,
     pub path: PathBuf,
 }

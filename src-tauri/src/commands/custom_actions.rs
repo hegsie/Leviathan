@@ -388,11 +388,9 @@ mod tests {
     #[tokio::test]
     async fn test_run_custom_action() {
         let repo = TestRepo::with_initial_commit();
-        let action = if cfg!(target_os = "windows") {
-            make_action("1", "Echo", "echo hello")
-        } else {
-            make_action("1", "Echo", "echo hello")
-        };
+        // `echo hello` is valid on every supported platform, so this needs no
+        // cfg! split; both arms were identical.
+        let action = make_action("1", "Echo", "echo hello");
         save_custom_action(repo.path_str(), action).await.unwrap();
 
         let result = run_custom_action(repo.path_str(), "1".to_string()).await;
