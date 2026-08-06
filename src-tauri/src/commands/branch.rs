@@ -603,9 +603,14 @@ pub struct CheckoutWithStashResult {
 /// 3. Try to apply the stash
 /// 4. Return status including any conflicts
 #[command]
+/// `auto_stash` honours the "Auto-Stash on Checkout" setting. When false the
+/// checkout is attempted as-is, so git refuses one that would overwrite local
+/// changes instead of silently stashing and popping behind the user's back.
+/// Absent keeps the previous always-stash behaviour.
 pub async fn checkout_with_autostash(
     path: String,
     ref_name: String,
+    auto_stash: Option<bool>,
 ) -> Result<CheckoutWithStashResult> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
 
@@ -613,7 +618,7 @@ pub async fn checkout_with_autostash(
     let old_head = crate::commands::hooks::head_oid_string(&repo);
 
     // Check if there are uncommitted changes
-    let has_changes = {
+    let has_changes = auto_stash.unwrap_or(true) && {
         let statuses = repo.statuses(None)?;
         statuses.iter().any(|s| {
             let flags = s.status();
@@ -1414,7 +1419,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("feature");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1431,7 +1437,8 @@ mod tests {
         repo.create_file("README.md", "modified content");
         repo.stage_file("README.md");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1444,7 +1451,8 @@ mod tests {
     async fn test_checkout_with_autostash_nonexistent_ref_fails() {
         let repo = TestRepo::with_initial_commit();
 
-        let result = checkout_with_autostash(repo.path_str(), "nonexistent".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "nonexistent".to_string(), Some(true)).await;
         assert!(result.is_err());
         // Should still be on original branch
         assert_eq!(repo.current_branch(), "main");
@@ -1458,8 +1466,12 @@ mod tests {
         // Simulate a remote branch
         repo.create_remote_branch("feature-remote", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature-remote".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature-remote".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         let data = result.unwrap();
         assert!(data.success);
@@ -1489,8 +1501,12 @@ mod tests {
         repo.create_branch("feature-existing");
         repo.create_remote_branch("feature-existing", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature-existing".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature-existing".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1512,8 +1528,12 @@ mod tests {
         // Simulate origin/feature/my-branch (nested path)
         repo.create_remote_branch("feature/my-branch", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature/my-branch".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature/my-branch".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1530,7 +1550,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("feature");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
 
         let branches = get_branches(repo.path_str()).await.unwrap();
@@ -1546,8 +1567,12 @@ mod tests {
         let oid = repo.head_oid();
         repo.create_remote_branch("new-feature", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/new-feature".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/new-feature".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
 
         let branches = get_branches(repo.path_str()).await.unwrap();
@@ -1696,7 +1721,7 @@ mod tests {
         repo.create_commit("Second commit", &[("file2.txt", "data")]);
 
         // Checkout a commit hash via autostash should detach HEAD
-        let result = checkout_with_autostash(repo.path_str(), oid.to_string()).await;
+        let result = checkout_with_autostash(repo.path_str(), oid.to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1790,7 +1815,9 @@ mod tests {
         let commit_b = repo.create_commit("B on main", &[("newer.txt", "from B")]);
         repo.create_remote_branch("feature", commit_b);
 
-        let result = checkout_with_autostash(repo.path_str(), "origin/feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/feature".to_string(), Some(true))
+                .await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         assert!(result.unwrap().success);
 
@@ -1812,7 +1839,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_file("README.md", "# modified content");
 
-        let result = checkout_with_autostash(repo.path_str(), "no-such-ref".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "no-such-ref".to_string(), Some(true)).await;
         let err = result.expect_err("checkout of a nonexistent ref must fail");
         let msg = err.to_string();
         assert!(
@@ -1847,7 +1875,8 @@ mod tests {
         repo.create_file("README.md", "# staged change");
         repo.stage_file("README.md");
 
-        let result = checkout_with_autostash(repo.path_str(), "other".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "other".to_string(), Some(true)).await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         let data = result.unwrap();
         assert!(data.success);
@@ -1907,7 +1936,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         setup_autostash_conflict(&repo, false);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -1964,7 +1993,7 @@ mod tests {
         repo.stage_file("shared.txt");
         repo.create_file("shared.txt", working_ver);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -2014,7 +2043,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         setup_autostash_conflict(&repo, true);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -2104,7 +2133,7 @@ mod tests {
             &format!("#!/bin/sh\necho \"$1 $2 $3\" > \"{}\"\n", marker.display()),
         );
 
-        checkout_with_autostash(repo.path_str(), "feature".to_string())
+        checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .unwrap();
 

@@ -457,7 +457,9 @@ export class LvSubmoduleDialog extends LitElement {
       this.mode = 'list';
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
+      // The gate already announced a block, and a declined confirm is the
+      // user's own decision — neither is a failure to report.
       this.error = result.error?.message || 'Failed to add submodule';
       showToast(result.error?.message || 'Failed to add submodule', 'error');
     }
@@ -481,7 +483,7 @@ export class LvSubmoduleDialog extends LitElement {
       }
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to initialize submodule';
       showToast(result.error?.message || 'Failed to initialize submodule', 'error');
     }
@@ -504,7 +506,7 @@ export class LvSubmoduleDialog extends LitElement {
     if (result.success) {
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodule';
       showToast(result.error?.message || 'Failed to update submodule', 'error');
     }
@@ -560,7 +562,7 @@ export class LvSubmoduleDialog extends LitElement {
       showToast('All submodules updated', 'success');
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodules';
       showToast(result.error?.message || 'Failed to update submodules', 'error');
     }

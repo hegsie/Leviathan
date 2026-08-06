@@ -896,8 +896,14 @@ pub async fn execute_interactive_rebase(
     // where the only visible affordance was an Abort button that would throw
     // the rebase away. The rebase directory is still on disk while it is
     // paused, so use that to tell the two apart.
-    let paused = Path::new(&path).join(".git/rebase-merge").exists()
-        || Path::new(&path).join(".git/rebase-apply").exists();
+    // Resolve via repo.path() so per-worktree rebase state is found in linked
+    // worktrees: there `<wt>/.git` is a gitdir-POINTER FILE and the rebase
+    // state lives under `<main>/.git/worktrees/<name>/`, so joining ".git/..."
+    // onto the working-tree root can never match and `paused` was always false.
+    let git_dir = git2::Repository::open(Path::new(&path))?
+        .path()
+        .to_path_buf();
+    let paused = git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists();
 
     Ok(InteractiveRebaseOutcome { paused })
 }

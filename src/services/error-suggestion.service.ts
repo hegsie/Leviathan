@@ -110,8 +110,11 @@ export function getErrorSuggestion(
     };
   }
 
-  // Repository lock
-  if (msg.includes('lock') || msg.includes('locked')) {
+  // Repository lock. Matched on a word boundary: plain `includes('lock')` also
+  // matches "blocked", so a security-gate refusal ("Operation blocked by
+  // security settings") was diagnosed as a stuck index.lock and sent the user
+  // hunting for a file that does not exist.
+  if (/\block\b|\blocked\b|index\.lock/.test(msg)) {
     return {
       message: 'Repository is locked by another process. Wait or remove the lock file.',
     };

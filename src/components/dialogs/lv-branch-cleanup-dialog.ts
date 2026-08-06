@@ -798,7 +798,7 @@ export class LvBranchCleanupDialog extends LitElement {
       // "remotes pruned" for that overstates, and it forced a reload after
       // every zero-delete attempt.
       pruned = pruneResult.success && (pruneResult.data?.branchesPruned.length ?? 0) > 0;
-      if (!pruneResult.success) {
+      if (!pruneResult.success && !gitService.isNetworkGateRefusal(pruneResult.error)) {
         showToast(
           `Failed to prune remote branches: ${pruneResult.error?.message ?? 'Unknown error'}`,
           'error',

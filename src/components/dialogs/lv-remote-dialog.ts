@@ -614,7 +614,9 @@ export class LvRemoteDialog extends LitElement {
       if (result.success) {
         showToast(`Fetched from ${remote.name}`, 'success');
         this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A gate refusal already announced itself, and a declined confirm is
+        // the user's own decision — reporting either back is a lie.
         showToast(`Fetch failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
@@ -640,7 +642,7 @@ export class LvRemoteDialog extends LitElement {
           await this.loadRemotes();
           this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
         }
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         showToast(`Prune failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
