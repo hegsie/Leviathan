@@ -101,7 +101,17 @@ export async function fetchInBackground(
     return blockedResult();
   }
   const token = await getRepoToken(repoPath);
-  return invokeCommand<void>("fetch", { path: repoPath, token });
+
+  // Same timeout its sibling `fetch` applies. Without it the backend's
+  // `timeout_secs: None` branch awaits forever, so a hung remote left one
+  // unbounded fetch alive per window focus — and nothing reports them, by
+  // design, so they pile up invisibly.
+  const timeoutSecs = settingsStore.getState().networkOperationTimeout;
+  return invokeCommand<void>("fetch", {
+    path: repoPath,
+    token,
+    ...(timeoutSecs > 0 ? { timeoutSecs } : {}),
+  });
 }
 
 /**

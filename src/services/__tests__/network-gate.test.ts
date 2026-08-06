@@ -37,6 +37,8 @@ import {
   listBitbucketPullRequests,
   listAdoPullRequests,
   isNetworkGateRefusal,
+  fetchInBackground,
+  checkoutWithAutoStash,
 } from '../git.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 
@@ -219,6 +221,70 @@ describe('network security gate', () => {
 
       expect(result.error?.code).to.equal('BLOCKED');
       expect(isNetworkGateRefusal(result.error)).to.equal(true);
+    });
+  });
+
+  describe('background fetch matches its foreground sibling', () => {
+    it('applies the configured network timeout', async () => {
+      // fetchInBackground was split off from fetch and dropped the timeout, so
+      // the backend's `timeout_secs: None` branch awaited forever — one
+      // unbounded fetch per window focus on a hung remote, none reportable.
+      settingsStore.setState({ networkOperationTimeout: 42 });
+      try {
+        await fetchInBackground('/repo');
+        const call = invokeHistory.find((c) => c.command === 'fetch');
+        expect(call, 'fetch invoked').to.not.be.undefined;
+        expect((call!.args as { timeoutSecs?: number }).timeoutSecs).to.equal(42);
+      } finally {
+        settingsStore.setState({ networkOperationTimeout: 0 });
+      }
+    });
+
+    it('omits the timeout when it is disabled', async () => {
+      settingsStore.setState({ networkOperationTimeout: 0 });
+      await fetchInBackground('/repo');
+      const call = invokeHistory.find((c) => c.command === 'fetch');
+      expect((call!.args as { timeoutSecs?: number }).timeoutSecs).to.be.undefined;
+    });
+
+    it('never prompts, even with confirm-network-operations on', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      try {
+        await fetchInBackground('/repo');
+        expect(
+          invokeHistory.some((c) => c.command === 'plugin:dialog|confirm'),
+          'alt-tabbing back into the app must not raise a modal',
+        ).to.equal(false);
+        expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+      } finally {
+        settingsStore.setState({ confirmNetworkOps: false });
+      }
+    });
+
+    it('still honours offline mode', async () => {
+      settingsStore.setState({ offlineMode: true });
+      const result = await fetchInBackground('/repo');
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+  });
+
+  describe('checkout carries the auto-stash setting', () => {
+    it('defaults on, preserving the behaviour users already had', async () => {
+      await checkoutWithAutoStash('/repo', 'feature');
+      const call = invokeHistory.find((c) => c.command === 'checkout_with_autostash');
+      expect((call!.args as { autoStash?: boolean }).autoStash).to.equal(true);
+    });
+
+    it('forwards the setting when the user turns it off', async () => {
+      settingsStore.setState({ autoStashOnCheckout: false });
+      try {
+        await checkoutWithAutoStash('/repo', 'feature');
+        const call = invokeHistory.find((c) => c.command === 'checkout_with_autostash');
+        expect((call!.args as { autoStash?: boolean }).autoStash).to.equal(false);
+      } finally {
+        settingsStore.setState({ autoStashOnCheckout: true });
+      }
     });
   });
 

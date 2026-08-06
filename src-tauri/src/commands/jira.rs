@@ -62,11 +62,18 @@ fn build_jira_api_url(base_url: &str, path: &str) -> String {
 }
 
 /// Load JIRA config from the repository's .git/leviathan/jira.json
+/// Repo-level config lives beside the git dir. Resolved via `commondir` rather
+/// than joining ".git" onto the working tree: in a linked worktree `<wt>/.git`
+/// is a pointer FILE, so the join produced a path that could never be created
+/// or read. `commondir` also keeps one config shared across every worktree of
+/// the same repository, which is what repo-level settings should do.
+fn leviathan_config_dir(repo_path: &str) -> Result<std::path::PathBuf> {
+    let repo = git2::Repository::open(Path::new(repo_path))?;
+    Ok(repo.commondir().join("leviathan"))
+}
+
 fn load_jira_config(repo_path: &str) -> Result<JiraConfig> {
-    let config_path = Path::new(repo_path)
-        .join(".git")
-        .join("leviathan")
-        .join("jira.json");
+    let config_path = leviathan_config_dir(repo_path)?.join("jira.json");
 
     if !config_path.exists() {
         return Err(LeviathanError::OperationFailed(
@@ -162,7 +169,7 @@ pub async fn get_jira_config(path: String) -> Result<Option<JiraConfig>> {
 pub async fn save_jira_config(path: String, config: JiraConfig) -> Result<()> {
     debug!("Saving JIRA config for: {}", path);
 
-    let leviathan_dir = Path::new(&path).join(".git").join("leviathan");
+    let leviathan_dir = leviathan_config_dir(&path)?;
 
     // Create the leviathan directory if it doesn't exist
     if !leviathan_dir.exists() {

@@ -744,6 +744,12 @@ export class AppShell extends LitElement {
   private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Last auto-fetch interval applied to the backend (settings subscription
   // must only restart timers when THIS value actually changes)
+  /** Repos with a window-focus fetch already running. */
+  private focusFetchInFlight = new Set<string>();
+  /** Guards the graph ref menu's merge/rebase the way lv-branch-list guards
+   * its own: from the graph you could right-click a second ref and start a
+   * second history rewrite while the first was still running. */
+  private refOperationInFlight = false;
   private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
@@ -1455,7 +1461,12 @@ export class AppShell extends LitElement {
       // Pinned: the user can switch tabs during the fetch; the result belongs
       // to the repo it was started for.
       const repoPath = this.activeRepository.repository.path;
+      // Alt-tabbing repeatedly used to start a fetch per focus event; on a hung
+      // remote they stacked with nothing to cancel them.
+      if (this.focusFetchInFlight.has(repoPath)) return;
+      this.focusFetchInFlight.add(repoPath);
       void (async () => {
+        try {
         await gitService.fetchInBackground(repoPath);
         const result = await gitService.getRemoteStatus(repoPath);
         if (
@@ -1464,6 +1475,9 @@ export class AppShell extends LitElement {
           repoPath === this.activeRepository?.repository.path
         ) {
           this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
+        }
+        } finally {
+          this.focusFetchInFlight.delete(repoPath);
         }
       })();
     };
@@ -1499,7 +1513,7 @@ export class AppShell extends LitElement {
       toggleLeftPanel: () => this.toggleLeftPanel(),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
-      openReflog: () => { this.showReflog = true; },
+      openReflog: this.requiresRepository(() => { this.showReflog = true; }),
       // Wrapped like the palette entries: pressing Ctrl+Shift+F on the welcome
       // screen used to do nothing at all while the same command from the
       // palette explained that a repository is needed.
@@ -1507,7 +1521,7 @@ export class AppShell extends LitElement {
       pull: this.requiresRepository(() => this.handlePull()),
       push: this.requiresRepository(() => this.handlePush()),
       createStash: this.requiresRepository(() => this.handleCreateStash()),
-      createBranch: () => this.createBranchDialog?.open(),
+      createBranch: this.requiresRepository(() => this.createBranchDialog?.open()),
       closeDiff: () => this.handleCloseOverlay(),
       nextTab: () => this.cycleRepositoryTab(1),
       previousTab: () => this.cycleRepositoryTab(-1),
@@ -1895,6 +1909,19 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    // Same confirm the sidebar and drag-drop paths show for the same
+    // operation. The sibling delete handlers below already carry a comment
+    // saying the graph ref menu must not be the one unguarded path; merge and
+    // rebase were missed by that pass.
+    if (this.refOperationInFlight) return;
+    if (!await showConfirm(
+      'Merge Branch',
+      `Merge "${refName}" into the current branch?`,
+      'info',
+    )) return;
+
+    this.refOperationInFlight = true;
+    try {
     const result = await gitService.merge({
       path: repoPath,
       sourceRef: refName,
@@ -1917,6 +1944,9 @@ export class AppShell extends LitElement {
       log.error('Merge failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Merge failed');
     }
+    } finally {
+      this.refOperationInFlight = false;
+    }
   }
 
   private async handleRefRebase(): Promise<void> {
@@ -1926,6 +1956,15 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    if (this.refOperationInFlight) return;
+    if (!await showConfirm(
+      'Rebase Branch',
+      `Rebase current branch onto "${refName}"?\n\nThis will rewrite commit history.`,
+      'warning',
+    )) return;
+
+    this.refOperationInFlight = true;
+    try {
     const result = await gitService.rebase({
       path: repoPath,
       onto: refName,
@@ -1947,6 +1986,9 @@ export class AppShell extends LitElement {
     } else {
       log.error('Rebase failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Rebase failed');
+    }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
@@ -2868,6 +2910,8 @@ export class AppShell extends LitElement {
     if (!this.rightPanelVisible) {
       uiStore.getState().togglePanel('right');
       await this.updateComplete;
+    }
+    {
       const panel = this.renderRoot.querySelector('lv-right-panel') as LitElement | null;
       await panel?.updateComplete;
       // Mounted is not the same as ready. lv-file-status registers the listener
@@ -2880,6 +2924,11 @@ export class AppShell extends LitElement {
         | (LitElement & { loadStatus?: () => Promise<void> })
         | null;
       await fileStatus?.updateComplete;
+      // Unconditionally, not just when the panel was hidden. With it already
+      // visible — the default — the list can still be mid-reload after a repo
+      // tab switch or a watcher event, and "Stage all" would act on whatever
+      // was cached: the previous repo's paths, or a subset of the current
+      // repo's. loadStatus is sequence-guarded, so this is a no-op when fresh.
       await fileStatus?.loadStatus?.();
     }
     window.dispatchEvent(new CustomEvent(eventName));

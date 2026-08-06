@@ -67,8 +67,11 @@ describe('settings.store', () => {
       expect(settingsStore.getState().openLastRepository).to.be.true;
     });
 
-    it('should have auto stash on checkout disabled by default', () => {
-      expect(settingsStore.getState().autoStashOnCheckout).to.be.false;
+    it('should have auto stash on checkout enabled by default', () => {
+      // Until the setting was wired through, every checkout auto-stashed
+      // regardless. Defaulting to false would have silently turned a seamless
+      // branch switch into a refusal for every existing user.
+      expect(settingsStore.getState().autoStashOnCheckout).to.be.true;
     });
 
     it('should have 90 stale branch days by default', () => {

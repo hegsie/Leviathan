@@ -253,6 +253,88 @@ describe('app-shell remote-operation feedback', () => {
     });
   });
 
+  describe('the graph ref menu confirms before rewriting history', () => {
+    async function refMenuShell(): Promise<AppShell> {
+      const el = shellOnRepo();
+      (el as any).refContextMenu = { visible: true, x: 0, y: 0, refName: 'feature' };
+      return el;
+    }
+
+    it('merge asks first, and declining blocks it', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = await refMenuShell();
+
+      await (el as any).handleRefMerge();
+
+      expect(invokeCallArgs.some((c) => c.command === 'merge'), 'declined merge blocked').to.equal(
+        false,
+      );
+    });
+
+    it('rebase asks first, and declining blocks it', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = await refMenuShell();
+
+      await (el as any).handleRefRebase();
+
+      expect(invokeCallArgs.some((c) => c.command === 'rebase'), 'declined rebase blocked').to.equal(
+        false,
+      );
+    });
+
+    it('accepting the confirm runs the merge', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = await refMenuShell();
+
+      await (el as any).handleRefMerge();
+
+      expect(invokeCallArgs.some((c) => c.command === 'merge')).to.equal(true);
+    });
+
+    it('a second rebase cannot start while the first is running', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = await refMenuShell();
+      (el as any).refOperationInFlight = true;
+
+      await (el as any).handleRefRebase();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'rebase'),
+        'no second history rewrite on the same worktree',
+      ).to.equal(false);
+    });
+  });
+
+  describe('shortcuts with no repository open', () => {
+    it('Ctrl+Z and Ctrl+Shift+N explain, like their palette twins', async () => {
+      const { keyboardService } = await import('../services/keyboard.service.ts');
+      const el = createAppShell();
+      (el as any).activeRepository = null;
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        for (const description of ['Open reflog', 'Create new branch']) {
+          const sc = keyboardService
+            .getAllShortcuts()
+            .find((s) => s.description === description);
+          if (!sc) continue;
+          uiStore.setState({ toasts: [] });
+          sc.action();
+          expect(
+            uiStore.getState().toasts.length,
+            `${description} tells the user a repository is needed`,
+          ).to.equal(1);
+        }
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
   describe('staging works with the right panel hidden', () => {
     it('reveals the panel that owns the listener before dispatching', async () => {
       // `stage-all` is heard only by lv-file-status, which lives inside the
