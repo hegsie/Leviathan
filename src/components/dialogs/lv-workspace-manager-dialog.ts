@@ -851,10 +851,17 @@ export class LvWorkspaceManagerDialog extends LitElement {
     // repo in the workspace used to count as "failed" and the summary read
     // "0 succeeded, 8 failed" for eight operations that were never attempted.
     let skippedCount = 0;
+    // Repos that are gone or no longer git repos were silently dropped, so a
+    // summary that now reads as fully accounted-for (succeeded/failed/skipped)
+    // still didn't add up to the workspace size.
+    let unavailableCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
-      if (status && (!status.exists || !status.isValidRepo)) continue;
+      if (status && (!status.exists || !status.isValidRepo)) {
+        unavailableCount++;
+        continue;
+      }
 
       const result = await gitService.fetch({ path: repo.path, silent: true });
       if (result.success) {
@@ -870,8 +877,13 @@ export class LvWorkspaceManagerDialog extends LitElement {
     showToast(
       `Fetch all: ${successCount} succeeded` +
         (failCount > 0 ? `, ${failCount} failed` : '') +
-        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : ''),
-      failCount > 0 ? 'warning' : skippedCount > 0 ? 'info' : 'success',
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
+        (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
+      failCount > 0 || unavailableCount > 0
+        ? 'warning'
+        : skippedCount > 0
+          ? 'info'
+          : 'success',
     );
     await this.refreshStatus();
   }
@@ -887,10 +899,17 @@ export class LvWorkspaceManagerDialog extends LitElement {
     // repo in the workspace used to count as "failed" and the summary read
     // "0 succeeded, 8 failed" for eight operations that were never attempted.
     let skippedCount = 0;
+    // Repos that are gone or no longer git repos were silently dropped, so a
+    // summary that now reads as fully accounted-for (succeeded/failed/skipped)
+    // still didn't add up to the workspace size.
+    let unavailableCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
-      if (status && (!status.exists || !status.isValidRepo)) continue;
+      if (status && (!status.exists || !status.isValidRepo)) {
+        unavailableCount++;
+        continue;
+      }
 
       const result = await gitService.pull({ path: repo.path, silent: true });
       if (result.success) {
@@ -906,8 +925,13 @@ export class LvWorkspaceManagerDialog extends LitElement {
     showToast(
       `Pull all: ${successCount} succeeded` +
         (failCount > 0 ? `, ${failCount} failed` : '') +
-        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : ''),
-      failCount > 0 ? 'warning' : skippedCount > 0 ? 'info' : 'success',
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
+        (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
+      failCount > 0 || unavailableCount > 0
+        ? 'warning'
+        : skippedCount > 0
+          ? 'info'
+          : 'success',
     );
     await this.refreshStatus();
   }

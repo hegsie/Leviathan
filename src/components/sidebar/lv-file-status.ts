@@ -989,6 +989,9 @@ export class LvFileStatus extends LitElement {
     if (this.statusRefreshTimeout) {
       clearTimeout(this.statusRefreshTimeout);
     }
+    // The list is known-stale from the moment the watcher fires, not from when
+    // the debounce expires — a stage-all inside that window must reload.
+    this.statusDirty = true;
     this.statusRefreshTimeout = setTimeout(() => {
       this.statusRefreshTimeout = null;
       this.loadStatus();
@@ -999,6 +1002,7 @@ export class LvFileStatus extends LitElement {
     if (changedProperties.has("repositoryPath") && this.repositoryPath) {
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
+      this.statusDirty = true;
       // Start watching the new repository
       try {
         await watcherService.startWatching(this.repositoryPath);
@@ -1014,7 +1018,43 @@ export class LvFileStatus extends LitElement {
   // can't catch A -> B -> A switches reordering two loads for A)
   private statusLoadSeq = new Map<string, number>();
 
+  /** Path of the last COMPLETED successful load, and whether anything has
+   * happened since that could have changed it. Together these let
+   * ensureStatusFresh() skip the IPC round trip in the common case. */
+  private statusLoadedForPath: string | null = null;
+  private statusDirty = true;
+  /** The load currently in flight, so a caller can await it instead of racing. */
+  private statusLoadInFlight: Promise<void> | null = null;
+
+  /**
+   * Resolve once `unstagedFiles`/`stagedFiles` reflect the current repository.
+   *
+   * "Stage all" must act on what is on disk, not on a list left over from
+   * another repo or from before a watcher event. Calling loadStatus()
+   * unconditionally did that but cost a full working-tree walk on every
+   * keypress — the sequence guard only discards a stale RESPONSE, it never
+   * skips the request.
+   */
+  public async ensureStatusFresh(): Promise<void> {
+    if (this.statusLoadInFlight) {
+      await this.statusLoadInFlight;
+    }
+    if (this.statusDirty || this.statusLoadedForPath !== this.repositoryPath) {
+      await this.loadStatus();
+    }
+  }
+
   async loadStatus(): Promise<void> {
+    const run = this.runLoadStatus();
+    this.statusLoadInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.statusLoadInFlight === run) this.statusLoadInFlight = null;
+    }
+  }
+
+  private async runLoadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
     // Captured before the await so a mid-flight tab switch still writes the
     // result to the repo it was loaded FROM
@@ -1059,6 +1099,10 @@ export class LvFileStatus extends LitElement {
         stagedFiles: newStagedFiles,
         unstagedFiles: newUnstagedFiles,
       });
+
+      // The list for `loadedPath` is now current, whichever tab is showing.
+      this.statusLoadedForPath = loadedPath;
+      this.statusDirty = false;
 
       if (!isCurrent) return;
 

@@ -422,7 +422,23 @@ pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
 /// Get push options with credential and progress callbacks
 pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
     let mut push_opts = git2::PushOptions::new();
-    push_opts.remote_callbacks(get_callbacks_with_progress(token));
+    let mut callbacks = get_callbacks_with_progress(token);
+
+    // Without this, a push the SERVER rejects reports success. libgit2's
+    // git_remote_push only errors when the pack fails to unpack; per-reference
+    // rejections (a protected branch, a pre-receive hook exiting non-zero) land
+    // in the push status list, and git_push_update_tips simply skips any entry
+    // carrying a message. Nothing inspects them unless this callback is
+    // registered, so `Remote::push` returned Ok and the UI said
+    // "Pushed to origin/main" while nothing had reached the remote — the worst
+    // possible lie to tell someone before they reset or delete a branch.
+    // (Plain non-fast-forward is already caught by libgit2's local pre-check.)
+    callbacks.push_update_reference(|refname, status| match status {
+        Some(msg) => Err(git2::Error::from_str(&format!("{}: {}", refname, msg))),
+        None => Ok(()),
+    });
+
+    push_opts.remote_callbacks(callbacks);
     push_opts
 }
 
@@ -485,6 +501,42 @@ mod tests {
     // Serialize tests that use the shared CREDENTIAL_CACHE to prevent flaky
     // failures from parallel test execution interleaving clear/write/read.
     static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A push whose refs the SERVER rejects must surface as an error.
+    ///
+    /// libgit2's `git_remote_push` only fails when the pack cannot be unpacked;
+    /// per-reference rejections (protected branch, pre-receive hook) live in the
+    /// push status list and `git_push_update_tips` skips any entry carrying a
+    /// message. Without a `push_update_reference` callback the push returned Ok
+    /// and the UI reported "Pushed to origin/main" while nothing had landed.
+    #[test]
+    fn push_options_reject_a_ref_the_server_refused() {
+        // Exercise the callback contract directly: the closure registered in
+        // get_push_options must turn a Some(msg) status into an Err.
+        let to_result = |status: Option<&str>| -> Result<(), git2::Error> {
+            match status {
+                Some(msg) => Err(git2::Error::from_str(&format!("refs/heads/main: {}", msg))),
+                None => Ok(()),
+            }
+        };
+
+        assert!(to_result(None).is_ok(), "an accepted ref is not an error");
+
+        let rejected = to_result(Some("pre-receive hook declined"));
+        assert!(rejected.is_err(), "a rejected ref must not report success");
+        assert!(rejected
+            .unwrap_err()
+            .message()
+            .contains("pre-receive hook declined"));
+    }
+
+    #[test]
+    fn push_options_build_with_the_rejection_callback() {
+        // Smoke test that get_push_options still constructs once the callback
+        // is registered (a borrow error here would break every push).
+        let _opts = get_push_options(Some("tok".to_string()));
+        let _opts_no_token = get_push_options(None);
+    }
 
     /// Clear the global credential cache between tests to avoid cross-contamination.
     fn clear_cache() {

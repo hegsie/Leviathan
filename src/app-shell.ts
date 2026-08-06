@@ -749,7 +749,7 @@ export class AppShell extends LitElement {
   /** Guards the graph ref menu's merge/rebase the way lv-branch-list guards
    * its own: from the graph you could right-click a second ref and start a
    * second history rewrite while the first was still running. */
-  private refOperationInFlight = false;
+  @state() private refOperationInFlight = false;
   private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
@@ -876,6 +876,7 @@ export class AppShell extends LitElement {
     // A later repo at the same path must not flash this repo's graph
     evictGraphCache(path);
     this.staleRepoPaths.delete(path);
+    this.focusFetchInFlight.delete(path);
     const pendingHydration = this.badgeHydrationTimers.get(path);
     if (pendingHydration) {
       clearTimeout(pendingHydration);
@@ -1863,7 +1864,21 @@ export class AppShell extends LitElement {
 
     const refName = this.refContextMenu.refName;
     const repoPath = this.activeRepository.repository.path;
+    const refType = this.refContextMenu.refType;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
+
+    // Checking out a tag detaches HEAD. The Tags sidebar warns about that; this
+    // handler was written for branches and later reused for the tag menu entry,
+    // so the graph route silently detached and a commit made afterwards was
+    // reachable from no ref.
+    if (refType === 'tag') {
+      const confirmed = await showConfirm(
+        'Checkout Tag',
+        `Checking out tag "${refName}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
+        'warning',
+      );
+      if (!confirmed) return;
+    }
 
     const result = await gitService.checkoutWithAutoStash(repoPath, refName);
 
@@ -2921,15 +2936,18 @@ export class AppShell extends LitElement {
       // did nothing, the second worked. loadStatus is sequence-guarded, so
       // awaiting it again is safe.
       const fileStatus = panel?.renderRoot?.querySelector('lv-file-status') as
-        | (LitElement & { loadStatus?: () => Promise<void> })
+        | (LitElement & { ensureStatusFresh?: () => Promise<void> })
         | null;
       await fileStatus?.updateComplete;
-      // Unconditionally, not just when the panel was hidden. With it already
-      // visible — the default — the list can still be mid-reload after a repo
-      // tab switch or a watcher event, and "Stage all" would act on whatever
-      // was cached: the previous repo's paths, or a subset of the current
-      // repo's. loadStatus is sequence-guarded, so this is a no-op when fresh.
-      await fileStatus?.loadStatus?.();
+      // Require a CURRENT list, not a blind reload. With the panel already
+      // visible — the default — the cached list can belong to the previous repo
+      // after a tab switch, or predate a watcher event still inside its
+      // debounce; either way "Stage all" would act on the wrong set. But
+      // loadStatus always issues a full working-tree walk, so calling it every
+      // time cost two scans per keypress. ensureStatusFresh awaits an in-flight
+      // load, reloads only when something could have changed, and is otherwise
+      // free.
+      await fileStatus?.ensureStatusFresh?.();
     }
     window.dispatchEvent(new CustomEvent(eventName));
   }
@@ -3866,7 +3884,10 @@ export class AppShell extends LitElement {
       // confirm is the user's own decision — reporting either as a red error
       // tells them their own click failed.
       if (!gitService.isNetworkGateRefusal(result.error)) {
-        showToast(result.error?.message ?? 'Push failed', 'error');
+        // Through the suggestion service so a non-fast-forward rejection offers
+        // the Pull Now action the app already implements — a plain toast made
+        // that recovery unreachable from the only push surface there is.
+        showErrorWithSuggestion(result.error?.message ?? '', 'Push failed', { operation: 'push' });
       }
     }
   }
@@ -4491,7 +4512,7 @@ export class AppShell extends LitElement {
                       </svg>
                       Checkout
                     </button>
-                    <button class="context-menu-item" @click=${this.handleRefMerge}>
+                    <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefMerge}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="18" cy="18" r="3"></circle>
                         <circle cx="6" cy="6" r="3"></circle>
@@ -4499,7 +4520,7 @@ export class AppShell extends LitElement {
                       </svg>
                       Merge into current branch
                     </button>
-                    <button class="context-menu-item" @click=${this.handleRefRebase}>
+                    <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefRebase}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="6" y1="3" x2="6" y2="15"></line>
                         <circle cx="18" cy="6" r="3"></circle>
@@ -4525,7 +4546,7 @@ export class AppShell extends LitElement {
                         </svg>
                         Checkout
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefMerge}>
+                      <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefMerge}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <circle cx="18" cy="18" r="3"></circle>
                           <circle cx="6" cy="6" r="3"></circle>
@@ -4533,7 +4554,7 @@ export class AppShell extends LitElement {
                         </svg>
                         Merge into current branch
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefRebase}>
+                      <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefRebase}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="6" y1="3" x2="6" y2="15"></line>
                           <circle cx="18" cy="6" r="3"></circle>
