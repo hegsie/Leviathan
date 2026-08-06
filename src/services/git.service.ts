@@ -50,11 +50,18 @@ async function resolveRemoteUrl(repoPath: string, remote?: string): Promise<stri
 async function checkNetworkAllowed(
   repoPath: string | null,
   remote?: string,
+  /** Unattended callers (the auto-fetch loop, the graph's PR lookup) pass true.
+   * They run on every refresh, so toasting each refusal stacks a fresh
+   * "Offline mode is enabled" on the user for every commit, stage and
+   * checkout. The refusal still happens — it just doesn't shout. */
+  silent = false,
 ): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
 
   if (settings.offlineMode) {
-    showToast('Offline mode is enabled. Disable in Settings > Security.', 'warning');
+    if (!silent) {
+      showToast('Offline mode is enabled. Disable in Settings > Security.', 'warning');
+    }
     return 'offline';
   }
 
@@ -68,15 +75,33 @@ async function checkNetworkAllowed(
     !!url &&
     settings.remoteAllowlist.some((domain) => url.toLowerCase().includes(domain.toLowerCase()));
   if (!allowed) {
-    showToast(
-      url
-        ? `Remote "${url}" is not in your allowlist`
-        : 'Could not determine the remote URL, and an allowlist is configured',
-      'error',
-    );
+    if (!silent) {
+      showToast(
+        url
+          ? `Remote "${url}" is not in your allowlist`
+          : 'Could not determine the remote URL, and an allowlist is configured',
+        'error',
+      );
+    }
     return 'allowlist';
   }
   return null;
+}
+
+/**
+ * A fetch the user did not ask for — the window-focus refresh. Hard blocks
+ * apply; the confirm does not, and neither does the block toast. Routing this
+ * through the confirm-capable gate popped a native modal every time the user
+ * alt-tabbed back into the app.
+ */
+export async function fetchInBackground(
+  repoPath: string,
+): Promise<CommandResult<void>> {
+  if (await checkNetworkAllowed(repoPath, undefined, true)) {
+    return blockedResult();
+  }
+  const token = await getRepoToken(repoPath);
+  return invokeCommand<void>("fetch", { path: repoPath, token });
 }
 
 /**
@@ -123,10 +148,37 @@ async function invokeProviderCommand<T>(
   command: string,
   args?: Record<string, unknown>,
 ): Promise<CommandResult<T>> {
-  if (await checkNetworkAllowed(null)) {
+  // Pass the API host so the allowlist has a domain to match. Without it every
+  // provider call refused the moment ANY allowlist existed — `checkNetworkAllowed`
+  // fails closed when it cannot see a URL, which is right for a git remote and
+  // wrong here, because these calls never had a repo-relative remote to resolve.
+  // With the host supplied, allowlisting "github.com" permits GitHub and still
+  // blocks GitLab, which is what setting an allowlist means.
+  if (await checkNetworkAllowed(null, providerApiHost(command, args), true)) {
     return blockedResult();
   }
   return invokeCommand<T>(command, args);
+}
+
+/**
+ * The host a provider command talks to. GitLab is self-hostable, so its
+ * instance URL travels in the arguments; the rest have fixed API hosts
+ * (`github.rs:9`, `bitbucket.rs:12`, and dev.azure.com for Azure DevOps).
+ */
+function providerApiHost(command: string, args?: Record<string, unknown>): string {
+  if (command === 'test_ssh_connection') {
+    return String(args?.host ?? '');
+  }
+  if (command.includes('gitlab')) {
+    return String(args?.instanceUrl ?? 'https://gitlab.com');
+  }
+  if (command.includes('bitbucket')) {
+    return 'https://api.bitbucket.org';
+  }
+  if (command.includes('ado') || command.includes('azure')) {
+    return 'https://dev.azure.com';
+  }
+  return 'https://api.github.com';
 }
 
 /**
@@ -459,9 +511,16 @@ export async function checkoutWithAutoStash(
   path: string,
   refName: string,
 ): Promise<CommandResult<CheckoutWithStashResult>> {
+  // The "Auto-Stash on Checkout" setting was persisted and rendered but never
+  // read by anything: every checkout stashed, switched and popped regardless,
+  // and a conflicting pop dropped the user into the conflict dialog they had
+  // explicitly opted out of. With the setting off, let git refuse a checkout
+  // that would clobber uncommitted work, the way `git checkout` does.
+  const autoStash = settingsStore.getState().autoStashOnCheckout;
   return invokeCommand<CheckoutWithStashResult>("checkout_with_autostash", {
     path,
     refName,
+    autoStash,
   });
 }
 
@@ -3332,7 +3391,7 @@ export async function getRepoLabels(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<Label[]>> {
-  return invokeCommand<Label[]>("get_repo_labels", {
+  return invokeProviderCommand<Label[]>("get_repo_labels", {
     owner,
     repo,
     perPage,
@@ -4201,7 +4260,7 @@ export async function checkBitbucketConnection(): Promise<
   if (credsResult.success && credsResult.data) {
     [username, appPassword] = credsResult.data;
   }
-  return invokeCommand<BitbucketConnectionStatus>(
+  return invokeProviderCommand<BitbucketConnectionStatus>(
     "check_bitbucket_connection",
     { username, appPassword },
   );
@@ -4213,7 +4272,7 @@ export async function checkBitbucketConnection(): Promise<
 export async function checkBitbucketConnectionWithToken(
   token: string,
 ): Promise<CommandResult<BitbucketConnectionStatus>> {
-  return invokeCommand<BitbucketConnectionStatus>(
+  return invokeProviderCommand<BitbucketConnectionStatus>(
     "check_bitbucket_connection_with_token",
     { token },
   );
@@ -4447,7 +4506,7 @@ export interface IssueTemplate {
 export async function getIssueTemplates(
   repoPath: string,
 ): Promise<CommandResult<IssueTemplate[]>> {
-  return invokeProviderCommand<IssueTemplate[]>("get_issue_templates", {
+  return invokeCommand<IssueTemplate[]>("get_issue_templates", {
     path: repoPath,
   });
 }
@@ -4459,7 +4518,7 @@ export async function getIssueTemplateContent(
   repoPath: string,
   templatePath: string,
 ): Promise<CommandResult<string>> {
-  return invokeProviderCommand<string>("get_issue_template_content", {
+  return invokeCommand<string>("get_issue_template_content", {
     path: repoPath,
     templatePath,
   });
@@ -4487,7 +4546,7 @@ export async function startAutoFetch(
   // in front of, so a confirm here would be a dialog out of nowhere. Offline
   // mode and the allowlist still apply — otherwise "offline" leaks a fetch
   // every N minutes.
-  if (await checkNetworkAllowed(repoPath)) {
+  if (await checkNetworkAllowed(repoPath, undefined, true)) {
     return blockedResult();
   }
 

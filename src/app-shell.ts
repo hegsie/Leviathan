@@ -1449,12 +1449,14 @@ export class AppShell extends LitElement {
       // "Fetch on Window Focus" used to call getRemoteStatus, which only runs
       // graph_ahead_behind over refs already on disk — no network. It
       // recomputed a number that could not have changed, so the setting never
-      // did anything. Fetch first, then read the counts.
+      // did anything. Fetch first, then read the counts — via the background
+      // route, because alt-tabbing back into the app is not a gesture that
+      // should raise a native "Allow fetch?" modal.
       // Pinned: the user can switch tabs during the fetch; the result belongs
       // to the repo it was started for.
       const repoPath = this.activeRepository.repository.path;
       void (async () => {
-        await gitService.fetch({ path: repoPath, silent: true });
+        await gitService.fetchInBackground(repoPath);
         const result = await gitService.getRemoteStatus(repoPath);
         if (
           result.success &&
@@ -1487,8 +1489,8 @@ export class AppShell extends LitElement {
       pageUp: () => this.graphCanvas?.navigatePageUp?.(),
       pageDown: () => this.graphCanvas?.navigatePageDown?.(),
       selectCommit: () => {/* handled by graph canvas */},
-      stageAll: () => this.handleStageAll(),
-      unstageAll: () => this.handleUnstageAll(),
+      stageAll: this.requiresRepository(() => this.handleStageAll()),
+      unstageAll: this.requiresRepository(() => this.handleUnstageAll()),
       commit: () => {/* handled by commit panel */},
       refresh: () => this.handleRefresh(),
       search: () => this.handleToggleSearch(),
@@ -1498,10 +1500,13 @@ export class AppShell extends LitElement {
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
       openReflog: () => { this.showReflog = true; },
-      fetch: () => this.handleFetch(),
-      pull: () => this.handlePull(),
-      push: () => this.handlePush(),
-      createStash: () => this.handleCreateStash(),
+      // Wrapped like the palette entries: pressing Ctrl+Shift+F on the welcome
+      // screen used to do nothing at all while the same command from the
+      // palette explained that a repository is needed.
+      fetch: this.requiresRepository(() => this.handleFetch()),
+      pull: this.requiresRepository(() => this.handlePull()),
+      push: this.requiresRepository(() => this.handlePush()),
+      createStash: this.requiresRepository(() => this.handleCreateStash()),
       createBranch: () => this.createBranchDialog?.open(),
       closeDiff: () => this.handleCloseOverlay(),
       nextTab: () => this.cycleRepositoryTab(1),
@@ -2033,7 +2038,7 @@ export class AppShell extends LitElement {
     if (result.success) {
       this.refreshConflictDialogRepo(repoPath);
       showToast(`Pushed tag ${tagName}`, 'success');
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
       log.error('Push tag failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', { operation: 'push' });
     }
@@ -2865,6 +2870,17 @@ export class AppShell extends LitElement {
       await this.updateComplete;
       const panel = this.renderRoot.querySelector('lv-right-panel') as LitElement | null;
       await panel?.updateComplete;
+      // Mounted is not the same as ready. lv-file-status registers the listener
+      // in connectedCallback but loads its file list over IPC, so dispatching
+      // as soon as it exists found `unstagedFiles` still empty and
+      // handleStageAll returned at `if (paths.length === 0)` — the first press
+      // did nothing, the second worked. loadStatus is sequence-guarded, so
+      // awaiting it again is safe.
+      const fileStatus = panel?.renderRoot?.querySelector('lv-file-status') as
+        | (LitElement & { loadStatus?: () => Promise<void> })
+        | null;
+      await fileStatus?.updateComplete;
+      await fileStatus?.loadStatus?.();
     }
     window.dispatchEvent(new CustomEvent(eventName));
   }

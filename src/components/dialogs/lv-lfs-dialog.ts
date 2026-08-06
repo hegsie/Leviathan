@@ -531,7 +531,8 @@ export class LvLfsDialog extends LitElement {
       this.success = 'LFS files pulled successfully';
       await this.loadFiles();
       this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
+      // The gate already said why; a declined confirm needs no message at all.
       this.error = result.error?.message || 'Failed to pull LFS files';
     }
 

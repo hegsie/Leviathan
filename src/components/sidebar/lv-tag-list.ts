@@ -657,7 +657,7 @@ export class LvTagList extends LitElement {
           bubbles: true,
           composed: true,
         }));
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         console.error('Failed to push tag:', result.error);
         showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }

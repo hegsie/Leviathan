@@ -53,8 +53,7 @@ const NETWORK_COMMANDS = new Set([
   'create_pull_request', 'create_release', 'delete_release',
   'get_ado_pull_request', 'get_ado_work_items', 'get_bitbucket_pull_request',
   'get_check_runs', 'get_gitlab_labels', 'get_gitlab_merge_request',
-  'get_issue', 'get_issue_comments', 'get_issue_template_content',
-  'get_issue_templates', 'get_latest_release', 'get_pull_request',
+  'get_issue', 'get_issue_comments', 'get_latest_release', 'get_pull_request',
   'get_pull_request_reviews', 'get_release_by_tag', 'get_workflow_runs',
   'list_ado_organizations', 'list_ado_pipeline_runs', 'list_ado_pull_requests',
   'list_bitbucket_issues', 'list_bitbucket_pipelines',
@@ -62,6 +61,27 @@ const NETWORK_COMMANDS = new Set([
   'list_gitlab_merge_requests', 'list_gitlab_pipelines', 'list_issues',
   'list_pull_requests', 'list_releases', 'query_ado_work_items',
   'test_ssh_connection', 'update_issue_state', 'add_issue_comment',
+  'get_repo_labels', 'check_bitbucket_connection',
+  'check_bitbucket_connection_with_token',
+]);
+
+/**
+ * Commands that must NEVER be gated: they read local files only. Routing one
+ * through the provider wrapper would make offline mode refuse something that
+ * never left the machine — which is what happened to the issue-template
+ * readers, latent only because nothing calls them yet.
+ */
+const LOCAL_COMMANDS = new Set([
+  'get_issue_templates',
+  'get_issue_template_content',
+  'lfs_prune',
+  'init_submodules',
+  'sync_submodules',
+  'get_remote_status',
+  'detect_github_repo',
+  'detect_gitlab_repo',
+  'detect_bitbucket_repo',
+  'detect_ado_repo',
 ]);
 
 /**
@@ -112,6 +132,83 @@ describe('network gate coverage', () => {
       Array.from(leaked, ([fn, cmd]) => `${fn} -> ${cmd}`),
       'these reached the network with offline mode on',
     ).to.deep.equal([]);
+  });
+
+  it('offline mode does not block commands that never leave the machine', async () => {
+    // Routing a local read through the provider wrapper makes offline mode
+    // refuse something that never left the machine. The issue-template readers
+    // only `fs::read` well-known paths under the repo directory.
+    settingsStore.setState({ offlineMode: true, confirmNetworkOps: false, remoteAllowlist: [] });
+
+    const localCalls: Array<{ name: string; command: string; run: () => Promise<unknown> }> = [
+      {
+        name: 'getIssueTemplates',
+        command: 'get_issue_templates',
+        run: () => gitService.getIssueTemplates('/repo'),
+      },
+      {
+        name: 'getIssueTemplateContent',
+        command: 'get_issue_template_content',
+        run: () => gitService.getIssueTemplateContent('/repo', '.github/ISSUE_TEMPLATE/bug.md'),
+      },
+      { name: 'lfsPrune', command: 'lfs_prune', run: () => gitService.lfsPrune('/repo') },
+      {
+        name: 'initSubmodules',
+        command: 'init_submodules',
+        run: () => gitService.initSubmodules('/repo'),
+      },
+      {
+        name: 'syncSubmodules',
+        command: 'sync_submodules',
+        run: () => gitService.syncSubmodules('/repo'),
+      },
+      {
+        name: 'getRemoteStatus',
+        command: 'get_remote_status',
+        run: () => gitService.getRemoteStatus('/repo'),
+      },
+    ];
+
+    const blocked: string[] = [];
+    for (const local of localCalls) {
+      invoked.length = 0;
+      try {
+        await local.run();
+      } catch {
+        /* ignore */
+      }
+      if (!invoked.includes(local.command)) blocked.push(`${local.name} -> ${local.command}`);
+    }
+
+    expect(blocked, 'these are local reads and must not be gated').to.deep.equal([]);
+  });
+
+  it('every command in LOCAL_COMMANDS is absent from NETWORK_COMMANDS', () => {
+    const both = [...LOCAL_COMMANDS].filter((c) => NETWORK_COMMANDS.has(c));
+    expect(both, 'a command cannot be both local and network').to.deep.equal([]);
+  });
+
+  it('a configured allowlist does not refuse provider APIs on the allowed host', async () => {
+    // Failing closed is right for a git remote and wrong for a provider call,
+    // which has no repo-relative remote to resolve. Passing repoPath: null with
+    // no host made EVERY provider API refuse the moment any allowlist existed.
+    settingsStore.setState({ offlineMode: false, remoteAllowlist: ['github.com'] });
+
+    invoked.length = 0;
+    const result = await gitService.listPullRequests('owner', 'repo');
+
+    expect(result.success, 'a github.com allowlist permits GitHub APIs').to.not.equal(false);
+    expect(invoked.includes('list_pull_requests')).to.equal(true);
+  });
+
+  it('a configured allowlist still refuses a provider on a host not on the list', async () => {
+    settingsStore.setState({ offlineMode: false, remoteAllowlist: ['github.com'] });
+
+    invoked.length = 0;
+    const result = await gitService.listGitLabIssues('https://gitlab.com', 'g/p');
+
+    expect(result.success, 'gitlab.com is not on the list').to.equal(false);
+    expect(invoked.includes('list_gitlab_issues')).to.equal(false);
   });
 
   it('the same sweep does reach those commands when offline mode is off', async () => {
