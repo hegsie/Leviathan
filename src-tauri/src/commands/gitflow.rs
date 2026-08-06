@@ -169,12 +169,31 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     let branch = repo.branch(&branch_name, &commit, false)?;
     let reference = branch.get();
 
-    // Checkout the new branch
-    let obj = reference.peel(git2::ObjectType::Commit)?;
-    repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().map_err(|_| {
-        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
-    })?)?;
+    // Checkout the new branch. The checkout is fallible — a dirty file whose
+    // content differs between the two branches conflicts — and the ref already
+    // exists by now, so a failure is rolled back: otherwise the panel shows an
+    // error while the refs watcher makes the branch appear in the sidebar, and
+    // a retry dead-ends on "already exists". create_branch does the same.
+    //
+    // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
+    // so post-checkout fires there. branch.rs fires it for every checkout.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+    let switch = (|| -> Result<()> {
+        let obj = reference.peel(git2::ObjectType::Commit)?;
+        repo.checkout_tree(&obj, None)?;
+        repo.set_head(reference.name().map_err(|_| {
+            LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+        })?)?;
+        Ok(())
+    })();
+    if let Err(e) = switch {
+        if let Ok(mut created) = repo.find_branch(&branch_name, git2::BranchType::Local) {
+            let _ = created.delete();
+        }
+        return Err(e);
+    }
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     Ok(Branch {
         name: branch_name.clone(),
@@ -309,10 +328,19 @@ pub async fn gitflow_finish_feature(
         .find_branch(&develop, git2::BranchType::Local)
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
+    // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
+    // so post-checkout fires there. branch.rs fires it for every checkout.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+    // post-checkout — see gitflow_finish_feature.
+    let old_head_develop = crate::commands::hooks::head_oid_string(&repo);
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
+    let new_head_develop = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head_develop, &new_head_develop, true);
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     // Merge feature into develop
     let annotated_commit = repo.find_annotated_commit(feature_commit.id())?;
@@ -347,6 +375,12 @@ pub async fn gitflow_finish_feature(
                 &[&develop_commit],
             )?;
             repo.cleanup_state()?;
+            // post-merge — see gitflow_finish_feature.
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            // git runs post-merge after a merge commit (flag 0 = not a squash
+            // merge). merge.rs fires it; gitflow reimplements the merge inline
+            // and fired nothing.
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
         }
     } else {
         // Regular merge (no-ff)
@@ -371,6 +405,12 @@ pub async fn gitflow_finish_feature(
             let message = format!("Merge branch '{}' into {}", branch_name, develop);
             repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
             repo.cleanup_state()?;
+            // post-merge — see gitflow_finish_feature.
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            // git runs post-merge after a merge commit (flag 0 = not a squash
+            // merge). merge.rs fires it; gitflow reimplements the merge inline
+            // and fired nothing.
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
         }
     }
 
@@ -415,11 +455,25 @@ pub async fn gitflow_start_release(path: String, version: String) -> Result<Bran
     let branch = repo.branch(&branch_name, &commit, false)?;
     let reference = branch.get();
 
-    let obj = reference.peel(git2::ObjectType::Commit)?;
-    repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().map_err(|_| {
-        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
-    })?)?;
+    // Rolled back on a failed checkout, and fires post-checkout — see
+    // gitflow_start_feature.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+    let switch = (|| -> Result<()> {
+        let obj = reference.peel(git2::ObjectType::Commit)?;
+        repo.checkout_tree(&obj, None)?;
+        repo.set_head(reference.name().map_err(|_| {
+            LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+        })?)?;
+        Ok(())
+    })();
+    if let Err(e) = switch {
+        if let Ok(mut created) = repo.find_branch(&branch_name, git2::BranchType::Local) {
+            let _ = created.delete();
+        }
+        return Err(e);
+    }
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     Ok(Branch {
         name: branch_name.clone(),
@@ -496,10 +550,14 @@ async fn finish_release_like(
         .find_branch(&master, git2::BranchType::Local)
         .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
     let master_obj = master_branch.get().peel(git2::ObjectType::Commit)?;
+    // post-checkout — see gitflow_finish_feature.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
     repo.checkout_tree(&master_obj, None)?;
     repo.set_head(master_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     let annotated = repo.find_annotated_commit(release_commit.id())?;
     let (master_analysis, _) = repo.merge_analysis(&[&annotated])?;
@@ -529,6 +587,8 @@ async fn finish_release_like(
         let message = format!("Merge branch '{}' into {}", branch_name, master);
         let merge_oid = repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
         repo.cleanup_state()?;
+        // post-merge — see gitflow_finish_feature.
+        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
         Some(merge_oid)
     };
 
@@ -591,6 +651,8 @@ async fn finish_release_like(
         let message = format!("Merge branch '{}' into {}", branch_name, develop);
         repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
         repo.cleanup_state()?;
+        // post-merge — see gitflow_finish_feature.
+        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
     }
 
     // Delete release branch
@@ -634,11 +696,25 @@ pub async fn gitflow_start_hotfix(path: String, version: String) -> Result<Branc
     let branch = repo.branch(&branch_name, &commit, false)?;
     let reference = branch.get();
 
-    let obj = reference.peel(git2::ObjectType::Commit)?;
-    repo.checkout_tree(&obj, None)?;
-    repo.set_head(reference.name().map_err(|_| {
-        LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
-    })?)?;
+    // Rolled back on a failed checkout, and fires post-checkout — see
+    // gitflow_start_feature.
+    let old_head = crate::commands::hooks::head_oid_string(&repo);
+    let switch = (|| -> Result<()> {
+        let obj = reference.peel(git2::ObjectType::Commit)?;
+        repo.checkout_tree(&obj, None)?;
+        repo.set_head(reference.name().map_err(|_| {
+            LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
+        })?)?;
+        Ok(())
+    })();
+    if let Err(e) = switch {
+        if let Ok(mut created) = repo.find_branch(&branch_name, git2::BranchType::Local) {
+            let _ = created.delete();
+        }
+        return Err(e);
+    }
+    let new_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
     Ok(Branch {
         name: branch_name.clone(),
@@ -733,6 +809,105 @@ mod tests {
                 err
             );
         }
+    }
+
+    /// libgit2 runs no hooks; the app fires them at hand-picked sites.
+    /// merge.rs and branch.rs were instrumented, gitflow.rs — which
+    /// reimplements both operations inline — was not, so a post-checkout hook
+    /// that sets up the environment ran for every checkout EXCEPT the git-flow
+    /// ones. Canonical `git flow` shells out to git, so all of these fire.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_gitflow_start_feature_runs_post_checkout_hook() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let marker = repo.path.join("post-checkout.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!("#!/bin/sh\necho \"$3\" > {}\n", marker.display()),
+        );
+
+        gitflow_start_feature(repo.path_str(), "hooked".to_string())
+            .await
+            .expect("start feature");
+
+        let logged = std::fs::read_to_string(&marker).expect("post-checkout must run");
+        assert_eq!(
+            logged.trim(),
+            "1",
+            "flag must be 1 (branch checkout, not file checkout)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_gitflow_finish_feature_runs_post_merge_hook() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "hooked".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("feature work", &[("feature.txt", "work\n")]);
+
+        let marker = repo.path.join("post-merge.log");
+        repo.install_hook(
+            "post-merge",
+            &format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display()),
+        );
+
+        gitflow_finish_feature(repo.path_str(), "hooked".to_string(), None, None)
+            .await
+            .expect("finish feature");
+
+        let logged = std::fs::read_to_string(&marker).expect("post-merge must run");
+        assert_eq!(logged.trim(), "0", "flag must be 0 (not a squash merge)");
+    }
+
+    /// The ref exists before the fallible checkout. Without a rollback the
+    /// panel showed an error while the refs watcher made the branch appear in
+    /// the sidebar, and a retry dead-ended on "already exists".
+    #[tokio::test]
+    async fn test_gitflow_start_rolls_back_when_the_checkout_fails() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Put develop and the current branch at different content for one file,
+        // then dirty that file so the SAFE checkout conflicts.
+        let git = repo.repo();
+        let head_name = git.head().unwrap().name().unwrap().to_string();
+        git.set_head("refs/heads/develop").unwrap();
+        git.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        repo.create_commit("develop side", &[("shared.txt", "develop\n")]);
+
+        let git = repo.repo();
+        git.set_head(&head_name).unwrap();
+        git.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        repo.create_file("shared.txt", "my unsaved work\n");
+
+        let result = gitflow_start_feature(repo.path_str(), "rollback".to_string()).await;
+
+        if result.is_err() {
+            assert!(
+                repo.repo()
+                    .find_branch("feature/rollback", git2::BranchType::Local)
+                    .is_err(),
+                "a failed start must not leave the branch behind"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("shared.txt")).unwrap(),
+            "my unsaved work\n",
+            "the uncommitted work survives either way"
+        );
     }
 
     /// A preventDeletion rule must survive a git-flow finish. These finishes
