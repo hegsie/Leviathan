@@ -516,6 +516,17 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
         ));
     }
 
+    // The Hooks dialog advertises pre-rebase as "Run before rebase. Can prevent
+    // the rebase", and it does fire for Interactive rebase / Reword / non-HEAD
+    // Amend, because those shell out to `git rebase -i` and git runs it. This
+    // libgit2 path ran no hooks at all — libgit2 never does — so one repo with
+    // one enabled hook had two Rebase buttons, one honouring the veto and one
+    // silently ignoring it. Placed after the dirty-tree checks and before any
+    // repository state is created, so a refusal leaves nothing behind. git
+    // passes <upstream> [<branch>]; the single-argument form is the
+    // current-branch invocation.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-rebase", &[&onto], None)?;
+
     // Find the onto commit
     let onto_ref = repo
         .find_reference(&format!("refs/heads/{}", onto))
@@ -788,6 +799,34 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
 #[command]
 pub async fn abort_rebase(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Same CLI branch continue_rebase has. libgit2 refuses to open an
+    // interactive rebase at all — rebase.c returns "interactive rebase is not
+    // supported" — so `open_rebase` failed for every rebase started through
+    // execute_interactive_rebase. That made Abort impossible from the banner,
+    // from the trigger-abort toast action, and from the conflict dialog, which
+    // renders no × and suppresses Escape: its only other control is Continue,
+    // disabled until every conflict is resolved. A user who opened it on an
+    // interactive-rebase conflict and did not want to finish was trapped in a
+    // modal with no working exit, and reset is refused mid-rebase too.
+    if repo.path().join("rebase-merge/git-rebase-todo").exists() {
+        let output = create_command("git")
+            .current_dir(&path)
+            // As continue_rebase_cli: no editor is reachable from a GUI child
+            // process, and the C locale keeps any error matching meaningful.
+            .env("GIT_EDITOR", "true")
+            .env("LC_ALL", "C")
+            .args(["rebase", "--abort"])
+            .output()
+            .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(LeviathanError::OperationFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
     let mut rebase = repo.open_rebase(None)?;
     rebase.abort()?;
     Ok(())
@@ -2544,6 +2583,87 @@ mod tests {
             commits[0].body.contains("Fixes #4412"),
             "the body must cross the boundary, or the editor cannot show it"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_be_aborted() {
+        // libgit2 refuses to OPEN an interactive rebase ("interactive rebase is
+        // not supported"), so open_rebase failed for every rebase started
+        // through execute_interactive_rebase — making Abort impossible from the
+        // banner, the toast action, and the conflict dialog, which renders no ×
+        // and suppresses Escape. continue_rebase has had the CLI branch since it
+        // was written; abort never got it.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        let branch_before = repo.current_branch();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+        let head_before = repo.head_oid();
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        // An `edit` line pauses the rebase, which is the state Abort exists for.
+        let todo = format!("edit {}\npick {}\n", commits[0].oid, commits[1].oid);
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base, todo)
+            .await
+            .expect("the rebase itself runs");
+        assert!(outcome.paused, "paused at the edit line");
+
+        abort_rebase(repo.path_str())
+            .await
+            .expect("an interactive rebase must be abortable");
+
+        let after = repo.repo();
+        assert_eq!(
+            after.state(),
+            git2::RepositoryState::Clean,
+            "the repository is no longer mid-rebase"
+        );
+        assert_eq!(
+            after.head().unwrap().target().unwrap(),
+            head_before,
+            "and HEAD is back where it started"
+        );
+        assert_eq!(
+            repo.current_branch(),
+            branch_before,
+            "on the original branch"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_rebase_pre_rebase_hook_can_refuse() {
+        // The Hooks dialog advertises pre-rebase as "Can prevent the rebase",
+        // and it does fire for Interactive rebase (git runs it). This libgit2
+        // path ran no hooks, so the same enabled hook vetoed one Rebase button
+        // and was silently ignored by the other.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("a.txt", "a")]);
+        let head_before = repo.head_oid();
+
+        repo.install_hook("pre-rebase", "#!/bin/sh\nexit 1\n");
+
+        let err = rebase(repo.path_str(), main_branch)
+            .await
+            .expect_err("the hook must be able to refuse");
+        assert!(
+            format!("{}", err).to_lowercase().contains("pre-rebase"),
+            "and say which hook: {}",
+            err
+        );
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "a refusal leaves no rebase state behind"
+        );
+        assert_eq!(repo.head_oid(), head_before, "and HEAD unmoved");
     }
 
     #[tokio::test]
