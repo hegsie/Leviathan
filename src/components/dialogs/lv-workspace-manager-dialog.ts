@@ -680,7 +680,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
   @state() private workspaces: Workspace[] = [];
   @state() private selectedWorkspaceId: string | null = null;
   @state() private repoStatuses: Map<string, WorkspaceRepoStatus> = new Map();
-  @state() private batchRunning = false;
+  /** Which batch is running, so the button the user pressed reports it —
+   *  a shared boolean made Fetch All read "Running..." during a Pull All. */
+  @state() private batchRunning: 'fetch' | 'pull' | null = null;
   @state() private deletingWorkspace = false;
   @state() private removingRepoPath: string | null = null;
   @state() private statusLoading = false;
@@ -896,7 +898,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws) return;
 
-    this.batchRunning = true;
+    this.batchRunning = 'fetch';
     let successCount = 0;
     let failCount = 0;
     // A security-gate refusal is not a failure: with offline mode on, every
@@ -925,7 +927,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
       }
     }
 
-    this.batchRunning = false;
+    this.batchRunning = null;
     showToast(
       `Fetch all: ${successCount} succeeded` +
         (failCount > 0 ? `, ${failCount} failed` : '') +
@@ -944,7 +946,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws) return;
 
-    this.batchRunning = true;
+    this.batchRunning = 'pull';
     let successCount = 0;
     // Named, not just counted: "2 failed" across a 10-repo workspace gave the
     // user nothing to act on.
@@ -987,7 +989,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
     }
 
     const failCount = failed.length;
-    this.batchRunning = false;
+    this.batchRunning = null;
     showToast(
       `Pull all: ${successCount} succeeded` +
         (conflicted.length > 0
@@ -1422,17 +1424,17 @@ export class LvWorkspaceManagerDialog extends LitElement {
                         <div class="batch-ops">
                           <button
                             class="batch-btn"
-                            ?disabled=${this.batchRunning}
+                            ?disabled=${this.batchRunning !== null}
                             @click=${this.handleFetchAll}
                           >
-                            ${this.batchRunning ? 'Running...' : 'Fetch All'}
+                            ${this.batchRunning === 'fetch' ? 'Running...' : 'Fetch All'}
                           </button>
                           <button
                             class="batch-btn"
-                            ?disabled=${this.batchRunning}
+                            ?disabled=${this.batchRunning !== null}
                             @click=${this.handlePullAll}
                           >
-                            Pull All
+                            ${this.batchRunning === 'pull' ? 'Running...' : 'Pull All'}
                           </button>
                           <button
                             class="batch-btn"

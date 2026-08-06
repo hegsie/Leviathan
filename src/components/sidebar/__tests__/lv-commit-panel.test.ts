@@ -31,6 +31,7 @@ import { expect, fixture, html } from '@open-wc/testing';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import type { LvCommitPanel } from '../lv-commit-panel.ts';
 import '../lv-commit-panel.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -828,6 +829,34 @@ describe('lv-commit-panel', () => {
       expect((unstage!.args as { paths: string[] }).paths).to.deep.equal(['c.ts', 'z.ts']);
       expect(stage, 'stages this group').to.exist;
       expect((stage!.args as { paths: string[] }).paths).to.deep.equal(['a.ts', 'b.ts']);
+    });
+  });
+
+  describe('amend when HEAD cannot be read', () => {
+    it('reports the failure and un-arms the checkbox', async () => {
+      // invokeCommand never throws, so the `catch` under this call is dead code
+      // and the no-else branch was the real failure path. It left `amend` true
+      // with `lastCommit` null — a state the label and the Commit button cannot
+      // tell from a healthy one, since canCommit is satisfied by `amend` alone.
+      // The user learned it had failed only after pressing Commit.
+      const el = await renderCommitPanel(0);
+      mockInvoke = async (command: string) => {
+        if (command === 'get_commit_history') {
+          throw { code: 'COMMAND_ERROR', message: 'HEAD points at a missing ref' };
+        }
+        return null;
+      };
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).fetchLastCommitMessage();
+      await el.updateComplete;
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the failure is surfaced').to.equal(1);
+      expect(errors[0].message).to.contain('missing ref');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).amend, 'and the checkbox is not left armed').to.equal(false);
     });
   });
 });

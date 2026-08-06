@@ -13,7 +13,7 @@ use crate::error::Result;
 /// silently destroying the in-progress operation. Mirror git by refusing.
 /// (A plain single-op Merge / CherryPick / Revert is intentionally allowed:
 /// `git reset` is the documented way to abort those.)
-fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
+pub(crate) fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
     use git2::RepositoryState::*;
     match repo.state() {
         Rebase | RebaseInteractive | RebaseMerge | ApplyMailbox | ApplyMailboxOrRebase => {

@@ -19,6 +19,7 @@ const invoked: string[] = [];
 let confirmCount = 0;
 /** Resolves the pending confirm; while set, confirms hang. */
 let releaseConfirm: (() => void) | null = null;
+let statusEntries: unknown[] = [];
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: async (command: string) => {
@@ -32,6 +33,7 @@ let releaseConfirm: (() => void) | null = null;
       }
       return 'Ok';
     }
+    if (command === 'get_status') return statusEntries;
     if (command === 'get_worktrees') return [];
     if (command === 'get_submodules') return [];
     if (command === 'get_remotes') return [];
@@ -49,6 +51,7 @@ import '../lv-lfs-dialog.ts';
 import '../lv-remote-dialog.ts';
 import '../lv-workspace-manager-dialog.ts';
 import '../lv-reflog-dialog.ts';
+import '../../sidebar/lv-file-status.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -75,6 +78,7 @@ describe('destructive buttons claim their guard before the confirm', () => {
     invoked.length = 0;
     confirmCount = 0;
     releaseConfirm = null;
+    statusEntries = [];
   });
 
   it('worktree removal', async () => {
@@ -143,6 +147,29 @@ describe('destructive buttons claim their guard before the confirm', () => {
 
     expect(prompts).to.equal(1);
     expect(invoked.filter((c) => c === 'delete_workspace').length).to.equal(1);
+  });
+
+  it('the file-status discard controls', async () => {
+    // The row × and the "Discard" toolbar button stay on screen through the
+    // confirm — unlike the context menus, which close synchronously — so this
+    // component needed the claim too and was missed by the round-29 sweep.
+    statusEntries = [
+      { path: 'untracked.txt', status: 'untracked', isStaged: false, isConflicted: false },
+      { path: 'other.txt', status: 'untracked', isStaged: false, isConflicted: false },
+    ];
+    const el = await fixture<any>(
+      html`<lv-file-status .repositoryPath=${'/repo/a'}></lv-file-status>`,
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 50));
+    el.unstagedFiles = statusEntries;
+    el.selectedFiles = new Set(['untracked.txt', 'other.txt']);
+    await el.updateComplete;
+
+    const prompts = await doubleClick(() => el.handleDiscardSelected());
+
+    expect(prompts, 'one "permanently delete" prompt, not two').to.equal(1);
+    expect(invoked.filter((c) => c === 'discard_changes').length).to.equal(1);
   });
 
   it('reflog hard reset', async () => {

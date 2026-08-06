@@ -791,15 +791,25 @@ pub async fn abort_rebase(path: String) -> Result<()> {
 pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<RebaseCommit>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Find the onto commit
-    let onto_ref = repo
+    // Find the onto commit.
+    //
+    // `find_reference` is an EXACT refname lookup and validates the name, so it
+    // rejects any revspec. The graph's Reword and Amend entries route non-HEAD
+    // commits here as `<oid>^`, where `^` is illegal in a refname — all three
+    // lookups failed and the dialog opened showing "the given reference name
+    // '<oid>^' is not valid", an empty plan and a disabled Start Rebase, with
+    // no way to proceed. `execute_interactive_rebase` shells out to
+    // `git rebase -i <onto>` and has always accepted the revspec; only the
+    // listing could not resolve it. revparse_single closes that gap and is what
+    // git itself would do.
+    let onto_oid = match repo
         .find_reference(&format!("refs/heads/{}", onto))
         .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", onto)))
-        .or_else(|_| repo.find_reference(&onto))?;
-
-    let onto_oid = onto_ref
-        .target()
-        .ok_or_else(|| LeviathanError::InvalidReference)?;
+        .or_else(|_| repo.find_reference(&onto))
+    {
+        Ok(r) => r.target().ok_or(LeviathanError::InvalidReference)?,
+        Err(_) => repo.revparse_single(&onto)?.peel_to_commit()?.id(),
+    };
 
     let head_oid = repo
         .head()?
@@ -2374,6 +2384,38 @@ mod tests {
         for commit in &commits {
             assert_eq!(commit.action, "pick");
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_rebase_commits_accepts_a_revspec() {
+        // The graph's Reword and Amend entries route non-HEAD commits here as
+        // `<oid>^`. find_reference is an exact refname lookup and `^` is
+        // illegal in a refname, so the dialog opened empty and disabled with a
+        // raw libgit2 message and no way forward.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("second", &[("a.txt", "a")]);
+        repo.create_commit("third", &[("b.txt", "b")]);
+
+        let head_oid = repo.head_oid().to_string();
+
+        let commits = get_rebase_commits(repo.path_str(), format!("{}^", head_oid))
+            .await
+            .expect("a revspec must resolve, not error");
+
+        assert_eq!(commits.len(), 1, "just the tip, whose parent we asked for");
+        assert_eq!(commits[0].oid, head_oid);
+    }
+
+    #[tokio::test]
+    async fn test_get_rebase_commits_still_accepts_a_branch_name() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("a.txt", "a")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(commits.len(), 1);
     }
 
     #[tokio::test]

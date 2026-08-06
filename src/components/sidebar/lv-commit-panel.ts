@@ -1074,7 +1074,20 @@ export class LvCommitPanel extends LitElement {
         this.lastCommit = result.data[0];
         this.summary = this.lastCommit.summary;
         this.description = this.lastCommit.body ?? '';
+        return;
       }
+
+      // Without this the checkbox stayed ticked with lastCommit still null —
+      // a state the label and the Commit button cannot tell from a healthy
+      // one, since canCommit is satisfied by `amend` alone. The user then
+      // learned it had failed only after pressing Commit. (invokeCommand never
+      // throws, so this branch — not the catch below — is the real failure
+      // path: an unborn HEAD, or a ref deleted out from under the app.)
+      this.amend = false;
+      showToast(
+        result.error?.message ?? 'Could not read the last commit to amend',
+        'error'
+      );
     } catch (err) {
       console.error('Failed to fetch last commit:', err);
       showToast(`Failed to fetch last commit: ${err instanceof Error ? err.message : String(err)}`, 'error');

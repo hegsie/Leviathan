@@ -463,6 +463,28 @@ pub async fn push(
                     head.shorthand().unwrap_or("main").to_string()
                 };
 
+                // A `preventForcePush` rule was stored and read by nothing —
+                // only `preventDeletion` was ever enforced, so the field was
+                // decorative while the app grew a one-click Force Push action
+                // on the push-rejection toast. Checked here, in the command, for
+                // the same reason deletion is: every surface reaches this path,
+                // and none of them load the rules themselves.
+                //
+                // Propagated rather than defaulted, like delete_branch: a
+                // protection that fails open is worse than none.
+                if force_val || use_force_with_lease {
+                    let rules =
+                        crate::commands::branch_rules::load_rules(Path::new(&path_for_task))?;
+                    if crate::commands::branch_rules::is_force_push_prevented(&rules, &branch_name)
+                    {
+                        return Err(LeviathanError::OperationFailed(format!(
+                            "Branch \"{}\" is protected by a branch rule and cannot be \
+                             force-pushed. Remove the rule first.",
+                            branch_name
+                        )));
+                    }
+                }
+
                 if use_force_with_lease || use_push_tags {
                     push_via_cli(
                         &path_for_task,

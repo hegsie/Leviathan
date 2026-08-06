@@ -721,13 +721,25 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard(entries, dirPath))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard(entries, dirPath))) return;
 
-    const result = await gitService.discardChanges(repoPath, paths);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, paths);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
     }
   }
 
@@ -1041,6 +1053,8 @@ export class LvFileStatus extends LitElement {
    * signal bumps `statusDirtySeq`; a load records which generation it observed,
    * so a signal that arrives mid-flight still leaves the two unequal. */
   private statusLoadedForPath: string | null = null;
+  /** Re-entrancy guard for the discard controls; see handleDiscardFile. */
+  @state() private discarding = false;
   private statusDirtySeq = 1;
   private statusCleanSeq = 0;
   /** The load currently in flight, so a caller can await it instead of racing. */
@@ -1414,15 +1428,25 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard([file]))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard([file]))) return;
 
-    const result = await gitService.discardChanges(repoPath, [
-      file.path,
-    ]);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, [file.path]);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
     }
   }
 
@@ -1552,16 +1576,28 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard(entries))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard(entries))) return;
 
-    const result = await gitService.discardChanges(repoPath, paths);
-    if (result.success) {
-      const newSelected = new Set(this.selectedFiles);
-      paths.forEach((p) => newSelected.delete(p));
-      this.selectedFiles = newSelected;
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, paths);
+      if (result.success) {
+        const newSelected = new Set(this.selectedFiles);
+        paths.forEach((p) => newSelected.delete(p));
+        this.selectedFiles = newSelected;
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
     }
   }
 
@@ -1678,14 +1714,25 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard([file]))) return;
-    const result = await gitService.discardChanges(repoPath, [
-      file.path,
-    ]);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard([file]))) return;
+
+      const result = await gitService.discardChanges(repoPath, [file.path]);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
     }
   }
 
@@ -1770,6 +1817,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard changes"
                   aria-label="Discard changes for ${name}"
+                  ?disabled=${this.discarding}
                   @click=${(e: Event) => this.handleDiscardFile(file, e)}
                 >
                   <svg
@@ -1864,6 +1912,7 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="file-action"
                     title="Discard changes"
+                    ?disabled=${this.discarding}
                     @click=${(e: Event) => this.handleDiscardFile(file, e)}
                   >
                     <svg
@@ -1963,6 +2012,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard directory changes"
                   aria-label="Discard changes for directory ${path}"
+                  ?disabled=${this.discarding}
                   @click=${(e: Event) => this.handleDiscardDirectory(path, e)}
                 >
                   <svg
@@ -2039,6 +2089,7 @@ export class LvFileStatus extends LitElement {
               </button>
               <button
                 class="selection-action-btn danger"
+                ?disabled=${this.discarding}
                 @click=${() => this.handleDiscardSelected()}
                 title="Discard selected files"
               >

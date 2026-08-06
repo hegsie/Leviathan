@@ -202,6 +202,24 @@ describe('workspace batch operations and the security gate', () => {
     expect(summary).to.contain('skipped by security settings');
   });
 
+  it('the button you pressed is the one that reports progress', async () => {
+    // batchRunning was a shared boolean and only the Fetch All label read it,
+    // so a Pull All over a ten-repo workspace made Fetch All say "Running..."
+    // for a minute while claiming the wrong operation.
+    const el = await dialogWithWorkspace();
+    (el as any).batchRunning = 'pull';
+    await el.updateComplete;
+
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.batch-btn')).map(
+      (b) => b.textContent?.trim() ?? '',
+    );
+    expect(labels.filter((t) => t === 'Running...').length, 'exactly one claim').to.equal(1);
+    const fetchBtn = Array.from(el.shadowRoot!.querySelectorAll('.batch-btn')).find((b) =>
+      /Fetch All/.test(b.textContent ?? ''),
+    );
+    expect(fetchBtn, 'Fetch All keeps its own label').to.not.be.undefined;
+  });
+
   it('a clean run still reports plain success', async () => {
     const el = await dialogWithWorkspace();
     uiStore.setState({ toasts: [] });
