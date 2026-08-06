@@ -336,8 +336,60 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('reword and amend refuse a merge commit', () => {
+    // get_rebase_commits skips merge commits (a `pick` of one dies
+    // mid-rebase), so the plan loaded for `<merge>^` contains every commit in
+    // `<merge>^..HEAD` EXCEPT the one the user asked to reword — including the
+    // merged-in side branch — with Start Rebase enabled. One click would
+    // linearize that range onto the merge's first parent, destroying the merge
+    // and rewriting the side branch, from a gesture that promised only to
+    // change a message.
+    for (const handler of ['handleRewordCommit', 'handleQuickAmend']) {
+      it(`${handler} never opens the rebase dialog for a merge commit`, async () => {
+        mockResponses['get_commit_history'] = () => [commit('headoid')];
+        mockResponses['is_ancestor_of_head'] = () => true;
+        const el = shellOnRepo();
+        const merge = { ...commit('mergeoid'), parentIds: ['p1', 'p2'], shortId: 'mergeoi' };
+        (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: merge };
+
+        let opened = false;
+        Object.defineProperty(el, 'interactiveRebaseDialog', {
+          configurable: true,
+          get: () => ({ open: () => { opened = true; } }),
+        });
+        uiStore.setState({ toasts: [] });
+
+        await (el as any)[handler]();
+
+        expect(opened, 'an armed rebase plan that omits the target').to.equal(false);
+        expect(
+          uiStore.getState().toasts.some((t) => t.message.includes('merge commit')),
+          'the refusal must say why',
+        ).to.equal(true);
+      });
+    }
+
+    it('still opens the rebase dialog for an ordinary commit', async () => {
+      mockResponses['get_commit_history'] = () => [commit('headoid')];
+      mockResponses['is_ancestor_of_head'] = () => true;
+      const el = shellOnRepo();
+      const ordinary = { ...commit('olderoid'), parentIds: ['p1'], shortId: 'olderoi' };
+      (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: ordinary };
+
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        get: () => ({ open: () => { opened = true; } }),
+      });
+
+      await (el as any).handleRewordCommit();
+
+      expect(opened).to.equal(true);
+    });
+  });
+
   describe('the graph ref menu serializes its own operations', () => {
-    // refOperationInFlight was introduced to stop Merge and Rebase racing each
+    // The ref lock was introduced to stop Merge and Rebase racing each
     // other; delete-branch, delete-tag and push-tag were never folded in, so
     // any of them could run concurrently with a still-running merge or rebase
     // against the same working tree. There is no per-repo lock in the backend —
@@ -359,7 +411,7 @@ describe('app-shell destructive guards', () => {
         mockResponses['plugin:dialog|message'] = () => 'Ok';
         const el = shellOnRepo();
         (el as any).refContextMenu = { visible: true, x: 0, y: 0, fullName: '', ...menu };
-        (el as any).refOperationInFlight = true;
+        (el as any).refOperationsInFlight = new Set(['/repo/one']);
         invokeCallArgs.length = 0;
 
         await (el as any)[handler]();
@@ -379,11 +431,34 @@ describe('app-shell destructive guards', () => {
         await (el as any)[handler]();
 
         expect(
-          (el as any).refOperationInFlight,
+          (el as any).refOperationsInFlight.has('/repo/one'),
           'released, or the menu wedges for the rest of the session',
         ).to.equal(false);
       });
     }
+
+    it('an operation in one repo does not lock another open repo', async () => {
+      // The lock used to be a single boolean, so a rebase running in one repo
+      // tab greyed out every mutating control in EVERY other open repo — with
+      // no banner to explain why, because those repos are clean. Separate
+      // repos have separate working trees and nothing to serialize against.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo();
+      (el as any).refOperationsInFlight = new Set(['/repo/two']);
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '', refType: 'localBranch', refName: 'feature',
+      };
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleRefDeleteBranch();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'delete_branch'),
+        'an in-flight operation in the other repo must not block this one',
+      ).to.equal(true);
+      expect((el as any).isRefOperationInFlight(), 'the menu is usable').to.equal(false);
+    });
 
     it('a declined confirm releases the flag', async () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
@@ -395,7 +470,7 @@ describe('app-shell destructive guards', () => {
 
       await (el as any).handleRefDeleteBranch();
 
-      expect((el as any).refOperationInFlight).to.equal(false);
+      expect((el as any).refOperationsInFlight.has('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'delete_branch')).to.equal(false);
     });
   });
@@ -624,7 +699,7 @@ describe('app-shell destructive guards', () => {
           visible: true, x: 0, y: 0,
           commit: { ...commit('olderoid'), parentIds: ['parentoid'] },
         };
-        (el as any).refOperationInFlight = true;
+        (el as any).refOperationsInFlight = new Set(['/repo/one']);
         invokeCallArgs.length = 0;
 
         await (el as any)[methods[label]](...args());
@@ -649,7 +724,7 @@ describe('app-shell destructive guards', () => {
         await (el as any)[methods[label]](...args());
 
         expect(
-          (el as any).refOperationInFlight,
+          (el as any).refOperationsInFlight.has('/repo/one'),
           'or the whole graph menu wedges for the session',
         ).to.equal(false);
       });
@@ -665,7 +740,7 @@ describe('app-shell destructive guards', () => {
       document.body.appendChild(el);
       try {
         (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
-        (el as any).refOperationInFlight = true;
+        (el as any).refOperationsInFlight = new Set(['/repo/one']);
         await (el as any).updateComplete;
 
         const items = Array.from(
@@ -695,7 +770,7 @@ describe('app-shell destructive guards', () => {
       // The third checkout surface — round 33 folded the ref menu's and the
       // graph label's into this lock and left the palette's out.
       const el = shellOnRepo();
-      (el as any).refOperationInFlight = true;
+      (el as any).refOperationsInFlight = new Set(['/repo/one']);
       invokeCallArgs.length = 0;
 
       await (el as any).handleCheckoutBranch(
@@ -716,7 +791,7 @@ describe('app-shell destructive guards', () => {
         new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
       );
 
-      expect((el as any).refOperationInFlight).to.equal(false);
+      expect((el as any).refOperationsInFlight.has('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
     });
   });

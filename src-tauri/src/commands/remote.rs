@@ -210,6 +210,61 @@ pub async fn fetch(
     }
 }
 
+/// Fast-forward `refname` to `target_oid`, checking out the target tree first.
+///
+/// The checkout is SAFE (git2's default), not forced, and the ref only moves
+/// once it succeeded — exactly what `merge()`'s fast-forward path does. This
+/// used to `checkout_head` with `.force()` AFTER moving the ref:
+/// `GIT_CHECKOUT_FORCE` overwrites modified files, so a pull onto a branch
+/// with an uncommitted edit to a file the incoming commits touch silently
+/// destroyed that edit — content that is in no git object and has no reflog to
+/// recover it. git itself refuses such a fast-forward.
+fn fast_forward_to(repo: &git2::Repository, refname: &str, target_oid: git2::Oid) -> Result<()> {
+    let target_commit = repo.find_commit(target_oid)?;
+
+    // Collect the conflicting paths so the error can name them, like git's own
+    // "Your local changes to the following files ..." message.
+    let conflict_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let notify_paths = std::rc::Rc::clone(&conflict_paths);
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout
+        .notify_on(git2::CheckoutNotificationType::CONFLICT)
+        .notify(move |_why, path, _baseline, _target, _workdir| {
+            if let Some(p) = path {
+                notify_paths.borrow_mut().push(p.display().to_string());
+            }
+            true
+        });
+
+    match repo.checkout_tree(target_commit.as_object(), Some(&mut checkout)) {
+        Ok(()) => {}
+        Err(e) if e.code() == git2::ErrorCode::Conflict => {
+            let files = conflict_paths.borrow().join(", ");
+            return Err(LeviathanError::OperationFailed(if files.is_empty() {
+                "Your local changes would be overwritten by merge. \
+                 Commit or stash them before you pull."
+                    .to_string()
+            } else {
+                format!(
+                    "Your local changes to the following files would be overwritten by \
+                     merge: {}. Commit or stash them before you pull.",
+                    files
+                )
+            }));
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    let mut reference = repo.find_reference(refname)?;
+    reference.set_target(target_oid, "Fast-forward")?;
+    repo.set_head(refname)?;
+
+    // git runs post-merge after a fast-forward too (flag 0 = not a squash
+    // merge). merge() fires it; this path did not.
+    crate::commands::hooks::run_hook_noblock(repo, "post-merge", &["0"]);
+    Ok(())
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -298,10 +353,7 @@ pub async fn pull(
                         message = "Already up to date".to_string();
                     } else if analysis.is_fast_forward() {
                         let refname = format!("refs/heads/{}", branch_name);
-                        let mut reference = repo.find_reference(&refname)?;
-                        reference.set_target(fetch_commit.id(), "Fast-forward")?;
-                        repo.set_head(&refname)?;
-                        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+                        fast_forward_to(&repo, &refname, fetch_commit.id())?;
                         message = "Fast-forward merge completed".to_string();
                     } else {
                         // Normal merge. Anything that fails AFTER repo.merge()
@@ -1047,6 +1099,129 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- fast-forward pull must not overwrite uncommitted work ----
+
+    /// Build a repo whose `main` is one commit behind `refs/heads/incoming`,
+    /// where the incoming commit touches `tracked.txt`.
+    fn repo_behind_by_one() -> (TestRepo, git2::Oid) {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        let base = test_repo
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        let incoming = test_repo.create_commit("incoming", &[("tracked.txt", "incoming\n")]);
+        let repo = test_repo.repo();
+        repo.reference("refs/heads/incoming", incoming, true, "test")
+            .unwrap();
+
+        // Put main (and the working tree) back on `base`.
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let refname = format!("refs/heads/{}", branch);
+        repo.find_reference(&refname)
+            .unwrap()
+            .set_target(base, "test")
+            .unwrap();
+        repo.set_head(&refname).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        (test_repo, incoming)
+    }
+
+    #[test]
+    fn test_fast_forward_refuses_when_a_touched_file_is_dirty() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        // Uncommitted edit to the very file the incoming commit changes.
+        test_repo.create_file("tracked.txt", "my unsaved work\n");
+
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+        let before = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let err = fast_forward_to(&repo, &refname, incoming)
+            .expect_err("a forced checkout would have destroyed the edit");
+        let message = err.to_string();
+        assert!(
+            message.contains("would be overwritten") && message.contains("tracked.txt"),
+            "the error must name the file, got: {}",
+            message
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "my unsaved work\n",
+            "the uncommitted edit is in no git object — losing it is unrecoverable"
+        );
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            before,
+            "the branch must not move when the checkout was refused"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_succeeds_with_a_clean_tree() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+
+        fast_forward_to(&repo, &refname, incoming).expect("clean tree fast-forwards");
+
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            incoming
+        );
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "incoming\n"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_keeps_an_unrelated_dirty_file() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        // Dirty, but not a file the incoming commit touches — git allows this.
+        test_repo.create_commit("other", &[("other.txt", "committed\n")]);
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+        // Re-point main back to the base of the incoming commit.
+        let base = repo.find_commit(incoming).unwrap().parent(0).unwrap().id();
+        repo.find_reference(&refname)
+            .unwrap()
+            .set_target(base, "test")
+            .unwrap();
+        repo.set_head(&refname).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        test_repo.create_file("other.txt", "uncommitted\n");
+
+        fast_forward_to(&test_repo.repo(), &refname, incoming)
+            .expect("an unrelated dirty file must not block the fast-forward");
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("other.txt")).unwrap(),
+            "uncommitted\n",
+            "the unrelated edit survives"
+        );
+    }
 
     // ---- pre-push hook parity (git2 push path) ----
 

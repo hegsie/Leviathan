@@ -524,7 +524,7 @@ describe('app-shell remote-operation feedback', () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Ok';
       mockResponses['plugin:dialog|message'] = () => 'Ok';
       const el = await refMenuShell();
-      (el as any).refOperationInFlight = true;
+      (el as any).refOperationsInFlight = new Set([(el as any).activeRepository.repository.path]);
 
       await (el as any).handleRefRebase();
 

@@ -940,6 +940,45 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(commits[0].newMessage).to.equal((el as any).fullMessage(commits[0]));
     });
 
+    it('refuses to arm a rebase when the reword target is not in the plan', async () => {
+      // get_rebase_commits skips merge commits, so a reword of one loads a plan
+      // that contains every OTHER commit in range. The seeding .map() matched
+      // nothing and silently no-opped, leaving Start Rebase enabled on a plan
+      // that would linearize the range and destroy the merge.
+      setupDefaultMocks(mockCommits);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'not-in-the-plan' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start, 'the Start Rebase button is rendered').to.not.be.undefined;
+      expect(start.disabled, 'one click here would rewrite history the user never chose')
+        .to.equal(true);
+
+      const warning = el.shadowRoot!.querySelector('.warning-message');
+      expect(warning, 'the user is told why').to.not.be.null;
+      expect(warning!.textContent).to.contain('cannot be reworded by rebase');
+    });
+
+    it('arms the rebase normally when the reword target IS in the plan', async () => {
+      setupDefaultMocks(mockCommits);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'aaa1111111111' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start.disabled).to.equal(false);
+      expect(el.shadowRoot!.querySelector('.warning-message')).to.be.null;
+    });
+
     it('switching the dropdown to reword also seeds the full message', async () => {
       const withBody = [
         {

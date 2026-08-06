@@ -479,6 +479,8 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private executing = false;
   @state() private error = '';
   @state() private warning = '';
+  /** Set when open() was given a reword target the loaded plan does not contain. */
+  @state() private rewordTargetMissing = false;
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
@@ -544,6 +546,18 @@ export class LvInteractiveRebaseDialog extends LitElement {
     // no message at all. Seeding with the current summary means an untouched
     // textarea is a no-op, and any edit takes effect.
     if (options?.rewordCommitOid) {
+      // A .map() that matches nothing is a silent no-op, and the plan it leaves
+      // behind still rebases every OTHER commit in range — so an unmatched
+      // target (a merge commit, which get_rebase_commits skips) armed a rebase
+      // that would destroy the very commit the user asked to reword. Refuse
+      // instead: say so, and keep Start Rebase disabled.
+      if (!this.commits.some((c) => c.oid === options.rewordCommitOid)) {
+        this.rewordTargetMissing = true;
+        this.warning =
+          'This commit is not part of the rebase plan, so its message cannot be ' +
+          'rewritten here. Merge commits cannot be reworded by rebase.';
+        return;
+      }
       this.commits = this.commits.map((c) =>
         c.oid === options.rewordCommitOid
           ? { ...c, action: 'reword' as RebaseAction, newMessage: this.fullMessage(c) }
@@ -569,6 +583,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.executing = false;
     this.error = '';
     this.warning = '';
+    this.rewordTargetMissing = false;
     this.draggedIndex = null;
     this.dropTargetIndex = null;
     this.showPreview = true;
@@ -954,7 +969,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private get canExecute(): boolean {
-    return this.commits.length > 0 && !this.executing && !this.hasValidationErrors();
+    return (
+      this.commits.length > 0 &&
+      !this.rewordTargetMissing &&
+      !this.executing &&
+      !this.hasValidationErrors()
+    );
   }
 
   private renderCommitRow(commit: EditableRebaseCommit, index: number) {

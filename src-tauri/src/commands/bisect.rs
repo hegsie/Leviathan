@@ -59,10 +59,23 @@ pub struct CulpritCommit {
     pub email: String,
 }
 
+/// The `git` invocation every bisect shell-out is built from.
+///
+/// `LC_ALL=C` is not cosmetic: every caller below matches git's English output
+/// ("is the first bad commit", "We cannot bisect more"). Under a localized git
+/// those strings are translated, so the culprit parsed as `None`, the dialog
+/// never advanced to its result step, and the finished search was reachable
+/// only through the danger-styled "Abort Bisect" that discards it. The sibling
+/// CLI shell-outs in merge.rs and worktree.rs already pin this.
+fn git_command(repo_path: &Path) -> std::process::Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path).env("LC_ALL", "C");
+    cmd
+}
+
 /// Helper to run git commands
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = create_command("git")
-        .current_dir(repo_path)
+    let output = git_command(repo_path)
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
@@ -477,6 +490,22 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_git_command_pins_the_locale() {
+        // Every parse in this module matches git's English output. Under a
+        // localized git those strings are translated, the culprit parses as
+        // None, and the dialog never leaves its Good/Bad/Skip step.
+        let repo = TestRepo::with_initial_commit();
+        let cmd = git_command(&repo.path);
+
+        let lc_all = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("LC_ALL"))
+            .and_then(|(_, v)| v)
+            .expect("LC_ALL must be set, or a localized git breaks every parse below");
+        assert_eq!(lc_all, std::ffi::OsStr::new("C"));
+    }
 
     #[tokio::test]
     async fn test_get_bisect_status_inactive() {

@@ -760,8 +760,15 @@ export class AppShell extends LitElement {
   private focusFetchInFlight = new Set<string>();
   /** Guards the graph ref menu's merge/rebase the way lv-branch-list guards
    * its own: from the graph you could right-click a second ref and start a
-   * second history rewrite while the first was still running. */
-  @state() private refOperationInFlight = false;
+   * second history rewrite while the first was still running.
+   *
+   * Keyed by repo path, like destructiveActionsInFlight below. It used to be a
+   * single boolean, so a rebase running in one repo tab greyed out every
+   * mutating control in EVERY other open repo — with no banner or tooltip to
+   * explain why, because those repos are clean. Separate repos have separate
+   * working trees and nothing to serialize against each other. Reassigned
+   * rather than mutated so Lit sees the change and re-renders the menus. */
+  @state() private refOperationsInFlight = new Set<string>();
   /**
    * Keys for destructive actions already running.
    *
@@ -783,14 +790,32 @@ export class AppShell extends LitElement {
    * produced the earlier holes. Wrapping rather than editing each body means no
    * early return can leak the claim.
    */
-  private async runRefExclusive(fn: () => Promise<void>): Promise<void> {
-    if (this.refOperationInFlight) return;
-    this.refOperationInFlight = true;
+  private async runRefExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
+    if (!this.claimRefOperation(repoPath)) return;
     try {
       await fn();
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
+  }
+
+  /** True when `repoPath` (default: the active repo) has a ref operation running. */
+  private isRefOperationInFlight(repoPath?: string): boolean {
+    const path = repoPath ?? this.activeRepository?.repository.path;
+    return path !== undefined && this.refOperationsInFlight.has(path);
+  }
+
+  /** Claim the lock for `repoPath`; false when it is already held. */
+  private claimRefOperation(repoPath: string): boolean {
+    if (this.refOperationsInFlight.has(repoPath)) return false;
+    this.refOperationsInFlight = new Set(this.refOperationsInFlight).add(repoPath);
+    return true;
+  }
+
+  private releaseRefOperation(repoPath: string): void {
+    const next = new Set(this.refOperationsInFlight);
+    next.delete(repoPath);
+    this.refOperationsInFlight = next;
   }
 
   /** Run `fn` unless an identical action is already in flight. */
@@ -1932,16 +1957,15 @@ export class AppShell extends LitElement {
   }
 
   private async handleRefCheckout(): Promise<void> {
-    if (!this.activeRepository || this.refOperationInFlight) return;
+    if (!this.activeRepository) return;
     // Checkout mutates the same working tree merge/rebase/delete do, and was
     // left out when this flag was extended to them — so it stayed clickable
     // during an in-flight merge and ran concurrently against it. There is no
     // per-repo lock in the backend. The sidebar has always guarded its own
     // checkout with the flag it shares with merge/rebase/rename.
-    this.refOperationInFlight = true;
-
     const refName = this.refContextMenu.refName;
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     const refType = this.refContextMenu.refType;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
@@ -1956,7 +1980,7 @@ export class AppShell extends LitElement {
         'warning',
       );
       if (!confirmed) {
-        this.refOperationInFlight = false;
+        this.releaseRefOperation(repoPath);
         return;
       }
     }
@@ -1977,7 +2001,7 @@ export class AppShell extends LitElement {
         );
       }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -2016,14 +2040,19 @@ export class AppShell extends LitElement {
     // operation. The sibling delete handlers below already carry a comment
     // saying the graph ref menu must not be the one unguarded path; merge and
     // rebase were missed by that pass.
-    if (this.refOperationInFlight) return;
+    // Claimed BEFORE the confirm, like the delete siblings below: showConfirm
+    // is an IPC round trip, so a claim taken after it does not serialize two
+    // dispatches that both got past the check.
+    if (!this.claimRefOperation(repoPath)) return;
     if (!await showConfirm(
       'Merge Branch',
       `Merge "${refName}" into the current branch?`,
       'info',
-    )) return;
+    )) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
 
-    this.refOperationInFlight = true;
     try {
     const result = await gitService.merge({
       path: repoPath,
@@ -2048,7 +2077,7 @@ export class AppShell extends LitElement {
       showErrorWithSuggestion(result.error?.message || '', 'Merge failed');
     }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -2059,14 +2088,17 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    if (this.refOperationInFlight) return;
+    // Claimed BEFORE the confirm — see handleRefMerge.
+    if (!this.claimRefOperation(repoPath)) return;
     if (!await showConfirm(
       'Rebase Branch',
       `Rebase current branch onto "${refName}"?\n\nThis will rewrite commit history.`,
       'warning',
-    )) return;
+    )) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
 
-    this.refOperationInFlight = true;
     try {
     const result = await gitService.rebase({
       path: repoPath,
@@ -2091,25 +2123,24 @@ export class AppShell extends LitElement {
       showErrorWithSuggestion(result.error?.message || '', 'Rebase failed');
     }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
   private async handleRefDeleteBranch(): Promise<void> {
-    if (!this.activeRepository || this.refOperationInFlight) return;
-    // Serialized with Merge and Rebase from this same menu. refOperationInFlight
-    // was introduced to stop those two racing each other, and these three were
+    if (!this.activeRepository) return;
+    // Serialized with Merge and Rebase from this same menu. The lock was
+    // introduced to stop those two racing each other, and these three were
     // never folded in — so a delete or a tag push could run concurrently with a
     // still-running merge or rebase against the same working tree. There is no
     // per-repo lock in the backend (every command opens its own git2 handle),
     // so this flag is the only thing serializing them. The sidebar gets it
     // right: its delete shares operationInProgress with merge/rebase/rename.
-    this.refOperationInFlight = true;
-
     const branchName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     // Deleting from the graph's ref menu destroys the same branch as the
@@ -2122,7 +2153,7 @@ export class AppShell extends LitElement {
     );
 
     if (!confirmed) {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
       return;
     }
 
@@ -2140,19 +2171,18 @@ export class AppShell extends LitElement {
         });
       }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
   private async handleRefDeleteTag(): Promise<void> {
-    if (!this.activeRepository || this.refOperationInFlight) return;
+    if (!this.activeRepository) return;
     // Serialized with the rest of this menu — see handleRefDeleteBranch.
-    this.refOperationInFlight = true;
-
     const tagName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     // Gated to match the sidebar's tag delete (lv-tag-list.ts) — the graph ref
@@ -2164,7 +2194,7 @@ export class AppShell extends LitElement {
     );
 
     if (!confirmed) {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
       return;
     }
 
@@ -2179,19 +2209,18 @@ export class AppShell extends LitElement {
         showToast(result.error?.message || 'Delete tag failed', 'error');
       }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
   private async handleRefPushTag(): Promise<void> {
-    if (!this.activeRepository || this.refOperationInFlight) return;
+    if (!this.activeRepository) return;
     // Serialized with the rest of this menu — see handleRefDeleteBranch.
-    this.refOperationInFlight = true;
-
     const tagName = this.refContextMenu.refName;
     // Captured before the (slow, network) push await: the push and its refresh
     // must target the repo it was invoked on, even if the user switches tabs.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     try {
@@ -2210,7 +2239,7 @@ export class AppShell extends LitElement {
         });
       }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -2331,7 +2360,9 @@ export class AppShell extends LitElement {
   }
 
   private handleRevertCommit(): Promise<void> {
-    return this.runRefExclusive(() => this.revertCommit());
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.revertCommit());
   }
 
   private async revertCommit(): Promise<void> {
@@ -2771,7 +2802,9 @@ export class AppShell extends LitElement {
   }
 
   private handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
-    return this.runRefExclusive(() => this.resetToCommit(mode));
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.resetToCommit(mode));
   }
 
   private async resetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
@@ -2870,7 +2903,9 @@ export class AppShell extends LitElement {
    * Can be auto-squashed later with interactive rebase --autosquash
    */
   private handleFixupCommit(): Promise<void> {
-    return this.runRefExclusive(() => this.fixupCommit());
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.fixupCommit());
   }
 
   private async fixupCommit(): Promise<void> {
@@ -2916,7 +2951,9 @@ export class AppShell extends LitElement {
    * Similar to fixup but preserves the message for editing during autosquash
    */
   private handleSquashCommit(): Promise<void> {
-    return this.runRefExclusive(() => this.squashCommit());
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.squashCommit());
   }
 
   private async squashCommit(): Promise<void> {
@@ -2962,6 +2999,26 @@ export class AppShell extends LitElement {
    * For HEAD: Opens amend mode in commit panel
    * For other commits: Dispatches event to open interactive rebase with reword action
    */
+  /**
+   * Refuse a rewrite-in-place of a merge commit, with a reason.
+   *
+   * get_rebase_commits skips merge commits (a `pick` of one dies mid-rebase),
+   * so the plan the dialog loads for `<merge>^` contains every commit in
+   * `<merge>^..HEAD` EXCEPT the one the user asked to reword — including the
+   * merged-in side branch. Start Rebase stays enabled, and one click replays
+   * that set linearly onto the merge's first parent: the merge is destroyed
+   * and the side branch rewritten, from a gesture that promised only to change
+   * a message.
+   */
+  private isMergeCommit(commit: { shortId: string; parentIds?: string[] }): boolean {
+    if ((commit.parentIds?.length ?? 0) <= 1) return false;
+    showToast(
+      `${commit.shortId} is a merge commit — its message cannot be rewritten by rebase`,
+      'warning',
+    );
+    return true;
+  }
+
   private async handleRewordCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
@@ -2979,6 +3036,7 @@ export class AppShell extends LitElement {
       await this.dispatchAmend(commit);
     } else {
       // For other commits, open interactive rebase dialog pre-configured for rewording
+      if (this.isMergeCommit(commit)) return;
       if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
         rewordCommitOid: commit.oid,
@@ -3077,9 +3135,10 @@ export class AppShell extends LitElement {
     if (isHead) {
       await this.dispatchAmend(commit);
     } else {
-      // Same gate as reword — see canRewriteInPlace. Checked BEFORE the
-      // "opening interactive rebase" toast, so a refusal is not preceded by a
-      // promise the app is about to break.
+      // Same gates as reword — see isMergeCommit and canRewriteInPlace. Checked
+      // BEFORE the "opening interactive rebase" toast, so a refusal is not
+      // preceded by a promise the app is about to break.
+      if (this.isMergeCommit(commit)) return;
       if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
       showToast('Only the latest commit can be amended — opening interactive rebase', 'info');
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
@@ -3166,11 +3225,10 @@ export class AppShell extends LitElement {
     // checkout_with_autostash stashes, applies index 0, then drops index 0 —
     // and a stash index is a position, so a second run's save shifts the
     // first's entry and the two cross-apply and cross-drop each other's work.
-    if (!this.activeRepository || this.refOperationInFlight) return;
-    this.refOperationInFlight = true;
-
+    if (!this.activeRepository) return;
     const branchName = e.detail.branchName;
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     try {
       const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
 
@@ -3186,7 +3244,7 @@ export class AppShell extends LitElement {
         );
       }
     } finally {
-      this.refOperationInFlight = false;
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -4473,7 +4531,9 @@ export class AppShell extends LitElement {
     // label's into this lock and left the palette's out — the same stale
     // enumeration again. Two concurrent auto-stash checkouts cross-apply and
     // cross-drop each other's stash, because a stash index is a position.
-    return this.runRefExclusive(() => this.checkoutBranchFromPalette(e));
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromPalette(e));
   }
 
   private async checkoutBranchFromPalette(
@@ -4870,14 +4930,14 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
                 </svg>
                 Amend
               </button>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRewordCommit} title="Change the commit message">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRewordCommit} title="Change the commit message">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="17" y1="10" x2="3" y2="10"></line>
                   <line x1="21" y1="6" x2="3" y2="6"></line>
@@ -4887,7 +4947,7 @@ export class AppShell extends LitElement {
                 Reword
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                   <polyline points="17 8 12 3 7 8"></polyline>
@@ -4895,7 +4955,7 @@ export class AppShell extends LitElement {
                 </svg>
                 Fixup into this
               </button>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                   <line x1="9" y1="3" x2="9" y2="21"></line>
@@ -4904,14 +4964,14 @@ export class AppShell extends LitElement {
                 Squash into this
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleCherryPick}>
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
                   <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" fill="none"/>
                 </svg>
                 Cherry-pick
               </button>
-              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRevertCommit}>
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRevertCommit}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0zM8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3z"/>
                   <path d="M8 4v4l3 2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
@@ -4937,13 +4997,13 @@ export class AppShell extends LitElement {
               <div class="context-menu-divider"></div>
               <div class="context-menu-submenu">
                 <span class="context-menu-label">Reset to this commit</span>
-                <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('soft')}>
+                <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('soft')}>
                   Soft (keep changes staged)
                 </button>
-                <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('mixed')}>
+                <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('mixed')}>
                   Mixed (keep changes unstaged)
                 </button>
-                <button class="context-menu-item danger" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('hard')}>
+                <button class="context-menu-item danger" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('hard')}>
                   Hard (discard all changes)
                 </button>
               </div>
@@ -4967,7 +5027,7 @@ export class AppShell extends LitElement {
                 ? html`
                     <button
                       class="context-menu-item"
-                      ?disabled=${this.refOperationInFlight}
+                      ?disabled=${this.isRefOperationInFlight()}
                       @click=${this.handleRefCheckout}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -4975,7 +5035,7 @@ export class AppShell extends LitElement {
                       </svg>
                       Checkout
                     </button>
-                    <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefMerge}>
+                    <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefMerge}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="18" cy="18" r="3"></circle>
                         <circle cx="6" cy="6" r="3"></circle>
@@ -4983,7 +5043,7 @@ export class AppShell extends LitElement {
                       </svg>
                       Merge into current branch
                     </button>
-                    <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefRebase}>
+                    <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefRebase}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="6" y1="3" x2="6" y2="15"></line>
                         <circle cx="18" cy="6" r="3"></circle>
@@ -5003,7 +5063,7 @@ export class AppShell extends LitElement {
                                did not. -->
                           <button
                             class="context-menu-item danger"
-                            ?disabled=${this.refOperationInFlight}
+                            ?disabled=${this.isRefOperationInFlight()}
                             @click=${this.handleRefDeleteBranch}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5018,7 +5078,7 @@ export class AppShell extends LitElement {
                   ? html`
                       <button
                         class="context-menu-item"
-                        ?disabled=${this.refOperationInFlight}
+                        ?disabled=${this.isRefOperationInFlight()}
                         @click=${this.handleRefCheckout}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5026,7 +5086,7 @@ export class AppShell extends LitElement {
                         </svg>
                         Checkout
                       </button>
-                      <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefMerge}>
+                      <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefMerge}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <circle cx="18" cy="18" r="3"></circle>
                           <circle cx="6" cy="6" r="3"></circle>
@@ -5034,7 +5094,7 @@ export class AppShell extends LitElement {
                         </svg>
                         Merge into current branch
                       </button>
-                      <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRefRebase}>
+                      <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefRebase}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="6" y1="3" x2="6" y2="15"></line>
                           <circle cx="18" cy="6" r="3"></circle>
@@ -5047,7 +5107,7 @@ export class AppShell extends LitElement {
                   : html`
                       <button
                         class="context-menu-item"
-                        ?disabled=${this.refOperationInFlight}
+                        ?disabled=${this.isRefOperationInFlight()}
                         @click=${this.handleRefCheckout}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5057,7 +5117,7 @@ export class AppShell extends LitElement {
                       </button>
                       <button
                         class="context-menu-item"
-                        ?disabled=${this.refOperationInFlight}
+                        ?disabled=${this.isRefOperationInFlight()}
                         @click=${this.handleRefPushTag}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -5069,7 +5129,7 @@ export class AppShell extends LitElement {
                       <div class="context-menu-divider"></div>
                       <button
                         class="context-menu-item danger"
-                        ?disabled=${this.refOperationInFlight}
+                        ?disabled=${this.isRefOperationInFlight()}
                         @click=${this.handleRefDeleteTag}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
