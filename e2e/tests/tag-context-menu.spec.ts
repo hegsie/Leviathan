@@ -5,6 +5,7 @@ import {
   startCommandCaptureWithMocks,
   startCommandCapture,
   findCommand,
+  waitForCommand,
   injectCommandError,
   injectCommandMock,
 } from '../fixtures/test-helpers';
@@ -189,6 +190,7 @@ test.describe('Tag List Context Menu', () => {
     await expect(pushOption).toBeVisible();
     await clickMenuItem(pushOption);
 
+    await waitForCommand(page, 'push_tag');
     const pushCommands = await findCommand(page, 'push_tag');
     expect(pushCommands.length).toBeGreaterThan(0);
   });
@@ -446,6 +448,7 @@ test.describe('Tag Context Menu - Error Handling', () => {
     await expect(pushOption).toBeVisible();
     await clickMenuItem(pushOption);
 
+    await waitForCommand(page, 'push_tag');
     const pushCommands = await findCommand(page, 'push_tag');
     expect(pushCommands.length).toBeGreaterThan(0);
     const args = pushCommands[0].args as { name?: string; tagName?: string };
