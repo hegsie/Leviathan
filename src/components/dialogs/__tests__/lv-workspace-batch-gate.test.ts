@@ -11,10 +11,17 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 const invoked: Array<{ command: string; args?: unknown }> = [];
 let failCommands = new Set<string>();
 let failureFor: Map<string, { code: string; message: string }> = new Map();
+/** confirm() resolves to (message-dialog result === okLabel); the default is 'Ok'. */
+let confirmAnswer = 'Cancel';
+const dialogMessages: string[] = [];
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
     invoked.push({ command, args });
+    if (command === 'plugin:dialog|message') {
+      dialogMessages.push(String((args as { message?: string })?.message ?? ''));
+      return Promise.resolve(confirmAnswer);
+    }
     const specific = failureFor.get(command);
     if (specific) return Promise.reject(specific);
     if (failCommands.has(command)) {
@@ -54,6 +61,52 @@ async function dialogWithWorkspace(): Promise<LvWorkspaceManagerDialog> {
   await el.updateComplete;
   return el;
 }
+
+describe('deleting a workspace', () => {
+  beforeEach(() => {
+    invoked.length = 0;
+    failCommands = new Set();
+    failureFor = new Map();
+    uiStore.setState({ toasts: [] });
+  });
+
+  it('asks first, and declining leaves the workspace alone', async () => {
+    // The footer's single Delete button permanently drops a saved multi-repo
+    // configuration with no undo. The profile manager — the sibling dialog
+    // managing the same kind of object — has always confirmed; this one didn't.
+    const el = await dialogWithWorkspace();
+    confirmAnswer = 'Cancel';
+
+    await (el as any).handleDelete();
+
+    expect(invoked.some((c) => c.command === 'delete_workspace')).to.equal(false);
+  });
+
+  it('names the workspace and how much is in it', async () => {
+    const el = await dialogWithWorkspace();
+    confirmAnswer = 'Cancel';
+    dialogMessages.length = 0;
+
+    await (el as any).handleDelete();
+
+    const prompt = dialogMessages.join(' ');
+    expect(prompt).to.contain('Team');
+    expect(prompt, 'the repository count is stated').to.contain('3');
+    expect(prompt, 'and that the repos on disk survive').to.contain('not touched');
+  });
+
+  it('confirming deletes it and says so', async () => {
+    const el = await dialogWithWorkspace();
+    confirmAnswer = 'Ok';
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handleDelete();
+
+    expect(invoked.some((c) => c.command === 'delete_workspace')).to.equal(true);
+    const summary = uiStore.getState().toasts.map((t) => `${t.type}:${t.message}`).join(' | ');
+    expect(summary).to.contain('success:Deleted workspace Team');
+  });
+});
 
 describe('workspace batch operations and the security gate', () => {
   beforeEach(() => {

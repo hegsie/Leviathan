@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 import {
@@ -929,6 +930,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private editMode = false;
   @state() private editContent = '';
   @state() private originalContent = '';
+  /**
+   * The path the edit buffer was loaded from. The pane is a single reused
+   * element, so `file` can be reassigned under an open editor; without this the
+   * buffer and the Save target could name two different files.
+   */
+  private editPath: string | null = null;
   @state() private saving = false;
   @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
   @state() private selectedLines: Set<LineKey> = new Set();
@@ -1002,6 +1009,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // are re-truncated by default.
     if (changedProperties.has('file') || changedProperties.has('commitFile')) {
       this.showFullDiff = false;
+      // The editor does NOT follow the selection. This pane is one reused
+      // element, so selecting another file while the editor was open left the
+      // header naming the new file and the textarea still holding the old
+      // one's text — and Save writes `editContent` to `this.file.path`, i.e.
+      // the previous file's content over the newly selected file, destroying
+      // its uncommitted changes with no git object and no reflog entry.
+      this.exitEditModeOnFileChange();
     }
     if (changedProperties.has('file') && this.file) {
       await this.loadWorkingDiff();
@@ -1145,10 +1159,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       // Enter edit mode - load file content
       await this.loadFileContent();
     } else {
-      // Exit edit mode without saving
-      this.editMode = false;
-      this.editContent = '';
-      this.originalContent = '';
+      // Same guard as Cancel: the header toggle is one click away from the
+      // textarea and must not be the cheaper route to the same loss.
+      await this.cancelEdit();
     }
   }
 
@@ -1167,6 +1180,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     if (result.success && result.data !== undefined) {
       this.originalContent = result.data;
       this.editContent = result.data;
+      this.editPath = this.file.path;
       this.editMode = true;
     }
   }
@@ -1194,7 +1208,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         textarea.selectionStart = textarea.selectionEnd = start + 2;
       });
     } else if (e.key === 'Escape') {
-      this.cancelEdit();
+      void this.cancelEdit();
     } else if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       this.saveEdit();
@@ -1205,7 +1219,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * Save edits
    */
   private async saveEdit(): Promise<void> {
-    if (!this.repositoryPath || !this.file || this.saving) return;
+    // `editMode` first: once the editor has closed, `editContent` is empty, and
+    // a save from a stale binding would truncate the file to nothing.
+    if (!this.editMode || !this.repositoryPath || !this.file || this.saving) return;
+    // Identity, not just existence: the buffer must belong to the file it is
+    // about to be written to.
+    if (this.editPath && this.editPath !== this.file.path) {
+      showToast('The editor no longer matches the selected file', 'error');
+      return;
+    }
 
     this.saving = true;
 
@@ -1219,9 +1241,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     this.saving = false;
 
     if (result.success) {
-      this.editMode = false;
-      this.editContent = '';
-      this.originalContent = '';
+      this.discardEditBuffer();
       // Reload the diff to show updated changes
       await this.loadWorkingDiff();
       // Dispatch event to notify parent to refresh status
@@ -1235,13 +1255,48 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
   }
 
-  /**
-   * Cancel editing
-   */
-  private cancelEdit(): void {
+  /** Leave edit mode without touching disk. */
+  private discardEditBuffer(): void {
     this.editMode = false;
     this.editContent = '';
     this.originalContent = '';
+    this.editPath = null;
+  }
+
+  /**
+   * Selecting another file (or a commit's file) closes the editor.
+   *
+   * A confirm is not possible here — the property has already changed by the
+   * time `updated()` runs, so there is nothing left to cancel. Unsaved text is
+   * therefore reported rather than silently dropped.
+   */
+  private exitEditModeOnFileChange(): void {
+    if (!this.editMode) return;
+    if (this.editPath && this.file?.path === this.editPath) return;
+    const lost = this.hasChanges ? this.editPath : null;
+    this.discardEditBuffer();
+    if (lost) {
+      showToast(`Unsaved edits to ${lost} were discarded`, 'warning');
+    }
+  }
+
+  /**
+   * Cancel editing.
+   *
+   * Gated on unsaved text, like every other editing surface in the app
+   * (lv-hooks-dialog, lv-merge-editor). Escape reaches here too, and Escape is
+   * bound app-wide to "close diff" — so it gets pressed reflexively.
+   */
+  private async cancelEdit(): Promise<void> {
+    if (this.hasChanges) {
+      const confirmed = await showConfirm(
+        'Discard edits?',
+        `This file has unsaved edits — closing the editor discards them.`,
+        'warning'
+      );
+      if (!confirmed) return;
+    }
+    this.discardEditBuffer();
   }
 
   /**
@@ -2508,7 +2563,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           </div>
           <button
             class="edit-btn active"
-            @click=${this.toggleEditMode}
+            @click=${() => void this.toggleEditMode()}
             title="Exit edit mode"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2523,7 +2578,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           : nothing}
         <div class="editor-container">
           <div class="editor-toolbar">
-            <button class="cancel-btn" @click=${this.cancelEdit}>Cancel</button>
+            <button class="cancel-btn" @click=${() => void this.cancelEdit()}>Cancel</button>
             <button
               class="save-btn"
               @click=${this.saveEdit}

@@ -53,6 +53,7 @@ interface Internal {
   unstagedFiles: StatusEntry[];
   stagedFiles: StatusEntry[];
   selectedFiles: Set<string>;
+  contextMenu: { visible: boolean; x: number; y: number; file: StatusEntry | null; isStaged: boolean };
   handleDiscardFile: (file: StatusEntry, e: Event) => Promise<void>;
   handleDiscardSelected: () => Promise<void>;
 }
@@ -174,5 +175,45 @@ describe('lv-file-status discard confirm copy', () => {
     expect(lastConfirm, 'confirm shown').to.not.be.null;
     expect(lastConfirm!.message!.toLowerCase()).to.include('permanently delete 2 untracked file');
     expect(lastConfirm!.message!.toLowerCase()).to.not.include('discard changes');
+  });
+});
+
+describe('the context menu does not offer a discard that cannot do anything', () => {
+  beforeEach(() => {
+    invokeHistory.length = 0;
+    lastConfirm = null;
+    settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  it('hides Discard on a staged row', async () => {
+    // discard_changes mirrors `git checkout -- <path>`: for a path present in
+    // the index it restores the worktree FROM the index, so on a purely-staged
+    // file it is a byte-identical rewrite that reports nothing. The row-level
+    // buttons already hide it; only the context menu still offered it, behind a
+    // confirm claiming the change could not be undone.
+    const staged = makeEntry({ path: 'src/staged.ts', status: 'new', isStaged: true });
+    const el = await render([staged]);
+    internalOf(el).contextMenu = { visible: true, x: 0, y: 0, file: staged, isStaged: true };
+    await el.updateComplete;
+
+    const items = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (b) => b.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Discard changes'))).to.equal(false);
+    expect(items.some((t) => t.includes('Unstage')), 'the useful action is still there').to.equal(
+      true,
+    );
+  });
+
+  it('still offers Discard on an unstaged row', async () => {
+    const unstaged = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([unstaged]);
+    internalOf(el).contextMenu = { visible: true, x: 0, y: 0, file: unstaged, isStaged: false };
+    await el.updateComplete;
+
+    const items = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (b) => b.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Discard changes'))).to.equal(true);
   });
 });

@@ -182,3 +182,73 @@ describe('lv-branch-list drop stash-conflict (Fix 4)', () => {
     expect(invokeCalls.some((c) => c.command === 'merge'), 'merge ran on clean tree').to.be.true;
   });
 });
+
+/**
+ * A drag is the least deliberate of the three gestures that reach a rebase —
+ * alt-drag is easy to trigger by accident — and it was the one surface whose
+ * confirm omitted the history-rewrite disclosure the branch context menu and
+ * the graph's ref menu both carry.
+ */
+describe('the drag-drop rebase confirm says what a rebase does', () => {
+  let prompts: string[] = [];
+
+  function mockWithPromptCapture(command: string, args?: unknown): Promise<unknown> {
+    if (command === 'plugin:dialog|message') {
+      prompts.push(String((args as { message?: string })?.message ?? ''));
+      return Promise.resolve('Cancel');
+    }
+    return defaultMockInvoke(command);
+  }
+
+  beforeEach(() => {
+    invokeCalls.length = 0;
+    prompts = [];
+  });
+
+  it('warns about the rewrite when dropping onto the current branch', async () => {
+    const el = await createComponent();
+    const source = makeBranch('feature/source');
+    const head = makeBranch('main', /* isHead */ true);
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+    mockInvoke = mockWithPromptCapture;
+
+    // Alt-drag onto HEAD is the rebase gesture.
+    await (el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }).handleDrop(
+      fakeDragEvent(true),
+      head
+    );
+
+    expect(prompts.join(' ')).to.contain('rewrite commit history');
+    expect(invokeCalls.some((c) => c.command === 'rebase'), 'declining blocks it').to.be.false;
+  });
+
+  it('warns about the rewrite when dropping onto another branch', async () => {
+    const el = await createComponent();
+    const source = makeBranch('feature/source');
+    const target = makeBranch('feature/target', /* isHead */ false);
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+    mockInvoke = mockWithPromptCapture;
+
+    await (el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }).handleDrop(
+      fakeDragEvent(true),
+      target
+    );
+
+    expect(prompts.join(' ')).to.contain('rewrite commit history');
+  });
+
+  it('a merge drop is not labelled a history rewrite', async () => {
+    const el = await createComponent();
+    const source = makeBranch('feature/source');
+    const target = makeBranch('feature/target', /* isHead */ false);
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+    mockInvoke = mockWithPromptCapture;
+
+    await (el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }).handleDrop(
+      fakeDragEvent(false),
+      target
+    );
+
+    expect(prompts.join(' ')).to.not.contain('rewrite commit history');
+  });
+});

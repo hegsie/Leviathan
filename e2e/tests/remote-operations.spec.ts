@@ -396,7 +396,12 @@ test.describe('Push Operation', () => {
 
     const toast = page.locator('.toast');
     await expect(toast).toBeVisible({ timeout: 5000 });
-    await expect(toast).toContainText(/error|fail|rejected/i);
+    // A non-fast-forward rejection is routed through the suggestion service,
+    // which REPLACES the raw libgit2 string with the recovery the app can
+    // actually perform. Assert that contract rather than the server's words.
+    await expect(toast).toHaveClass(/error/);
+    await expect(toast).toContainText(/pull before pushing/i);
+    await expect(toast.getByRole('button', { name: 'Pull Now' })).toBeVisible();
 
     // Badge should remain unchanged after failed push
     await expect(pushBadge).toBeVisible();

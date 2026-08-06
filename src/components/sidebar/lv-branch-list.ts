@@ -1701,9 +1701,12 @@ export class LvBranchList extends LitElement {
         }
       } else {
         // Rebase current branch onto source
+        // Same disclosure the context menu and the graph's ref menu carry. A
+        // drag is the least deliberate of the three gestures — alt-drag is easy
+        // to trigger by accident — so it is the one that most needs it.
         const confirmed = await showConfirm(
           'Rebase Branch',
-          `Rebase current branch onto "${sourceBranch.name}"?`,
+          `Rebase current branch onto "${sourceBranch.name}"?\n\nThis will rewrite commit history.`,
           'warning'
         );
         if (!confirmed) return;
@@ -1732,7 +1735,8 @@ export class LvBranchList extends LitElement {
       const actionText = action === 'merge' ? 'merge' : 'rebase onto';
       const confirmed = await showConfirm(
         action === 'merge' ? 'Merge Branch' : 'Rebase Branch',
-        `This will checkout "${targetBranch.name}" and ${actionText} "${sourceBranch.name}". Continue?`,
+        `This will checkout "${targetBranch.name}" and ${actionText} "${sourceBranch.name}". Continue?` +
+          (action === 'rebase' ? `\n\nThis will rewrite commit history.` : ''),
         action === 'merge' ? 'info' : 'warning'
       );
       if (!confirmed) return;

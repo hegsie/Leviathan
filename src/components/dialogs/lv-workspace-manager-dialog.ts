@@ -8,7 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as workspaceService from '../../services/workspace.service.ts';
 import * as gitService from '../../services/git.service.ts';
-import { openRepositoryDialog, openDialog, saveDialog } from '../../services/dialog.service.ts';
+import { openRepositoryDialog, openDialog, saveDialog, showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
@@ -782,11 +782,28 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws) return;
 
+    // The footer's single Delete button permanently drops a named, saved
+    // multi-repo configuration with no undo. Its direct sibling — the profile
+    // manager, which manages the same kind of object — confirms first; this
+    // dialog was the one that didn't. The count matters: a user with several
+    // workspaces selected the wrong row often enough that the confirm has to
+    // name which one and how much is in it.
+    const count = ws.repositories.length;
+    const confirmed = await showConfirm(
+      'Delete Workspace',
+      `Delete workspace "${ws.name}"? This removes the workspace and its ` +
+        `${count} tracked ${count === 1 ? 'repository' : 'repositories'}. ` +
+        `The repositories themselves are not touched.`,
+      'warning'
+    );
+    if (!confirmed) return;
+
     const result = await workspaceService.deleteWorkspace(ws.id);
     if (result.success) {
       workspaceStore.getState().removeWorkspace(ws.id);
       this.selectedWorkspaceId = null;
       await this.loadWorkspaces();
+      showToast(`Deleted workspace ${ws.name}`, 'success');
     } else {
       showToast(result.error?.message || 'Failed to delete workspace', 'error');
     }

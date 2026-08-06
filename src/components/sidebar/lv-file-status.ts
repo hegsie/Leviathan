@@ -2193,6 +2193,9 @@ export class LvFileStatus extends LitElement {
           </svg>
           Copy file path
         </button>
+        ${isStaged
+          ? nothing
+          : html`
         <div class="context-menu-divider" role="separator"></div>
         <button
           class="context-menu-item danger"
@@ -2212,6 +2215,7 @@ export class LvFileStatus extends LitElement {
           </svg>
           Discard changes
         </button>
+        `}
       </div>
     `;
   }
