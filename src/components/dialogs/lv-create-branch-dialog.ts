@@ -153,6 +153,21 @@ export class LvCreateBranchDialog extends LitElement {
     // clear `isCreating` and re-enable the button for a second concurrent run,
     // and the first run's close() would then yank shut the reopened session.
     if (this.isCreating) return;
+
+    // Already open: re-entering must NOT reset. Several entry points converge
+    // on this one instance (context menu, panel header button, command
+    // palette), and ctrl-shortcuts fire even while typing in an input — so
+    // Ctrl+P then "Create..." while the dialog was open silently wiped the
+    // branch name the user had entered. Re-aim at the new target if one was
+    // given, refocus, and keep their text.
+    if (this.isOpen) {
+      if (startPoint) {
+        this.startPoint = startPoint;
+      }
+      this.inputEl?.focus();
+      return;
+    }
+
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;

@@ -188,34 +188,27 @@ export class LvLeftPanel extends LitElement {
       </section>
 
       <!-- Stashes Section - only show when there are stashes -->
-      ${this.stashCount > 0 ? html`
-        <section class="section refs-section ${stashesExpanded ? '' : 'collapsed'}">
-          <header class="section-header" @click=${() => this.toggleSection('stashes')}>
-            ${this.renderChevron(stashesExpanded)}
-            <span class="title">Stashes</span>
-            <span class="count">${this.stashCount}</span>
-          </header>
-          <div class="section-content">
-            <lv-stash-list
-              .repositoryPath=${this.repositoryPath}
-              @stash-applied=${this.handleStashApplied}
-              @stash-created=${this.handleStashCreated}
-              @stash-dropped=${this.handleStashDropped}
-              @stash-count-changed=${this.handleStashCountChanged}
-            ></lv-stash-list>
-          </div>
-        </section>
-      ` : html`
-        <!-- Hidden stash-list to track count -->
-        <lv-stash-list
-          style="display: none;"
-          .repositoryPath=${this.repositoryPath}
-          @stash-applied=${this.handleStashApplied}
-          @stash-created=${this.handleStashCreated}
-          @stash-dropped=${this.handleStashDropped}
-          @stash-count-changed=${this.handleStashCountChanged}
-        ></lv-stash-list>
-      `}
+      <!-- ONE template position, as above: swapping literals on the count
+           rebuilt <lv-stash-list> and anything stateful inside it. -->
+      <section
+        class="section refs-section ${stashesExpanded ? '' : 'collapsed'}"
+        style=${this.stashCount > 0 ? '' : 'display: none;'}
+      >
+        <header class="section-header" @click=${() => this.toggleSection('stashes')}>
+          ${this.renderChevron(stashesExpanded)}
+          <span class="title">Stashes</span>
+          <span class="count">${this.stashCount}</span>
+        </header>
+        <div class="section-content">
+          <lv-stash-list
+            .repositoryPath=${this.repositoryPath}
+            @stash-applied=${this.handleStashApplied}
+            @stash-created=${this.handleStashCreated}
+            @stash-dropped=${this.handleStashDropped}
+            @stash-count-changed=${this.handleStashCountChanged}
+          ></lv-stash-list>
+        </div>
+      </section>
 
       <!-- Tags Section - always show header for discoverability -->
       <section class="section refs-section ${tagsExpanded ? '' : 'collapsed'}">
@@ -234,24 +227,24 @@ export class LvLeftPanel extends LitElement {
             </svg>
           </button>
         </header>
-        ${this.tagCount > 0 ? html`
-          <div class="section-content">
-            <lv-tag-list
-              .repositoryPath=${this.repositoryPath}
-              @tags-changed=${this.handleTagsChanged}
-              @tag-checkout=${this.handleTagCheckout}
-              @tag-count-changed=${this.handleTagCountChanged}
-            ></lv-tag-list>
-          </div>
-        ` : html`
+        <!-- ONE template position, hidden with CSS when empty. Two separate
+             html template literals made lit tear down and rebuild lv-tag-list
+             every time the count crossed 0 — taking its embedded create-tag
+             dialog with it, mid-edit, with no warning. lv-tag-list and
+             lv-branch-list each already carry this exact fix internally; the
+             same hazard one level up was never addressed. An external
+             "git tag -d" picked up by the watcher is enough to trigger it. -->
+        <div
+          class="section-content"
+          style=${this.tagCount > 0 ? '' : 'display: none;'}
+        >
           <lv-tag-list
-            style="display: none;"
             .repositoryPath=${this.repositoryPath}
             @tags-changed=${this.handleTagsChanged}
             @tag-checkout=${this.handleTagCheckout}
             @tag-count-changed=${this.handleTagCountChanged}
           ></lv-tag-list>
-        `}
+        </div>
       </section>
 
       <!-- Git Flow Section -->

@@ -14,6 +14,9 @@ export interface ErrorSuggestion {
 export interface ErrorContext {
   operation?: string;
   branchName?: string;
+  /** Repo the failing operation ran against. Pinned into any suggested
+   *  action, because a toast outlives a repository switch. */
+  repoPath?: string;
 }
 
 /**
@@ -45,8 +48,13 @@ export function getErrorSuggestion(
       message: `Branch is not fully merged. Force delete if you're sure.`,
       action: {
         label: 'Force Delete',
+        // repoPath travels with the branch name. The toast outlives a repo
+        // switch (8s, and nothing clears toasts on switch), so resolving the
+        // repo when the button is clicked force-deleted from whichever tab
+        // happened to be active then — discarding unmerged commits in a repo
+        // the user never aimed at.
         callback: () => window.dispatchEvent(new CustomEvent('force-delete-branch', {
-          detail: { branchName: context?.branchName },
+          detail: { branchName: context?.branchName, repoPath: context?.repoPath },
         })),
       },
     };
