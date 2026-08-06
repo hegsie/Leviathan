@@ -398,6 +398,14 @@ fn undo_checkout(
     author: String,
     description: String,
 ) -> Result<UndoAction> {
+    // The non-checkout branch of undo_last_action calls ensure_resettable; this
+    // one switches branches instead, so it needs the switch guard rather than
+    // the reset guard. It was the last set_head site in the codebase without
+    // one. Not reachable from any UI surface today (Ctrl+Z opens the reflog
+    // dialog, a different path), but leaving the hole is how the last five
+    // rounds of this exact pattern started.
+    crate::commands::branch::ensure_checkoutable(repo)?;
+
     let from = parse_checkout_source(message).ok_or_else(|| {
         LeviathanError::OperationFailed(
             "Could not determine which branch to switch back to for this checkout.".to_string(),
@@ -684,6 +692,45 @@ mod tests {
 
         // HEAD should now point back to first commit
         assert_eq!(repo.head_oid(), first_oid);
+    }
+
+    /// undo_checkout switches branches, so it needs the switch guard, not the
+    /// reset guard the other undo path uses. Without it, undoing a checkout
+    /// mid-rebase moved HEAD while .git/rebase-merge stayed on disk.
+    #[tokio::test]
+    async fn test_undo_checkout_refuses_mid_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        let git = repo.repo();
+        let head = git.head().unwrap().peel_to_commit().unwrap().id();
+        std::fs::create_dir_all(repo.path.join(".git/rebase-merge")).unwrap();
+        std::fs::write(repo.path.join(".git/rebase-merge/interactive"), "").unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/head-name"),
+            "refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/onto"),
+            format!("{}\n", head),
+        )
+        .unwrap();
+        assert_ne!(repo.repo().state(), git2::RepositoryState::Clean);
+
+        let err = undo_checkout(
+            &repo.repo(),
+            "checkout: moving from main to feature",
+            &head.to_string(),
+            &head.to_string(),
+            0,
+            "Test User".to_string(),
+            "checkout".to_string(),
+        )
+        .expect_err("undoing a checkout mid-rebase orphans the rebase state");
+        assert!(
+            err.to_string().contains("rebase is in progress"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[tokio::test]
