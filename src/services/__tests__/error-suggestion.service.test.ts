@@ -190,4 +190,95 @@ describe('error-suggestion.service', () => {
       ).to.not.equal(null);
     });
   });
+
+  describe('a rejected push distinguishes the two libgit2 messages', () => {
+    // push.c:345 and push.c:356 share no substring and mean opposite things.
+    const REMOTE_AHEAD =
+      'cannot push because a reference that you are trying to update on the remote contains commits that are not present locally.';
+    const LOCAL_DIVERGED = 'cannot push non-fastforwardable reference';
+
+    it('offers Pull Now when the remote genuinely has commits we lack', () => {
+      const result = getErrorSuggestion(REMOTE_AHEAD, { operation: 'push' });
+      expect(result).to.not.equal(null);
+      expect(result!.message).to.match(/pull before pushing/i);
+      expect(result!.action?.label).to.equal('Pull Now');
+    });
+
+    it('does NOT offer Pull Now after an amend or rebase', () => {
+      // Pulling here merges the pre-amend commits back in, duplicating them and
+      // undoing the amend — worse than saying nothing.
+      const result = getErrorSuggestion(LOCAL_DIVERGED, { operation: 'push' });
+      expect(result).to.not.equal(null);
+      expect(result!.message).to.match(/diverged/i);
+      expect(result!.action, 'no one-click action that would undo their work').to.be.undefined;
+    });
+
+    it('a tag already on the remote gets tag-specific advice, not "pull"', () => {
+      const result = getErrorSuggestion(LOCAL_DIVERGED, { operation: 'push-tag' });
+      expect(result!.message).to.match(/tag at a different commit/i);
+      expect(result!.message).to.not.match(/pull before pushing/i);
+    });
+
+    it('the git CLI wording still reaches the pull advice', () => {
+      const result = getErrorSuggestion('Updates were rejected', { operation: 'push' });
+      expect(result!.action?.label).to.equal('Pull Now');
+    });
+  });
+
+  describe('suggestion actions carry the repo that failed', () => {
+    it('Pull Now pins the repo', () => {
+      const result = getErrorSuggestion('...not present locally', {
+        operation: 'push',
+        repoPath: '/repo/a',
+      });
+      let detail: { repoPath?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ repoPath?: string }>).detail;
+      };
+      window.addEventListener('trigger-pull', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('trigger-pull', handler);
+      }
+      expect(detail).to.not.be.null;
+      expect(detail!.repoPath).to.equal('/repo/a');
+    });
+
+    it('Abort Rebase pins the repo', () => {
+      const result = getErrorSuggestion('rebase in progress', { repoPath: '/repo/a' });
+      let detail: { repoPath?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ repoPath?: string }>).detail;
+      };
+      window.addEventListener('trigger-abort', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('trigger-abort', handler);
+      }
+      expect(detail!.repoPath).to.equal('/repo/a');
+    });
+  });
+
+  describe('"permission denied" is not always an auth failure', () => {
+    it('a locked file during a checkout is not reported as an SSH problem', () => {
+      // The OS says "permission denied" for a read-only or held file too.
+      const result = getErrorSuggestion('failed to write file: permission denied');
+      expect(
+        String(result?.message ?? ''),
+        'the real filesystem error must not be replaced with credentials advice',
+      ).to.not.contain('credentials or SSH keys');
+    });
+
+    it('but a push that fails on permission denied still is', () => {
+      const result = getErrorSuggestion('permission denied', { operation: 'push' });
+      expect(result!.message).to.match(/credentials or SSH keys/);
+    });
+
+    it('publickey wording is recognised regardless of operation', () => {
+      const result = getErrorSuggestion('Permission denied (publickey)');
+      expect(result!.message).to.match(/credentials or SSH keys/);
+    });
+  });
 });

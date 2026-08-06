@@ -2097,7 +2097,10 @@ export class AppShell extends LitElement {
       showToast(`Pushed tag ${tagName}`, 'success');
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       log.error('Push tag failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', { operation: 'push' });
+      showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
+        operation: 'push-tag',
+        repoPath,
+      });
     }
   }
 
@@ -2270,11 +2273,20 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleAbortOperation(): Promise<void> {
-    if (!this.activeRepository || this.abortInProgress) return;
+  private async handleAbortOperation(pinnedRepoPath?: string): Promise<void> {
+    if (this.abortInProgress) return;
 
-    const state = this.activeRepository.repository.state;
-    const path = this.activeRepository.repository.path;
+    // An abort discards the in-progress operation AND any conflict resolution,
+    // so a toast action must target the repo that failed, not the active tab.
+    const repo = pinnedRepoPath
+      ? repositoryStore
+          .getState()
+          .openRepositories.find((r) => r.repository.path === pinnedRepoPath)
+      : this.activeRepository;
+    if (!repo) return;
+
+    const state = repo.repository.state;
+    const path = repo.repository.path;
     let result;
 
     // Reject an unabortable state BEFORE prompting — otherwise the user
@@ -2341,8 +2353,30 @@ export class AppShell extends LitElement {
   }
 
   // Error suggestion action handlers
-  private handleTriggerPull = (): void => {
-    this.handlePull();
+  /**
+   * A suggestion toast lives 8 seconds and nothing clears toasts on a repo
+   * switch, so an action clicked from one must run against the repo that
+   * FAILED — not whichever tab happens to be active by then. Same reasoning as
+   * handleForceDeleteBranch; these two were left resolving `activeRepository`.
+   */
+  private resolvePinnedRepo(repoPath?: string): string | null {
+    if (!repoPath) return this.activeRepository?.repository.path ?? null;
+    const open = repositoryStore
+      .getState()
+      .openRepositories.some((r) => r.repository.path === repoPath);
+    if (!open) {
+      showToast('That repository is no longer open', 'warning');
+      return null;
+    }
+    return repoPath;
+  }
+
+  private handleTriggerPull = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.handlePull(repoPath);
   };
 
   private handleForceDeleteBranch = (
@@ -2491,8 +2525,12 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleTriggerAbort = (): void => {
-    this.handleAbortOperation();
+  private handleTriggerAbort = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.handleAbortOperation(repoPath);
   };
 
   private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
@@ -3824,9 +3862,11 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handlePull(): Promise<void> {
-    if (!this.activeRepository) return;
-    const repoPath = this.activeRepository.repository.path;
+  private async handlePull(pinnedRepoPath?: string): Promise<void> {
+    // pinnedRepoPath comes from a suggestion toast's Pull Now, which must pull
+    // the repo whose push failed even if the user has since switched tabs.
+    const repoPath = pinnedRepoPath ?? this.activeRepository?.repository.path;
+    if (!repoPath) return;
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.
@@ -3887,7 +3927,10 @@ export class AppShell extends LitElement {
         // Through the suggestion service so a non-fast-forward rejection offers
         // the Pull Now action the app already implements — a plain toast made
         // that recovery unreachable from the only push surface there is.
-        showErrorWithSuggestion(result.error?.message ?? '', 'Push failed', { operation: 'push' });
+        showErrorWithSuggestion(result.error?.message ?? '', 'Push failed', {
+          operation: 'push',
+          repoPath,
+        });
       }
     }
   }

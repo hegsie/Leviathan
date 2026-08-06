@@ -31,19 +31,50 @@ export function getErrorSuggestion(
 
   const msg = errorMessage.toLowerCase();
 
-  // Push rejected (non-fast-forward)
-  // libgit2's own wording is "cannot push non-fastforwardable reference" — no
-  // hyphen between "non" and "fastforwardable" — so the hyphenated match alone
-  // never fired for the case it was written for.
+  // A push the remote refused. libgit2 emits TWO different messages here
+  // (push.c:345 and :356) that share no substring, and they mean opposite
+  // things:
+  //
+  //   "…contains commits that are not present locally"  -> someone else pushed
+  //   "cannot push non-fastforwardable reference"        -> YOU rewrote history
+  //
+  // Only the first is a "pull before pushing" situation. Offering Pull Now for
+  // the second is worse than saying nothing: pulling merges the pre-amend
+  // commits back in, duplicating them and undoing the amend the user just made.
+  // Checked FIRST, and on libgit2's exact spelling: "non-fastforwardable" is
+  // specifically "the remote tip IS in your object database but is not an
+  // ancestor", i.e. you amended or rebased. The git CLI's hyphenated
+  // "non-fast-forward" means the opposite (you are behind) and is handled
+  // below — the two differ only by those hyphens, so order matters.
+  if (msg.includes('fastforwardable')) {
+    // A tag that already exists on the remote at another commit fails the same
+    // refspec-generic pre-check, and neither pulling nor "newer changes"
+    // describes it.
+    if (context?.operation === 'push-tag') {
+      return {
+        message:
+          'The remote already has this tag at a different commit. Delete the remote tag first if you mean to move it.',
+      };
+    }
+    return {
+      message:
+        'Your local history has diverged from the remote (an amend or rebase). Pull to merge the remote commits back in, or force-push to replace them.',
+    };
+  }
+
   if (
-    /non-fast-?forward|nonfastforward|fastforwardable/.test(msg) ||
+    msg.includes('not present locally') ||
+    /non-fast-?forward/.test(msg) ||
     (msg.includes('rejected') && context?.operation === 'push')
   ) {
     return {
       message: 'Remote has newer changes. Pull before pushing.',
       action: {
         label: 'Pull Now',
-        callback: () => window.dispatchEvent(new CustomEvent('trigger-pull')),
+        callback: () => window.dispatchEvent(new CustomEvent('trigger-pull', {
+          // Pinned like force-delete below: the toast outlives a repo switch.
+          detail: { repoPath: context?.repoPath },
+        })),
       },
     };
   }
@@ -66,9 +97,26 @@ export function getErrorSuggestion(
     };
   }
 
-  // Authentication errors
-  if (msg.includes('authentication') || msg.includes('auth') ||
-      msg.includes('credentials') || msg.includes('permission denied')) {
+  // Authentication errors.
+  //
+  // "permission denied" alone is NOT enough: it is also what the OS says when a
+  // file is read-only or held by another process, so a checkout or merge that
+  // failed on a locked file was reported as an auth problem — replacing the
+  // real filesystem error with "check your SSH keys" and an Open Settings
+  // button. Match it only for operations that actually talk to a remote, or
+  // alongside wording only an auth failure produces.
+  const isNetworkOp =
+    context?.operation === 'push' ||
+    context?.operation === 'pull' ||
+    context?.operation === 'fetch' ||
+    context?.operation === 'clone' ||
+    context?.operation === 'push-tag';
+  if (
+    msg.includes('authentication') ||
+    msg.includes('credentials') ||
+    msg.includes('publickey') ||
+    (msg.includes('permission denied') && isNetworkOp)
+  ) {
     return {
       message: 'Authentication failed. Check your credentials or SSH keys.',
       action: {
@@ -84,7 +132,12 @@ export function getErrorSuggestion(
       message: 'A rebase is already in progress. Resolve or abort it first.',
       action: {
         label: 'Abort Rebase',
-        callback: () => window.dispatchEvent(new CustomEvent('trigger-abort')),
+        callback: () => window.dispatchEvent(new CustomEvent('trigger-abort', {
+          // Pinned: aborting discards the in-progress rebase AND any conflict
+          // resolution — doing that to whichever tab happens to be active when
+          // an 8-second toast is clicked is exactly the bug force-delete had.
+          detail: { repoPath: context?.repoPath },
+        })),
       },
     };
   }
