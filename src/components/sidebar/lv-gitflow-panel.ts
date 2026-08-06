@@ -12,6 +12,12 @@ import { showToast } from '../../services/notification.service.ts';
 import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 type GitFlowCategory = 'feature' | 'release' | 'hotfix';
 
@@ -279,7 +285,40 @@ export class LvGitflowPanel extends LitElement {
   @state() private activeReleases: ActiveItem[] = [];
   @state() private activeHotfixes: ActiveItem[] = [];
   @state() private expandedSections = new Set<GitFlowCategory>(['feature', 'release', 'hotfix']);
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell, the other sidebar sections
+   * and the destructive dialogs.
+   *
+   * This panel is the fourth section in the same left panel as the branch, tag
+   * and stash lists, and performs the same class of operation — a git-flow
+   * finish checks out develop, merges and deletes a branch. It was the last
+   * one still holding a component-local boolean, so a Finish and a branch-list
+   * checkout could run against the same working tree at once. See
+   * utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /** Claim the lock for `repoPath`; false when it is already held. */
+  private claimOperation(repoPath: string): boolean {
+    return tryAcquireRefOp(repoPath);
+  }
+
+  /**
+   * Release `repoPath`'s lock.
+   *
+   * The path is passed explicitly rather than re-read from
+   * `this.repositoryPath`: the prop rebinds when the user switches repo tabs
+   * mid-operation, and a release that re-read it would free the wrong repo.
+   */
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
   /** Per-path load sequence: a slow load for repo A must not overwrite the
    * panel with A's config/items after the user switched to repo B (whose
    * load already resolved). Mirrors lv-branch-list's branchesLoadSeq. The
@@ -289,6 +328,9 @@ export class LvGitflowPanel extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     // Conflicted finishes complete inside the shared conflict dialog (branch
     // deleted / finish re-run there), so reload when the app-level refresh
     // fires — otherwise the finished item stays listed as active.
@@ -298,6 +340,8 @@ export class LvGitflowPanel extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
   }
 
@@ -394,13 +438,11 @@ export class LvGitflowPanel extends LitElement {
   }
 
   private async handleInitialize(): Promise<void> {
-    if (this.operationInProgress) return;
-    this.error = null;
-    this.operationInProgress = true;
-
     // Captured BEFORE the await — the host's refresh must target the repo
     // the init actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
+    if (!this.claimOperation(repoPath)) return;
+    this.error = null;
     try {
       const result = await gitService.initGitFlow(repoPath);
       if (result.success) {
@@ -417,7 +459,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to initialize git flow:', err);
       this.error = 'Failed to initialize Git Flow';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -429,8 +471,8 @@ export class LvGitflowPanel extends LitElement {
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
+    if (!this.claimOperation(repoPath)) return;
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowStartFeature(repoPath, name.trim());
@@ -448,12 +490,14 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to start feature:', err);
       this.error = 'Failed to start feature';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
   private async handleFinishFeature(item: ActiveItem, squash = false): Promise<void> {
-    if (this.operationInProgress) return;
+    // Captured BEFORE the awaits: the conflict dialog must pin to the repo
+    // the finish actually ran on, even if the prop is rebound mid-flight.
+    const repoPath = this.repositoryPath;
 
     // Claim the guard SYNCHRONOUSLY, before the confirm's await.
     //
@@ -463,11 +507,7 @@ export class LvGitflowPanel extends LitElement {
     // still false and both pass the check. Two concurrent squash finishes on
     // one repo can double-merge or mint a duplicate squash commit — the Rust
     // command takes no repo-level lock. Claim first, release on decline.
-    this.operationInProgress = true;
-
-    // Captured BEFORE the awaits: the conflict dialog must pin to the repo
-    // the finish actually ran on, even if the prop is rebound mid-flight.
-    const repoPath = this.repositoryPath;
+    if (!this.claimOperation(repoPath)) return;
 
     // A squash finish collapses the branch into ONE commit on develop and then
     // deletes it. Because a squash commit never makes the feature tip an
@@ -494,7 +534,7 @@ export class LvGitflowPanel extends LitElement {
         confirmed = false;
       }
       if (!confirmed) {
-        this.operationInProgress = false;
+        this.releaseOperation(repoPath);
         return;
       }
     }
@@ -538,7 +578,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to finish feature:', err);
       this.error = 'Failed to finish feature';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -547,8 +587,8 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
+    if (!this.claimOperation(repoPath)) return;
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowStartRelease(repoPath, version.trim());
@@ -566,7 +606,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to start release:', err);
       this.error = 'Failed to start release';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -576,15 +616,13 @@ export class LvGitflowPanel extends LitElement {
     // the prompt strands the first call on a promise that never settles rather
     // than racing it — claiming up front prevents that hang and keeps the three
     // finish handlers consistent.
-    if (this.operationInProgress) return;
-    this.operationInProgress = true;
-
     // Captured BEFORE the prompt (an in-app overlay — Ctrl+Tab can rebind
     // this prop while it is open): the finish must run on the repo whose
     // release the user clicked, and the conflict dialog must pin to it.
     // The develop-branch NAME is per-repo config that reloads on switch —
     // capture it with the path.
     const repoPath = this.repositoryPath;
+    if (!this.claimOperation(repoPath)) return;
     const developBranch = this.config?.developBranch ?? 'develop';
     // showPrompt dynamically imports the prompt component; a chunk-load
     // failure rejects here, and the flag is already claimed while the try that
@@ -594,11 +632,11 @@ export class LvGitflowPanel extends LitElement {
     try {
       tagMessage = await showPrompt('Finish Release', `Enter tag message for release ${item.name}:`, `Release ${item.name}`);
     } catch {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
       return;
     }
     if (tagMessage === null) {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
       return;
     }
 
@@ -647,7 +685,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to finish release:', err);
       this.error = 'Failed to finish release';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -656,8 +694,8 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
+    if (!this.claimOperation(repoPath)) return;
     this.error = null;
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.gitFlowStartHotfix(repoPath, version.trim());
@@ -675,7 +713,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to start hotfix:', err);
       this.error = 'Failed to start hotfix';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -685,10 +723,8 @@ export class LvGitflowPanel extends LitElement {
     // the prompt strands the first call on a promise that never settles rather
     // than racing it — claiming up front prevents that hang and keeps the three
     // finish handlers consistent.
-    if (this.operationInProgress) return;
-    this.operationInProgress = true;
-
     const repoPath = this.repositoryPath;
+    if (!this.claimOperation(repoPath)) return;
     const developBranch = this.config?.developBranch ?? 'develop';
     // showPrompt dynamically imports the prompt component; a chunk-load
     // failure rejects here, and the flag is already claimed while the try that
@@ -698,11 +734,11 @@ export class LvGitflowPanel extends LitElement {
     try {
       tagMessage = await showPrompt('Finish Hotfix', `Enter tag message for hotfix ${item.name}:`, `Hotfix ${item.name}`);
     } catch {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
       return;
     }
     if (tagMessage === null) {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
       return;
     }
 
@@ -751,7 +787,7 @@ export class LvGitflowPanel extends LitElement {
       console.error('Failed to finish hotfix:', err);
       this.error = 'Failed to finish hotfix';
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(repoPath);
     }
   }
 

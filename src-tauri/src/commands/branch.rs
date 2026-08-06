@@ -323,6 +323,29 @@ pub async fn rename_branch(
 /// refused with "Another operation is in progress", and the still-visible
 /// Abort would yank the user back to the original branch. Canonical git
 /// refuses the same way.
+/// The current index of the auto-stash `stash_oid`, or None when it is gone.
+///
+/// `git stash push` PREPENDS, so a stash created by another surface (or a
+/// terminal) between the auto-stash save and the re-apply renumbers the entry.
+/// Applying and dropping the bare index 0 then restored someone else's stash
+/// and destroyed it, while the user's pre-checkout work stayed unapplied one
+/// slot down — and the success toast still said the changes had been
+/// re-applied. The checkout-FAILURE path in this same function already
+/// verified the OID before popping; the success path, the common one, did not.
+fn auto_stash_index(repo: &mut git2::Repository, stash_oid: Option<git2::Oid>) -> Option<usize> {
+    let expected = stash_oid?;
+    let mut found = None;
+    let _ = repo.stash_foreach(|idx, _name, oid| {
+        if *oid == expected {
+            found = Some(idx);
+            false
+        } else {
+            true
+        }
+    });
+    found
+}
+
 pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
     use git2::RepositoryState::*;
     let what = match repo.state() {
@@ -892,7 +915,25 @@ pub async fn checkout_with_autostash(
             ref_name
         );
 
-        match repo.stash_apply(0, Some(&mut stash_apply_opts)) {
+        // Resolved by OID, not assumed to be 0 — see auto_stash_index.
+        let stash_idx = match auto_stash_index(&mut repo, stash_oid) {
+            Some(idx) => idx,
+            None => {
+                return Ok(CheckoutWithStashResult {
+                    success: true,
+                    stashed: true,
+                    stash_applied: false,
+                    stash_conflict: false,
+                    message: format!(
+                        "Switched to {}, but your stashed changes could not be found to \
+                         re-apply. They are still in the stash list — apply them manually.",
+                        ref_name
+                    ),
+                });
+            }
+        };
+
+        match repo.stash_apply(stash_idx, Some(&mut stash_apply_opts)) {
             Ok(()) => {
                 // Apply reported success, but an unstaged conflicting change can
                 // land conflicts in the index while still returning Ok. Only drop
@@ -906,7 +947,7 @@ pub async fn checkout_with_autostash(
                         message: conflict_message,
                     });
                 }
-                repo.stash_drop(0)?;
+                repo.stash_drop(stash_idx)?;
                 return Ok(CheckoutWithStashResult {
                     success: true,
                     stashed: true,
@@ -935,7 +976,10 @@ pub async fn checkout_with_autostash(
                     retry_checkout.safe();
                     retry_opts.checkout_options(retry_checkout);
 
-                    if repo.stash_apply(0, Some(&mut retry_opts)).is_ok() {
+                    // Re-resolved: the failed apply above may itself have
+                    // changed the stash list.
+                    let retry_idx = auto_stash_index(&mut repo, stash_oid).unwrap_or(stash_idx);
+                    if repo.stash_apply(retry_idx, Some(&mut retry_opts)).is_ok() {
                         if repo.index()?.has_conflicts() {
                             return Ok(CheckoutWithStashResult {
                                 success: true,
@@ -951,7 +995,7 @@ pub async fn checkout_with_autostash(
                         // duplicate or conflict with the already-applied changes.
                         // The staged status could not be reinstated on this path, so
                         // note that in the message.
-                        repo.stash_drop(0)?;
+                        repo.stash_drop(retry_idx)?;
                         return Ok(CheckoutWithStashResult {
                             success: true,
                             stashed: true,
@@ -1597,6 +1641,84 @@ mod tests {
         assert!(data.success);
         assert!(!data.stashed);
         assert_eq!(repo.current_branch(), "feature");
+    }
+
+    /// `git stash push` PREPENDS, so a stash created between the auto-stash
+    /// save and the re-apply renumbers the entry. Applying and dropping the
+    /// bare index 0 then restored someone else's stash and destroyed it, while
+    /// the user's pre-checkout work stayed unapplied one slot down — and the
+    /// success toast still claimed the changes had been re-applied.
+    #[test]
+    fn test_auto_stash_index_follows_the_oid_not_the_position() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+
+        test_repo.create_file("README.md", "first stash\n");
+        let first = repo
+            .stash_save(&sig, "first", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        // A second stash pushes the first down to index 1.
+        test_repo.create_file("README.md", "second stash\n");
+        let second = repo
+            .stash_save(&sig, "second", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        assert_eq!(
+            auto_stash_index(&mut repo, Some(first)),
+            Some(1),
+            "the first stash moved to index 1 and must be found there"
+        );
+        assert_eq!(auto_stash_index(&mut repo, Some(second)), Some(0));
+    }
+
+    #[test]
+    fn test_auto_stash_index_is_none_when_the_stash_is_gone() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+
+        test_repo.create_file("README.md", "stashed\n");
+        let oid = repo
+            .stash_save(&sig, "gone", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+        repo.stash_drop(0).unwrap();
+
+        assert_eq!(
+            auto_stash_index(&mut repo, Some(oid)),
+            None,
+            "a vanished stash must not fall back to whatever sits at index 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_leaves_a_foreign_stash_alone() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.create_file("README.md", "my work\n");
+
+        // A stash that is NOT the auto-stash, sitting at index 0.
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's work\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let result =
+            checkout_with_autostash(test_repo.path_str(), "feature".to_string(), Some(true))
+                .await
+                .expect("checkout");
+        assert!(result.success);
+
+        // Whatever happened to the auto-stash, the foreign one must survive.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the checkout applied and dropped a stash it did not create"
+        );
     }
 
     #[tokio::test]

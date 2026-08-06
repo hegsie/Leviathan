@@ -4314,11 +4314,23 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handlePull(pinnedRepoPath?: string): Promise<void> {
+  private handlePull(pinnedRepoPath?: string): Promise<void> {
     // pinnedRepoPath comes from a suggestion toast's Pull Now, which must pull
     // the repo whose push failed even if the user has since switched tabs.
     const repoPath = pinnedRepoPath ?? this.activeRepository?.repository.path;
-    if (!repoPath) return;
+    if (!repoPath) return Promise.resolve();
+    // Three surfaces reach this — Ctrl+Shift+P, the palette, and the Pull Now
+    // toast action — and none guarded against a second call. ensure_pullable
+    // in the backend only refuses when a merge is ALREADY unresolved; two pulls
+    // that both start clean both pass it, and the second calls repo.merge() on
+    // top of the first, which deletes MERGE_HEAD and leaves a conflicted index
+    // that abort_merge then refuses to clean up. Keyboard auto-repeat alone
+    // fires this ~30x a second. Keyed like the force-push sibling, and claimed
+    // before the network-permission confirm so that round trip is covered too.
+    return this.runExclusive(`pull:${repoPath}`, () => this.pullRepository(repoPath));
+  }
+
+  private async pullRepository(repoPath: string): Promise<void> {
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.

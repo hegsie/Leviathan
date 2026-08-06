@@ -390,6 +390,47 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('pull is serialized', () => {
+    // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
+    // "Pull Now" toast action — and none guarded a second call. The backend's
+    // ensure_pullable only refuses when a merge is ALREADY unresolved; two
+    // pulls that both start clean both pass it, and the second calls
+    // repo.merge() on top of the first, deleting MERGE_HEAD and leaving a
+    // conflicted index abort_merge then refuses to clean up. Keyboard
+    // auto-repeat alone fires this many times a second.
+    it('a second pull is refused while the first is in flight', async () => {
+      const el = shellOnRepo();
+      let started = 0;
+      mockResponses['pull'] = () => {
+        started++;
+        return new Promise(() => {
+          /* never resolves — the first pull is still running */
+        });
+      };
+      invokeCallArgs.length = 0;
+
+      void (el as any).handlePull();
+      void (el as any).handlePull();
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(started, 'the second pull must not reach the backend').to.equal(1);
+    });
+
+    it('a later pull works once the first finished', async () => {
+      const el = shellOnRepo();
+      let started = 0;
+      mockResponses['pull'] = () => {
+        started++;
+        return null;
+      };
+
+      await (el as any).handlePull();
+      await (el as any).handlePull();
+
+      expect(started, 'a stuck claim would block pulling for the session').to.equal(2);
+    });
+  });
+
   describe('the graph lock is shared with the sidebar lists', () => {
     // app-shell and lv-branch-list/lv-tag-list/lv-stash-list used to hold two
     // disjoint locks over the same commands, and <lv-left-panel> is rendered
