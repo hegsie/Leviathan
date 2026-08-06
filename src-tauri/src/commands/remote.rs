@@ -210,6 +210,24 @@ pub async fn fetch(
     }
 }
 
+/// Refuse a pull while another operation is unresolved, the way merge() does.
+fn ensure_pullable(repo_path: &Path) -> Result<()> {
+    let repo = git2::Repository::open(repo_path)?;
+    match repo.state() {
+        git2::RepositoryState::Clean => Ok(()),
+        git2::RepositoryState::Merge => Err(LeviathanError::OperationFailed(
+            "You have not concluded your merge (MERGE_HEAD exists). Resolve the \
+             conflicts and commit, or abort the merge, before pulling."
+                .to_string(),
+        )),
+        state => Err(LeviathanError::OperationFailed(format!(
+            "Cannot pull: another operation is in progress ({:?}). \
+             Complete or abort it first.",
+            state
+        ))),
+    }
+}
+
 /// Fast-forward `refname` to `target_oid`, checking out the target tree first.
 ///
 /// The checkout is SAFE (git2's default), not forced, and the ref only moves
@@ -293,6 +311,18 @@ pub async fn pull(
         // thread so the Tokio runtime stays responsive.
         let (remote_name_returned, message) =
             tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+                // Refuse before the network round trip if another operation is
+                // unresolved. merge() has always had this guard; pull never
+                // did, and its normal-merge branch calls repo.merge() a SECOND
+                // time on top of the first. libgit2 errors out — but as a side
+                // effect it deletes MERGE_HEAD and flips state() back to Clean
+                // while the index still holds the conflicted entries. abort_merge
+                // then refuses ("no merge to abort"), so the app's only recovery
+                // action for a stuck merge is gone and the conflicted index still
+                // blocks a commit. The keyboard shortcut fires through an open
+                // conflict dialog, so this is one keystroke away.
+                ensure_pullable(Path::new(&path_for_task))?;
+
                 // First fetch (network I/O)
                 fetch_internal(&path_for_task, &remote_for_task, false, token)?;
 
@@ -1280,6 +1310,60 @@ mod tests {
                 .id(),
             head_before
         );
+    }
+
+    // ---- pull must not clobber an unresolved operation ----
+
+    /// A second git2 merge on top of an unresolved one errors out, but as a
+    /// side effect deletes MERGE_HEAD and flips state() back to Clean while
+    /// the index still holds the conflicted entries — after which abort_merge
+    /// refuses ("no merge to abort") and the conflicted index still blocks a
+    /// commit. This locks in the refusal that keeps that from happening.
+    #[test]
+    fn test_pull_refuses_while_a_merge_is_unresolved() {
+        let t = TestRepo::with_initial_commit();
+        t.create_commit("base", &[("f.txt", "base\n")]);
+        let repo = t.repo();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("side", &repo.find_commit(base).unwrap(), false)
+            .unwrap();
+        t.create_commit("main side", &[("f.txt", "main\n")]);
+
+        repo.set_head("refs/heads/side").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        t.create_commit("other side", &[("f.txt", "side\n")]);
+        let side_oid = t.repo().head().unwrap().peel_to_commit().unwrap().id();
+
+        let repo = t.repo();
+        repo.set_head(&main_ref).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        // Conflicting merge, left unresolved — what the conflict dialog shows.
+        let annotated = repo.find_annotated_commit(side_oid).unwrap();
+        let _ = repo.merge(&[&annotated], None, None);
+        assert_eq!(repo.state(), git2::RepositoryState::Merge);
+        assert!(repo.index().unwrap().has_conflicts());
+
+        let err = ensure_pullable(&t.path).expect_err("pull must refuse mid-merge");
+        assert!(
+            err.to_string().contains("not concluded your merge"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The recovery path is still intact.
+        assert_eq!(t.repo().state(), git2::RepositoryState::Merge);
+        assert!(t.path.join(".git/MERGE_HEAD").exists());
+    }
+
+    #[test]
+    fn test_pull_is_allowed_on_a_clean_repo() {
+        let t = TestRepo::with_initial_commit();
+        ensure_pullable(&t.path).expect("a clean repo must be pullable");
     }
 
     // ---- pre-push hook parity (git2 push path) ----
