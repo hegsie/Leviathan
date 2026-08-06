@@ -7,6 +7,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { createBranch } from '../../services/git.service.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -182,10 +183,16 @@ export class LvCreateBranchDialog extends LitElement {
     void this.updateComplete.then(() => {
       if (!this.isOpen) return;
       this.modal.open = true;
-      // Focus input after modal opens
-      setTimeout(() => {
-        if (this.isOpen) this.inputEl?.focus();
-      }, 100);
+      // Focus the name field once the modal has painted — but only while focus
+      // is still nobody's. The unguarded 100ms timer this replaces fired long
+      // after the user could click or Tab into another control and yanked the
+      // caret back into the name box mid-keystroke. A rAF also lands before
+      // lv-modal's own focus pass, which then sees focus inside and backs off.
+      requestAnimationFrame(() => {
+        if (!this.isOpen) return;
+        if (containsDeepActiveElement(this)) return;
+        this.inputEl?.focus();
+      });
     });
   }
 

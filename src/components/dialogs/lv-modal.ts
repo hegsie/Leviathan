@@ -7,6 +7,7 @@ import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 
 @customElement('lv-modal')
 export class LvModal extends LitElement {
@@ -129,19 +130,6 @@ export class LvModal extends LitElement {
 
   private previouslyFocused: HTMLElement | null = null;
 
-  /**
-   * True when focus already sits inside this modal, following shadow
-   * boundaries. `document.activeElement` only ever names the outermost host,
-   * so a slotted input reads as its own dialog element, not as the input.
-   */
-  private containsDeepActiveElement(): boolean {
-    let el: Element | null = document.activeElement;
-    while (el?.shadowRoot?.activeElement) {
-      el = el.shadowRoot.activeElement;
-    }
-    return !!el && el !== document.body && this.contains(el);
-  }
-
   private handleOverlayClick(e: MouseEvent): void {
     if (e.target === e.currentTarget) {
       this.close();
@@ -230,7 +218,7 @@ export class LvModal extends LitElement {
           // focus from every slotted field. lv-prompt-dialog focused its text
           // input and lost it every time: typing a branch rename went to the
           // global shortcut handler instead, where "s" ran Stage All Changes.
-          if (this.containsDeepActiveElement()) return;
+          if (containsDeepActiveElement(this)) return;
 
           const dialog = this.shadowRoot?.querySelector('.dialog') as HTMLElement;
           if (dialog) {
