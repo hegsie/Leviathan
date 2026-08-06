@@ -63,15 +63,19 @@ export async function waitForRepositoryChanged(
   action: () => Promise<void>,
   timeout = 3000
 ): Promise<boolean> {
+  // Two signals mean "the app refreshed for this repo": `repository-changed`,
+  // which sidebar components bubble to their host, and the `repository-refresh`
+  // window event app-shell's own handleRefresh() dispatches. Operations driven
+  // by an app-shell-owned dialog produce only the second. Accept either.
   const eventPromise = page.evaluate((ms: number) => {
     return new Promise<boolean>((resolve) => {
-      document.addEventListener(
-        'repository-changed',
-        () => {
-          resolve(true);
-        },
-        { once: true }
-      );
+      const done = (): void => {
+        document.removeEventListener('repository-changed', done);
+        window.removeEventListener('repository-refresh', done);
+        resolve(true);
+      };
+      document.addEventListener('repository-changed', done, { once: true });
+      window.addEventListener('repository-refresh', done, { once: true });
       setTimeout(() => resolve(false), ms);
     });
   }, timeout);
