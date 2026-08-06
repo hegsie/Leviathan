@@ -1182,7 +1182,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       this.editContent = result.data;
       this.editPath = this.file.path;
       this.editMode = true;
+      return;
     }
+
+    // Without this the Edit button was a no-op on two reachable failures: the
+    // file was deleted or renamed on disk since the last status refresh
+    // (FILE_NOT_FOUND), or it is not valid UTF-8 despite passing the diff's
+    // binary heuristic. Neither showed anything — and read_file_content is
+    // excluded from the Output panel by its `read_` prefix, so the failure was
+    // not even recorded anywhere. The backend deliberately gives the two cases
+    // separate codes because they are presented very differently.
+    showToast(
+      result.error?.code === 'FILE_NOT_FOUND'
+        ? `${this.file.path} is no longer on disk — refresh to see its current state`
+        : result.error?.message ?? 'Could not open this file for editing',
+      'error'
+    );
   }
 
   /**

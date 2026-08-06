@@ -27,6 +27,7 @@ import type { LvDiffView } from '../lv-diff-view.ts';
 
 // Import the actual component — registers <lv-diff-view> custom element
 import '../lv-diff-view.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -110,6 +111,7 @@ function setupDefaultMocks(opts: {
   diff?: DiffFile;
   fileContent?: string;
   diffToolConfig?: { tool: string | null };
+  readFails?: { code?: string; message: string };
 } = {}): void {
   const diff = opts.diff ?? makeDiffFile();
   mockInvoke = async (command: string) => {
@@ -119,6 +121,7 @@ function setupDefaultMocks(opts: {
       case 'get_commit_file_diff':
         return diff;
       case 'read_file_content':
+        if (opts.readFails) throw opts.readFails;
         return opts.fileContent ?? 'file content here';
       case 'write_file_content':
         return undefined;
@@ -384,6 +387,41 @@ describe('lv-diff-view', () => {
       const saveBtn = el.shadowRoot!.querySelector('.save-btn');
       expect(saveBtn).to.not.be.null;
       expect(saveBtn!.textContent).to.include('Save');
+    });
+
+    it('says why when the file cannot be opened for editing', async () => {
+      // Two reachable failures: the file was deleted or renamed on disk since
+      // the last status refresh, or it is not valid UTF-8 despite passing the
+      // diff's binary heuristic. Both left the Edit button doing nothing at
+      // all — and read_file_content is excluded from the Output panel by its
+      // `read_` prefix, so the failure was recorded nowhere.
+      setupDefaultMocks({ readFails: { code: 'COMMAND_ERROR', message: 'stream did not contain valid UTF-8' } });
+      const el = await renderDiffView();
+      uiStore.setState({ toasts: [] });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.editor-textarea'), 'edit mode is not entered').to.be
+        .null;
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the click is not silent').to.equal(1);
+      expect(errors[0].message).to.contain('UTF-8');
+    });
+
+    it('a file that vanished from disk is named, not reported as a decode error', async () => {
+      setupDefaultMocks({ readFails: { code: 'FILE_NOT_FOUND', message: 'src/main.ts' } });
+      const el = await renderDiffView();
+      uiStore.setState({ toasts: [] });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length).to.equal(1);
+      expect(errors[0].message).to.contain('no longer on disk');
     });
 
     it('shows textarea in edit mode', async () => {
