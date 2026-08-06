@@ -547,20 +547,35 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     // permanently stuck in REBASE state. We do NOT abort on RebaseConflict
     // because the UI surfaces a "resolve conflicts" flow that needs the
     // rebase state intact; the user can call abort_rebase explicitly.
+    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit.
+    let mut rewritten: Vec<String> = Vec::new();
     let result = (|| -> Result<()> {
         while let Some(op) = rebase.next() {
-            let _op = op?;
+            let op = op?;
+            let old_oid = op.id();
 
             if repo.index()?.has_conflicts() {
                 return Err(LeviathanError::RebaseConflict);
             }
 
-            rebase.commit(None, &signature, None)?;
+            let new_oid = rebase.commit(None, &signature, None)?;
+            rewritten.push(format!("{} {}", old_oid, new_oid));
         }
 
         rebase.finish(Some(&signature))?;
         Ok(())
     })();
+
+    if result.is_ok() && !rewritten.is_empty() {
+        // Same hook the CLI rebase path gets for free — see the pre-rebase note
+        // above. Advertised by the Hooks dialog for "rebase, amend".
+        crate::commands::hooks::run_hook_noblock_with_stdin(
+            &repo,
+            "post-rewrite",
+            &["rebase"],
+            Some(&format!("{}\n", rewritten.join("\n"))),
+        );
+    }
 
     match result {
         Err(LeviathanError::RebaseConflict) => Err(LeviathanError::RebaseConflict),
@@ -899,6 +914,16 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
     for oid in revwalk {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
+
+        // Canonical `git rebase -i` omits merge commits from its todo, and a
+        // `pick` of one fails mid-run with "is a merge but no -m option was
+        // given" — after earlier commits have already been replayed, leaving a
+        // detached HEAD and a live rebase the user has to find the banner to
+        // abort. The plain revwalk also emitted commits from the merged-in
+        // side, which the user never touched and did not expect to see.
+        if commit.parent_count() > 1 {
+            continue;
+        }
 
         commits.push(RebaseCommit {
             oid: oid.to_string(),
@@ -2664,6 +2689,72 @@ mod tests {
             "a refusal leaves no rebase state behind"
         );
         assert_eq!(repo.head_oid(), head_before, "and HEAD unmoved");
+    }
+
+    #[tokio::test]
+    async fn test_rebase_plan_omits_merge_commits() {
+        // `git rebase -i` omits merges from its todo, and a `pick` of one dies
+        // with "is a merge but no -m option was given" — after earlier commits
+        // have already been replayed, leaving a detached HEAD and a live
+        // rebase. The plain revwalk also emitted commits from the merged-in
+        // side that the user never touched.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        let main_branch = repo.current_branch();
+        repo.create_commit("m1", &[("m.txt", "m")]);
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        repo.create_commit("s1", &[("s.txt", "s")]);
+        repo.checkout_branch(&main_branch);
+
+        merge(repo.path_str(), "side".to_string(), None, None, None)
+            .await
+            .expect("a clean merge");
+        repo.create_commit("after", &[("a.txt", "a")]);
+
+        let plan = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let git_repo = repo.repo();
+        for c in &plan {
+            let commit = git_repo.find_commit(c.oid.parse().unwrap()).unwrap();
+            assert_eq!(
+                commit.parent_count(),
+                1,
+                "a merge commit reached the plan: {}",
+                c.summary
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_rebase_runs_post_rewrite() {
+        // The Hooks dialog advertises post-rewrite for "rebase, amend"; the
+        // libgit2 path ran no hooks, so the same Rebase fired it only when it
+        // happened to go through the CLI.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_commit("on main", &[("m.txt", "m")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("f.txt", "f")]);
+
+        let marker = repo.path.join("post-rewrite-ran");
+        repo.install_hook(
+            "post-rewrite",
+            &format!("#!/bin/sh\ncat > \"{}\"\n", marker.display()),
+        );
+
+        rebase(repo.path_str(), main_branch).await.expect("rebase");
+
+        assert!(marker.exists(), "post-rewrite must run after a rebase");
+        let recorded = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            recorded.split_whitespace().count(),
+            2,
+            "one `<old> <new>` pair for the replayed commit: {:?}",
+            recorded
+        );
     }
 
     #[tokio::test]

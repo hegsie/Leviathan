@@ -4361,6 +4361,16 @@ export class AppShell extends LitElement {
       return;
     }
 
+    // Claimed BEFORE the confirm, not only checked. showConfirm is an IPC round
+    // trip before the native dialog takes focus, and the palette entry can be
+    // re-invoked through it — so a double-invoke read and dismissed the same
+    // "permanently deletes unreachable objects" warning twice for one gesture.
+    // runExclusive owns the release, including on a declined confirm.
+    const claim = `maintenance:${repoPath}`;
+    if (this.destructiveActionsInFlight.has(claim)) return;
+    this.destructiveActionsInFlight.add(claim);
+    try {
+
     // Shared with the Repository Health dialog so the two surfaces that reach
     // this command cannot drift apart on whether it is gated.
     if (!(await confirmGarbageCollection(aggressive))) return;
@@ -4388,6 +4398,9 @@ export class AppShell extends LitElement {
       );
     } finally {
       releaseMaintenance(repoPath);
+    }
+    } finally {
+      this.destructiveActionsInFlight.delete(claim);
     }
   }
 
@@ -4428,23 +4441,31 @@ export class AppShell extends LitElement {
       return;
     }
 
-    if (!(await confirmPrune())) return;
+    // Claimed before the confirm — see handleRunGc.
+    const claim = `maintenance:${repoPath}`;
+    if (this.destructiveActionsInFlight.has(claim)) return;
+    this.destructiveActionsInFlight.add(claim);
+    try {
+      if (!(await confirmPrune())) return;
 
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
-      return;
+      if (!tryAcquireMaintenance(repoPath)) {
+        showToast('A maintenance operation is already running on this repository', 'warning');
+        return;
+      }
+
+      // silent: the service toasts by default; this handler owns the message.
+      const result = await gitService
+        .runPrune({ path: repoPath, silent: true })
+        .finally(() => releaseMaintenance(repoPath));
+      showToast(
+        result.success
+          ? 'Pruned unreachable objects'
+          : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
+        result.success ? 'success' : 'error'
+      );
+    } finally {
+      this.destructiveActionsInFlight.delete(claim);
     }
-
-    // silent: the service toasts by default; this handler owns the message.
-    const result = await gitService
-      .runPrune({ path: repoPath, silent: true })
-      .finally(() => releaseMaintenance(repoPath));
-    showToast(
-      result.success
-        ? 'Pruned unreachable objects'
-        : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
-      result.success ? 'success' : 'error'
-    );
   }
 
   private handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {

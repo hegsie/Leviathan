@@ -289,9 +289,39 @@ pub async fn rename_branch(
 }
 
 /// Checkout a branch or commit
+/// Refuse to switch branches while another operation owns the working tree.
+///
+/// merge, rebase, cherry_pick and both resets all defend this; checkout — the
+/// one operation reachable from every list surface at all times — never did.
+/// The direct route in is an interactive rebase paused on an `edit` line: it
+/// returns success, closes its dialog, and leaves nothing modal on screen, so
+/// the sidebar, the graph and the palette are all live. Checking out elsewhere
+/// then moved HEAD while `.git/rebase-merge/` stayed on disk describing a
+/// rebase of the OLD branch — every later merge/rebase on the new branch was
+/// refused with "Another operation is in progress", and the still-visible
+/// Abort would yank the user back to the original branch. Canonical git
+/// refuses the same way.
+fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
+    use git2::RepositoryState::*;
+    let what = match repo.state() {
+        Clean => return Ok(()),
+        Merge => "merge",
+        Revert | RevertSequence => "revert",
+        CherryPick | CherryPickSequence => "cherry-pick",
+        Bisect => "bisect",
+        Rebase | RebaseInteractive | RebaseMerge => "rebase",
+        ApplyMailbox | ApplyMailboxOrRebase => "patch application",
+    };
+    Err(LeviathanError::OperationFailed(format!(
+        "Cannot switch branches while a {} is in progress. Finish or abort it first.",
+        what
+    )))
+}
+
 #[command]
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    ensure_checkoutable(&repo)?;
 
     // Capture HEAD before the switch so the post-checkout hook receives the
     // correct <old-ref> argument (githooks(5)).
@@ -613,6 +643,7 @@ pub async fn checkout_with_autostash(
     auto_stash: Option<bool>,
 ) -> Result<CheckoutWithStashResult> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
+    ensure_checkoutable(&repo)?;
 
     // Capture HEAD before the switch for the post-checkout hook's <old-ref>.
     let old_head = crate::commands::hooks::head_oid_string(&repo);

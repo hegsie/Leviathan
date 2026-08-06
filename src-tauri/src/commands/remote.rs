@@ -617,15 +617,28 @@ fn push_via_cli(
     cmd.arg(remote_name);
     cmd.arg(branch_name);
 
-    // If a token is provided, configure it via the GIT_ASKPASS mechanism
+    // Feed the token through a credential helper, the way the git2 path does
+    // with Cred::userpass_plaintext.
+    //
+    // This used to set GIT_ASKPASS=echo, which makes git run `echo <prompt>` —
+    // so it authenticated with the literal string "Username for
+    // 'https://...'" as the username and the prompt text as the password.
+    // GIT_TOKEN is not a variable git reads, and clearing credential.helper
+    // also disabled the user's own helper, so the fallback could not save it.
+    // The net effect was that Force Push — the only route through this
+    // function — failed to authenticate on HTTPS precisely BECAUSE a token was
+    // found, while pushing with no token stored worked.
     if let Some(ref token_value) = token {
-        // Use a helper that echoes the token for password prompts
-        cmd.env("GIT_ASKPASS", "echo");
+        cmd.env("LEVIATHAN_PUSH_TOKEN", token_value);
         cmd.env("GIT_CONFIG_COUNT", "1");
         cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
-        cmd.env("GIT_CONFIG_VALUE_0", "");
-        // Provide credentials via URL embedding for HTTPS
-        cmd.env("GIT_TOKEN", token_value);
+        // `git` as the username matches the git2 path's fallback; every
+        // provider we support authenticates a token as the password and
+        // ignores the username.
+        cmd.env(
+            "GIT_CONFIG_VALUE_0",
+            "!f() { echo username=git; echo \"password=$LEVIATHAN_PUSH_TOKEN\"; }; f",
+        );
     }
 
     let output = cmd.output().map_err(|e| {

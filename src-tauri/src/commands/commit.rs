@@ -699,6 +699,16 @@ pub async fn amend_commit(
     }
 
     crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
+    // The Hooks dialog advertises post-rewrite for "rebase, amend" and lets
+    // the user enable it, but nothing ran it — so the same Amend button fired
+    // it or not depending purely on whether GPG signing was on, since the
+    // signed path shells out to git and git runs it.
+    crate::commands::hooks::run_hook_noblock_with_stdin(
+        &repo,
+        "post-rewrite",
+        &["amend"],
+        Some(&format!("{} {}\n", old_oid, new_oid)),
+    );
 
     Ok(AmendResult {
         new_oid: new_oid.to_string(),

@@ -405,19 +405,29 @@ export class LvRepositoryHealthDialog extends LitElement {
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
 
+    // Claimed BEFORE the confirm, not just checked. showConfirm is an IPC round
+    // trip before the native dialog takes focus, and the button stays live
+    // through it — so a double-click read and dismissed the same "permanently
+    // deletes unreachable objects" warning twice for one gesture, the second
+    // then refused by the cross-surface lock. Released on decline so a
+    // declined run does not hold the slot.
+    this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
+
     // Same gate as the command palette (shared helper) — this dialog reaches
     // the identical irreversible command and must not be the unguarded route.
-    if (!(await confirmGarbageCollection(aggressive))) return;
+    if (!(await confirmGarbageCollection(aggressive))) {
+      this.runningAction = null;
+      return;
+    }
 
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
+      this.runningAction = null;
       showToast('A maintenance operation is already running on this repository', 'warning');
       return;
     }
-
-    this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
 
     try {
       const result = await gitService.runGc({
@@ -500,17 +510,22 @@ export class LvRepositoryHealthDialog extends LitElement {
 
     const repoPath = this.pinnedRepoPath;
 
-    if (!(await confirmPrune())) return;
+    // Claimed before the confirm — see runGc.
+    this.runningAction = 'prune';
+
+    if (!(await confirmPrune())) {
+      this.runningAction = null;
+      return;
+    }
 
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
+      this.runningAction = null;
       showToast('A maintenance operation is already running on this repository', 'warning');
       return;
     }
-
-    this.runningAction = 'prune';
 
     try {
       const result = await gitService.runPrune({

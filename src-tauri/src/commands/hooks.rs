@@ -211,7 +211,20 @@ pub fn run_hook_blocking(
 /// Run a non-blocking hook (post-commit, post-checkout, post-merge). Failures
 /// are logged but never abort the operation, mirroring canonical git.
 pub fn run_hook_noblock(repo: &git2::Repository, name: &str, args: &[&str]) {
-    match run_hook(repo, name, args, None) {
+    run_hook_noblock_with_stdin(repo, name, args, None)
+}
+
+/// As `run_hook_noblock`, but feeds the hook stdin.
+///
+/// `post-rewrite` reads `<old-sha> <new-sha>` lines from stdin, so it cannot
+/// use the no-stdin form.
+pub fn run_hook_noblock_with_stdin(
+    repo: &git2::Repository,
+    name: &str,
+    args: &[&str],
+    stdin_data: Option<&str>,
+) {
+    match run_hook(repo, name, args, stdin_data) {
         Ok(outcome) => {
             if outcome.ran && !outcome.success {
                 tracing::warn!("{} hook exited non-zero: {}", name, outcome.output.trim());
@@ -347,7 +360,13 @@ const HOOKS: &[(&str, &str)] = &[
     ),
     (
         "prepare-commit-msg",
-        "Run after the default commit message is created, before the editor.",
+        // Honest about reachability: git runs this to seed the message the
+        // editor opens on, and Leviathan commits from its own message box with
+        // no editor, so it has no point to call it from. Advertising it
+        // unqualified — and shipping a one-click template for it — meant a hook
+        // could be installed, badged Enabled and counted as active while no
+        // commit made in the app would ever run it.
+        "Run by git before the commit editor opens. Leviathan commits without an editor, so it does not run this hook.",
     ),
     (
         "commit-msg",
