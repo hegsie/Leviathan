@@ -653,6 +653,23 @@ fn push_single_remote(
     push_tags: bool,
     token: Option<String>,
 ) -> std::result::Result<(), String> {
+    // The same branch-rule gate the single-remote `push` command applies. A
+    // protection enforced on only some of the paths that reach a force push is
+    // the stale hand-enumerated list this codebase keeps being bitten by, so
+    // this one is checked here even though the multi-remote command currently
+    // has no UI caller — the hole would be invisible the day it gets one.
+    if force || force_with_lease {
+        let rules = crate::commands::branch_rules::load_rules(Path::new(path))
+            .map_err(|e| e.to_string())?;
+        if crate::commands::branch_rules::is_force_push_prevented(&rules, branch_name) {
+            return Err(format!(
+                "Branch \"{}\" is protected by a branch rule and cannot be force-pushed. \
+                 Remove the rule first.",
+                branch_name
+            ));
+        }
+    }
+
     if force_with_lease || push_tags {
         push_via_cli(
             path,

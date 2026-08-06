@@ -2039,7 +2039,15 @@ export class AppShell extends LitElement {
   }
 
   private async handleRefDeleteBranch(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.refOperationInFlight) return;
+    // Serialized with Merge and Rebase from this same menu. refOperationInFlight
+    // was introduced to stop those two racing each other, and these three were
+    // never folded in — so a delete or a tag push could run concurrently with a
+    // still-running merge or rebase against the same working tree. There is no
+    // per-repo lock in the backend (every command opens its own git2 handle),
+    // so this flag is the only thing serializing them. The sidebar gets it
+    // right: its delete shares operationInProgress with merge/rebase/rename.
+    this.refOperationInFlight = true;
 
     const branchName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
@@ -2056,28 +2064,33 @@ export class AppShell extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.refOperationInFlight = false;
+      return;
+    }
 
-    const result = await gitService.deleteBranch(
-      repoPath,
-      branchName,
-      false
-    );
+    try {
+      const result = await gitService.deleteBranch(repoPath, branchName, false);
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Deleted branch ${branchName}`, 'success');
-    } else {
-      log.error('Delete branch failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', {
-        branchName,
-        repoPath,
-      });
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Deleted branch ${branchName}`, 'success');
+      } else {
+        log.error('Delete branch failed:', result.error);
+        showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', {
+          branchName,
+          repoPath,
+        });
+      }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
   private async handleRefDeleteTag(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.refOperationInFlight) return;
+    // Serialized with the rest of this menu — see handleRefDeleteBranch.
+    this.refOperationInFlight = true;
 
     const tagName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
@@ -2093,24 +2106,30 @@ export class AppShell extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.refOperationInFlight = false;
+      return;
+    }
 
-    const result = await gitService.deleteTag({
-      path: repoPath,
-      name: tagName,
-    });
+    try {
+      const result = await gitService.deleteTag({ path: repoPath, name: tagName });
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Deleted tag ${tagName}`, 'success');
-    } else {
-      log.error('Delete tag failed:', result.error);
-      showToast(result.error?.message || 'Delete tag failed', 'error');
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Deleted tag ${tagName}`, 'success');
+      } else {
+        log.error('Delete tag failed:', result.error);
+        showToast(result.error?.message || 'Delete tag failed', 'error');
+      }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
   private async handleRefPushTag(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.refOperationInFlight) return;
+    // Serialized with the rest of this menu — see handleRefDeleteBranch.
+    this.refOperationInFlight = true;
 
     const tagName = this.refContextMenu.refName;
     // Captured before the (slow, network) push await: the push and its refresh
@@ -2118,22 +2137,23 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    const result = await gitService.pushTag({
-      path: repoPath,
-      name: tagName,
-    });
+    try {
+      const result = await gitService.pushTag({ path: repoPath, name: tagName });
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Pushed tag ${tagName}`, 'success');
-    } else if (!gitService.isNetworkGateRefusal(result.error)) {
-      log.error('Push tag failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
-        operation: 'push-tag',
-        // Carries the tag through to the Force Push Tag suggestion action.
-        branchName: tagName,
-        repoPath,
-      });
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Pushed tag ${tagName}`, 'success');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        log.error('Push tag failed:', result.error);
+        showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
+          operation: 'push-tag',
+          // Carries the tag through to the Force Push Tag suggestion action.
+          branchName: tagName,
+          repoPath,
+        });
+      }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
@@ -4818,6 +4838,7 @@ export class AppShell extends LitElement {
                                did not. -->
                           <button
                             class="context-menu-item danger"
+                            ?disabled=${this.refOperationInFlight}
                             @click=${this.handleRefDeleteBranch}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -4861,7 +4882,11 @@ export class AppShell extends LitElement {
                         </svg>
                         Checkout tag
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefPushTag}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.refOperationInFlight}
+                        @click=${this.handleRefPushTag}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="12" y1="19" x2="12" y2="5"></line>
                           <polyline points="5 12 12 5 19 12"></polyline>
@@ -4869,7 +4894,11 @@ export class AppShell extends LitElement {
                         Push tag to remote
                       </button>
                       <div class="context-menu-divider"></div>
-                      <button class="context-menu-item danger" @click=${this.handleRefDeleteTag}>
+                      <button
+                        class="context-menu-item danger"
+                        ?disabled=${this.refOperationInFlight}
+                        @click=${this.handleRefDeleteTag}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="3 6 5 6 21 6"></polyline>
                           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>

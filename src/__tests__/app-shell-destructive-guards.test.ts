@@ -331,4 +331,64 @@ describe('app-shell destructive guards', () => {
       expect(uiStore.getState().toasts.length).to.equal(0);
     });
   });
+
+  describe('the graph ref menu serializes its own operations', () => {
+    // refOperationInFlight was introduced to stop Merge and Rebase racing each
+    // other; delete-branch, delete-tag and push-tag were never folded in, so
+    // any of them could run concurrently with a still-running merge or rebase
+    // against the same working tree. There is no per-repo lock in the backend —
+    // every command opens its own git2 handle — so this flag is the only thing
+    // serializing them. The sidebar has always got this right.
+    const cases: Array<[string, string, Record<string, unknown>]> = [
+      ['delete branch', 'handleRefDeleteBranch', { refType: 'localBranch', refName: 'feature' }],
+      ['delete tag', 'handleRefDeleteTag', { refType: 'tag', refName: 'v1.0.0' }],
+      ['push tag', 'handleRefPushTag', { refType: 'tag', refName: 'v1.0.0' }],
+    ];
+
+    for (const [label, handler, menu] of cases) {
+      it(`${label} is inert while another ref operation is running`, async () => {
+        mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+        mockResponses['plugin:dialog|message'] = () => 'Ok';
+        const el = shellOnRepo();
+        (el as any).refContextMenu = { visible: true, x: 0, y: 0, fullName: '', ...menu };
+        (el as any).refOperationInFlight = true;
+        invokeCallArgs.length = 0;
+
+        await (el as any)[handler]();
+
+        expect(
+          invokeCallArgs.some((c) => /^(delete_branch|delete_tag|push_tag)$/.test(c.command)),
+          'nothing reaches the backend',
+        ).to.equal(false);
+      });
+
+      it(`${label} claims and releases the flag around its own work`, async () => {
+        mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+        mockResponses['plugin:dialog|message'] = () => 'Ok';
+        const el = shellOnRepo();
+        (el as any).refContextMenu = { visible: true, x: 0, y: 0, fullName: '', ...menu };
+
+        await (el as any)[handler]();
+
+        expect(
+          (el as any).refOperationInFlight,
+          'released, or the menu wedges for the rest of the session',
+        ).to.equal(false);
+      });
+    }
+
+    it('a declined confirm releases the flag', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '', refType: 'localBranch', refName: 'feature',
+      };
+
+      await (el as any).handleRefDeleteBranch();
+
+      expect((el as any).refOperationInFlight).to.equal(false);
+      expect(invokeCallArgs.some((c) => c.command === 'delete_branch')).to.equal(false);
+    });
+  });
 });
