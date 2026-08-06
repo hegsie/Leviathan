@@ -203,6 +203,12 @@ export class LvCreateBranchDialog extends LitElement {
 
   private reset(): void {
     this.branchName = '';
+    // Cleared like every other field — open() re-applies the argument straight
+    // after. Leaving it set made a start point picked once from "Create branch
+    // from here" stick to the single shared dialog for the rest of the session:
+    // every later Ctrl+Shift+N cut from that ref instead of HEAD, shown only in
+    // a disabled "Based on" field with no way to clear it.
+    this.startPoint = '';
     this.checkoutAfterCreate = true;
     this.isCreating = false;
     this.error = '';

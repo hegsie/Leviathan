@@ -207,6 +207,51 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('turning offline mode on stops the running loops', async () => {
+      // The gate only guarded the START call; the loop it started is a Tokio
+      // task with no re-check, so it kept fetching every N minutes after the
+      // user went offline.
+      settingsStore.setState({ autoFetchInterval: 5, offlineMode: false });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await waitForCommand('start_auto_fetch');
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ offlineMode: true });
+        const stopCall = await waitForCommand('stop_auto_fetch');
+
+        expect(stopCall, 'the running loop is stopped').to.not.be.undefined;
+        expect(stopCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+      }
+    });
+
+    it('turning offline mode back off restarts auto-fetch', async () => {
+      // Without this the repo stayed dead until the interval changed or the app
+      // restarted, with no indication.
+      settingsStore.setState({ autoFetchInterval: 5, offlineMode: true });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await new Promise((r) => setTimeout(r, 20));
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ offlineMode: false });
+        const startCall = await waitForCommand('start_auto_fetch');
+
+        expect(startCall, 'auto-fetch resumes').to.not.be.undefined;
+        expect(startCall!.args.intervalMinutes).to.equal(5);
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+      }
+    });
+
     it('stops auto-fetch when a repo tab is closed', async () => {
       settingsStore.setState({ autoFetchInterval: 5 });
       const el = createAppShell();

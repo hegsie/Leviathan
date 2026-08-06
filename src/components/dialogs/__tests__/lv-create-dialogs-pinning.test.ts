@@ -33,6 +33,71 @@ import '../lv-create-branch-dialog.ts';
 const REPO_A = '/repo/a';
 const REPO_B = '/repo/b';
 
+describe('create-branch start point does not leak between entry points', () => {
+  it('reopening without a start point clears the one set by "Create branch from here"', async () => {
+    // One shared dialog serves the context menu, the palette and Ctrl+Shift+N.
+    // reset() cleared every field except startPoint, so a ref picked once from
+    // the context menu stuck for the session: every later Create Branch cut
+    // from that ref instead of HEAD, shown only in a disabled "Based on" field.
+    const el = await fixture<LvCreateBranchDialog>(
+      html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`,
+    );
+    await el.updateComplete;
+
+    el.open('origin/feature');
+    await el.updateComplete;
+    expect(el.startPoint).to.equal('origin/feature');
+
+    el.close();
+    await el.updateComplete;
+
+    el.open();
+    await el.updateComplete;
+    expect(el.startPoint, 'a fresh open starts from HEAD').to.equal('');
+  });
+
+  it('create_branch is invoked with no start point after a reopen', async () => {
+    const el = await fixture<LvCreateBranchDialog>(
+      html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`,
+    );
+    await el.updateComplete;
+
+    el.open('origin/feature');
+    await el.updateComplete;
+    el.close();
+    await el.updateComplete;
+
+    el.open();
+    await el.updateComplete;
+    (el as unknown as { branchName: string }).branchName = 'feature/new';
+    invokeCalls.length = 0;
+    await (el as unknown as { handleCreate: () => Promise<void> }).handleCreate();
+
+    const call = invokeCalls.find((c) => c.command === 'create_branch');
+    expect(call, 'create_branch invoked').to.not.be.undefined;
+    const args = call!.args as { startPoint?: string };
+    expect(args.startPoint, 'cut from HEAD, not the stale ref').to.be.undefined;
+  });
+
+  it('an explicit start point still reaches create_branch', async () => {
+    const el = await fixture<LvCreateBranchDialog>(
+      html`<lv-create-branch-dialog .repositoryPath=${REPO_A}></lv-create-branch-dialog>`,
+    );
+    await el.updateComplete;
+
+    el.open('origin/feature');
+    await el.updateComplete;
+    (el as unknown as { branchName: string }).branchName = 'feature/new';
+    invokeCalls.length = 0;
+    await (el as unknown as { handleCreate: () => Promise<void> }).handleCreate();
+
+    const args = invokeCalls.find((c) => c.command === 'create_branch')!.args as {
+      startPoint?: string;
+    };
+    expect(args.startPoint).to.equal('origin/feature');
+  });
+});
+
 describe('create-tag / create-branch dialog pinning', () => {
   beforeEach(() => {
     invokeCalls.length = 0;

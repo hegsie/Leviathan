@@ -11,6 +11,19 @@ use crate::models::{
 use crate::utils::create_command;
 
 /// Represents a commit in the interactive rebase todo list
+/// Outcome of an interactive rebase run.
+///
+/// `git rebase -i` exits 0 both when the plan ran to completion and when it
+/// stopped at an `edit`/`break` line, so the exit code alone cannot tell the
+/// caller whether the repository is still mid-rebase.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractiveRebaseOutcome {
+    /// True when the rebase stopped at a breakpoint and the repo is still in a
+    /// rebase state awaiting `git rebase --continue`.
+    pub paused: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RebaseCommit {
@@ -819,7 +832,11 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
 
 /// Execute an interactive rebase using git CLI
 #[command]
-pub async fn execute_interactive_rebase(path: String, onto: String, todo: String) -> Result<()> {
+pub async fn execute_interactive_rebase(
+    path: String,
+    onto: String,
+    todo: String,
+) -> Result<InteractiveRebaseOutcome> {
     // Unique names per call, like apply_patch_to_index. The fixed
     // /tmp/leviathan-rebase-todo these replace meant two rebases running at
     // once would read each other's plan — one repo silently rewritten with the
@@ -873,7 +890,16 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
         return Err(LeviathanError::OperationFailed(stderr.to_string()));
     }
 
-    Ok(())
+    // Exit 0 does NOT mean "finished": `git rebase -i` also exits 0 when it
+    // stops at an `edit` or `break` line. Reporting that as success closed the
+    // dialog with no message and left the repo mid-rebase on a detached HEAD,
+    // where the only visible affordance was an Abort button that would throw
+    // the rebase away. The rebase directory is still on disk while it is
+    // paused, so use that to tell the two apart.
+    let paused = Path::new(&path).join(".git/rebase-merge").exists()
+        || Path::new(&path).join(".git/rebase-apply").exists();
+
+    Ok(InteractiveRebaseOutcome { paused })
 }
 
 /// Get list of conflicted files

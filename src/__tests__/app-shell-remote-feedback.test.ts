@@ -195,6 +195,125 @@ describe('app-shell remote-operation feedback', () => {
     });
   });
 
+  describe('the security gate does not report itself as a failure', () => {
+    it('a declined confirm produces no error toast', async () => {
+      const { settingsStore } = await import('../stores/index.ts');
+      settingsStore.setState({ confirmNetworkOps: true });
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      try {
+        const el = shellOnRepo();
+        await (el as any).handleFetch();
+
+        expect(
+          uiStore.getState().toasts.filter((t) => t.type === 'error').length,
+          "the user's own Cancel is not an error",
+        ).to.equal(0);
+      } finally {
+        settingsStore.setState({ confirmNetworkOps: false });
+      }
+    });
+
+    it('an offline block is announced once by the gate, not twice', async () => {
+      const { settingsStore } = await import('../stores/index.ts');
+      settingsStore.setState({ offlineMode: true });
+      try {
+        const el = shellOnRepo();
+        await (el as any).handlePush();
+
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.length, 'one message, from the gate').to.equal(1);
+        expect(toasts[0].message).to.contain('Offline mode');
+      } finally {
+        settingsStore.setState({ offlineMode: false });
+      }
+    });
+  });
+
+  describe('commands that need a repository say so', () => {
+    it('palette network and staging entries are guarded', () => {
+      const el = createAppShell();
+      (el as any).activeRepository = null;
+      const commands = (el as any).getPaletteCommands() as Array<{
+        id: string;
+        action: () => void;
+      }>;
+
+      uiStore.setState({ toasts: [] });
+      for (const id of ['fetch', 'pull', 'push', 'stash', 'stage-all', 'unstage-all']) {
+        const cmd = commands.find((c) => c.id === id);
+        expect(cmd, `${id} present in the palette`).to.not.be.undefined;
+        uiStore.setState({ toasts: [] });
+        cmd!.action();
+        expect(
+          uiStore.getState().toasts.length,
+          `${id} tells the user a repository is needed`,
+        ).to.equal(1);
+      }
+    });
+  });
+
+  describe('staging works with the right panel hidden', () => {
+    it('reveals the panel that owns the listener before dispatching', async () => {
+      // `stage-all` is heard only by lv-file-status, which lives inside the
+      // right panel. With Ctrl+J pressed the panel is unmounted, its listener
+      // gone, and both the `s` shortcut and the palette entry silently did
+      // nothing — with no other way to stage.
+      const { uiStore: ui } = await import('../stores/index.ts');
+      const el = shellOnRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        if ((el as any).rightPanelVisible) {
+          ui.getState().togglePanel('right');
+          await (el as any).updateComplete;
+        }
+        expect((el as any).rightPanelVisible, 'panel starts hidden').to.equal(false);
+
+        let heard = 0;
+        const onStage = (): void => { heard++; };
+        window.addEventListener('stage-all', onStage);
+        try {
+          await (el as any).dispatchToFileStatus('stage-all');
+        } finally {
+          window.removeEventListener('stage-all', onStage);
+        }
+
+        expect((el as any).rightPanelVisible, 'panel revealed').to.equal(true);
+        expect(heard, 'event still dispatched').to.equal(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('leaves an already-visible panel alone', async () => {
+      const { uiStore: ui } = await import('../stores/index.ts');
+      const el = shellOnRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        if (!(el as any).rightPanelVisible) {
+          ui.getState().togglePanel('right');
+          await (el as any).updateComplete;
+        }
+
+        let heard = 0;
+        const onUnstage = (): void => { heard++; };
+        window.addEventListener('unstage-all', onUnstage);
+        try {
+          await (el as any).dispatchToFileStatus('unstage-all');
+        } finally {
+          window.removeEventListener('unstage-all', onUnstage);
+        }
+
+        expect((el as any).rightPanelVisible).to.equal(true);
+        expect(heard).to.equal(1);
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
   describe('create branch is reachable without a mouse', () => {
     it('the command palette offers Create branch, like Create tag', () => {
       const el = shellOnRepo();

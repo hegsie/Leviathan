@@ -10,33 +10,152 @@ import { showConfirm } from "./dialog.service.ts";
 import { commitStatsCache, commitSignatureCache, createCacheKey } from "./cache.service.ts";
 import { settingsStore } from "../stores/settings.store.ts";
 
+/** Why a network operation was refused. */
+export type NetworkBlockReason = 'offline' | 'allowlist' | 'declined';
+
 /**
- * Check if a network operation is allowed based on security settings.
- * Returns false if the operation should be blocked.
+ * Resolve a remote *name* to its URL so the allowlist has a domain to match.
+ *
+ * The allowlist compares against a domain, but almost every caller only knows
+ * a short name ("origin") — and `"origin".includes("github.com")` is false, so
+ * configuring an allowlist used to refuse the very remotes it was meant to
+ * permit. Callers that already hold a URL (clone, add submodule) pass it
+ * through unchanged.
+ *
+ * `get_remotes` reads the local config; it does not touch the network, so this
+ * is safe to call from inside the gate.
  */
-async function checkNetworkPermission(operation: string, remote?: string): Promise<boolean> {
+async function resolveRemoteUrl(repoPath: string, remote?: string): Promise<string | null> {
+  if (remote && /^([a-z][a-z0-9+.-]*:\/\/|git@|ssh:\/\/)/i.test(remote)) {
+    return remote;
+  }
+  const result = await invokeCommand<Remote[]>("get_remotes", { path: repoPath });
+  if (!result.success || !result.data) return null;
+  // No name given means the operation targets the repo's default remote.
+  const wanted = remote ?? 'origin';
+  const match = result.data.find((r) => r.name === wanted) ?? result.data[0];
+  return match?.url ?? null;
+}
+
+/**
+ * Hard blocks only: offline mode and the remote allowlist. No confirm prompt.
+ *
+ * Used for network calls the user did not just ask for — background provider
+ * lookups, the auto-fetch loop — where a modal appearing out of nowhere would
+ * be worse than useless. `checkNetworkPermission` layers the confirm on top for
+ * explicit gestures.
+ *
+ * Returns null when allowed, or the reason it was refused.
+ */
+async function checkNetworkAllowed(
+  repoPath: string | null,
+  remote?: string,
+): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
 
   if (settings.offlineMode) {
     showToast('Offline mode is enabled. Disable in Settings > Security.', 'warning');
-    return false;
+    return 'offline';
   }
 
-  if (settings.remoteAllowlist.length > 0 && remote) {
-    const allowed = settings.remoteAllowlist.some(domain =>
-      remote.toLowerCase().includes(domain.toLowerCase())
+  if (settings.remoteAllowlist.length === 0) return null;
+
+  // An allowlist that cannot see the URL must refuse, not wave the operation
+  // through: silently allowing is the failure mode that made this setting
+  // decorative.
+  const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
+  const allowed =
+    !!url &&
+    settings.remoteAllowlist.some((domain) => url.toLowerCase().includes(domain.toLowerCase()));
+  if (!allowed) {
+    showToast(
+      url
+        ? `Remote "${url}" is not in your allowlist`
+        : 'Could not determine the remote URL, and an allowlist is configured',
+      'error',
     );
-    if (!allowed) {
-      showToast(`Remote "${remote}" is not in your allowlist`, 'error');
+    return 'allowlist';
+  }
+  return null;
+}
+
+/**
+ * Check if a network operation is allowed based on security settings.
+ * Returns false if the operation should be blocked.
+ */
+async function checkNetworkPermission(
+  operation: string,
+  repoPath: string | null,
+  remote?: string,
+): Promise<boolean> {
+  if (await checkNetworkAllowed(repoPath, remote)) return false;
+
+  if (settingsStore.getState().confirmNetworkOps) {
+    // A declined confirm is the user's own decision, not a failure — callers
+    // distinguish it from a block so they don't report it back as a red error.
+    const ok = await showConfirm(
+      'Network Operation',
+      `Allow ${operation}${remote ? ` to ${remote}` : ''}?`,
+    );
+    if (!ok) {
+      lastNetworkBlockReason = 'declined';
       return false;
     }
   }
 
-  if (settings.confirmNetworkOps) {
-    return showConfirm('Network Operation', `Allow ${operation}${remote ? ` to ${remote}` : ''}?`);
-  }
-
   return true;
+}
+
+/**
+ * A hosting-provider API call (GitHub / GitLab / Bitbucket / Azure DevOps).
+ *
+ * These reach `https://api.github.com` and friends over reqwest, so "offline
+ * mode" that does not cover them is not offline. They are gated with the
+ * hard-block check rather than `checkNetworkPermission`: several run
+ * unprompted — the graph loads pull requests whenever a repo opens — and a
+ * confirm dialog on a background refresh would be worse than useless.
+ *
+ * Routing them all through one function is deliberate: a per-function guard
+ * list has to be remembered, and the enumeration test below fails if a new
+ * provider command starts using bare `invokeCommand`.
+ */
+async function invokeProviderCommand<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<CommandResult<T>> {
+  if (await checkNetworkAllowed(null)) {
+    return blockedResult();
+  }
+  return invokeCommand<T>(command, args);
+}
+
+/**
+ * True when a failed result is the security gate refusing, or the user
+ * declining its confirm. Both are already accounted for — the gate toasts its
+ * own reason, and a decline is the user's own choice — so callers must not
+ * report either back as an error.
+ */
+export function isNetworkGateRefusal(error?: { code?: string }): boolean {
+  return error?.code === 'BLOCKED' || error?.code === 'CANCELLED';
+}
+
+/** Set by the most recent refusal so `blockedResult` can label it. */
+let lastNetworkBlockReason: NetworkBlockReason = 'offline';
+
+/**
+ * The refusal a gated operation returns. `CANCELLED` means the user declined
+ * the confirm; `BLOCKED` means a setting refused it and the gate already said
+ * so in a toast. Callers must not toast either one again.
+ */
+function blockedResult<T>(): CommandResult<T> {
+  const declined = lastNetworkBlockReason === 'declined';
+  lastNetworkBlockReason = 'offline';
+  return {
+    success: false,
+    error: declined
+      ? { code: 'CANCELLED', message: 'Cancelled' }
+      : { code: 'BLOCKED', message: 'Operation blocked by security settings' },
+  };
 }
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
@@ -143,6 +262,7 @@ import type {
   RunPruneCommand,
   MaintenanceResult,
   CommandResult,
+  InteractiveRebaseOutcome,
 } from "../types/api.types.ts";
 
 /**
@@ -157,8 +277,8 @@ export async function openRepository(
 export async function cloneRepository(
   args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
-  if (!await checkNetworkPermission('clone', args.url)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('clone', null, args.url)) {
+    return blockedResult();
   }
 
   // If no token is provided, try to find one based on the URL
@@ -710,8 +830,8 @@ export async function setRemoteUrl(
 export async function fetch(
   args?: FetchCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('fetch', args?.remote)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('fetch', args?.path ?? null, args?.remote)) {
+    return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
@@ -745,8 +865,8 @@ export async function fetch(
 export async function pull(
   args?: PullCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('pull', args?.remote)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('pull', args?.path ?? null, args?.remote)) {
+    return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
@@ -780,8 +900,8 @@ export async function pull(
 export async function push(
   args?: PushCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('push', args?.remote)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('push', args?.path ?? null, args?.remote)) {
+    return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
@@ -818,8 +938,8 @@ export async function push(
 export async function pushToMultipleRemotes(
   args: PushToMultipleRemotesCommand & { silent?: boolean },
 ): Promise<CommandResult<MultiPushResult>> {
-  if (!await checkNetworkPermission('push')) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('push', args?.path ?? null)) {
+    return blockedResult();
   }
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
@@ -863,8 +983,8 @@ export async function pushToMultipleRemotes(
 export async function fetchAllRemotes(
   args: FetchAllRemotesCommand & { silent?: boolean },
 ): Promise<CommandResult<FetchAllResult>> {
-  if (!await checkNetworkPermission('fetch')) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('fetch', args?.path ?? null)) {
+    return blockedResult();
   }
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
@@ -1101,8 +1221,8 @@ export async function executeInteractiveRebase(
   path: string,
   onto: string,
   todo: string,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("execute_interactive_rebase", {
+): Promise<CommandResult<InteractiveRebaseOutcome>> {
+  return invokeCommand<InteractiveRebaseOutcome>("execute_interactive_rebase", {
     path,
     onto,
     todo,
@@ -1405,8 +1525,8 @@ export async function deleteTag(
 export async function pushTag(
   args: PushTagCommand,
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('push tag', args.remote)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('push tag', args.path, args.remote)) {
+    return blockedResult();
   }
 
   // push_tag takes a token and feeds it to the same credentials helper `push`
@@ -1942,8 +2062,8 @@ export async function addSubmodule(
 ): Promise<CommandResult<Submodule>> {
   // `git submodule add` clones from `url` — a network operation despite living
   // among the local submodule commands.
-  if (!await checkNetworkPermission('add submodule', url)) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('add submodule', null, url)) {
+    return blockedResult();
   }
   return invokeCommand<Submodule>("add_submodule", {
     path: repoPath,
@@ -1975,8 +2095,8 @@ export async function updateSubmodules(
 ): Promise<CommandResult<void>> {
   // `git submodule update` fetches (and clones with --init), so it belongs
   // behind the same gate as fetch/pull.
-  if (!await checkNetworkPermission('update submodules')) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('update submodules', repoPath)) {
+    return blockedResult();
   }
 
   // Try to find a token if not provided
@@ -2169,8 +2289,8 @@ export async function getLfsFiles(
 export async function lfsPull(
   repoPath: string,
 ): Promise<CommandResult<string>> {
-  if (!await checkNetworkPermission('LFS pull')) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('LFS pull', repoPath)) {
+    return blockedResult();
   }
   const token = await getRepoToken(repoPath);
   return invokeCommand<string>("lfs_pull", { path: repoPath, token });
@@ -2180,8 +2300,8 @@ export async function lfsFetch(
   repoPath: string,
   refs?: string[],
 ): Promise<CommandResult<string>> {
-  if (!await checkNetworkPermission('LFS fetch')) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  if (!await checkNetworkPermission('LFS fetch', repoPath)) {
+    return blockedResult();
   }
   const token = await getRepoToken(repoPath);
   return invokeCommand<string>("lfs_fetch", { path: repoPath, refs, token });
@@ -2433,7 +2553,7 @@ export async function generateSshKey(
 export async function testSshConnection(
   host: string,
 ): Promise<CommandResult<SshTestResult>> {
-  return invokeCommand<SshTestResult>("test_ssh_connection", { host });
+  return invokeProviderCommand<SshTestResult>("test_ssh_connection", { host });
 }
 
 export async function addKeyToAgent(
@@ -2949,7 +3069,7 @@ export async function checkGitHubConnection(): Promise<
   // Get token from credential service and pass to backend
   const tokenResult = await getGitHubToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<GitHubConnectionStatus>("check_github_connection", {
+  return invokeProviderCommand<GitHubConnectionStatus>("check_github_connection", {
     token,
   });
 }
@@ -2961,7 +3081,7 @@ export async function checkGitHubConnection(): Promise<
 export async function checkGitHubConnectionWithToken(
   token: string | null,
 ): Promise<CommandResult<GitHubConnectionStatus>> {
-  return invokeCommand<GitHubConnectionStatus>("check_github_connection", {
+  return invokeProviderCommand<GitHubConnectionStatus>("check_github_connection", {
     token,
   });
 }
@@ -2983,7 +3103,7 @@ export async function listPullRequests(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<PullRequestSummary[]>> {
-  return invokeCommand<PullRequestSummary[]>("list_pull_requests", {
+  return invokeProviderCommand<PullRequestSummary[]>("list_pull_requests", {
     owner,
     repo,
     state,
@@ -2998,7 +3118,7 @@ export async function getPullRequest(
   number: number,
   token?: string | null,
 ): Promise<CommandResult<PullRequestDetails>> {
-  return invokeCommand<PullRequestDetails>("get_pull_request", {
+  return invokeProviderCommand<PullRequestDetails>("get_pull_request", {
     owner,
     repo,
     number,
@@ -3012,7 +3132,7 @@ export async function createPullRequest(
   input: CreatePullRequestInput,
   token?: string | null,
 ): Promise<CommandResult<PullRequestSummary>> {
-  return invokeCommand<PullRequestSummary>("create_pull_request", {
+  return invokeProviderCommand<PullRequestSummary>("create_pull_request", {
     owner,
     repo,
     input,
@@ -3026,7 +3146,7 @@ export async function getPullRequestReviews(
   number: number,
   token?: string | null,
 ): Promise<CommandResult<PullRequestReview[]>> {
-  return invokeCommand<PullRequestReview[]>("get_pull_request_reviews", {
+  return invokeProviderCommand<PullRequestReview[]>("get_pull_request_reviews", {
     owner,
     repo,
     number,
@@ -3042,7 +3162,7 @@ export async function getWorkflowRuns(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<WorkflowRun[]>> {
-  return invokeCommand<WorkflowRun[]>("get_workflow_runs", {
+  return invokeProviderCommand<WorkflowRun[]>("get_workflow_runs", {
     owner,
     repo,
     branch,
@@ -3057,7 +3177,7 @@ export async function getCheckRuns(
   commitSha: string,
   token?: string | null,
 ): Promise<CommandResult<CheckRun[]>> {
-  return invokeCommand<CheckRun[]>("get_check_runs", {
+  return invokeProviderCommand<CheckRun[]>("get_check_runs", {
     owner,
     repo,
     commitSha,
@@ -3120,7 +3240,7 @@ export async function listIssues(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<IssueSummary[]>> {
-  return invokeCommand<IssueSummary[]>("list_issues", {
+  return invokeProviderCommand<IssueSummary[]>("list_issues", {
     owner,
     repo,
     state,
@@ -3136,7 +3256,7 @@ export async function getIssue(
   number: number,
   token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>("get_issue", {
+  return invokeProviderCommand<IssueSummary>("get_issue", {
     owner,
     repo,
     number,
@@ -3150,7 +3270,7 @@ export async function createIssue(
   input: CreateIssueInput,
   token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>("create_issue", {
+  return invokeProviderCommand<IssueSummary>("create_issue", {
     owner,
     repo,
     input,
@@ -3165,7 +3285,7 @@ export async function updateIssueState(
   state: string,
   token?: string | null,
 ): Promise<CommandResult<IssueSummary>> {
-  return invokeCommand<IssueSummary>("update_issue_state", {
+  return invokeProviderCommand<IssueSummary>("update_issue_state", {
     owner,
     repo,
     number,
@@ -3181,7 +3301,7 @@ export async function getIssueComments(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<IssueComment[]>> {
-  return invokeCommand<IssueComment[]>("get_issue_comments", {
+  return invokeProviderCommand<IssueComment[]>("get_issue_comments", {
     owner,
     repo,
     number,
@@ -3197,7 +3317,7 @@ export async function addIssueComment(
   body: string,
   token?: string | null,
 ): Promise<CommandResult<IssueComment>> {
-  return invokeCommand<IssueComment>("add_issue_comment", {
+  return invokeProviderCommand<IssueComment>("add_issue_comment", {
     owner,
     repo,
     number,
@@ -3334,7 +3454,7 @@ export async function listReleases(
   perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary[]>> {
-  return invokeCommand<ReleaseSummary[]>("list_releases", {
+  return invokeProviderCommand<ReleaseSummary[]>("list_releases", {
     owner,
     repo,
     perPage,
@@ -3348,7 +3468,7 @@ export async function getReleaseByTag(
   tag: string,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>("get_release_by_tag", {
+  return invokeProviderCommand<ReleaseSummary>("get_release_by_tag", {
     owner,
     repo,
     tag,
@@ -3361,7 +3481,7 @@ export async function getLatestRelease(
   repo: string,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>("get_latest_release", {
+  return invokeProviderCommand<ReleaseSummary>("get_latest_release", {
     owner,
     repo,
     token,
@@ -3374,7 +3494,7 @@ export async function createRelease(
   input: CreateReleaseInput,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary>> {
-  return invokeCommand<ReleaseSummary>("create_release", {
+  return invokeProviderCommand<ReleaseSummary>("create_release", {
     owner,
     repo,
     input,
@@ -3388,7 +3508,7 @@ export async function deleteRelease(
   releaseId: number,
   token?: string | null,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>("delete_release", {
+  return invokeProviderCommand<void>("delete_release", {
     owner,
     repo,
     releaseId,
@@ -3530,7 +3650,7 @@ export async function checkAdoConnection(
   // Get token from credential service and pass to backend
   const tokenResult = await getAdoToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<AdoConnectionStatus>("check_ado_connection", {
+  return invokeProviderCommand<AdoConnectionStatus>("check_ado_connection", {
     organization,
     token,
   });
@@ -3544,7 +3664,7 @@ export async function checkAdoConnectionWithToken(
   organization: string,
   token: string | null,
 ): Promise<CommandResult<AdoConnectionStatus>> {
-  return invokeCommand<AdoConnectionStatus>("check_ado_connection", {
+  return invokeProviderCommand<AdoConnectionStatus>("check_ado_connection", {
     organization,
     token,
   });
@@ -3558,7 +3678,7 @@ export async function checkAdoConnectionWithToken(
 export async function listAdoOrganizations(
   token?: string | null,
 ): Promise<CommandResult<AdoOrganization[]>> {
-  return invokeCommand<AdoOrganization[]>("list_ado_organizations", { token });
+  return invokeProviderCommand<AdoOrganization[]>("list_ado_organizations", { token });
 }
 
 export async function detectAdoRepo(
@@ -3576,7 +3696,7 @@ export async function listAdoPullRequests(
   status?: string,
   token?: string | null,
 ): Promise<CommandResult<AdoPullRequest[]>> {
-  return invokeCommand<AdoPullRequest[]>("list_ado_pull_requests", {
+  return invokeProviderCommand<AdoPullRequest[]>("list_ado_pull_requests", {
     organization,
     project,
     repository,
@@ -3592,7 +3712,7 @@ export async function getAdoPullRequest(
   pullRequestId: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPullRequest>> {
-  return invokeCommand<AdoPullRequest>("get_ado_pull_request", {
+  return invokeProviderCommand<AdoPullRequest>("get_ado_pull_request", {
     organization,
     project,
     repository,
@@ -3608,7 +3728,7 @@ export async function createAdoPullRequest(
   input: CreateAdoPullRequestInput,
   token?: string | null,
 ): Promise<CommandResult<AdoPullRequest>> {
-  return invokeCommand<AdoPullRequest>("create_ado_pull_request", {
+  return invokeProviderCommand<AdoPullRequest>("create_ado_pull_request", {
     organization,
     project,
     repository,
@@ -3625,7 +3745,7 @@ export async function getAdoWorkItems(
   ids: number[],
   token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>("get_ado_work_items", {
+  return invokeProviderCommand<AdoWorkItem[]>("get_ado_work_items", {
     organization,
     project,
     ids,
@@ -3639,7 +3759,7 @@ export async function queryAdoWorkItems(
   state?: string,
   token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
-  return invokeCommand<AdoWorkItem[]>("query_ado_work_items", {
+  return invokeProviderCommand<AdoWorkItem[]>("query_ado_work_items", {
     organization,
     project,
     state,
@@ -3661,7 +3781,7 @@ export async function createAzureDevOpsWorkItem(
   input: CreateAdoWorkItemInput,
   token?: string | null,
 ): Promise<CommandResult<AdoWorkItem>> {
-  return invokeCommand<AdoWorkItem>("create_azure_devops_work_item", {
+  return invokeProviderCommand<AdoWorkItem>("create_azure_devops_work_item", {
     organization,
     project,
     input,
@@ -3677,7 +3797,7 @@ export async function listAdoPipelineRuns(
   top?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPipelineRun[]>> {
-  return invokeCommand<AdoPipelineRun[]>("list_ado_pipeline_runs", {
+  return invokeProviderCommand<AdoPipelineRun[]>("list_ado_pipeline_runs", {
     organization,
     project,
     top,
@@ -3820,7 +3940,7 @@ export async function checkGitLabConnection(
   // Get token from credential service and pass to backend
   const tokenResult = await getGitLabToken();
   const token = tokenResult.success ? tokenResult.data : null;
-  return invokeCommand<GitLabConnectionStatus>("check_gitlab_connection", {
+  return invokeProviderCommand<GitLabConnectionStatus>("check_gitlab_connection", {
     instanceUrl,
     token,
   });
@@ -3834,7 +3954,7 @@ export async function checkGitLabConnectionWithToken(
   instanceUrl: string,
   token: string | null,
 ): Promise<CommandResult<GitLabConnectionStatus>> {
-  return invokeCommand<GitLabConnectionStatus>("check_gitlab_connection", {
+  return invokeProviderCommand<GitLabConnectionStatus>("check_gitlab_connection", {
     instanceUrl,
     token,
   });
@@ -3856,7 +3976,7 @@ export async function listGitLabMergeRequests(
   state?: string,
   token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest[]>> {
-  return invokeCommand<GitLabMergeRequest[]>("list_gitlab_merge_requests", {
+  return invokeProviderCommand<GitLabMergeRequest[]>("list_gitlab_merge_requests", {
     instanceUrl,
     projectPath,
     state,
@@ -3870,7 +3990,7 @@ export async function getGitLabMergeRequest(
   mrIid: number,
   token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest>> {
-  return invokeCommand<GitLabMergeRequest>("get_gitlab_merge_request", {
+  return invokeProviderCommand<GitLabMergeRequest>("get_gitlab_merge_request", {
     instanceUrl,
     projectPath,
     mrIid,
@@ -3884,7 +4004,7 @@ export async function createGitLabMergeRequest(
   input: CreateMergeRequestInput,
   token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest>> {
-  return invokeCommand<GitLabMergeRequest>("create_gitlab_merge_request", {
+  return invokeProviderCommand<GitLabMergeRequest>("create_gitlab_merge_request", {
     instanceUrl,
     projectPath,
     input,
@@ -3901,7 +4021,7 @@ export async function listGitLabIssues(
   labels?: string,
   token?: string | null,
 ): Promise<CommandResult<GitLabIssue[]>> {
-  return invokeCommand<GitLabIssue[]>("list_gitlab_issues", {
+  return invokeProviderCommand<GitLabIssue[]>("list_gitlab_issues", {
     instanceUrl,
     projectPath,
     state,
@@ -3916,7 +4036,7 @@ export async function createGitLabIssue(
   input: CreateGitLabIssueInput,
   token?: string | null,
 ): Promise<CommandResult<GitLabIssue>> {
-  return invokeCommand<GitLabIssue>("create_gitlab_issue", {
+  return invokeProviderCommand<GitLabIssue>("create_gitlab_issue", {
     instanceUrl,
     projectPath,
     input,
@@ -3932,7 +4052,7 @@ export async function listGitLabPipelines(
   status?: string,
   token?: string | null,
 ): Promise<CommandResult<GitLabPipeline[]>> {
-  return invokeCommand<GitLabPipeline[]>("list_gitlab_pipelines", {
+  return invokeProviderCommand<GitLabPipeline[]>("list_gitlab_pipelines", {
     instanceUrl,
     projectPath,
     status,
@@ -3945,7 +4065,7 @@ export async function getGitLabLabels(
   projectPath: string,
   token?: string | null,
 ): Promise<CommandResult<string[]>> {
-  return invokeCommand<string[]>("get_gitlab_labels", {
+  return invokeProviderCommand<string[]>("get_gitlab_labels", {
     instanceUrl,
     projectPath,
     token,
@@ -4115,7 +4235,7 @@ export async function listBitbucketPullRequests(
   state?: string,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest[]>> {
-  return invokeCommand<BitbucketPullRequest[]>("list_bitbucket_pull_requests", {
+  return invokeProviderCommand<BitbucketPullRequest[]>("list_bitbucket_pull_requests", {
     workspace,
     repoSlug,
     state,
@@ -4129,7 +4249,7 @@ export async function getBitbucketPullRequest(
   prId: number,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest>> {
-  return invokeCommand<BitbucketPullRequest>("get_bitbucket_pull_request", {
+  return invokeProviderCommand<BitbucketPullRequest>("get_bitbucket_pull_request", {
     workspace,
     repoSlug,
     prId,
@@ -4143,7 +4263,7 @@ export async function createBitbucketPullRequest(
   input: CreateBitbucketPullRequestInput,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest>> {
-  return invokeCommand<BitbucketPullRequest>("create_bitbucket_pull_request", {
+  return invokeProviderCommand<BitbucketPullRequest>("create_bitbucket_pull_request", {
     workspace,
     repoSlug,
     input,
@@ -4159,7 +4279,7 @@ export async function listBitbucketIssues(
   state?: string,
   token?: string | null,
 ): Promise<CommandResult<BitbucketIssue[]>> {
-  return invokeCommand<BitbucketIssue[]>("list_bitbucket_issues", {
+  return invokeProviderCommand<BitbucketIssue[]>("list_bitbucket_issues", {
     workspace,
     repoSlug,
     state,
@@ -4180,7 +4300,7 @@ export async function createBitbucketIssue(
   input: CreateBitbucketIssueInput,
   token?: string | null,
 ): Promise<CommandResult<BitbucketIssue>> {
-  return invokeCommand<BitbucketIssue>("create_bitbucket_issue", {
+  return invokeProviderCommand<BitbucketIssue>("create_bitbucket_issue", {
     workspace,
     repoSlug,
     input,
@@ -4195,7 +4315,7 @@ export async function listBitbucketPipelines(
   repoSlug: string,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPipeline[]>> {
-  return invokeCommand<BitbucketPipeline[]>("list_bitbucket_pipelines", {
+  return invokeProviderCommand<BitbucketPipeline[]>("list_bitbucket_pipelines", {
     workspace,
     repoSlug,
     token,
@@ -4327,7 +4447,7 @@ export interface IssueTemplate {
 export async function getIssueTemplates(
   repoPath: string,
 ): Promise<CommandResult<IssueTemplate[]>> {
-  return invokeCommand<IssueTemplate[]>("get_issue_templates", {
+  return invokeProviderCommand<IssueTemplate[]>("get_issue_templates", {
     path: repoPath,
   });
 }
@@ -4339,7 +4459,7 @@ export async function getIssueTemplateContent(
   repoPath: string,
   templatePath: string,
 ): Promise<CommandResult<string>> {
-  return invokeCommand<string>("get_issue_template_content", {
+  return invokeProviderCommand<string>("get_issue_template_content", {
     path: repoPath,
     templatePath,
   });
@@ -4363,12 +4483,12 @@ export async function startAutoFetch(
   repoPath: string,
   intervalMinutes: number,
 ): Promise<CommandResult<void>> {
-  // Offline mode has to stop the background loop too, or "offline" leaks a
-  // fetch every N minutes. Checked without prompting: this is not a gesture the
-  // user is standing in front of, so a confirm here would be a dialog out of
-  // nowhere — offline/allowlist block it, confirmNetworkOps does not apply.
-  if (settingsStore.getState().offlineMode) {
-    return { success: false, error: { code: 'BLOCKED', message: 'Offline mode is enabled' } };
+  // Hard blocks only: the background loop is not a gesture the user is standing
+  // in front of, so a confirm here would be a dialog out of nowhere. Offline
+  // mode and the allowlist still apply — otherwise "offline" leaks a fetch
+  // every N minutes.
+  if (await checkNetworkAllowed(repoPath)) {
+    return blockedResult();
   }
 
   // The background loop authenticates with whatever token we hand it; without
@@ -6684,6 +6804,11 @@ export async function pruneRemoteTrackingBranches(
   repoPath: string,
   remote?: string,
 ): Promise<CommandResult<PruneResult>> {
+  // `git remote prune` queries the remote's ref list — it is `git fetch
+  // --prune` minus the object transfer, so it belongs behind the same gate.
+  if (!await checkNetworkPermission('prune remote-tracking branches', repoPath, remote)) {
+    return blockedResult();
+  }
   return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
     path: repoPath,
     remote,

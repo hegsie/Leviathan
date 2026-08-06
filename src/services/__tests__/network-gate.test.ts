@@ -29,6 +29,14 @@ import {
   addSubmodule,
   updateSubmodules,
   startAutoFetch,
+  pruneRemoteTrackingBranches,
+  listPullRequests,
+  createPullRequest,
+  listIssues,
+  listGitLabIssues,
+  listBitbucketPullRequests,
+  listAdoPullRequests,
+  isNetworkGateRefusal,
 } from '../git.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 
@@ -47,6 +55,37 @@ const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Prom
   },
   { name: 'updateSubmodules', command: 'update_submodules', run: () => updateSubmodules('/repo') },
   { name: 'startAutoFetch', command: 'start_auto_fetch', run: () => startAutoFetch('/repo', 5) },
+  {
+    name: 'pruneRemoteTrackingBranches',
+    command: 'prune_remote_tracking_branches',
+    run: () => pruneRemoteTrackingBranches('/repo'),
+  },
+  {
+    name: 'listPullRequests (provider API)',
+    command: 'list_pull_requests',
+    run: () => listPullRequests('o', 'r'),
+  },
+  {
+    name: 'createPullRequest (provider API)',
+    command: 'create_pull_request',
+    run: () => createPullRequest('o', 'r', { title: 't', head: 'h', base: 'b' }),
+  },
+  { name: 'listIssues (provider API)', command: 'list_issues', run: () => listIssues('o', 'r') },
+  {
+    name: 'listGitLabIssues (provider API)',
+    command: 'list_gitlab_issues',
+    run: () => listGitLabIssues('https://gitlab.com', 'g/p'),
+  },
+  {
+    name: 'listBitbucketPullRequests (provider API)',
+    command: 'list_bitbucket_pull_requests',
+    run: () => listBitbucketPullRequests('w', 'r'),
+  },
+  {
+    name: 'listAdoPullRequests (provider API)',
+    command: 'list_ado_pull_requests',
+    run: () => listAdoPullRequests('o', 'p', 'r'),
+  },
 ];
 
 describe('network security gate', () => {
@@ -74,6 +113,113 @@ describe('network security gate', () => {
         ).to.equal(false);
       });
     }
+  });
+
+  describe('the allowlist works with the argument shapes real callers use', () => {
+    // Real UI callers pass a remote NAME ("origin") or nothing at all — never a
+    // URL. Matching a name against a domain meant `"origin".includes("github.com")`
+    // was false, so an allowlist refused the very remotes it was meant to permit,
+    // while the callers that passed nothing skipped the check entirely.
+    function mockRemotes(url: string): void {
+      mockInvoke = (command: string) => {
+        if (command === 'get_remotes') {
+          return Promise.resolve([{ name: 'origin', url, fetchUrl: url, pushUrl: url }]);
+        }
+        return Promise.resolve(null);
+      };
+    }
+
+    it('allows a fetch by remote NAME when the resolved URL is on the list', async () => {
+      mockRemotes('https://github.com/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'a github.com origin must not be refused').to.not.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('blocks a fetch by remote NAME when the resolved URL is not on the list', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('does not skip the check when no remote is named — it resolves the default', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      // This is the toolbar's call shape: `{ path, silent }` and nothing else.
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success, 'an unspecified remote used to bypass the allowlist').to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'push')).to.equal(false);
+    });
+
+    it('refuses rather than allows when the remote URL cannot be resolved', async () => {
+      mockInvoke = () => Promise.resolve([]);
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', silent: true });
+
+      expect(result.success, 'an allowlist that cannot see the URL must fail closed').to.equal(false);
+    });
+
+    it('leaves everything alone when no allowlist is configured', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      await fetch({ path: '/repo', silent: true });
+
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+  });
+
+  describe('declining the confirm is the user\'s decision, not a failure', () => {
+    it('reports CANCELLED, not BLOCKED, so callers can stay quiet', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      // plugin-dialog's confirm() resolves true only for the OK button label.
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Cancel');
+        }
+        return Promise.resolve(null);
+      };
+
+      const result = await fetch({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(result.error?.code, 'a decline is not a block').to.equal('CANCELLED');
+      expect(isNetworkGateRefusal(result.error), 'callers suppress their toast').to.equal(true);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('accepting the confirm lets the operation through', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Ok');
+        }
+        return Promise.resolve(null);
+      };
+
+      await fetch({ path: '/repo', silent: true });
+
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('an offline block is a refusal too, so it is never double-reported', async () => {
+      settingsStore.setState({ offlineMode: true });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.error?.code).to.equal('BLOCKED');
+      expect(isNetworkGateRefusal(result.error)).to.equal(true);
+    });
   });
 
   describe('the allowlist blocks remotes outside it', () => {

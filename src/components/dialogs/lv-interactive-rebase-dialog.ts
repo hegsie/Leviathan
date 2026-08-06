@@ -884,6 +884,18 @@ export class LvInteractiveRebaseDialog extends LitElement {
           composed: true,
         }));
         this.close();
+        // An `edit`/`break` line stops the rebase and still exits 0. Closing
+        // silently left the user on a detached HEAD mid-rebase, with the
+        // operation banner's Abort ("all resolved changes will be lost") as
+        // the most obvious thing to click — throwing away the rebase they
+        // paused on purpose.
+        if (result.data?.paused) {
+          showToast(
+            'Rebase paused — amend the commit, then Continue from the banner',
+            'warning',
+            8000,
+          );
+        }
       } else {
         if (result.error?.code === 'REBASE_CONFLICT') {
           this.close();
