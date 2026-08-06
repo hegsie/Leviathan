@@ -24,7 +24,7 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvBranchList } from '../lv-branch-list.ts';
-import { repositoryStore } from '../../../stores/index.ts';
+import { repositoryStore, uiStore } from '../../../stores/index.ts';
 import type { Repository } from '../../../types/git.types.ts';
 
 // Import the actual component
@@ -635,5 +635,55 @@ describe('lv-branch-list operationInProgress guards', () => {
     }
 
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
+  });
+});
+
+/**
+ * Deleting a branch from the sidebar was the last delete surface reporting
+ * nothing on success. The graph's ref menu toasts, the force escalation
+ * toasts, and Branch Cleanup toasts; here the only signal was a row vanishing
+ * from a list that is often filtered or scrolled away from the deleted row —
+ * the same gap already fixed on the sibling tag list.
+ */
+describe('lv-branch-list delete feedback', () => {
+  beforeEach(() => {
+    invokeCalls.length = 0;
+    confirmResult = true;
+    uiStore.setState({ toasts: [] });
+  });
+
+  it('confirms the branch is gone', async () => {
+    const el = await createComponent();
+    const branch = makeBranch({ name: 'feature/gone', shorthand: 'feature/gone' });
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, branch,
+    };
+    uiStore.setState({ toasts: [] });
+
+    await (el as unknown as { handleDeleteBranch: () => Promise<void> }).handleDeleteBranch();
+
+    const success = uiStore.getState().toasts.find((t) => t.type === 'success');
+    expect(success, 'the delete is acknowledged').to.not.be.undefined;
+    expect(success!.message).to.equal('Deleted branch feature/gone');
+  });
+
+  it('says nothing on success when the delete failed', async () => {
+    const el = await createComponent();
+    mockInvoke = (command: string) => {
+      if (command === 'delete_branch') {
+        return Promise.reject({ code: 'COMMAND_ERROR', message: 'branch is checked out' });
+      }
+      return defaultMockInvoke(command);
+    };
+    const branch = makeBranch({ name: 'feature/busy', shorthand: 'feature/busy' });
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, branch,
+    };
+    uiStore.setState({ toasts: [] });
+
+    await (el as unknown as { handleDeleteBranch: () => Promise<void> }).handleDeleteBranch();
+
+    expect(uiStore.getState().toasts.some((t) => t.type === 'success')).to.equal(false);
+    expect(uiStore.getState().toasts.some((t) => t.type === 'error')).to.equal(true);
   });
 });

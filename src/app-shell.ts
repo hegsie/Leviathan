@@ -1325,6 +1325,9 @@ export class AppShell extends LitElement {
           // A conflicted file that left the status entirely was resolved and
           // committed (e.g. Complete Merge) — close the diff rather than
           // showing a permanently stale "has merge conflicts" interstitial.
+          // Not a gesture, but the same unmount: if the user was mid-edit on
+          // that file the typed text goes with the pane, so say so.
+          this.warnIfDiscardingEdits();
           this.diffFile = null;
           this.showDiff = false;
         }
@@ -2854,9 +2857,7 @@ export class AppShell extends LitElement {
 
     if (isHead) {
       // For HEAD, just trigger amend mode
-      window.dispatchEvent(new CustomEvent('trigger-amend', {
-        detail: { commit },
-      }));
+      await this.dispatchAmend(commit);
     } else {
       // For other commits, open interactive rebase dialog pre-configured for rewording
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
@@ -2921,9 +2922,7 @@ export class AppShell extends LitElement {
     if (isHead === null) return;
 
     if (isHead) {
-      window.dispatchEvent(new CustomEvent('trigger-amend', {
-        detail: { commit },
-      }));
+      await this.dispatchAmend(commit);
     } else {
       showToast('Only the latest commit can be amended — opening interactive rebase', 'info');
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
@@ -3134,6 +3133,33 @@ export class AppShell extends LitElement {
   }
 
   /**
+   * `trigger-amend` is heard only by `lv-commit-panel`, which lives in the
+   * right panel's Changes tab.
+   *
+   * Right-clicking a commit in the graph selects it first, and a new selection
+   * auto-switches that panel to Details — so amend mode was being turned on
+   * inside a `.tab-panel` with `display: none` and the gesture looked like it
+   * did nothing. With the panel hidden entirely (Ctrl+J) the component is
+   * unmounted and the event had no listener at all. Same class as
+   * dispatchToFileStatus and openBranchCleanup.
+   */
+  private async dispatchAmend(commit: Commit): Promise<void> {
+    if (!this.rightPanelVisible) {
+      uiStore.getState().togglePanel('right');
+      await this.updateComplete;
+    }
+    // Optional chaining: a shell that has never rendered has no renderRoot,
+    // and the dispatch below must still happen.
+    const panel = this.renderRoot?.querySelector('lv-right-panel') as
+      | (LitElement & { showChanges?: () => void })
+      | null;
+    await panel?.updateComplete;
+    panel?.showChanges?.();
+    await panel?.updateComplete;
+    window.dispatchEvent(new CustomEvent('trigger-amend', { detail: { commit } }));
+  }
+
+  /**
    * `stage-all` / `unstage-all` are heard only by `lv-file-status`, which lives
    * inside the right panel and is unmounted while that panel is hidden — so
    * with Ctrl+J pressed the `s` / `u` shortcuts and both palette entries
@@ -3321,6 +3347,9 @@ export class AppShell extends LitElement {
   }
 
   private handleShowBlame(e: CustomEvent<{ filePath: string; commitOid?: string }>): void {
+    // A fourth app-shell-owned gesture that unmounts the diff pane, and so the
+    // inline editor with it — same teardown as the × and a tab switch.
+    this.warnIfDiscardingEdits();
     // Close diff if open
     this.showDiff = false;
     this.diffFile = null;

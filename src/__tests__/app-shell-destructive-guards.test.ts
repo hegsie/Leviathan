@@ -139,6 +139,49 @@ describe('app-shell destructive guards', () => {
       expect(amended).to.equal('headoid');
     });
 
+    it('reveals the panel that owns the listener before dispatching', async () => {
+      // trigger-amend is heard only by lv-commit-panel, in the right panel's
+      // Changes tab. Right-clicking a commit selects it first, and a new
+      // selection auto-switches that panel to Details — so amend mode was
+      // turned on inside a tab-panel with display:none and the gesture looked
+      // like it did nothing. With the panel hidden entirely there was no
+      // listener at all.
+      mockResponses['get_commit_history'] = () => [commit('headoid')];
+      const el = shellOnRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        if ((el as any).rightPanelVisible) {
+          const { uiStore: ui } = await import('../stores/index.ts');
+          ui.getState().togglePanel('right');
+          await (el as any).updateComplete;
+        }
+        expect((el as any).rightPanelVisible, 'panel starts hidden').to.equal(false);
+
+        (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('headoid') };
+
+        // The ordering is the whole fix: the panel that owns the listener has
+        // to be visible BEFORE the event fires, or amend mode is turned on in
+        // a component that is unmounted (or in a hidden tab).
+        let visibleWhenDispatched: boolean | null = null;
+        const onAmend = (): void => {
+          visibleWhenDispatched = (el as any).rightPanelVisible;
+        };
+        window.addEventListener('trigger-amend', onAmend);
+        try {
+          await (el as any).handleQuickAmend();
+        } finally {
+          window.removeEventListener('trigger-amend', onAmend);
+        }
+
+        expect(visibleWhenDispatched, 'the event fired').to.not.be.null;
+        expect(visibleWhenDispatched, 'and the panel was already up').to.equal(true);
+        expect((el as any).rightPanelVisible, 'panel revealed').to.equal(true);
+      } finally {
+        el.remove();
+      }
+    });
+
     it('a repository switch during the history lookup cancels the amend', async () => {
       let release!: (v: unknown) => void;
       mockResponses['get_commit_history'] = () =>
@@ -260,6 +303,23 @@ describe('app-shell destructive guards', () => {
       (el as any).handleCloseDiff();
 
       expect(uiStore.getState().toasts.length, 'nothing was lost, so nothing is said').to.equal(0);
+    });
+
+    it('opening Blame from the commit panel warns the same way', async () => {
+      // A fourth app-shell-owned gesture that unmounts the same pane. The ×
+      // and the tab switch were guarded; this one swaps lv-diff-view for
+      // lv-blame-view through the same `showDiff = false`.
+      const el = shellWithDirtyEditor('src/main.ts');
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleShowBlame(
+        new CustomEvent('show-blame', { detail: { filePath: 'src/other.ts' } }),
+      );
+
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'the loss is reported').to.not.be.undefined;
+      expect(warning!.message).to.contain('src/main.ts');
+      expect((el as any).showBlame, 'and blame still opens').to.equal(true);
     });
 
     it('closing with no diff open says nothing', async () => {

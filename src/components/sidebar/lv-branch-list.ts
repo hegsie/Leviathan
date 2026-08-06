@@ -1215,6 +1215,11 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
+        // The same delete from the graph's ref menu toasts, force-delete
+        // toasts, and Branch Cleanup toasts. Here the only signal was a row
+        // vanishing from a list that is often filtered or scrolled away from
+        // the deleted row — the same gap fixed on the sibling tag list.
+        showToast(`Deleted branch ${branch.shorthand}`, 'success');
         this.dispatchBranchesChanged(repoPath);
       } else {
         console.error('Delete branch failed:', result.error);

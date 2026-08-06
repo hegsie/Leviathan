@@ -81,6 +81,23 @@ fn is_executable(_path: &Path) -> bool {
     false
 }
 
+/// Would this hook actually run?
+///
+/// The management commands used to report `enabled` from file existence while
+/// the runner (and git) additionally require the executable bit, so the two
+/// disagreed about the same word. On Windows `is_executable` is always false,
+/// so existence is the only meaningful signal there.
+fn hook_exists_and_runs(hook_path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        is_executable(hook_path)
+    }
+    #[cfg(not(unix))]
+    {
+        hook_path.exists()
+    }
+}
+
 /// Outcome of attempting to run a hook.
 pub struct HookOutcome {
     /// The hook existed, was executable, and was executed.
@@ -386,9 +403,17 @@ pub async fn get_hooks(path: String) -> Result<Vec<GitHook>> {
         // the user's script.
         let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
-        let enabled = hook_path.exists();
-        let exists = enabled || disabled_path.exists();
-        let content = if enabled {
+        // "Enabled" must mean what the RUNNER means by it. run_hook skips a
+        // hook without the executable bit exactly as git does, so a file
+        // present but not +x — what a core.fileMode=false clone, a Windows
+        // checkout or a restored backup produces — was shown with the green
+        // Enabled badge and counted as active while nothing would ever run it.
+        // On Windows is_executable is always false, so fall back to existence
+        // there. toggle_hook(true) chmods 0755, which makes the toggle the
+        // repair.
+        let enabled = hook_exists_and_runs(&hook_path);
+        let exists = hook_path.exists() || disabled_path.exists();
+        let content = if hook_path.exists() {
             std::fs::read_to_string(&hook_path).ok()
         } else if disabled_path.exists() {
             std::fs::read_to_string(&disabled_path).ok()
@@ -420,10 +445,11 @@ pub async fn get_hook(path: String, name: String) -> Result<GitHook> {
     let hook_path = hooks_dir.join(&name);
     let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
-    // A disabled hook still exists — see get_hooks.
-    let enabled = hook_path.exists();
-    let exists = enabled || disabled_path.exists();
-    let content = if enabled {
+    // A disabled hook still exists — see get_hooks, which also explains why
+    // `enabled` tracks the executable bit rather than mere existence.
+    let enabled = hook_exists_and_runs(&hook_path);
+    let exists = hook_path.exists() || disabled_path.exists();
+    let content = if hook_path.exists() {
         std::fs::read_to_string(&hook_path).ok()
     } else if exists {
         std::fs::read_to_string(&disabled_path).ok()
@@ -457,7 +483,20 @@ pub async fn save_hook(path: String, name: String, content: String) -> Result<()
     std::fs::create_dir_all(&hooks_dir)?;
 
     let hook_path = hooks_dir.join(&name);
-    std::fs::write(&hook_path, &content)?;
+    let disabled_path = hooks_dir.join(format!("{}.disabled", name));
+
+    // Editing a DISABLED hook must not turn it back on. Now that the dialog
+    // can load and show a disabled hook's script, writing unconditionally to
+    // the live path created a second, enabled copy that git would run on the
+    // next commit — from a gesture whose only stated effect was "saved
+    // successfully" — and left the `.disabled` original stranded beside it.
+    let target = if !hook_path.exists() && disabled_path.exists() {
+        disabled_path
+    } else {
+        hook_path
+    };
+    std::fs::write(&target, &content)?;
+    let hook_path = target;
 
     // Make executable on Unix
     #[cfg(unix)]
@@ -667,6 +706,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_editing_a_disabled_hook_leaves_it_disabled() {
+        // The dialog can load and edit a disabled hook's script. Writing to the
+        // live path would create a second, ENABLED copy that git runs on the
+        // next commit — from a gesture whose only stated effect was "saved".
+        let repo = TestRepo::with_initial_commit();
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\nexit 0\n".to_string(),
+        )
+        .await
+        .unwrap();
+        toggle_hook(repo.path_str(), "pre-commit".to_string(), false)
+            .await
+            .unwrap();
+
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\necho edited\n".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let hook = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(hook.exists);
+        assert!(
+            !hook.enabled,
+            "an edit must not silently re-enable the hook"
+        );
+        assert!(hook.content.unwrap().contains("edited"), "the edit landed");
+        let hooks_dir = repo.path.join(".git").join("hooks");
+        assert!(
+            !hooks_dir.join("pre-commit").exists(),
+            "and no enabled duplicate is left behind for git to run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_non_executable_hook_is_not_reported_as_enabled() {
+        // What a core.fileMode=false clone, a Windows checkout or a restored
+        // backup produces. run_hook skips it exactly as git does, so calling it
+        // "Enabled" told the user a blocking hook was armed when it was inert.
+        use std::os::unix::fs::PermissionsExt;
+        let repo = TestRepo::with_initial_commit();
+        let hooks_dir = repo.path.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let reported = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(reported.exists, "the file is there");
+        assert!(!reported.enabled, "but nothing will ever run it");
+        assert!(
+            reported.content.unwrap().contains("exit 1"),
+            "its script is still readable so the user can see what is inert"
+        );
+
+        // The toggle is the repair: it chmods 0755.
+        toggle_hook(repo.path_str(), "pre-commit".to_string(), true)
+            .await
+            .unwrap();
+        let repaired = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(repaired.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_editing_an_enabled_hook_still_writes_the_live_path() {
+        let repo = TestRepo::with_initial_commit();
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\necho first\n".to_string(),
+        )
+        .await
+        .unwrap();
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\necho second\n".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let hook = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(hook.enabled);
+        assert!(hook.content.unwrap().contains("second"));
+    }
+
+    #[tokio::test]
     async fn test_delete_removes_a_disabled_hook_too() {
         let repo = TestRepo::with_initial_commit();
         save_hook(
@@ -739,7 +878,15 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let alt = repo.path.join(".husky");
         std::fs::create_dir_all(&alt).unwrap();
+        // Executable, as husky installs them — `enabled` now tracks the
+        // executable bit, the same predicate the runner uses.
         std::fs::write(alt.join("pre-push"), "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(alt.join("pre-push"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         {
             let git_repo = repo.repo();
             let mut cfg = git_repo.config().unwrap();
