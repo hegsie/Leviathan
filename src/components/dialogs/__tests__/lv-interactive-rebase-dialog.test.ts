@@ -906,6 +906,63 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(isNoop, 'summary + body is the message to compare against').to.equal(true);
     });
 
+    it('the reword-from-graph route shows the body, and leaving it alone is a no-op', async () => {
+      // The two seed sites define `newMessage` BEFORE the textarea renders, so
+      // the render-time `?? fullMessage(c)` fallback never fires for them. Seeded
+      // from the subject, the box hid the body from the user AND made the
+      // execute-time "did anything change?" comparison read true for an
+      // untouched reword — emitting an amend that replaced the whole message
+      // with its first line. This drives the real path rather than the
+      // fallback in isolation.
+      const withBody = [
+        {
+          oid: 'aaa111bbb222',
+          shortId: 'aaa111b',
+          summary: 'Add retry to the uploader',
+          body: 'Backoff is exponential.\n\nFixes #4412',
+          action: 'pick',
+        },
+      ];
+      setupDefaultMocks(withBody);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'aaa111bbb222' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea, 'the reword editor is shown').to.not.be.null;
+      expect(textarea.value, 'the body is visible to the user').to.contain('Fixes #4412');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const commits = (el as any).commits;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(commits[0].newMessage).to.equal((el as any).fullMessage(commits[0]));
+    });
+
+    it('switching the dropdown to reword also seeds the full message', async () => {
+      const withBody = [
+        {
+          oid: 'aaa111bbb222',
+          shortId: 'aaa111b',
+          summary: 'Subject',
+          body: 'Body line',
+          action: 'pick',
+        },
+      ];
+      setupDefaultMocks(withBody);
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
+      select.value = 'reword';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea.value, 'the second seed site too').to.contain('Body line');
+    });
+
     it('a commit with no body seeds just the subject', async () => {
       const el = await createDialog();
       await openAndWait(el);

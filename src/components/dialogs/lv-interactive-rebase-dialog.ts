@@ -546,7 +546,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     if (options?.rewordCommitOid) {
       this.commits = this.commits.map((c) =>
         c.oid === options.rewordCommitOid
-          ? { ...c, action: 'reword' as RebaseAction, newMessage: c.summary }
+          ? { ...c, action: 'reword' as RebaseAction, newMessage: this.fullMessage(c) }
           : c
       );
     }
@@ -788,8 +788,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
       return {
         ...c,
         action: newAction,
-        // Initialize newMessage for reword, clear it for other actions
-        newMessage: newAction === 'reword' ? (c.newMessage ?? c.summary) : undefined,
+        // Seeded with the FULL message, not the subject. The textarea's own
+        // `?? this.fullMessage(c)` fallback never fires once this is defined,
+        // so seeding from the subject both hid the body from the user and made
+        // the execute-time "did anything change?" comparison read true for an
+        // untouched reword — emitting an amend that replaced the whole message
+        // with just its first line.
+        newMessage: newAction === 'reword' ? (c.newMessage ?? this.fullMessage(c)) : undefined,
       };
     });
   }
@@ -1018,6 +1023,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
    * issue references, rationale. The commit panel's amend has always seeded
    * from summary + body, so the same operation preserved the body from one
    * surface and destroyed it from the other.
+   *
+   * Every place that seeds or compares a reword message must use this — the
+   * textarea's fallback alone is not enough, because both seed sites define
+   * `newMessage` before it ever renders.
    */
   private fullMessage(commit: EditableRebaseCommit): string {
     return commit.body ? `${commit.summary}\n\n${commit.body}` : commit.summary;
