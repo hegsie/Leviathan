@@ -114,4 +114,20 @@ describe('workspace batch operations and the security gate', () => {
     expect(summary).to.not.contain('failed');
     expect(summary).to.not.contain('skipped');
   });
+
+  it('repos that are missing or not git repos are accounted for, not dropped', async () => {
+    const el = await dialogWithWorkspace();
+    (el as any).repoStatuses = new Map([
+      ['/repo/one', { exists: true, isValidRepo: true }],
+      ['/repo/two', { exists: false, isValidRepo: false }],
+      ['/repo/three', { exists: true, isValidRepo: false }],
+    ]);
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handleFetchAll();
+
+    const summary = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+    expect(summary, 'the summary adds up to the workspace size').to.contain('2 unavailable');
+    expect(summary).to.contain('1 succeeded');
+  });
 });

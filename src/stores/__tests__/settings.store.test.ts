@@ -353,4 +353,44 @@ describe('settings.store', () => {
       }
     });
   });
+
+  describe('persisted-state migration', () => {
+    it('v1 state carries autoStashOnCheckout forward as true', () => {
+      // Changing a default only reaches installs with NO persisted state, and
+      // zustand shallow-merges the persisted object over the defaults — so
+      // every user who had ever changed any setting kept the old `false` and
+      // still got a refused checkout. That `false` was never a choice: nothing
+      // read the setting until it was wired up.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate;
+      expect(migrate, 'a migration exists').to.not.be.undefined;
+
+      const migrated = migrate!({ theme: 'dark', autoStashOnCheckout: false }, 1) as {
+        autoStashOnCheckout: boolean;
+        theme: string;
+      };
+
+      expect(migrated.autoStashOnCheckout).to.equal(true);
+      expect(migrated.theme, 'other settings survive').to.equal('dark');
+    });
+
+    it('leaves a v2 state alone', () => {
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ autoStashOnCheckout: false }, 2) as {
+        autoStashOnCheckout: boolean;
+      };
+
+      expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
+    });
+  });
 });

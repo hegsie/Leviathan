@@ -253,6 +253,58 @@ describe('app-shell remote-operation feedback', () => {
     });
   });
 
+  describe('a rejected push offers the recovery the app already implements', () => {
+    it('a non-fast-forward rejection carries a Pull Now action', async () => {
+      failures['push'] = {
+        code: 'COMMAND_ERROR',
+        message: 'cannot push non-fastforwardable reference',
+      };
+      const el = shellOnRepo();
+
+      await (el as any).handlePush();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.length, 'the failure is reported').to.be.greaterThan(0);
+      expect(
+        toasts.some((t) => /pull/i.test(t.message) || t.action?.label === 'Pull Now'),
+        'the Pull Now recovery is reachable from the only push surface',
+      ).to.equal(true);
+    });
+  });
+
+  describe('checking out a tag from the graph warns about detached HEAD', () => {
+    it('declining the warning blocks the checkout', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = { visible: true, x: 0, y: 0, refName: 'v1.0.0', refType: 'tag' };
+
+      await (el as any).handleRefCheckout();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'checkout_with_autostash'),
+        'HEAD is not detached behind the user',
+      ).to.equal(false);
+    });
+
+    it('a branch checkout is not gated by the tag warning', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        refName: 'feature',
+        refType: 'localBranch',
+      };
+
+      await (el as any).handleRefCheckout();
+
+      expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
+    });
+  });
+
   describe('the graph ref menu confirms before rewriting history', () => {
     async function refMenuShell(): Promise<AppShell> {
       const el = shellOnRepo();

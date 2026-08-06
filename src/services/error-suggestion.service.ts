@@ -32,7 +32,13 @@ export function getErrorSuggestion(
   const msg = errorMessage.toLowerCase();
 
   // Push rejected (non-fast-forward)
-  if (msg.includes('non-fast-forward') || (msg.includes('rejected') && context?.operation === 'push')) {
+  // libgit2's own wording is "cannot push non-fastforwardable reference" — no
+  // hyphen between "non" and "fastforwardable" — so the hyphenated match alone
+  // never fired for the case it was written for.
+  if (
+    /non-fast-?forward|nonfastforward|fastforwardable/.test(msg) ||
+    (msg.includes('rejected') && context?.operation === 'push')
+  ) {
     return {
       message: 'Remote has newer changes. Pull before pushing.',
       action: {

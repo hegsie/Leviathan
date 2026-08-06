@@ -215,9 +215,34 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePush();
 
+      // A rejected push now routes through the suggestion service, which
+      // replaces the bare "Updates were rejected" with the recovery the app
+      // already implements — previously unreachable from the only push surface.
       const toasts = uiStore.getState().toasts;
-      expect(toasts.some((t) => t.type === 'error' && /Updates were rejected/.test(t.message))).to.be.true;
+      const err = toasts.find((t) => t.type === 'error');
+      expect(err, 'the failure is still reported').to.not.be.undefined;
+      expect(err!.message).to.match(/pull before pushing/i);
+      expect(err!.action?.label, 'with a one-click recovery').to.equal('Pull Now');
       expect(findCommands('open_repository').length).to.equal(0);
+    });
+
+    it('a failure with no known recovery still shows the server\'s own words', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'push') {
+          throw { code: 'COMMAND_ERROR', message: 'refs/heads/main: protected branch hook declined' };
+        }
+        return null;
+      };
+
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handlePush();
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'error' && /protected branch hook declined/.test(t.message)),
+        'the reason the server gave is not swallowed',
+      ).to.be.true;
     });
   });
 

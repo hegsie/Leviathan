@@ -256,3 +256,84 @@ describe('lv-branch-list drop onto remote target (Finding 16)', () => {
     expect((checkoutCall!.args as { refName: string }).refName).to.equal('origin/topic');
   });
 });
+
+describe('lv-branch-list remote-branch operations use the full ref', () => {
+  beforeEach(() => {
+    invokeCalls.length = 0;
+  });
+
+  /**
+   * The backend resolves `refs/heads/<ref>` BEFORE `refs/remotes/<ref>`, so
+   * sending the shorthand for a remote branch silently hits the LOCAL branch of
+   * the same name — merging or rebasing onto a different commit than the row
+   * the user right-clicked, with a confirm that named the shorthand so nothing
+   * looked wrong.
+   */
+  const remoteBranch = () =>
+    makeBranch({ name: 'origin/topic', shorthand: 'topic', isRemote: true });
+
+  async function withRemoteContextMenu(): Promise<LvBranchList> {
+    const el = await createComponent([
+      makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+    ]);
+    (el as unknown as { contextMenu: unknown }).contextMenu = {
+      visible: true,
+      x: 0,
+      y: 0,
+      branch: remoteBranch(),
+    };
+    return el;
+  }
+
+  it('merges origin/topic, not the local topic', async () => {
+    const el = await withRemoteContextMenu();
+    invokeCalls.length = 0;
+
+    await (el as unknown as { handleMergeBranch: () => Promise<void> }).handleMergeBranch();
+
+    const call = invokeCalls.find((c) => c.command === 'merge');
+    expect(call, 'merge invoked').to.not.be.undefined;
+    expect((call!.args as { sourceRef: string }).sourceRef).to.equal('origin/topic');
+  });
+
+  it('rebases onto origin/topic, not the local topic', async () => {
+    const el = await withRemoteContextMenu();
+    invokeCalls.length = 0;
+
+    await (el as unknown as { handleRebaseBranch: () => Promise<void> }).handleRebaseBranch();
+
+    const call = invokeCalls.find((c) => c.command === 'rebase');
+    expect(call, 'rebase invoked').to.not.be.undefined;
+    expect((call!.args as { onto: string }).onto).to.equal('origin/topic');
+  });
+
+  it('asks the host for an interactive rebase onto origin/topic', async () => {
+    const el = await withRemoteContextMenu();
+    let onto: string | undefined;
+    el.addEventListener('interactive-rebase', (e) => {
+      onto = (e as CustomEvent<{ onto?: string }>).detail?.onto;
+    });
+
+    (el as unknown as { handleInteractiveRebase: () => void }).handleInteractiveRebase();
+
+    expect(onto).to.equal('origin/topic');
+  });
+
+  it('a local branch still sends its own name', async () => {
+    const el = await createComponent([
+      makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+    ]);
+    (el as unknown as { contextMenu: unknown }).contextMenu = {
+      visible: true,
+      x: 0,
+      y: 0,
+      branch: makeBranch({ name: 'feature/x', shorthand: 'feature/x' }),
+    };
+    invokeCalls.length = 0;
+
+    await (el as unknown as { handleMergeBranch: () => Promise<void> }).handleMergeBranch();
+
+    const call = invokeCalls.find((c) => c.command === 'merge');
+    expect((call!.args as { sourceRef: string }).sourceRef).to.equal('feature/x');
+  });
+});

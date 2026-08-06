@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
@@ -1103,7 +1104,13 @@ export class LvBranchList extends LitElement {
         }));
       } else {
         console.error('Checkout failed:', result.data?.message || result.error);
-        showToast(`Checkout failed: ${result.data?.message || result.error?.message || 'Unknown error'}`, 'error');
+        // Through the suggestion service, like the graph and palette paths:
+        // libgit2's "1 conflict prevents checkout" names neither the files nor
+        // a way forward, and this is the surface most checkouts come from.
+        showErrorWithSuggestion(
+          result.data?.message || result.error?.message || '',
+          'Checkout failed',
+        );
       }
     } finally {
       this.operationInProgress = false;
@@ -1229,7 +1236,7 @@ export class LvBranchList extends LitElement {
     const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Merge Branch',
-      `Merge "${branch.shorthand}" into the current branch?`,
+      `Merge "${branch.name}" into the current branch?`,
       'info'
     );
 
@@ -1240,7 +1247,11 @@ export class LvBranchList extends LitElement {
     try {
       const result = await gitService.merge({
         path: repoPath,
-        sourceRef: branch.shorthand,
+      // `branch.name` (origin/feature), NOT `shorthand` (feature): the backend
+      // resolves refs/heads/ FIRST, so a shorthand for a remote branch silently
+      // hits the LOCAL branch of the same name — merging/rebasing onto a
+      // different commit than the row the user right-clicked.
+        sourceRef: branch.name,
       });
 
       if (result.success) {
@@ -1273,7 +1284,7 @@ export class LvBranchList extends LitElement {
     const repoPath = this.repositoryPath;
     const confirmed = await showConfirm(
       'Rebase Branch',
-      `Rebase current branch onto "${branch.shorthand}"?\n\nThis will rewrite commit history.`,
+      `Rebase current branch onto "${branch.name}"?\n\nThis will rewrite commit history.`,
       'warning'
     );
 
@@ -1284,7 +1295,11 @@ export class LvBranchList extends LitElement {
     try {
       const result = await gitService.rebase({
         path: repoPath,
-        onto: branch.shorthand,
+      // `branch.name` (origin/feature), NOT `shorthand` (feature): the backend
+      // resolves refs/heads/ FIRST, so a shorthand for a remote branch silently
+      // hits the LOCAL branch of the same name — merging/rebasing onto a
+      // different commit than the row the user right-clicked.
+        onto: branch.name,
       });
 
       if (result.success) {
@@ -1314,7 +1329,8 @@ export class LvBranchList extends LitElement {
     this.dispatchEvent(new CustomEvent('interactive-rebase', {
       bubbles: true,
       composed: true,
-      detail: { onto: branch.shorthand },
+      // Full remote name, for the same reason as merge/rebase above.
+      detail: { onto: branch.name },
     }));
   }
 
@@ -1660,14 +1676,15 @@ export class LvBranchList extends LitElement {
         // Merge source branch into current (HEAD)
         const confirmed = await showConfirm(
           'Merge Branch',
-          `Merge "${sourceBranch.shorthand}" into the current branch?`,
+          `Merge "${sourceBranch.name}" into the current branch?`,
           'info'
         );
         if (!confirmed) return;
 
         const result = await gitService.merge({
           path: repoPath,
-          sourceRef: sourceBranch.shorthand,
+          // Full remote name — see handleMergeBranch.
+          sourceRef: sourceBranch.name,
         });
 
         if (result.success) {
@@ -1686,14 +1703,15 @@ export class LvBranchList extends LitElement {
         // Rebase current branch onto source
         const confirmed = await showConfirm(
           'Rebase Branch',
-          `Rebase current branch onto "${sourceBranch.shorthand}"?`,
+          `Rebase current branch onto "${sourceBranch.name}"?`,
           'warning'
         );
         if (!confirmed) return;
 
         const result = await gitService.rebase({
           path: repoPath,
-          onto: sourceBranch.shorthand,
+          // Full remote name — see handleMergeBranch.
+          onto: sourceBranch.name,
         });
 
         if (result.success) {
@@ -1714,7 +1732,7 @@ export class LvBranchList extends LitElement {
       const actionText = action === 'merge' ? 'merge' : 'rebase onto';
       const confirmed = await showConfirm(
         action === 'merge' ? 'Merge Branch' : 'Rebase Branch',
-        `This will checkout "${targetBranch.shorthand}" and ${actionText} "${sourceBranch.shorthand}". Continue?`,
+        `This will checkout "${targetBranch.name}" and ${actionText} "${sourceBranch.name}". Continue?`,
         action === 'merge' ? 'info' : 'warning'
       );
       if (!confirmed) return;
@@ -1727,7 +1745,10 @@ export class LvBranchList extends LitElement {
 
       if (!checkoutResult.success || !checkoutResult.data?.success) {
         console.error('Checkout failed:', checkoutResult.data?.message || checkoutResult.error);
-        showToast(`Checkout failed: ${checkoutResult.data?.message || checkoutResult.error?.message || 'Unknown error'}`, 'error');
+        showErrorWithSuggestion(
+          checkoutResult.data?.message || checkoutResult.error?.message || '',
+          'Checkout failed',
+        );
         return;
       }
 
@@ -1762,7 +1783,8 @@ export class LvBranchList extends LitElement {
       if (action === 'merge') {
         const result = await gitService.merge({
           path: repoPath,
-          sourceRef: sourceBranch.shorthand,
+          // Full remote name — see handleMergeBranch.
+          sourceRef: sourceBranch.name,
         });
 
         if (result.success) {
@@ -1780,7 +1802,8 @@ export class LvBranchList extends LitElement {
       } else {
         const result = await gitService.rebase({
           path: repoPath,
-          onto: sourceBranch.shorthand,
+          // Full remote name — see handleMergeBranch.
+          onto: sourceBranch.name,
         });
 
         if (result.success) {

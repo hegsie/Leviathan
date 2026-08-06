@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
@@ -558,9 +559,10 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        const errorMsg = result.data?.message || result.error?.message || 'Unknown error';
+        const errorMsg = result.data?.message || result.error?.message || '';
         console.error('Failed to checkout tag:', errorMsg);
-        showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
+        // Same translation the branch and graph checkout paths get.
+        showErrorWithSuggestion(errorMsg, 'Failed to checkout tag');
       }
     } finally {
       this.operationInProgress = false;
