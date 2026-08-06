@@ -327,6 +327,9 @@ export class LvSettingsDialog extends LitElement {
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
   @state() private confirmBeforeDiscard = true;
+  @state() private offlineMode = false;
+  @state() private confirmNetworkOps = false;
+  @state() private remoteAllowlist: string[] = [];
   @state() private autoStashOnCheckout = false;
   @state() private staleBranchDays = 90;
   @state() private networkOperationTimeout = 300;
@@ -493,6 +496,9 @@ export class LvSettingsDialog extends LitElement {
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
+    this.offlineMode = settings.offlineMode;
+    this.confirmNetworkOps = settings.confirmNetworkOps;
+    this.remoteAllowlist = settings.remoteAllowlist;
     this.autoStashOnCheckout = settings.autoStashOnCheckout;
     this.staleBranchDays = settings.staleBranchDays;
     this.networkOperationTimeout = settings.networkOperationTimeout;
@@ -684,6 +690,19 @@ export class LvSettingsDialog extends LitElement {
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
+  /** Comma-separated in the UI, string[] in the store. Empty means "no
+   * allowlist" — the gate only filters when the list is non-empty. */
+  private handleRemoteAllowlistChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const domains = input.value
+      .split(',')
+      .map((d) => d.trim())
+      .filter((d) => d.length > 0);
+    this.remoteAllowlist = domains;
+    settingsStore.getState().setRemoteAllowlist(domains);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
+  }
+
   private handleToggle(setting: string, e: Event): void {
     const input = e.target as HTMLInputElement;
     const value = input.checked;
@@ -705,6 +724,14 @@ export class LvSettingsDialog extends LitElement {
       case 'confirmBeforeDiscard':
         this.confirmBeforeDiscard = value;
         store.setConfirmBeforeDiscard(value);
+        break;
+      case 'offlineMode':
+        this.offlineMode = value;
+        store.setOfflineMode(value);
+        break;
+      case 'confirmNetworkOps':
+        this.confirmNetworkOps = value;
+        store.setConfirmNetworkOps(value);
         break;
       case 'autoStashOnCheckout':
         this.autoStashOnCheckout = value;
@@ -1190,6 +1217,40 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Automatically fetch when the app window regains focus</span>
             </div>
             ${this.renderToggle(this.fetchOnFocus, 'fetchOnFocus')}
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-title">Security</div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Offline Mode</span>
+              <span class="setting-description">Block every operation that talks to a remote — fetch, pull, push, clone, tag push, LFS and auto-fetch</span>
+            </div>
+            ${this.renderToggle(this.offlineMode, 'offlineMode')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Confirm Network Operations</span>
+              <span class="setting-description">Ask before every operation that contacts a remote</span>
+            </div>
+            ${this.renderToggle(this.confirmNetworkOps, 'confirmNetworkOps')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Remote Allowlist</span>
+              <span class="setting-description">Comma-separated domains. When set, remotes outside the list are blocked. Leave empty to allow all.</span>
+            </div>
+            <input
+              type="text"
+              .value=${this.remoteAllowlist.join(', ')}
+              @change=${this.handleRemoteAllowlistChange}
+              placeholder="github.com, gitlab.com"
+              style="width: 220px;"
+            />
           </div>
         </div>
 

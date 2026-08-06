@@ -93,60 +93,32 @@ describe('lv-tag-list operationInProgress guards', () => {
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
   });
 
-  it('preserves the create-tag dialog element across an empty<->non-empty tag flip', async () => {
-    // The dialog must live at ONE template position; flipping the tag list
-    // empty<->non-empty (e.g. a watcher refresh after an external git tag) must
-    // not destroy an open dialog (losing its pinned repo / in-progress input).
+  it('mounts no create-tag dialog of its own', async () => {
+    // Two live copies meant two independent `isOpen` guards: opening from this
+    // list's context menu and then from the command palette stacked two
+    // dialogs with different pinned targets. app-shell owns the only instance.
     const el = await createComponent();
     await el.updateComplete;
-    const before = el.shadowRoot!.querySelector('lv-create-tag-dialog');
-    expect(before, 'dialog present when empty').to.not.be.null;
-
-    (el as unknown as { tags: unknown[] }).tags = [makeTag({ name: 'v1.0.0' })];
-    await el.updateComplete;
-    expect(
-      el.shadowRoot!.querySelector('lv-create-tag-dialog'),
-      'same element instance after tags appear',
-    ).to.equal(before);
-
-    (el as unknown as { tags: unknown[] }).tags = [];
-    await el.updateComplete;
-    expect(
-      el.shadowRoot!.querySelector('lv-create-tag-dialog'),
-      'same element instance after flipping back to empty',
-    ).to.equal(before);
+    expect(el.shadowRoot!.querySelector('lv-create-tag-dialog')).to.be.null;
   });
 
-  it('closes its embedded create-tag dialog when the pinned repo tab is removed', async () => {
-    // lv-tag-list embeds its own create-tag dialog; app-shell's self-close
-    // guard can't reach it. Closing the pinned tab must dismiss it, or Create
-    // would run against a repo no longer in the tab bar.
-    repositoryStore.getState().reset();
-    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
-    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
-
+  it('asks the host to open create-tag, carrying the tag it was invoked on', async () => {
     const el = await createComponent();
-    for (let i = 0; i < 50; i++) {
-      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    let closed = false;
-    Object.defineProperty(el, 'createTagDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
+    const tag = makeTag({ name: 'v1.0.0' });
+    let targetRef: string | undefined;
+    let fired = 0;
+    el.addEventListener('create-tag', (e) => {
+      fired++;
+      targetRef = (e as CustomEvent<{ targetRef?: string }>).detail?.targetRef;
     });
 
-    repositoryStore.getState().removeRepository('/repo/a');
-    await el.updateComplete;
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, tag,
+    };
+    (el as unknown as { handleCreateTagFromContext: () => void }).handleCreateTagFromContext();
 
-    expect(closed, 'create-tag dialog closed when its pinned tab was removed').to.be.true;
-    repositoryStore.getState().reset();
+    expect(fired, 'create-tag dispatched to the host').to.equal(1);
+    expect(targetRef).to.equal(tag.targetOid);
   });
 
   it('handleCheckoutTag should skip when operationInProgress is true', async () => {
@@ -221,6 +193,12 @@ describe('lv-tag-list operationInProgress guards', () => {
 
     // Should be in progress now
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(true);
+
+    // pushTag resolves a credential token before it invokes push_tag, so the
+    // hanging promise above is created a few microtasks in.
+    for (let i = 0; i < 50 && !resolvePush; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
 
     // Resolve
     resolvePush({ success: true });

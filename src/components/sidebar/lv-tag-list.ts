@@ -11,8 +11,6 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
-import '../dialogs/lv-create-tag-dialog.ts';
-import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
@@ -322,9 +320,6 @@ export class LvTagList extends LitElement {
   @state() private collapsedGroups = new Set<string>();
   @state() private operationInProgress = false;
 
-  @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
-
-  private storeUnsubscribe?: () => void;
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -332,17 +327,6 @@ export class LvTagList extends LitElement {
     // creating a tag completes inside the shared conflict dialog) — same
     // subscription as the sibling branch/stash/gitflow lists.
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
-    // Close our OWN embedded create-tag dialog when its pinned repo's tab is
-    // closed — app-shell's guard only reaches app-shell's instance, not this
-    // one in the sidebar's shadow root. A create on a closed repo would be a
-    // silent mutation of a repo no longer in the tab bar.
-    this.storeUnsubscribe = repositoryStore.subscribe((state) => {
-      const pinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
-        this.createTagDialog.close();
-        showToast('The repository tab was closed — tag creation cancelled', 'warning');
-      }
-    });
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -353,7 +337,6 @@ export class LvTagList extends LitElement {
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
-    this.storeUnsubscribe?.();
   }
 
   private handleRepositoryRefresh = (): void => {
@@ -634,30 +617,18 @@ export class LvTagList extends LitElement {
     }));
   }
 
-  public openCreateTagDialog(targetRef?: string): void {
-    this.createTagDialog.open(targetRef);
-  }
-
   private handleCreateTagFromContext(): void {
     const tag = this.contextMenu.tag;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    // Open create tag dialog with the selected tag's target as the starting point
-    this.createTagDialog.open(tag?.targetOid);
-  }
-
-  private async handleTagCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
-    // The dialog pins to the repo it was opened for and reports it here. The
-    // user may have switched tabs while the dialog was open (rebinding our live
-    // repositoryPath), so trust the event's repo — not our current prop — and
-    // only reload OUR view when it matches the repo we're showing.
-    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
-    if (repoPath === this.repositoryPath) {
-      await this.loadTags();
-    }
-    this.dispatchEvent(new CustomEvent('tags-changed', {
-      detail: { repositoryPath: repoPath },
+    // Ask app-shell to open THE create-tag dialog, aimed at the selected tag's
+    // target. This list used to mount a second instance of its own: with two
+    // copies alive, each `open()`'s "already open, don't wipe the input" guard
+    // only knew about itself, so opening from here and then from the palette
+    // stacked two dialogs with different pinned targets over each other.
+    this.dispatchEvent(new CustomEvent('create-tag', {
       bubbles: true,
       composed: true,
+      detail: { targetRef: tag?.targetOid },
     }));
   }
 
@@ -890,10 +861,6 @@ export class LvTagList extends LitElement {
     return html`
       ${this.renderBody()}
       ${this.renderContextMenu()}
-      <lv-create-tag-dialog
-        .repositoryPath=${this.repositoryPath}
-        @tag-created=${this.handleTagCreated}
-      ></lv-create-tag-dialog>
     `;
   }
 

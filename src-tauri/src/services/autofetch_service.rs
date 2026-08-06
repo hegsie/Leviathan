@@ -35,6 +35,7 @@ impl AutoFetchService {
         &mut self,
         repo_path: String,
         interval_minutes: u32,
+        token: Option<String>,
         app_handle: tauri::AppHandle,
     ) {
         // Stop any existing task for this repo
@@ -53,7 +54,7 @@ impl AutoFetchService {
                 // Perform fetch
                 tracing::info!("Auto-fetching repository: {}", path);
 
-                match perform_fetch(&path).await {
+                match perform_fetch(&path, token.clone()).await {
                     Ok(status) => {
                         tracing::info!("Auto-fetch complete for {}: {:?}", path, status);
 
@@ -171,7 +172,7 @@ fn stagger_offset(repo_path: &str, interval: Duration) -> Duration {
 }
 
 /// Perform a fetch operation
-async fn perform_fetch(repo_path: &str) -> Result<RemoteStatus, String> {
+async fn perform_fetch(repo_path: &str, token: Option<String>) -> Result<RemoteStatus, String> {
     let path = repo_path.to_string();
 
     tokio::task::spawn_blocking(move || {
@@ -187,7 +188,11 @@ async fn perform_fetch(repo_path: &str) -> Result<RemoteStatus, String> {
 
         // Use the shared credentials helper (reads from OS keyring via `security` CLI
         // on macOS, avoiding Keychain authorization dialogs)
-        let mut fetch_opts = crate::services::credentials_service::get_fetch_options(None);
+        // Hard-coding None here meant the background loop could only ever
+        // authenticate via SSH or an OS-keyring credential: on a
+        // token-authenticated HTTPS remote every cycle failed, and the failure
+        // was swallowed by the UI, so the ahead/behind badge silently froze.
+        let mut fetch_opts = crate::services::credentials_service::get_fetch_options(token);
 
         // Perform fetch
         remote
