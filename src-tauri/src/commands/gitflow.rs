@@ -331,14 +331,10 @@ pub async fn gitflow_finish_feature(
     // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
     // so post-checkout fires there. branch.rs fires it for every checkout.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
-    // post-checkout — see gitflow_finish_feature.
-    let old_head_develop = crate::commands::hooks::head_oid_string(&repo);
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
-    let new_head_develop = crate::commands::hooks::head_oid_string(&repo);
-    crate::commands::hooks::run_post_checkout(&repo, &old_head_develop, &new_head_develop, true);
     let new_head = crate::commands::hooks::head_oid_string(&repo);
     crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
 
@@ -375,8 +371,6 @@ pub async fn gitflow_finish_feature(
                 &[&develop_commit],
             )?;
             repo.cleanup_state()?;
-            // post-merge — see gitflow_finish_feature.
-            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
             // git runs post-merge after a merge commit (flag 0 = not a squash
             // merge). merge.rs fires it; gitflow reimplements the merge inline
             // and fired nothing.
@@ -405,8 +399,6 @@ pub async fn gitflow_finish_feature(
             let message = format!("Merge branch '{}' into {}", branch_name, develop);
             repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
             repo.cleanup_state()?;
-            // post-merge — see gitflow_finish_feature.
-            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
             // git runs post-merge after a merge commit (flag 0 = not a squash
             // merge). merge.rs fires it; gitflow reimplements the merge inline
             // and fired nothing.
@@ -617,10 +609,15 @@ async fn finish_release_like(
         .find_branch(&develop, git2::BranchType::Local)
         .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?;
     let develop_obj = develop_branch.get().peel(git2::ObjectType::Commit)?;
+    // post-checkout for the develop-side switch too. The master switch above
+    // got it and this one did not — the same sibling-missed pattern.
+    let old_head_develop = crate::commands::hooks::head_oid_string(&repo);
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
     })?)?;
+    let new_head_develop = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::hooks::run_post_checkout(&repo, &old_head_develop, &new_head_develop, true);
 
     // Re-read release commit from the new HEAD context
     let release_branch2 = repo
@@ -825,9 +822,12 @@ mod tests {
             .unwrap();
 
         let marker = repo.path.join("post-checkout.log");
+        // Appends rather than overwrites: with `>` a double invocation writes
+        // byte-identical content and the assertion still passes, which is how a
+        // duplicated hook call went unnoticed.
         repo.install_hook(
             "post-checkout",
-            &format!("#!/bin/sh\necho \"$3\" > {}\n", marker.display()),
+            &format!("#!/bin/sh\necho \"$3\" >> \"{}\"\n", marker.display()),
         );
 
         gitflow_start_feature(repo.path_str(), "hooked".to_string())
@@ -836,9 +836,9 @@ mod tests {
 
         let logged = std::fs::read_to_string(&marker).expect("post-checkout must run");
         assert_eq!(
-            logged.trim(),
-            "1",
-            "flag must be 1 (branch checkout, not file checkout)"
+            logged.lines().collect::<Vec<_>>(),
+            vec!["1"],
+            "post-checkout must fire exactly once, with flag 1 (branch checkout)"
         );
     }
 
@@ -855,9 +855,18 @@ mod tests {
         repo.create_commit("feature work", &[("feature.txt", "work\n")]);
 
         let marker = repo.path.join("post-merge.log");
+        // Appends — see the post-checkout test above.
         repo.install_hook(
             "post-merge",
-            &format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display()),
+            &format!("#!/bin/sh\necho \"$1\" >> \"{}\"\n", marker.display()),
+        );
+        let checkout_marker = repo.path.join("post-checkout.log");
+        repo.install_hook(
+            "post-checkout",
+            &format!(
+                "#!/bin/sh\necho \"$3\" >> \"{}\"\n",
+                checkout_marker.display()
+            ),
         );
 
         gitflow_finish_feature(repo.path_str(), "hooked".to_string(), None, None)
@@ -865,7 +874,18 @@ mod tests {
             .expect("finish feature");
 
         let logged = std::fs::read_to_string(&marker).expect("post-merge must run");
-        assert_eq!(logged.trim(), "0", "flag must be 0 (not a squash merge)");
+        assert_eq!(
+            logged.lines().collect::<Vec<_>>(),
+            vec!["0"],
+            "post-merge must fire exactly once, with flag 0 (not a squash merge)"
+        );
+        let checked_out =
+            std::fs::read_to_string(&checkout_marker).expect("post-checkout must run");
+        assert_eq!(
+            checked_out.lines().collect::<Vec<_>>(),
+            vec!["1"],
+            "the develop switch must fire post-checkout exactly once"
+        );
     }
 
     /// The ref exists before the fallible checkout. Without a rollback the

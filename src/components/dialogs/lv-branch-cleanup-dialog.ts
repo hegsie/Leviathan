@@ -14,6 +14,7 @@ import { settingsStore } from '../../stores/settings.store.ts';
 import type { Branch, CleanupCandidate } from '../../types/git.types.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 type CleanupTab = 'merged' | 'stale' | 'gone';
 type RiskLevel = 'safe' | 'warning' | 'danger';
@@ -633,6 +634,17 @@ export class LvBranchCleanupDialog extends LitElement {
     // enabled through that window — so a double-click stacked two prompts for
     // the same target and, if both were accepted, ran the operation twice.
     // Same claim-before-confirm the abort banner and the clean dialog use.
+    //
+    // `deleting` only guards THIS dialog. The sidebar lists and the graph menu
+    // gate on the shared working-tree lock, so without claiming it a checkout
+    // of a branch this loop is about to delete stayed clickable. Held across
+    // the WHOLE loop, not per branch: what is being serialized is the
+    // repository's working tree, not an individual ref.
+    const lockedRepo = this.pinnedRepoPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.deleting = true;
 
     const toDelete = this.selectedForDeletion();
@@ -666,6 +678,7 @@ export class LvBranchCleanupDialog extends LitElement {
       );
       if (!confirmed) {
         this.deleting = false;
+        releaseRefOp(lockedRepo);
         return;
       }
     }
@@ -815,6 +828,7 @@ export class LvBranchCleanupDialog extends LitElement {
     }
 
     this.deleting = false;
+    releaseRefOp(lockedRepo);
 
     // ONE composite message covering every combination. Reporting deleted /
     // failed / kept in mutually exclusive branches silently dropped whichever

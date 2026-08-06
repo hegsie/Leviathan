@@ -11,6 +11,7 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -451,6 +452,15 @@ export class LvReflogDialog extends LitElement {
     // switch happened before the click rather than during the confirm.
     const repoPath = this.pinnedRepoPath;
 
+    // `resetting` only guards THIS dialog. The sidebar lists and the graph menu
+    // gate on the shared working-tree lock, so without claiming it a checkout
+    // stayed clickable while this reset was moving the branch.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.resetting = false;
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
     // EVERY mode is a reset — the "Undo" button runs a mixed one — so every
     // mode repoints the branch and drops commits off it. Gating the confirm on
     // `hard` alone meant clicking Undo in a dialog opened just to LOOK at
@@ -476,6 +486,7 @@ export class LvReflogDialog extends LitElement {
     );
     if (!confirmed) {
       this.resetting = false;
+      releaseRefOp(repoPath);
       return;
     }
 
@@ -512,6 +523,7 @@ export class LvReflogDialog extends LitElement {
       );
     } finally {
       this.resetting = false;
+      releaseRefOp(repoPath);
     }
   }
 

@@ -10,6 +10,7 @@ import { cherryPick } from '../../services/git.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { Commit } from '../../types/git.types.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 @customElement('lv-cherry-pick-dialog')
 export class LvCherryPickDialog extends LitElement {
@@ -267,12 +268,20 @@ export class LvCherryPickDialog extends LitElement {
   private async handleCherryPick(): Promise<void> {
     if (!this.commit) return;
 
-    this.isExecuting = true;
-    this.error = '';
-
     // The repo pinned at open — NOT the live prop, which rebinds on a
     // tab switch while this dialog sits open.
     const repoPath = this.pinnedRepoPath;
+    // `isExecuting` only stops a second click on THIS button. The sidebar
+    // lists and the graph menu gate on the shared working-tree lock, so
+    // without claiming it a concurrent checkout stayed enabled.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
+    this.isExecuting = true;
+    this.error = '';
+
     try {
       const result = await cherryPick({
         path: repoPath,
@@ -323,6 +332,7 @@ export class LvCherryPickDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.isExecuting = false;
+      releaseRefOp(repoPath);
     }
   }
 

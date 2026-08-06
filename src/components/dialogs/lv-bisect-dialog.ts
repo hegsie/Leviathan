@@ -11,6 +11,7 @@ import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts'
 import type { Commit } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -546,6 +547,14 @@ export class LvBisectDialog extends LitElement {
     }
 
     const repoPath = this.repositoryPath;
+    // Every bisect step moves HEAD and rewrites the working tree. `loading`
+    // only guards THIS dialog; the sidebar lists and the graph menu gate on
+    // the shared working-tree lock, so without claiming it a checkout stayed
+    // clickable while bisect was mid-step.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
@@ -554,6 +563,8 @@ export class LvBisectDialog extends LitElement {
       this.badCommitInput,
       this.goodCommitInput
     );
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -590,10 +601,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleBad(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectBad(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -622,10 +640,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleGood(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectGood(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -654,10 +679,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleSkip(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectSkip(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -686,7 +718,12 @@ export class LvBisectDialog extends LitElement {
     const repoPath = this.repositoryPath;
     // Claimed before the confirm, like every other destructive gate here: the
     // confirm is an IPC round trip before the native dialog takes focus, and
-    // this button stays live through it.
+    // this button stays live through it. `git bisect reset` checks the original
+    // HEAD back out, so it takes the shared working-tree lock too.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
@@ -711,11 +748,14 @@ export class LvBisectDialog extends LitElement {
       );
       if (!confirmed) {
         this.loading = false;
+        releaseRefOp(repoPath);
         return;
       }
     }
 
     const result = await gitService.bisectReset(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success) {

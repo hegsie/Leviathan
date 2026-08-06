@@ -12,6 +12,7 @@ import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { RebaseCommit, RebaseAction } from '../../types/git.types.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 interface EditableRebaseCommit extends RebaseCommit {
   action: RebaseAction;
@@ -863,6 +864,16 @@ export class LvInteractiveRebaseDialog extends LitElement {
   private async handleExecute(): Promise<void> {
     if (this.executing || this.commits.length === 0) return;
 
+    // `executing` only stops a second click on THIS button. The working-tree
+    // lock is what the sidebar lists and the graph menu read, so without
+    // claiming it a sidebar checkout stayed enabled and ran concurrently
+    // against the tree this rebase is rewriting.
+    const lockedRepo = this.pinnedRepoPath ?? this.repositoryPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
     this.executing = true;
     this.error = '';
 
@@ -951,6 +962,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.executing = false;
+      releaseRefOp(lockedRepo);
     }
   }
 
