@@ -308,11 +308,18 @@ test.describe('Interactive Rebase - Event Propagation', () => {
   });
 
   test('should dispatch repository-changed event after executing rebase', async ({ page }) => {
+    // Either refresh signal counts — the rebase dialog is owned by app-shell,
+    // which refreshes directly rather than bubbling `repository-changed` up
+    // from a sidebar component.
     const eventPromise = page.evaluate(() => {
       return new Promise<boolean>((resolve) => {
-        document.addEventListener('repository-changed', () => {
+        const done = (): void => {
+          document.removeEventListener('repository-changed', done);
+          window.removeEventListener('repository-refresh', done);
           resolve(true);
-        }, { once: true });
+        };
+        document.addEventListener('repository-changed', done, { once: true });
+        window.addEventListener('repository-refresh', done, { once: true });
         setTimeout(() => resolve(false), 5000);
       });
     });
