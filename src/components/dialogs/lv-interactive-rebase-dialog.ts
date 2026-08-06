@@ -516,18 +516,39 @@ export class LvInteractiveRebaseDialog extends LitElement {
     // `executing` and re-enable Start Rebase, allowing a second concurrent
     // execute_interactive_rebase against the same repository.
     if (this.executing) return;
+
+    // Already open: re-entering must NOT reset. reset() discards the whole
+    // rebase plan — every reorder, squash and reword the user has built. Its
+    // create-tag/create-branch siblings had the same shape and the same fix;
+    // this one has fewer entry points today, but the cost of hitting it is far
+    // higher than a cleared text field.
+    if (this.modal?.open) {
+      return;
+    }
+
     this.reset();
     this.onto = onto;
     this.pinnedRepoPath = this.repositoryPath;
     this.modal.open = true;
     await this.loadCommits();
 
-    // Pre-select a commit for rewording if requested
+    // Pre-select a commit for rewording if requested.
+    //
+    // Reassigned, not mutated in place: `commits` is @state, so mutating an
+    // element triggers no re-render — the action <select> and the reword
+    // textarea kept showing `pick`, giving no sign the request had landed.
+    //
+    // `newMessage` is seeded here too. handleExecute only emits a reword when
+    // `newMessage` is set AND differs from the summary; without it the entry
+    // fell through to a plain `pick`, so "Reword" rewrote history and changed
+    // no message at all. Seeding with the current summary means an untouched
+    // textarea is a no-op, and any edit takes effect.
     if (options?.rewordCommitOid) {
-      const target = this.commits.find(c => c.oid === options.rewordCommitOid);
-      if (target) {
-        target.action = 'reword';
-      }
+      this.commits = this.commits.map((c) =>
+        c.oid === options.rewordCommitOid
+          ? { ...c, action: 'reword' as RebaseAction, newMessage: c.summary }
+          : c
+      );
     }
   }
 

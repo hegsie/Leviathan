@@ -1960,7 +1960,10 @@ export class AppShell extends LitElement {
       showToast(`Deleted branch ${branchName}`, 'success');
     } else {
       log.error('Delete branch failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', { branchName });
+      showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', {
+        branchName,
+        repoPath,
+      });
     }
   }
 
@@ -2264,17 +2267,31 @@ export class AppShell extends LitElement {
     this.handlePull();
   };
 
-  private handleForceDeleteBranch = (e: CustomEvent<{ branchName?: string }>): void => {
+  private handleForceDeleteBranch = (
+    e: CustomEvent<{ branchName?: string; repoPath?: string }>
+  ): void => {
     const branchName = e.detail?.branchName;
-    if (branchName) void this.forceDeleteBranch(branchName);
+    const repoPath = e.detail?.repoPath;
+    if (branchName && repoPath) void this.forceDeleteBranch(branchName, repoPath);
   };
 
-  private async forceDeleteBranch(branchName: string): Promise<void> {
-    if (!this.activeRepository) return;
-
-    // Captured before the confirm: the force-delete and its refresh must target
-    // the repo it was invoked on, even if the user switches tabs mid-operation.
-    const repoPath = this.activeRepository.repository.path;
+  private async forceDeleteBranch(branchName: string, repoPath: string): Promise<void> {
+    // The repo comes from the event, NOT from activeRepository. This runs from
+    // an 8-second error toast, and nothing clears toasts on a repository
+    // switch — so resolving the repo at click time force-deleted from whichever
+    // tab was active by then. With two repos both holding a branch of the same
+    // name, that discarded unmerged commits in the repo the user never aimed at,
+    // under a confirm quoting facts measured in the other one.
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) {
+      showToast(
+        `Cannot force delete ${branchName}: its repository is no longer open`,
+        'warning'
+      );
+      return;
+    }
 
     // This fires from the "Force Delete" action on an error-suggestion toast,
     // i.e. one click away from an ordinary delete that just failed as unmerged.
@@ -2284,9 +2301,10 @@ export class AppShell extends LitElement {
     // irreversible outcome.
     const confirmed = await showConfirm(
       'Force Delete Branch',
-      `"${branchName}" has commits that are not merged anywhere else. ` +
-        `Force deleting it discards those commits permanently — they will be ` +
-        `recoverable only through the reflog. Continue?`,
+      `"${branchName}" in ${repo.repository.name} has commits that are not ` +
+        `merged anywhere else. Force deleting it discards those commits ` +
+        `permanently — they will be recoverable only through the reflog. ` +
+        `Continue?`,
       'warning'
     );
 
