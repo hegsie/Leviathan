@@ -372,10 +372,12 @@ test.describe('Tag Context Menu - Error Handling', () => {
     await expect(pushOption).toBeVisible();
     await clickMenuItem(pushOption);
 
-    // The component calls showToast which adds to the UI store, rendered by lv-toast-container
+    // Push-tag failures now route through the suggestion service, like every
+    // other push surface: the server's own words are shown (or a recovery
+    // suggestion when one matches), rather than a "Failed to push tag:" prefix.
     const toast = page.locator('lv-toast-container .toast');
     await expect(toast.first()).toBeVisible();
-    await expect(toast.first()).toContainText('push tag');
+    await expect(toast.first()).toContainText('remote rejected');
   });
 
   test('should show error toast when delete_tag fails', async ({ page }) => {
@@ -527,10 +529,11 @@ test.describe('Tag Context Menu - UI Outcome Verification', () => {
     await expect(pushOption).toBeVisible();
     await clickMenuItem(pushOption);
 
-    // Verify the error toast appears with the specific error message content
+    // An auth failure matches a suggestion, so the user gets the actionable
+    // wording plus an Open Settings button instead of the raw string.
     const toast = page.locator('lv-toast-container .toast');
     await expect(toast.first()).toBeVisible();
-    await expect(toast.first()).toContainText('push tag');
+    await expect(toast.first()).toContainText(/authentication failed/i);
 
     // The tag list should remain unchanged after the failed operation
     const tagCount = await leftPanel.getTagCount();

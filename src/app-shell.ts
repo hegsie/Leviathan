@@ -2273,6 +2273,10 @@ export class AppShell extends LitElement {
     }
   }
 
+  /** `pinnedRepoPath` is optional, so this must NEVER be bound directly as an
+   * event handler — a MouseEvent would arrive in that slot and the lookup below
+   * would silently find no repo, making Abort do nothing. Bind it as
+   * `() => this.handleAbortOperation()`. */
   private async handleAbortOperation(pinnedRepoPath?: string): Promise<void> {
     if (this.abortInProgress) return;
 
@@ -4264,7 +4268,7 @@ export class AppShell extends LitElement {
                             : ''}
                           ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
-                                <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
+                                <button class="operation-abort-btn" @click=${() => this.handleAbortOperation()}>
                                   Abort
                                 </button>
                               `
