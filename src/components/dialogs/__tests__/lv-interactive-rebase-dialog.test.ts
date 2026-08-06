@@ -312,6 +312,53 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(previewCommits.length).to.equal(2);
     });
 
+    it('a squash after a drop still lands in the previous pick', async () => {
+      // git squashes into the last PICKED commit, and a dropped line is not a
+      // pick — so pick/drop/squash yields ONE commit. The grouping loop treated
+      // `drop` as a boundary and emitted the squash as its own surviving
+      // commit, contradicting both git and the "Resulting: N" stat rendered
+      // directly underneath it.
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const selects = el.shadowRoot!.querySelectorAll(
+        '.action-select',
+      ) as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'drop';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+      selects[2].value = 'squash';
+      selects[2].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const previewCommits = el.shadowRoot!.querySelectorAll('.preview-commit');
+      expect(previewCommits.length, 'one surviving commit, as git would produce').to.equal(1);
+      expect(
+        previewCommits[0].querySelector('.squash-badge'),
+        'and it is marked as having absorbed the squash',
+      ).to.not.be.null;
+    });
+
+    it('the preview agrees with the stat rendered under it', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const selects = el.shadowRoot!.querySelectorAll(
+        '.action-select',
+      ) as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'drop';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+      selects[2].value = 'squash';
+      selects[2].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const previewCount = el.shadowRoot!.querySelectorAll('.preview-commit').length;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kept = (el as any).getStats().kept;
+      expect(previewCount, 'the two numbers on screen must not disagree').to.equal(kept);
+    });
+
     it('squash commits show .squash-badge on the parent preview commit', async () => {
       const el = await createDialog();
       await openAndWait(el);

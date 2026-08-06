@@ -271,6 +271,24 @@ describe('lv-bisect-dialog repository targeting', () => {
       expect((el as any).loading, 'or the dialog wedges').to.equal(false);
     });
 
+    it('Finish on a completed bisect does not prompt', async () => {
+      // This handler backs both footer buttons. Finishing discards nothing —
+      // the culprit is already on screen — so a "discard N steps?" prompt there
+      // would be friction with nothing behind it, and wrong copy besides.
+      const el = await openOn(REPO_A);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).step = 'complete';
+      await settle(el);
+      dialogPrompts.length = 0;
+      invokeCalls.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset();
+
+      expect(dialogPrompts.length, 'nothing is at stake, so nothing is asked').to.equal(0);
+      expect(invokeCalls.some((c) => c.command === 'bisect_reset')).to.equal(true);
+    });
+
     it('confirming aborts and still pins the refresh to the origin repo', async () => {
       const el = await openOn(REPO_A);
       confirmAnswer = 'Ok';

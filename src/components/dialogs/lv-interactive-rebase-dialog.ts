@@ -694,11 +694,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
       hasBaseCommit = true;
 
       // Check if following commits are squash/fixup
+      // `drop` lines are skipped, not treated as a boundary. git squashes into
+      // the last PICKED commit, and a dropped line is not a pick — so with
+      // pick/drop/squash the squash lands in the first commit. Stopping here
+      // instead emitted it as its own surviving commit, which contradicted both
+      // git and the "Resulting: N" stat rendered directly underneath (getStats
+      // counts only pick/edit/reword as kept).
       const squashedFrom: string[] = [];
       let j = i + 1;
-      while (j < this.commits.length &&
-             (this.commits[j].action === 'squash' || this.commits[j].action === 'fixup')) {
-        squashedFrom.push(this.commits[j].shortId);
+      while (
+        j < this.commits.length &&
+        (this.commits[j].action === 'drop' ||
+          this.commits[j].action === 'squash' ||
+          this.commits[j].action === 'fixup')
+      ) {
+        if (this.commits[j].action !== 'drop') {
+          squashedFrom.push(this.commits[j].shortId);
+        }
         j++;
       }
 

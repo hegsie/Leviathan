@@ -690,23 +690,29 @@ export class LvBisectDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    // A bisect session is many deliberate good/bad decisions, and aborting
-    // discards all of them — nothing in git records them, so the only way back
-    // is to redo the whole search. Every other destructive button in the app
-    // asks first; this one, styled danger and sitting next to Good/Bad, did not.
-    const stepsTaken = this.status?.currentStep ?? 0;
-    const confirmed = await showConfirm(
-      'Abort Bisect',
-      stepsTaken > 0
-        ? `End this bisect and discard the ${stepsTaken} step${stepsTaken === 1 ? '' : 's'} ` +
-          `already narrowed down? The original HEAD is checked back out; the search itself ` +
-          `is not recorded anywhere and would have to be repeated.`
-        : `End this bisect? The original HEAD is checked back out.`,
-      'warning'
-    );
-    if (!confirmed) {
-      this.loading = false;
-      return;
+    // Only the ABORT reaches a confirm. This handler backs both footer buttons:
+    // "Abort Bisect" while the search is in progress, and "Finish" once the
+    // culprit is found. Aborting throws away many deliberate good/bad decisions
+    // that git records nowhere, so the only way back is to repeat the whole
+    // search — every other destructive button in the app asks first, and this
+    // one, styled danger and sitting next to Good and Bad, did not. Finishing
+    // discards nothing: the answer is already on screen, and prompting there
+    // would be friction with nothing behind it.
+    if (this.step === 'in-progress') {
+      const stepsTaken = this.status?.currentStep ?? 0;
+      const confirmed = await showConfirm(
+        'Abort Bisect',
+        stepsTaken > 0
+          ? `End this bisect and discard the ${stepsTaken} step${stepsTaken === 1 ? '' : 's'} ` +
+            `already narrowed down? The original HEAD is checked back out; the search itself ` +
+            `is not recorded anywhere and would have to be repeated.`
+          : `End this bisect? The original HEAD is checked back out.`,
+        'warning'
+      );
+      if (!confirmed) {
+        this.loading = false;
+        return;
+      }
     }
 
     const result = await gitService.bisectReset(repoPath);

@@ -852,17 +852,25 @@ pub async fn execute_interactive_rebase(
     // once would read each other's plan — one repo silently rewritten with the
     // other's drops — and the predictable path in a world-writable directory
     // was a symlink target for anyone on the machine.
-    let todo_file = tempfile::Builder::new()
+    //
+    // into_temp_path() closes the file handle while keeping the path (and its
+    // delete-on-drop). The script MUST be closed before git execs it: on Linux
+    // exec of a file that any process still holds open for writing fails with
+    // ETXTBSY, and NamedTempFile holds exactly such a handle for its whole
+    // scope. Since git runs GIT_SEQUENCE_EDITOR for every `rebase -i`, that
+    // made every interactive rebase fail with "cannot exec ...: Text file busy"
+    // — not just the squash path this was found through.
+    let todo_path = tempfile::Builder::new()
         .prefix("leviathan-rebase-todo-")
-        .tempfile()?;
-    let todo_path = todo_file.path().to_path_buf();
+        .tempfile()?
+        .into_temp_path();
     std::fs::write(&todo_path, &todo)?;
 
     // Create a script that outputs the todo file content
-    let script_file = tempfile::Builder::new()
+    let script_path = tempfile::Builder::new()
         .prefix("leviathan-rebase-editor-")
-        .tempfile()?;
-    let script_path = script_file.path().to_path_buf();
+        .tempfile()?
+        .into_temp_path();
 
     #[cfg(target_os = "windows")]
     {
@@ -883,14 +891,30 @@ pub async fn execute_interactive_rebase(
     let output = create_command("git")
         .current_dir(&path)
         .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
+        // GIT_SEQUENCE_EDITOR only supplies the todo list. A `squash` (or
+        // `reword`) line then opens GIT_EDITOR for the combined message, and
+        // this is the one rebase in the app whose todo the USER composes, so it
+        // is the one that can contain them. Without this, git fell through to
+        // core.editor/VISUAL/EDITOR/vi: a terminal editor died instantly on the
+        // null stdin Command::output() gives it, and a GUI editor
+        // (`code --wait`) blocked forever on a window nobody asked for — either
+        // way leaving a paused rebase and a detached HEAD whose only exit was
+        // the banner's Abort. `true` accepts the message git already composed,
+        // which is exactly what the dialog's preview promises. Its sibling
+        // continue_rebase_cli has always set this.
+        .env("GIT_EDITOR", "true")
+        // Same reason as continue_rebase_cli: the conflict classification below
+        // matches English stderr, so a localized git would report a conflict as
+        // a generic failure and skip the conflict-resolution route entirely.
+        .env("LC_ALL", "C")
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
-    // NamedTempFile removes the file on drop; dropping here keeps the cleanup
+    // TempPath removes the file on drop; dropping here keeps the cleanup
     // adjacent to the run it belongs to.
-    drop(todo_file);
-    drop(script_file);
+    drop(todo_path);
+    drop(script_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2384,6 +2408,104 @@ mod tests {
         for commit in &commits {
             assert_eq!(commit.action, "pick");
         }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_squash_without_an_editor() {
+        // GIT_SEQUENCE_EDITOR only supplies the todo; a `squash` line then opens
+        // GIT_EDITOR for the combined message. This is the one rebase whose todo
+        // the user composes, so it is the one that can contain a squash — and
+        // without GIT_EDITOR git fell through to core.editor/VISUAL/EDITOR/vi,
+        // which dies on the null stdin Command::output() gives it, leaving a
+        // paused rebase and a detached HEAD.
+        //
+        // The env is scrubbed deliberately: a machine with EDITOR set would mask
+        // the bug this covers.
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+        std::env::remove_var("GIT_EDITOR");
+
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 2);
+
+        // Oldest-first from get_rebase_commits, which is git's todo order.
+        let todo = format!("pick {}\nsquash {}\n", commits[0].oid, commits[1].oid);
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("a squash must complete without opening an editor");
+        assert!(!outcome.paused, "and must not leave the rebase paused");
+
+        // One commit above the base instead of two.
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 1, "the two commits became one");
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "and the repository is not left mid-rebase"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_runs_at_all() {
+        // The plainest possible plan: reorder nothing, drop nothing, squash
+        // nothing. It failed too — git runs GIT_SEQUENCE_EDITOR for every
+        // `rebase -i`, and the script was still held open for writing by the
+        // NamedTempFile that created it, so exec'ing it returned ETXTBSY. This
+        // test exists so the general case is pinned, not just the squash that
+        // led here.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        let todo = commits
+            .iter()
+            .map(|c| format!("pick {}", c.oid))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("an all-pick interactive rebase must run");
+        assert!(!outcome.paused);
+
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 2, "both commits survive an all-pick plan");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_drop() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("keep", &[("a.txt", "a")]);
+        repo.create_commit("remove", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        let todo = format!("pick {}\ndrop {}\n", commits[0].oid, commits[1].oid);
+
+        execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("a drop plan must run");
+
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].summary.contains("keep"));
     }
 
     #[tokio::test]
