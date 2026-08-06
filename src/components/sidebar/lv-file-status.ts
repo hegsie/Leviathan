@@ -752,9 +752,19 @@ export class LvFileStatus extends LitElement {
     this.boundHandleStageAllEvent = () => this.handleStageAll();
     this.boundHandleUnstageAllEvent = () => this.handleUnstageAll();
     this.boundHandleRefreshEvent = () => this.refresh();
+    this.boundMarkStatusDirty = () => {
+      this.statusDirtySeq++;
+    };
     window.addEventListener("stage-all", this.boundHandleStageAllEvent);
     window.addEventListener("unstage-all", this.boundHandleUnstageAllEvent);
     window.addEventListener("status-refresh", this.boundHandleRefreshEvent);
+    // `repository-refresh` is the broadcast handleRefresh() fires after EVERY
+    // state-mutating operation — stash apply/pop/drop, reset, merge, rebase,
+    // revert, a hunk staged from the diff view. Marking dirty here (rather than
+    // reloading) means ensureStatusFresh cannot skip after an out-of-band
+    // mutation, without enumerating the operations one by one: that list is
+    // exactly what went stale and put "Stage all" back on a cached list.
+    window.addEventListener("repository-refresh", this.boundMarkStatusDirty);
 
     // Listen for keyboard events
     this.addEventListener("keydown", this.handleKeyDown);
@@ -923,6 +933,7 @@ export class LvFileStatus extends LitElement {
   private boundHandleStageAllEvent: (() => void) | null = null;
   private boundHandleUnstageAllEvent: (() => void) | null = null;
   private boundHandleRefreshEvent: (() => void) | null = null;
+  private boundMarkStatusDirty: (() => void) | null = null;
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -959,6 +970,9 @@ export class LvFileStatus extends LitElement {
         this.boundHandleRefreshEvent,
       );
     }
+    if (this.boundMarkStatusDirty) {
+      window.removeEventListener("repository-refresh", this.boundMarkStatusDirty);
+    }
 
     // Remove keyboard listener
     this.removeEventListener("keydown", this.handleKeyDown);
@@ -991,7 +1005,7 @@ export class LvFileStatus extends LitElement {
     }
     // The list is known-stale from the moment the watcher fires, not from when
     // the debounce expires — a stage-all inside that window must reload.
-    this.statusDirty = true;
+    this.statusDirtySeq++;
     this.statusRefreshTimeout = setTimeout(() => {
       this.statusRefreshTimeout = null;
       this.loadStatus();
@@ -1002,7 +1016,7 @@ export class LvFileStatus extends LitElement {
     if (changedProperties.has("repositoryPath") && this.repositoryPath) {
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
-      this.statusDirty = true;
+      this.statusDirtySeq++;
       // Start watching the new repository
       try {
         await watcherService.startWatching(this.repositoryPath);
@@ -1018,11 +1032,17 @@ export class LvFileStatus extends LitElement {
   // can't catch A -> B -> A switches reordering two loads for A)
   private statusLoadSeq = new Map<string, number>();
 
-  /** Path of the last COMPLETED successful load, and whether anything has
-   * happened since that could have changed it. Together these let
-   * ensureStatusFresh() skip the IPC round trip in the common case. */
+  /** Path of the last COMPLETED successful load.
+   *
+   * Freshness is a GENERATION counter, not a boolean. A boolean is wrong
+   * because ensureStatusFresh awaits a load already in flight: if the mutation
+   * happened after that load started, its result predates the change, and
+   * clearing a flag on completion would declare a stale list fresh. Each dirty
+   * signal bumps `statusDirtySeq`; a load records which generation it observed,
+   * so a signal that arrives mid-flight still leaves the two unequal. */
   private statusLoadedForPath: string | null = null;
-  private statusDirty = true;
+  private statusDirtySeq = 1;
+  private statusCleanSeq = 0;
   /** The load currently in flight, so a caller can await it instead of racing. */
   private statusLoadInFlight: Promise<void> | null = null;
 
@@ -1039,7 +1059,10 @@ export class LvFileStatus extends LitElement {
     if (this.statusLoadInFlight) {
       await this.statusLoadInFlight;
     }
-    if (this.statusDirty || this.statusLoadedForPath !== this.repositoryPath) {
+    if (
+      this.statusCleanSeq !== this.statusDirtySeq ||
+      this.statusLoadedForPath !== this.repositoryPath
+    ) {
       await this.loadStatus();
     }
   }
@@ -1061,6 +1084,7 @@ export class LvFileStatus extends LitElement {
     const loadedPath = this.repositoryPath;
     const seq = (this.statusLoadSeq.get(loadedPath) ?? 0) + 1;
     this.statusLoadSeq.set(loadedPath, seq);
+    const dirtyAtStart = this.statusDirtySeq;
 
     // Only show loading indicator on the very first load
     if (!this.hasInitiallyLoaded) {
@@ -1100,9 +1124,11 @@ export class LvFileStatus extends LitElement {
         unstagedFiles: newUnstagedFiles,
       });
 
-      // The list for `loadedPath` is now current, whichever tab is showing.
+      // The list for `loadedPath` is now current AS OF the generation this load
+      // observed — a dirty signal that arrived while it was in flight leaves
+      // the counters unequal, so the next ensureStatusFresh reloads.
       this.statusLoadedForPath = loadedPath;
-      this.statusDirty = false;
+      this.statusCleanSeq = dirtyAtStart;
 
       if (!isCurrent) return;
 

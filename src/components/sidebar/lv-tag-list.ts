@@ -661,7 +661,12 @@ export class LvTagList extends LitElement {
         }));
       } else if (!gitService.isNetworkGateRefusal(result.error)) {
         console.error('Failed to push tag:', result.error);
-        showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // Same routing the graph's push-tag gesture gets — this was the last
+        // push surface still building a raw toast.
+        showErrorWithSuggestion(result.error?.message ?? '', 'Failed to push tag', {
+          operation: 'push-tag',
+          repoPath,
+        });
       }
     } finally {
       this.operationInProgress = false;
