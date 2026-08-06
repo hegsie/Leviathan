@@ -445,6 +445,15 @@ export interface DeleteTagCommand {
   name: string;
 }
 
+/** Outcome of an interactive rebase run. `git rebase -i` exits 0 both when the
+ * plan completes and when it stops at an `edit`/`break` line, so the backend
+ * reports which happened. */
+export interface InteractiveRebaseOutcome {
+  /** True when the rebase stopped at a breakpoint and the repo is still
+   * mid-rebase awaiting `git rebase --continue`. */
+  paused: boolean;
+}
+
 export interface PushTagCommand {
   path: string;
   name: string;

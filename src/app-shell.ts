@@ -744,6 +744,7 @@ export class AppShell extends LitElement {
   private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Last auto-fetch interval applied to the backend (settings subscription
   // must only restart timers when THIS value actually changes)
+  private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
@@ -1410,8 +1411,10 @@ export class AppShell extends LitElement {
     this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
-    // Host-level so the branch-list's own rebase dialog reaches it too, not
-    // just the app-shell dialog.
+    // Host-level, so it catches the event once wherever the dialog is mounted.
+    // Do NOT also bind @rebase-complete on the dialog element: the event
+    // bubbles composed, so both would fire and every rebase would run two full
+    // refreshes (two open_repository round trips, two graph rebuilds).
     this.addEventListener('rebase-complete', this.handleRebaseComplete);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
     window.addEventListener('settings-changed', this.handleSettingsChanged);
@@ -1442,13 +1445,25 @@ export class AppShell extends LitElement {
 
     // Set up window focus handler for fetch-on-focus
     this.focusHandler = () => {
-      if (settingsStore.getState().fetchOnFocus && this.activeRepository) {
-        gitService.getRemoteStatus(this.activeRepository.repository.path).then((result) => {
-          if (result.success && result.data) {
-            this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
-          }
-        }).catch(() => { /* background status check — silent fail is acceptable */ });
-      }
+      if (!settingsStore.getState().fetchOnFocus || !this.activeRepository) return;
+      // "Fetch on Window Focus" used to call getRemoteStatus, which only runs
+      // graph_ahead_behind over refs already on disk — no network. It
+      // recomputed a number that could not have changed, so the setting never
+      // did anything. Fetch first, then read the counts.
+      // Pinned: the user can switch tabs during the fetch; the result belongs
+      // to the repo it was started for.
+      const repoPath = this.activeRepository.repository.path;
+      void (async () => {
+        await gitService.fetch({ path: repoPath, silent: true });
+        const result = await gitService.getRemoteStatus(repoPath);
+        if (
+          result.success &&
+          result.data &&
+          repoPath === this.activeRepository?.repository.path
+        ) {
+          this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
+        }
+      })();
     };
     window.addEventListener('focus', this.focusHandler);
 
@@ -2829,11 +2844,29 @@ export class AppShell extends LitElement {
   }
 
   private handleStageAll(): void {
-    window.dispatchEvent(new CustomEvent('stage-all'));
+    void this.dispatchToFileStatus('stage-all');
   }
 
   private handleUnstageAll(): void {
-    window.dispatchEvent(new CustomEvent('unstage-all'));
+    void this.dispatchToFileStatus('unstage-all');
+  }
+
+  /**
+   * `stage-all` / `unstage-all` are heard only by `lv-file-status`, which lives
+   * inside the right panel and is unmounted while that panel is hidden — so
+   * with Ctrl+J pressed the `s` / `u` shortcuts and both palette entries
+   * silently did nothing, and there was no other way to stage. Reveal the panel
+   * and let it render before dispatching, exactly as openBranchCleanup does for
+   * the left panel.
+   */
+  private async dispatchToFileStatus(eventName: string): Promise<void> {
+    if (!this.rightPanelVisible) {
+      uiStore.getState().togglePanel('right');
+      await this.updateComplete;
+      const panel = this.renderRoot.querySelector('lv-right-panel') as LitElement | null;
+      await panel?.updateComplete;
+    }
+    window.dispatchEvent(new CustomEvent(eventName));
   }
 
   // Re-entrancy state for handleRefresh. Multiple callers (file-watcher,
@@ -3047,21 +3080,21 @@ export class AppShell extends LitElement {
         label: 'Fetch from remote',
         category: 'action',
         icon: 'fetch',
-        action: () => this.handleFetch(),
+        action: this.requiresRepository(() => this.handleFetch()),
       },
       {
         id: 'pull',
         label: 'Pull from remote',
         category: 'action',
         icon: 'pull',
-        action: () => this.handlePull(),
+        action: this.requiresRepository(() => this.handlePull()),
       },
       {
         id: 'push',
         label: 'Push to remote',
         category: 'action',
         icon: 'push',
-        action: () => this.handlePush(),
+        action: this.requiresRepository(() => this.handlePush()),
       },
       {
         id: 'refresh',
@@ -3102,7 +3135,7 @@ export class AppShell extends LitElement {
         label: 'Create stash',
         category: 'action',
         icon: 'stash',
-        action: () => this.handleCreateStash(),
+        action: this.requiresRepository(() => this.handleCreateStash()),
       },
       {
         id: 'create-branch',
@@ -3366,14 +3399,14 @@ export class AppShell extends LitElement {
         label: 'Stage all changes',
         category: 'action',
         icon: 'commit',
-        action: () => this.handleStageAll(),
+        action: this.requiresRepository(() => this.handleStageAll()),
       },
       {
         id: 'unstage-all',
         label: 'Unstage all changes',
         category: 'action',
         icon: 'commit',
-        action: () => this.handleUnstageAll(),
+        action: this.requiresRepository(() => this.handleUnstageAll()),
       },
       {
         id: 'toggle-left-panel',
@@ -3549,13 +3582,21 @@ export class AppShell extends LitElement {
     // (theme, tray, ...) and each backend restart resets the fetch delay, so
     // reacting to unrelated changes would defer fetches indefinitely.
     this.lastAutoFetchInterval = settings.autoFetchInterval;
+    this.lastOfflineMode = settings.offlineMode;
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
-      if (state.autoFetchInterval !== this.lastAutoFetchInterval) {
+      // Offline mode gates the START call, but the loop it started is a Tokio
+      // task with no re-check: turning offline mode on left it fetching every
+      // N minutes forever, and turning it back off never revived a repo whose
+      // start had been refused. Treat an offline-mode flip like an interval
+      // change.
+      const offlineChanged = state.offlineMode !== this.lastOfflineMode;
+      if (state.autoFetchInterval !== this.lastAutoFetchInterval || offlineChanged) {
         this.lastAutoFetchInterval = state.autoFetchInterval;
+        this.lastOfflineMode = state.offlineMode;
         const paths = repositoryStore
           .getState()
           .openRepositories.map((r) => r.repository.path);
-        if (state.autoFetchInterval > 0) {
+        if (state.autoFetchInterval > 0 && !state.offlineMode) {
           for (const path of paths) {
             this.startAutoFetchLogged(path, state.autoFetchInterval);
           }
@@ -3691,7 +3732,12 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Fetch failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        showToast(result.error?.message ?? 'Fetch failed', 'error');
+      }
     }
   }
 
@@ -3726,7 +3772,12 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Pull failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        showToast(result.error?.message ?? 'Pull failed', 'error');
+      }
     }
   }
 
@@ -3746,7 +3797,12 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Push failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        showToast(result.error?.message ?? 'Push failed', 'error');
+      }
     }
   }
 
@@ -4690,8 +4746,6 @@ export class AppShell extends LitElement {
         <lv-interactive-rebase-dialog
           id="app-rebase-dialog"
           .repositoryPath=${this.activeRepository.repository.path}
-          @rebase-complete=${(e: CustomEvent<{ repositoryPath?: string }>) =>
-            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-interactive-rebase-dialog>
       ` : ''}
 

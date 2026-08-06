@@ -1226,7 +1226,7 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Offline Mode</span>
-              <span class="setting-description">Block every operation that talks to a remote — fetch, pull, push, clone, tag push, LFS and auto-fetch</span>
+              <span class="setting-description">Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)</span>
             </div>
             ${this.renderToggle(this.offlineMode, 'offlineMode')}
           </div>
@@ -1234,7 +1234,7 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Confirm Network Operations</span>
-              <span class="setting-description">Ask before every operation that contacts a remote</span>
+              <span class="setting-description">Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.</span>
             </div>
             ${this.renderToggle(this.confirmNetworkOps, 'confirmNetworkOps')}
           </div>
