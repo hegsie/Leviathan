@@ -84,14 +84,18 @@ describe('dashboard remote operations', () => {
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
 
-  it('reports success exactly once', async () => {
+  it('leaves the success message to the backend event', async () => {
+    // The Rust command emits `remote-operation-completed` and
+    // setupRemoteOperationListeners toasts it, naming the remote. These
+    // handlers adding their own stacked two messages on one click — the rule
+    // the toolbar handlers already follow and document.
     const el = await dashboard();
     uiStore.setState({ toasts: [] });
 
     await (el as any).handleFetch();
 
     const successes = uiStore.getState().toasts.filter((t) => t.type === 'success');
-    expect(successes.length, 'one confirmation, not zero and not two').to.equal(1);
+    expect(successes.length, 'exactly one owner of the message').to.equal(0);
   });
 
   it('a rejected push offers the recovery action instead of a raw message', async () => {

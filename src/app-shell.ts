@@ -1,4 +1,4 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
@@ -573,7 +573,17 @@ export class AppShell extends LitElement {
     refName: string;
     fullName: string;
     refType: 'localBranch' | 'remoteBranch' | 'tag';
-  } = { visible: false, x: 0, y: 0, refName: '', fullName: '', refType: 'localBranch' };
+    /** The checked-out branch cannot be deleted — see renderRefContextMenu. */
+    isHead: boolean;
+  } = {
+    visible: false,
+    x: 0,
+    y: 0,
+    refName: '',
+    fullName: '',
+    refType: 'localBranch',
+    isHead: false,
+  };
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
@@ -1861,10 +1871,11 @@ export class AppShell extends LitElement {
   }
 
   private handleRefContextMenu(e: CustomEvent): void {
-    const { refName, fullName, refType, position } = e.detail as {
+    const { refName, fullName, refType, isHead, position } = e.detail as {
       refName: string;
       fullName: string;
       refType: 'localBranch' | 'remoteBranch' | 'tag';
+      isHead?: boolean;
       position: { x: number; y: number };
     };
 
@@ -1875,6 +1886,7 @@ export class AppShell extends LitElement {
       refName,
       fullName,
       refType,
+      isHead: isHead ?? false,
     };
   }
 
@@ -2590,11 +2602,16 @@ export class AppShell extends LitElement {
       .openRepositories.find((r) => r.repository.path === repoPath);
     if (!repo) return;
 
+    // Names the BRANCH, not just the repository: this is the one operation in
+    // the app that can discard commits belonging to someone else, so the
+    // confirm has to say which ref it is about to overwrite.
+    const branch = repo.currentBranch?.shorthand ?? repo.repository.headRef;
     const confirmed = await showConfirm(
       'Force Push',
-      `This replaces the remote branch of ${repo.repository.name} with your local ` +
-        `commits. Any commits on the remote that you do not have will be removed ` +
-        `from it. The push is refused if the remote has moved since your last fetch.`,
+      `This replaces "${branch}" on the remote of ${repo.repository.name} with your ` +
+        `local commits. Any commits on the remote that you do not have will be ` +
+        `removed from it. The push is refused if the remote has moved since your ` +
+        `last fetch.`,
       'error'
     );
     if (!confirmed) return;
@@ -2607,7 +2624,10 @@ export class AppShell extends LitElement {
     });
     if (result.success) {
       progressService.completeOperation(opId);
-      showToast('Force pushed to remote', 'success');
+      // No success toast here: the backend emits remote-operation-completed and
+      // setupRemoteOperationListeners toasts it — naming the branch and remote,
+      // which this one could not. Adding a second stacked two messages on one
+      // click, the same rule handleFetch/handlePull/handlePush already follow.
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
@@ -4787,14 +4807,26 @@ export class AppShell extends LitElement {
                       </svg>
                       Rebase current branch onto this
                     </button>
-                    <div class="context-menu-divider"></div>
-                    <button class="context-menu-item danger" @click=${this.handleRefDeleteBranch}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                      </svg>
-                      Delete branch
-                    </button>
+                    ${this.refContextMenu.isHead
+                      ? nothing
+                      : html`
+                          <div class="context-menu-divider"></div>
+                          <!-- Hidden on the checked-out branch: libgit2 refuses
+                               to delete the current HEAD, so the item could only
+                               ever produce a confirm followed by an error. The
+                               sidebar branch list already hides it; the graph
+                               did not. -->
+                          <button
+                            class="context-menu-item danger"
+                            @click=${this.handleRefDeleteBranch}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <polyline points="3 6 5 6 21 6"></polyline>
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            Delete branch
+                          </button>
+                        `}
                   `
                 : this.refContextMenu.refType === 'remoteBranch'
                   ? html`

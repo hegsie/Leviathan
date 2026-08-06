@@ -627,7 +627,13 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private async handleDelete(): Promise<void> {
-    if (this.totalSelected === 0) return;
+    if (this.deleting || this.totalSelected === 0) return;
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click stacked two prompts for
+    // the same target and, if both were accepted, ran the operation twice.
+    // Same claim-before-confirm the abort banner and the clean dialog use.
+    this.deleting = true;
 
     const toDelete = this.selectedForDeletion();
 
@@ -658,10 +664,12 @@ export class LvBranchCleanupDialog extends LitElement {
         `Of the selected branches, ${parts.join(', and ')}.\n\nThis action cannot be undone. Continue?`,
         'warning',
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.deleting = false;
+        return;
+      }
     }
 
-    this.deleting = true;
     let deleted = 0;
     let failed = 0;
     let kept = 0;

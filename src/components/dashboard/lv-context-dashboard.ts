@@ -707,6 +707,10 @@ export class LvContextDashboard extends LitElement {
     });
   }
 
+  // No success toasts in these three: the backend emits
+  // remote-operation-completed and setupRemoteOperationListeners toasts it,
+  // naming the remote. Adding our own stacked two messages on one click — the
+  // rule the toolbar handlers already follow.
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository || this.isFetching) return;
 
@@ -720,7 +724,6 @@ export class LvContextDashboard extends LitElement {
       if (!result.success) {
         this.reportRemoteFailure(result, 'fetch', 'Fetch failed', repoPath);
       } else {
-        showToast('Fetch completed successfully', 'success');
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -741,7 +744,6 @@ export class LvContextDashboard extends LitElement {
     try {
       const result = await gitPull({ path: repoPath, silent: true });
       if (result.success) {
-        showToast('Pull completed successfully', 'success');
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
@@ -788,7 +790,6 @@ export class LvContextDashboard extends LitElement {
       if (!result.success) {
         this.reportRemoteFailure(result, 'push', 'Push failed', repoPath);
       } else {
-        showToast('Push completed successfully', 'success');
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,

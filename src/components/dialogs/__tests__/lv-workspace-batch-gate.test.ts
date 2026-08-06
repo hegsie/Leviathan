@@ -114,6 +114,42 @@ describe('deleting a workspace', () => {
   });
 });
 
+describe('removing a repository from a workspace', () => {
+  beforeEach(() => {
+    invoked.length = 0;
+    failCommands = new Set();
+    failureFor = new Map();
+    uiStore.setState({ toasts: [] });
+  });
+
+  it('asks first, naming the row and what survives', async () => {
+    // The × sits at the end of a dense row. Nothing on disk is touched, but
+    // putting the entry back means knowing where that repo lives on disk.
+    const el = await dialogWithWorkspace();
+    confirmAnswer = 'Cancel';
+    dialogMessages.length = 0;
+
+    await (el as any).handleRemoveRepo('/repo/two');
+
+    expect(invoked.some((c) => c.command === 'remove_repository_from_workspace')).to.equal(false);
+    const prompt = dialogMessages.join(' ');
+    expect(prompt).to.contain('two');
+    expect(prompt, 'and says the repository itself is safe').to.contain('not deleted');
+  });
+
+  it('confirming removes it and says so', async () => {
+    const el = await dialogWithWorkspace();
+    confirmAnswer = 'Ok';
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handleRemoveRepo('/repo/two');
+
+    expect(invoked.some((c) => c.command === 'remove_repository_from_workspace')).to.equal(true);
+    const summary = uiStore.getState().toasts.map((t) => `${t.type}:${t.message}`).join(' | ');
+    expect(summary).to.contain('success:Removed two from Team');
+  });
+});
+
 describe('workspace batch operations and the security gate', () => {
   beforeEach(() => {
     invoked.length = 0;

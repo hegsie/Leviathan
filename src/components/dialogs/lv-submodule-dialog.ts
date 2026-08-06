@@ -350,6 +350,8 @@ export class LvSubmoduleDialog extends LitElement {
   @state() private mode: DialogMode = 'list';
   @state() private submodules: Submodule[] = [];
   @state() private loading = false;
+  /** Re-entrancy guard for Remove, kept separate from the load spinner. */
+  @state() private removingPath: string | null = null;
   @state() private error = '';
   @state() private success = '';
 
@@ -520,6 +522,17 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   private async handleRemove(submodule: Submodule): Promise<void> {
+    // A DEDICATED flag, not `loading`: that one also tracks background list
+    // reloads, and a refresh in flight must not swallow the user's click.
+    //
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click stacked two prompts for
+    // the same submodule, and the second removal then failed against a working
+    // tree that was already gone, contradicting the success the user just read.
+    if (this.removingPath === submodule.path) return;
+    this.removingPath = submodule.path;
+
     // Captured BEFORE the confirm await: removal runs `git submodule deinit -f`
     // + `git rm -f`, deleting the submodule's working tree (including any
     // uncommitted work inside it). This dialog is bound to the active
@@ -533,7 +546,10 @@ export class LvSubmoduleDialog extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.removingPath = null;
+      return;
+    }
 
     this.loading = true;
     this.error = '';
@@ -551,6 +567,7 @@ export class LvSubmoduleDialog extends LitElement {
     }
 
     this.loading = false;
+    this.removingPath = null;
   }
 
   private async handleUpdateAll(): Promise<void> {
@@ -672,7 +689,7 @@ export class LvSubmoduleDialog extends LitElement {
                   class="action-btn danger"
                   title="Remove"
                   @click=${() => this.handleRemove(sub)}
-                  ?disabled=${this.loading}
+                  ?disabled=${this.loading || this.removingPath === sub.path}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6"/>

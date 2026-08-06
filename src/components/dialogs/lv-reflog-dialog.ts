@@ -438,6 +438,13 @@ export class LvReflogDialog extends LitElement {
 
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
+    // Claimed BEFORE the confirm, not after. Unlike the context-menu surfaces —
+    // which close their menu synchronously and so cannot be clicked twice — the
+    // reflog rows stay on screen through the confirm, and showConfirm is an IPC
+    // round trip before the native dialog takes focus. A double-click stacked
+    // two reset prompts, and a hard reset run twice discards uncommitted work
+    // against a branch that has already moved.
+    this.resetting = true;
 
     // The repo the listed entries were read from — NOT the live prop. Pinning
     // only at click time still reset the wrong repository whenever the tab
@@ -467,9 +474,10 @@ export class LvReflogDialog extends LitElement {
       `Reset to ${entry.shortId}?\n\n${droppedNote}\n\n${modeNote}`,
       'warning'
     );
-    if (!confirmed) return;
-
-    this.resetting = true;
+    if (!confirmed) {
+      this.resetting = false;
+      return;
+    }
 
     try {
       // entry.oid pins the reset to the commit the user was actually shown:

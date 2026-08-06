@@ -681,6 +681,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
   @state() private selectedWorkspaceId: string | null = null;
   @state() private repoStatuses: Map<string, WorkspaceRepoStatus> = new Map();
   @state() private batchRunning = false;
+  @state() private deletingWorkspace = false;
+  @state() private removingRepoPath: string | null = null;
   @state() private statusLoading = false;
 
   // Search
@@ -780,7 +782,13 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
   private async handleDelete(): Promise<void> {
     const ws = this.selectedWorkspace;
-    if (!ws) return;
+    if (!ws || this.deletingWorkspace) return;
+    // Claimed BEFORE the confirm — this button had no in-flight state at all.
+    // showConfirm is an IPC round trip before the native dialog takes focus, so
+    // a double-click stacked two prompts for the same workspace and the second
+    // delete then failed against a record that was already gone, contradicting
+    // the success the user just read.
+    this.deletingWorkspace = true;
 
     // The footer's single Delete button permanently drops a named, saved
     // multi-repo configuration with no undo. Its direct sibling — the profile
@@ -796,16 +804,23 @@ export class LvWorkspaceManagerDialog extends LitElement {
         `The repositories themselves are not touched.`,
       'warning'
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.deletingWorkspace = false;
+      return;
+    }
 
-    const result = await workspaceService.deleteWorkspace(ws.id);
-    if (result.success) {
-      workspaceStore.getState().removeWorkspace(ws.id);
-      this.selectedWorkspaceId = null;
-      await this.loadWorkspaces();
-      showToast(`Deleted workspace ${ws.name}`, 'success');
-    } else {
-      showToast(result.error?.message || 'Failed to delete workspace', 'error');
+    try {
+      const result = await workspaceService.deleteWorkspace(ws.id);
+      if (result.success) {
+        workspaceStore.getState().removeWorkspace(ws.id);
+        this.selectedWorkspaceId = null;
+        await this.loadWorkspaces();
+        showToast(`Deleted workspace ${ws.name}`, 'success');
+      } else {
+        showToast(result.error?.message || 'Failed to delete workspace', 'error');
+      }
+    } finally {
+      this.deletingWorkspace = false;
     }
   }
 
@@ -828,14 +843,34 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
   private async handleRemoveRepo(path: string): Promise<void> {
     const ws = this.selectedWorkspace;
-    if (!ws) return;
+    if (!ws || this.removingRepoPath === path) return;
+    // Claimed before the confirm, like every other destructive button here.
+    this.removingRepoPath = path;
+
+    // The × sits at the end of a dense row next to other controls. Nothing on
+    // disk is touched, but the workspace entry — including the path — is gone,
+    // and putting it back means knowing where that repo lives and re-browsing
+    // to it. A confirm naming the row is cheap next to that.
+    const name = ws.repositories.find((r) => r.path === path)?.name ?? path;
+    const confirmed = await showConfirm(
+      'Remove Repository',
+      `Remove "${name}" from the workspace "${ws.name}"? ` +
+        `The repository itself is not deleted — only its entry here.`,
+      'warning'
+    );
+    if (!confirmed) {
+      this.removingRepoPath = null;
+      return;
+    }
 
     const result = await workspaceService.removeRepositoryFromWorkspace(ws.id, path);
+    this.removingRepoPath = null;
     if (result.success) {
       const newStatuses = new Map(this.repoStatuses);
       newStatuses.delete(path);
       this.repoStatuses = newStatuses;
       await this.loadWorkspaces();
+      showToast(`Removed ${name} from ${ws.name}`, 'success');
     } else {
       showToast(result.error?.message || 'Failed to remove repository', 'error');
     }
@@ -1371,6 +1406,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
                                 <button
                                   class="repo-remove"
                                   title="Remove from workspace"
+                                  ?disabled=${this.removingRepoPath === repo.path}
                                   @click=${() => this.handleRemoveRepo(repo.path)}
                                 >
                                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1427,7 +1463,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
           <div class="footer-left">
             ${ws
               ? html`
-                  <button class="btn btn-danger" @click=${this.handleDelete}>
+                  <button
+                    class="btn btn-danger"
+                    ?disabled=${this.deletingWorkspace}
+                    @click=${this.handleDelete}
+                  >
                     Delete
                   </button>
                 `

@@ -495,6 +495,13 @@ pub async fn save_hook(path: String, name: String, content: String) -> Result<()
     } else {
         hook_path
     };
+    // "Disabled" now has TWO representations — renamed to `<name>.disabled`,
+    // and present but not executable — and an edit must preserve either. The
+    // rename flavour is handled by `target` above; this catches the other, so
+    // saving an edit to a hook the dialog shows as Disabled does not arm a
+    // blocking pre-commit from a gesture that only claimed to save.
+    #[cfg(unix)]
+    let was_inert = target.exists() && !is_executable(&target);
     std::fs::write(&target, &content)?;
     let hook_path = target;
 
@@ -502,9 +509,11 @@ pub async fn save_hook(path: String, name: String, content: String) -> Result<()
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_path, perms)?;
+        if !was_inert {
+            let mut perms = std::fs::metadata(&hook_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook_path, perms)?;
+        }
     }
 
     Ok(())
@@ -778,6 +787,38 @@ mod tests {
             .await
             .unwrap();
         assert!(repaired.enabled);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_editing_an_inert_hook_does_not_arm_it() {
+        // The other flavour of "disabled": present but not executable. Round 28
+        // made that read as Disabled; an edit must not silently chmod it into a
+        // blocking pre-commit that runs on the next commit.
+        use std::os::unix::fs::PermissionsExt;
+        let repo = TestRepo::with_initial_commit();
+        let hooks_dir = repo.path.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook = hooks_dir.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\nexit 2\n".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let reported = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(!reported.enabled, "an edit must not arm an inert hook");
+        assert!(
+            reported.content.unwrap().contains("exit 2"),
+            "the edit landed"
+        );
     }
 
     #[tokio::test]

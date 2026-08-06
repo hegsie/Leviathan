@@ -1261,6 +1261,10 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
+        // The same operation from the graph's ref label toasts. Here nothing
+        // visibly changes on an up-to-date merge or a no-op rebase, so without
+        // this the user cannot tell a completed operation from a dead click.
+        showToast(`Merged ${branch.shorthand}`, 'success');
         this.dispatchBranchesChanged(repoPath);
       } else if (result.error?.code === 'MERGE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
@@ -1309,6 +1313,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
+        showToast(`Rebased onto ${branch.shorthand}`, 'success');
         this.dispatchBranchesChanged(repoPath);
       } else if (result.error?.code === 'REBASE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
@@ -1694,6 +1699,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
+          showToast(`Merged ${sourceBranch.shorthand}`, 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', {
@@ -1724,6 +1730,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
+          showToast(`Rebased onto ${sourceBranch.shorthand}`, 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
@@ -1798,6 +1805,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
+          showToast(`Merged ${sourceBranch.shorthand}`, 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'MERGE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('merge-conflict', {
@@ -1817,6 +1825,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
+          showToast(`Rebased onto ${sourceBranch.shorthand}`, 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {

@@ -332,6 +332,49 @@ describe('app-shell remote-operation feedback', () => {
       expect(push!.args.force).to.not.equal(true);
     });
 
+    it('leaves the success message to the backend event', async () => {
+      // The Rust push command emits `remote-operation-completed` and
+      // setupRemoteOperationListeners toasts it, naming the branch and remote —
+      // which this handler could not. Adding one here stacked two success
+      // toasts on a single click, the exact rule handleFetch documents.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).forcePush('/repo/one');
+
+      expect(
+        uiStore.getState().toasts.filter((t) => t.type === 'success').length,
+        'exactly one owner of the success message',
+      ).to.equal(0);
+    });
+
+    it('the confirm names the branch it is about to overwrite', async () => {
+      // This is the one operation in the app that can discard commits belonging
+      // to someone else; naming only the repository was not enough.
+      let prompt = '';
+      mockResponses['plugin:dialog|message'] = (args) => {
+        prompt = String(args.message ?? '');
+        return 'Cancel';
+      };
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      const el = shellOnRepo();
+      repositoryStore.setState({
+        openRepositories: [
+          {
+            repository: mockRepo('/repo/one', 'one'),
+            currentBranch: { shorthand: 'feature/x', name: 'refs/heads/feature/x' },
+          },
+        ],
+        activeIndex: 0,
+      } as any);
+
+      await (el as any).forcePush('/repo/one');
+
+      expect(prompt).to.contain('feature/x');
+    });
+
     it('a force push that is itself rejected does not offer Force Push again', async () => {
       // Routing this through the suggestion service would match the same branch
       // that produced the toast and loop the user back onto the one action that

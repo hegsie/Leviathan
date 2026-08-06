@@ -2239,6 +2239,7 @@ export class LvGraphCanvas extends LitElement {
               refName: refLabelHit.label,
               fullName: refLabelHit.fullName,
               refType: refLabelHit.refType,
+              isHead: refLabelHit.isHead,
               position: {
                 x: e.clientX,
                 y: e.clientY,

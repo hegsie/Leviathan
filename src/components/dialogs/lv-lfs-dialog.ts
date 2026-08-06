@@ -383,6 +383,8 @@ export class LvLfsDialog extends LitElement {
   @state() private status: LfsStatus | null = null;
   @state() private files: LfsFile[] = [];
   @state() private loading = false;
+  /** Re-entrancy guard for Prune, kept separate from the load spinner. */
+  @state() private pruning = false;
   @state() private error = '';
   @state() private success = '';
   @state() private newPattern = '';
@@ -540,6 +542,16 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async handlePrune(): Promise<void> {
+    // A DEDICATED flag, not `loading`: that one also tracks background status
+    // reloads, and a refresh in flight must not swallow the user's click.
+    //
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click made the user read and
+    // dismiss the same irreversible-deletion warning twice for one gesture.
+    if (this.pruning) return;
+    this.pruning = true;
+
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
@@ -555,7 +567,10 @@ export class LvLfsDialog extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.pruning = false;
+      return;
+    }
 
     this.loading = true;
     this.error = '';
@@ -572,6 +587,7 @@ export class LvLfsDialog extends LitElement {
     }
 
     this.loading = false;
+    this.pruning = false;
   }
 
   private formatSize(bytes: number): string {
@@ -769,7 +785,11 @@ export class LvLfsDialog extends LitElement {
                 </svg>
                 Pull Files
               </button>
-              <button class="btn btn-secondary" @click=${this.handlePrune} ?disabled=${this.loading}>
+              <button
+                class="btn btn-secondary"
+                @click=${this.handlePrune}
+                ?disabled=${this.loading || this.pruning}
+              >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="3 6 5 6 21 6"/>
                   <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>

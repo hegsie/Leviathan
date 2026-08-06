@@ -347,6 +347,8 @@ export class LvWorktreeDialog extends LitElement {
   @state() private worktrees: Worktree[] = [];
   @state() private branches: Branch[] = [];
   @state() private loading = false;
+  /** Re-entrancy guard for Remove, kept separate from the load spinner. */
+  @state() private removingPath: string | null = null;
   @state() private error = '';
   @state() private success = '';
 
@@ -484,6 +486,16 @@ export class LvWorktreeDialog extends LitElement {
       this.error = 'Cannot remove the main worktree';
       return;
     }
+    // A DEDICATED flag, not `loading`: that one also tracks background list
+    // reloads, and a refresh in flight must not swallow the user's click.
+    //
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click stacked two prompts for
+    // the same worktree, and the second removal then failed against a directory
+    // that was already gone, contradicting the success the user just read.
+    if (this.removingPath === worktree.path) return;
+    this.removingPath = worktree.path;
 
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live, so a mid-confirm tab switch would otherwise
@@ -496,7 +508,10 @@ export class LvWorktreeDialog extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.removingPath = null;
+      return;
+    }
 
     this.loading = true;
     this.error = '';
@@ -508,7 +523,9 @@ export class LvWorktreeDialog extends LitElement {
     // the flow dead-ended on a raw CLI error with no way to finish. Offer the
     // same force escalation the branch-delete paths do, naming what is at stake.
     if (!result.success && this.isDirtyWorktreeError(result.error?.message)) {
-      this.loading = false;
+      // `loading` deliberately stays claimed across this second confirm: the
+      // escalation discards uncommitted work, so it is the last place that
+      // should be re-enterable.
       const forced = await showConfirm(
         'Remove Worktree',
         `The worktree at "${worktree.path}" contains modified or untracked files. Removing it will permanently discard that work. Continue?`,
@@ -516,9 +533,10 @@ export class LvWorktreeDialog extends LitElement {
       );
       if (!forced) {
         this.error = '';
+        this.loading = false;
+        this.removingPath = null;
         return;
       }
-      this.loading = true;
       result = await gitService.removeWorktree(repoPath, worktree.path, true);
     }
 
@@ -532,6 +550,7 @@ export class LvWorktreeDialog extends LitElement {
     }
 
     this.loading = false;
+    this.removingPath = null;
   }
 
   /** git's refusal when a worktree still holds working-tree state. */
@@ -637,7 +656,10 @@ export class LvWorktreeDialog extends LitElement {
                   class="action-btn danger"
                   title="Remove"
                   @click=${() => this.handleRemove(wt)}
-                  ?disabled=${this.loading || wt.isMain || wt.isLocked}
+                  ?disabled=${this.loading ||
+                  this.removingPath === wt.path ||
+                  wt.isMain ||
+                  wt.isLocked}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6"/>
