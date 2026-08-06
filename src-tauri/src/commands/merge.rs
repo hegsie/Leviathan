@@ -30,6 +30,13 @@ pub struct RebaseCommit {
     pub oid: String,
     pub short_id: String,
     pub summary: String,
+    /// Everything after the subject line, empty when there is none.
+    ///
+    /// The reword route amends with `-m`, which REPLACES the whole message —
+    /// so seeding the editor from `summary` alone silently deleted trailers,
+    /// issue references and rationale. The commit panel's amend has always
+    /// carried the body; this is what lets the rebase route match it.
+    pub body: String,
     pub action: String,
 }
 
@@ -858,6 +865,7 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
             oid: oid.to_string(),
             short_id: oid.to_string()[..7].to_string(),
             summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
+            body: commit.body().ok().flatten().unwrap_or("").to_string(),
             action: "pick".to_string(),
         });
     }
@@ -875,6 +883,12 @@ pub async fn execute_interactive_rebase(
     onto: String,
     todo: String,
 ) -> Result<InteractiveRebaseOutcome> {
+    // `onto` is forwarded to `git rebase -i` as a bare positional argument, so
+    // a ref named `--exec=<command>` would become a flag. cli_safety states the
+    // rule and 24 call sites apply it by hand; this was the destructive
+    // CLI-invoking command never added to that list.
+    crate::utils::reject_flag_like(&onto, "Rebase target")?;
+
     // Unique names per call, like apply_patch_to_index. The fixed
     // /tmp/leviathan-rebase-todo these replace meant two rebases running at
     // once would read each other's plan — one repo silently rewritten with the
@@ -2483,6 +2497,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_interactive_rebase_rejects_a_flag_like_target() {
+        // `onto` is forwarded to `git rebase -i` as a bare positional, so a ref
+        // named `--exec=<command>` would become a flag that runs it after every
+        // replayed commit. cli_safety states the rule; this command was the one
+        // never added to the 24 sites applying it.
+        let repo = TestRepo::with_initial_commit();
+        let err = execute_interactive_rebase(
+            repo.path_str(),
+            "--exec=touch /tmp/leviathan-should-not-exist".to_string(),
+            "pick abc123\n".to_string(),
+        )
+        .await
+        .expect_err("a flag-like rebase target must be refused");
+        assert!(
+            format!("{}", err).contains("must not start with '-'"),
+            "and say why: {}",
+            err
+        );
+        assert!(
+            !std::path::Path::new("/tmp/leviathan-should-not-exist").exists(),
+            "and refuse BEFORE spawning anything"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_reword_preserves_the_commit_body() {
+        // The reword route amends with `-m`, which replaces the whole message.
+        // Seeding the editor from the subject alone deleted trailers, issue
+        // references and rationale — silently, since the dialog only ever
+        // showed the subject.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit(
+            "Add retry to the uploader\n\nBackoff is exponential.\nFixes #4412",
+            &[("a.txt", "a")],
+        );
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].summary, "Add retry to the uploader");
+        assert!(
+            commits[0].body.contains("Fixes #4412"),
+            "the body must cross the boundary, or the editor cannot show it"
+        );
+    }
+
+    #[tokio::test]
     async fn test_is_ancestor_of_head() {
         // The graph offers Reword and Amend on every branch's commits. Routing
         // an off-branch commit to `<oid>^` produced a plan holding the CURRENT
@@ -2698,6 +2762,7 @@ mod tests {
             oid: "abc123def456".to_string(),
             short_id: "abc123d".to_string(),
             summary: "Test commit".to_string(),
+            body: "Explains why.\n\nFixes #1".to_string(),
             action: "pick".to_string(),
         };
 
@@ -2707,6 +2772,10 @@ mod tests {
         assert!(json_str.contains("\"oid\":\"abc123def456\""));
         assert!(json_str.contains("\"shortId\":\"abc123d\""));
         assert!(json_str.contains("\"action\":\"pick\""));
+        // The body has to cross the boundary, or the reword editor cannot show
+        // it and `--amend -m` silently drops it.
+        assert!(json_str.contains("\"body\""));
+        assert!(json_str.contains("Fixes #1"));
     }
 
     #[tokio::test]

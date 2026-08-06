@@ -597,4 +597,127 @@ describe('app-shell destructive guards', () => {
       expect(openedOnto).to.equal('olderoid^');
     });
   });
+
+  describe('the commit context menu shares the graph working-tree lock', () => {
+    // These live in the same canvas as the ref menu and touch the same working
+    // tree, but were never added when the flag was extended by hand — the same
+    // stale-enumeration pattern that produced the earlier holes.
+    const handlers: Array<[string, () => unknown[]]> = [
+      ['revert', () => []],
+      ['fixup', () => []],
+      ['squash', () => []],
+      ['reset (hard)', () => ['hard']],
+    ];
+    const methods: Record<string, string> = {
+      revert: 'handleRevertCommit',
+      fixup: 'handleFixupCommit',
+      squash: 'handleSquashCommit',
+      'reset (hard)': 'handleResetToCommit',
+    };
+
+    for (const [label, args] of handlers) {
+      it(`${label} is inert while another graph operation is running`, async () => {
+        mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+        mockResponses['plugin:dialog|message'] = () => 'Ok';
+        const el = shellOnRepo();
+        (el as any).contextMenu = {
+          visible: true, x: 0, y: 0,
+          commit: { ...commit('olderoid'), parentIds: ['parentoid'] },
+        };
+        (el as any).refOperationInFlight = true;
+        invokeCallArgs.length = 0;
+
+        await (el as any)[methods[label]](...args());
+
+        expect(
+          invokeCallArgs.some((c) =>
+            /^(reset|revert|create_commit|get_status)$/.test(c.command),
+          ),
+          'nothing reaches the backend',
+        ).to.equal(false);
+      });
+
+      it(`${label} releases the lock when it finishes`, async () => {
+        mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+        mockResponses['plugin:dialog|message'] = () => 'Cancel';
+        const el = shellOnRepo();
+        (el as any).contextMenu = {
+          visible: true, x: 0, y: 0,
+          commit: { ...commit('olderoid'), parentIds: ['parentoid'] },
+        };
+
+        await (el as any)[methods[label]](...args());
+
+        expect(
+          (el as any).refOperationInFlight,
+          'or the whole graph menu wedges for the session',
+        ).to.equal(false);
+      });
+    }
+
+    it('no mutating item in the commit menu is left enabled while locked', async () => {
+      // Structural, so a handler added later cannot quietly miss the flag: with
+      // the lock held, the ONLY enabled items may be the read-only ones. A new
+      // mutating button that forgets the binding fails here without anyone
+      // having to remember to add it to a list.
+      const READ_ONLY = ['create tag', 'create branch'];
+      const el = shellOnRepo();
+      document.body.appendChild(el);
+      try {
+        (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
+        (el as any).refOperationInFlight = true;
+        await (el as any).updateComplete;
+
+        const items = Array.from(
+          (el as any).renderRoot.querySelectorAll('.context-menu-item'),
+        ) as HTMLButtonElement[];
+        expect(items.length, 'the menu rendered').to.be.greaterThan(0);
+
+        const enabled = items
+          .filter((b) => !b.disabled)
+          .map((b) => (b.textContent ?? '').trim().toLowerCase())
+          .filter((t) => t.length > 0);
+
+        for (const label of enabled) {
+          expect(
+            READ_ONLY.some((allowed) => label.includes(allowed)),
+            `"${label}" mutates the repo but stays clickable while the lock is held`,
+          ).to.equal(true);
+        }
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('the command palette checkout shares the graph lock', () => {
+    it('is inert while another graph operation is running', async () => {
+      // The third checkout surface — round 33 folded the ref menu's and the
+      // graph label's into this lock and left the palette's out.
+      const el = shellOnRepo();
+      (el as any).refOperationInFlight = true;
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleCheckoutBranch(
+        new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
+      );
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'checkout_with_autostash'),
+        'two auto-stash checkouts cross-apply each other stashes',
+      ).to.equal(false);
+    });
+
+    it('releases the lock so a later checkout works', async () => {
+      mockResponses['checkout_with_autostash'] = () => ({ success: true, stashed: false });
+      const el = shellOnRepo();
+
+      await (el as any).handleCheckoutBranch(
+        new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
+      );
+
+      expect((el as any).refOperationInFlight).to.equal(false);
+      expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
+    });
+  });
 });

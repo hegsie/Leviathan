@@ -155,6 +155,8 @@ export interface RebaseCommit {
   oid: string;
   shortId: string;
   summary: string;
+  /** Everything after the subject line; '' when the commit has none. */
+  body: string;
   action: string;
 }
 

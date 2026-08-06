@@ -856,7 +856,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
         // Sanitize summary for todo file format (line-based, no newlines allowed)
         const sanitizedSummary = c.summary.replace(/[\r\n]+/g, ' ').trim();
 
-        if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
+        if (c.action === 'reword' && c.newMessage && c.newMessage !== this.fullMessage(c)) {
           // Use pick + exec to amend with new message
           // This is more reliable than reword which opens an editor
           todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
@@ -1000,7 +1000,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
               rows="2"
               placeholder="Enter new commit message..."
               aria-label="New commit message for ${commit.shortId}"
-              .value=${commit.newMessage ?? commit.summary}
+              .value=${commit.newMessage ?? this.fullMessage(commit)}
               @input=${(e: Event) => this.handleRewordChange(index, e)}
               ?disabled=${this.executing}
             ></textarea>
@@ -1008,6 +1008,19 @@ export class LvInteractiveRebaseDialog extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * The commit's full existing message.
+   *
+   * The reword route amends with `-m`, which REPLACES the whole message — so
+   * seeding this from the subject alone silently deleted the body: trailers,
+   * issue references, rationale. The commit panel's amend has always seeded
+   * from summary + body, so the same operation preserved the body from one
+   * surface and destroyed it from the other.
+   */
+  private fullMessage(commit: EditableRebaseCommit): string {
+    return commit.body ? `${commit.summary}\n\n${commit.body}` : commit.summary;
   }
 
   private renderPreview() {

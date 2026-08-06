@@ -855,4 +855,64 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(rows.length).to.equal(0);
     });
   });
+
+  describe('rewording preserves the message body', () => {
+    it('seeds the editor with subject AND body', async () => {
+      // The reword route amends with `-m`, which REPLACES the whole message —
+      // so seeding from the subject alone silently deleted trailers, issue
+      // references and rationale. The commit panel's amend has always carried
+      // the body, so the same operation preserved it from one surface and
+      // destroyed it from the other.
+      const el = await createDialog();
+      await openAndWait(el);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).commits = [
+        {
+          oid: 'aaa111',
+          shortId: 'aaa111',
+          summary: 'Add retry to the uploader',
+          body: 'Backoff is exponential.\n\nFixes #4412',
+          action: 'reword',
+        },
+      ];
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea, 'the reword editor is shown').to.not.be.null;
+      expect(textarea.value).to.contain('Add retry to the uploader');
+      expect(textarea.value, 'and the body the amend would otherwise drop').to.contain(
+        'Fixes #4412',
+      );
+    });
+
+    it('an untouched full message is treated as no change', async () => {
+      // Otherwise every reword row would emit an amend that rewrites the commit
+      // with exactly what it already said.
+      const el = await createDialog();
+      await openAndWait(el);
+      const commit = {
+        oid: 'aaa111',
+        shortId: 'aaa111',
+        summary: 'Subject',
+        body: 'Body line',
+        action: 'reword',
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).commits = [{ ...commit, newMessage: 'Subject\n\nBody line' }];
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isNoop = (el as any).fullMessage(commit) === 'Subject\n\nBody line';
+      expect(isNoop, 'summary + body is the message to compare against').to.equal(true);
+    });
+
+    it('a commit with no body seeds just the subject', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).fullMessage({ summary: 'Only a subject', body: '' })).to.equal(
+        'Only a subject',
+      );
+    });
+  });
 });

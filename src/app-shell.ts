@@ -774,6 +774,25 @@ export class AppShell extends LitElement {
    */
   private destructiveActionsInFlight = new Set<string>();
 
+  /**
+   * Claim the graph's working-tree lock for `fn`.
+   *
+   * The commit context menu's mutating actions live in the same canvas as the
+   * ref menu's and touch the same working tree, but were never added to the
+   * flag when it was extended by hand — the same stale-enumeration pattern that
+   * produced the earlier holes. Wrapping rather than editing each body means no
+   * early return can leak the claim.
+   */
+  private async runRefExclusive(fn: () => Promise<void>): Promise<void> {
+    if (this.refOperationInFlight) return;
+    this.refOperationInFlight = true;
+    try {
+      await fn();
+    } finally {
+      this.refOperationInFlight = false;
+    }
+  }
+
   /** Run `fn` unless an identical action is already in flight. */
   private async runExclusive(key: string, fn: () => Promise<void>): Promise<void> {
     if (this.destructiveActionsInFlight.has(key)) return;
@@ -2311,7 +2330,11 @@ export class AppShell extends LitElement {
     this.openConflictDialogFromState();
   }
 
-  private async handleRevertCommit(): Promise<void> {
+  private handleRevertCommit(): Promise<void> {
+    return this.runRefExclusive(() => this.revertCommit());
+  }
+
+  private async revertCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2747,7 +2770,11 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
+  private handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
+    return this.runRefExclusive(() => this.resetToCommit(mode));
+  }
+
+  private async resetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2842,7 +2869,11 @@ export class AppShell extends LitElement {
    * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
    * Can be auto-squashed later with interactive rebase --autosquash
    */
-  private async handleFixupCommit(): Promise<void> {
+  private handleFixupCommit(): Promise<void> {
+    return this.runRefExclusive(() => this.fixupCommit());
+  }
+
+  private async fixupCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2884,7 +2915,11 @@ export class AppShell extends LitElement {
    * Create a squash commit targeting the selected commit
    * Similar to fixup but preserves the message for editing during autosquash
    */
-  private async handleSquashCommit(): Promise<void> {
+  private handleSquashCommit(): Promise<void> {
+    return this.runRefExclusive(() => this.squashCommit());
+  }
+
+  private async squashCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -4412,7 +4447,17 @@ export class AppShell extends LitElement {
     );
   }
 
-  private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+  private handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+    // The third checkout surface. Round 33 folded the ref menu's and the graph
+    // label's into this lock and left the palette's out — the same stale
+    // enumeration again. Two concurrent auto-stash checkouts cross-apply and
+    // cross-drop each other's stash, because a stash index is a position.
+    return this.runRefExclusive(() => this.checkoutBranchFromPalette(e));
+  }
+
+  private async checkoutBranchFromPalette(
+    e: CustomEvent<{ branch: string }>,
+  ): Promise<void> {
     if (!this.activeRepository) return;
 
     const branch = e.detail.branch;
@@ -4804,14 +4849,14 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
                 </svg>
                 Amend
               </button>
-              <button class="context-menu-item" @click=${this.handleRewordCommit} title="Change the commit message">
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRewordCommit} title="Change the commit message">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="17" y1="10" x2="3" y2="10"></line>
                   <line x1="21" y1="6" x2="3" y2="6"></line>
@@ -4821,7 +4866,7 @@ export class AppShell extends LitElement {
                 Reword
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                   <polyline points="17 8 12 3 7 8"></polyline>
@@ -4829,7 +4874,7 @@ export class AppShell extends LitElement {
                 </svg>
                 Fixup into this
               </button>
-              <button class="context-menu-item" @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                   <line x1="9" y1="3" x2="9" y2="21"></line>
@@ -4838,14 +4883,14 @@ export class AppShell extends LitElement {
                 Squash into this
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleCherryPick}>
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
                   <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" fill="none"/>
                 </svg>
                 Cherry-pick
               </button>
-              <button class="context-menu-item" @click=${this.handleRevertCommit}>
+              <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${this.handleRevertCommit}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0zM8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3z"/>
                   <path d="M8 4v4l3 2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
@@ -4871,13 +4916,13 @@ export class AppShell extends LitElement {
               <div class="context-menu-divider"></div>
               <div class="context-menu-submenu">
                 <span class="context-menu-label">Reset to this commit</span>
-                <button class="context-menu-item" @click=${() => this.handleResetToCommit('soft')}>
+                <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('soft')}>
                   Soft (keep changes staged)
                 </button>
-                <button class="context-menu-item" @click=${() => this.handleResetToCommit('mixed')}>
+                <button class="context-menu-item" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('mixed')}>
                   Mixed (keep changes unstaged)
                 </button>
-                <button class="context-menu-item danger" @click=${() => this.handleResetToCommit('hard')}>
+                <button class="context-menu-item danger" ?disabled=${this.refOperationInFlight} @click=${() => this.handleResetToCommit('hard')}>
                   Hard (discard all changes)
                 </button>
               </div>
