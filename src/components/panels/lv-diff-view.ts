@@ -1270,6 +1270,24 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
   }
 
+  /**
+   * Is there typed text the user has not saved?
+   *
+   * Exposed because this pane can be torn out of the tree by gestures it never
+   * sees — the diff header's ×, Escape, and a repository tab switch all set
+   * `showDiff = false` in app-shell. Every teardown the component CAN see
+   * already guards (Cancel confirms, a file change warns); the host needs this
+   * to close the gap for the ones it owns.
+   */
+  public get hasUnsavedEdits(): boolean {
+    return this.editMode && this.hasChanges;
+  }
+
+  /** The file the unsaved buffer belongs to, for a message naming it. */
+  public get editingPath(): string | null {
+    return this.editPath;
+  }
+
   /** Leave edit mode without touching disk. */
   private discardEditBuffer(): void {
     this.editMode = false;

@@ -216,4 +216,59 @@ describe('app-shell destructive guards', () => {
       expect(invokeCallArgs.some((c) => c.command.startsWith('abort_'))).to.equal(false);
     });
   });
+
+  describe('closing the diff pane with unsaved editor text', () => {
+    function shellWithDirtyEditor(path: string): AppShell {
+      const el = shellOnRepo();
+      // `diffView` is a @query getter, so it has to be shadowed on the
+      // instance. This stands in for a mounted lv-diff-view whose inline
+      // editor holds typed text.
+      Object.defineProperty(el, 'diffView', {
+        configurable: true,
+        get: () => ({ hasUnsavedEdits: true, editingPath: path }),
+      });
+      (el as any).showDiff = true;
+      return el;
+    }
+
+    it('the × button says the edits were discarded rather than dropping them silently', async () => {
+      // The editor guards every teardown it can see — Cancel confirms, a file
+      // change warns — but ×, Escape and a tab switch are owned by app-shell
+      // and just set showDiff = false, unmounting the editor with the text in
+      // it. Escape is the sharpest case: the editor says "Esc to cancel" while
+      // the header says "Close diff (Esc)".
+      const el = shellWithDirtyEditor('src/main.ts');
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleCloseDiff();
+
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'the loss is reported').to.not.be.undefined;
+      expect(warning!.message).to.contain('src/main.ts');
+      expect((el as any).showDiff, 'and the pane still closes').to.equal(false);
+    });
+
+    it('a clean editor closes quietly', async () => {
+      const el = shellOnRepo();
+      Object.defineProperty(el, 'diffView', {
+        configurable: true,
+        get: () => ({ hasUnsavedEdits: false, editingPath: null }),
+      });
+      (el as any).showDiff = true;
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleCloseDiff();
+
+      expect(uiStore.getState().toasts.length, 'nothing was lost, so nothing is said').to.equal(0);
+    });
+
+    it('closing with no diff open says nothing', async () => {
+      const el = shellOnRepo();
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleCloseDiff();
+
+      expect(uiStore.getState().toasts.length).to.equal(0);
+    });
+  });
 });

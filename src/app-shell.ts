@@ -31,6 +31,7 @@ import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
 import './components/panels/lv-diff-view.ts';
+import type { LvDiffView } from './components/panels/lv-diff-view.ts';
 import './components/panels/lv-blame-view.ts';
 import './components/panels/lv-output-panel.ts';
 import './components/sidebar/lv-left-panel.ts';
@@ -722,6 +723,7 @@ export class AppShell extends LitElement {
   private resizeStartValue = 0;
 
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
+  @query('lv-diff-view') private diffView?: LvDiffView;
   @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
@@ -1359,6 +1361,10 @@ export class AppShell extends LitElement {
         // Clear selected commit and refs
         this.selectedCommit = null;
         this.selectedCommitRefs = [];
+
+        // Same gesture-owned teardown as handleCloseDiff: the tab switch
+        // unmounts the editor along with the pane.
+        this.warnIfDiscardingEdits();
 
         // Close any open overlays
         this.showDiff = false;
@@ -3058,7 +3064,28 @@ export class AppShell extends LitElement {
     this.showDiff = true;
   }
 
+  /**
+   * Closing the diff pane unmounts the inline editor with it.
+   *
+   * The editor guards every teardown it can see — Cancel confirms, a file
+   * change warns — but the × button, Escape and a repository tab switch are all
+   * owned by app-shell and simply set `showDiff = false`, dropping typed text
+   * with no confirm and no message. Escape is the sharpest case: the editor's
+   * own indicator says "Esc to cancel" while the header says "Close diff (Esc)",
+   * and which one won depended purely on whether the caret was in the textarea.
+   */
+  private warnIfDiscardingEdits(): void {
+    const editing = this.diffView;
+    if (editing?.hasUnsavedEdits) {
+      showToast(
+        `Unsaved edits to ${editing.editingPath ?? 'this file'} were discarded`,
+        'warning'
+      );
+    }
+  }
+
   private handleCloseDiff(): void {
+    this.warnIfDiscardingEdits();
     this.showDiff = false;
     this.diffFile = null;
     this.diffCommitFile = null;

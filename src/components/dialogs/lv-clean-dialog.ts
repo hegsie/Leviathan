@@ -469,7 +469,15 @@ export class LvCleanDialog extends LitElement {
   }
 
   private async handleClean(): Promise<void> {
-    if (this.selectedPaths.size === 0) return;
+    // Claimed on ENTRY, not after the confirms. showConfirm is an IPC round
+    // trip before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click raised a second delete
+    // confirm over the same selection. Confirming both ran the clean twice: the
+    // second on paths that no longer existed, producing a "0 of N items"
+    // warning that contradicted the success toast the user had just read. Same
+    // claim-before-confirm the abort banner and the gitflow panel apply.
+    if (this.cleaning || this.selectedPaths.size === 0) return;
+    this.cleaning = true;
 
     // The repo the listed files were read from — NOT the live prop. Pinning
     // only at click time still deleted from the wrong repository whenever the
@@ -499,7 +507,10 @@ export class LvCleanDialog extends LitElement {
         `They are not in Git and cannot be recovered.`,
       'warning'
     );
-    if (!confirmedDelete) return;
+    if (!confirmedDelete) {
+      this.cleaning = false;
+      return;
+    }
 
     // A nested git repository additionally destroys that repo's whole history,
     // which `git clean` itself guards behind a second `-f` — so it gets its own
@@ -515,11 +526,12 @@ export class LvCleanDialog extends LitElement {
           `This cannot be undone. Continue?`,
         'warning'
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.cleaning = false;
+        return;
+      }
     }
     const forceNested = nestedRepos.length > 0;
-
-    this.cleaning = true;
 
     try {
       const result = await gitService.cleanFiles(repoPath, paths, forceNested);

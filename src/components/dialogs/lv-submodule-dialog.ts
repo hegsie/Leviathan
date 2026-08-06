@@ -478,7 +478,12 @@ export class LvSubmoduleDialog extends LitElement {
       const updateResult = await gitService.updateSubmodules(this.pinnedRepoPath, {
         submodulePaths: [submodule.path],
       });
-      if (!updateResult.success) {
+      // Same gate contract every other handler in this file honours: BLOCKED
+      // means a setting refused it and checkNetworkAllowed already toasted, so
+      // reporting again stacked two contradictory messages on one click;
+      // CANCELLED means the user declined the confirm, and calling their own
+      // decision a failed update is worse still.
+      if (!updateResult.success && !gitService.isNetworkGateRefusal(updateResult.error)) {
         showToast('Initialized but update failed: ' + (updateResult.error?.message || 'Unknown error'), 'warning');
       }
       await this.loadSubmodules();

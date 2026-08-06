@@ -20,6 +20,8 @@ const mockSubmodules: Submodule[] = [
 ];
 
 let failingCommands: Set<string> = new Set();
+/** When true, the next confirm dialog is answered with Cancel. */
+let declineNextConfirm = false;
 let lastUpdateSubmodulesArgs: Record<string, unknown> | null = null;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -49,6 +51,7 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
     // plugin-dialog 2.7 routes confirm() through `message` and returns the
     // clicked button label; 'Ok' means the user confirmed.
     case 'plugin:dialog|message':
+      if (declineNextConfirm) return 'Cancel';
       return 'Ok';
     default:
       return null;
@@ -63,6 +66,7 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 import '../lv-submodule-dialog.ts';
 import type { LvSubmoduleDialog } from '../lv-submodule-dialog.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 describe('lv-submodule-dialog', () => {
   beforeEach(() => {
@@ -226,5 +230,65 @@ describe('lv-submodule-dialog', () => {
     const errorToast = toasts.find(t => t.type === 'error');
     expect(errorToast).to.not.be.undefined;
     expect(errorToast!.message).to.include('Operation failed');
+  });
+
+  describe('Init runs a network-gated update after the local init', () => {
+    afterEach(() => {
+      settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+    });
+
+    it('does not report a security-settings block a second time', async () => {
+      // init_submodules is local and ungated; the follow-up update_submodules
+      // is gated. checkNetworkAllowed already toasts on a block, so this
+      // handler reporting it again stacked two contradictory messages on one
+      // click. Every other handler in the file honours that contract.
+      settingsStore.setState({ offlineMode: true });
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleInit(mockSubmodules[0]);
+
+      const messages = uiStore.getState().toasts.map((t) => t.message);
+      expect(
+        messages.filter((m) => /update failed/i.test(m)).length,
+        'the gate spoke for itself',
+      ).to.equal(0);
+    });
+
+    it('does not call the user declining the confirm a failure', async () => {
+      // A declined confirm is deliberately silent everywhere else — it is the
+      // user's own decision, not an error.
+      settingsStore.setState({ confirmNetworkOps: true });
+      failingCommands = new Set();
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+      declineNextConfirm = true;
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleInit(mockSubmodules[0]);
+      declineNextConfirm = false;
+
+      const messages = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+      expect(messages).to.not.match(/update failed/i);
+    });
+
+    it('a genuine update failure after init is still reported', async () => {
+      failingCommands = new Set(['update_submodules']);
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleInit(mockSubmodules[0]);
+
+      const messages = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+      expect(messages).to.match(/update failed/i);
+    });
   });
 });

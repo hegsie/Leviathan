@@ -366,26 +366,38 @@ const HOOKS: &[(&str, &str)] = &[
 #[command]
 pub async fn get_hooks(path: String) -> Result<Vec<GitHook>> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let git_dir = repo.path();
-    let hooks_dir = git_dir.join("hooks");
+    // resolve_hooks_dir, NOT repo.path().join("hooks"): the runner and git
+    // itself honour core.hooksPath (husky sets it) and, in a linked worktree,
+    // the COMMON dir. Managing a different directory than the one that runs
+    // meant every hook read as "not configured" in those repos and every hook
+    // saved from this dialog was inert.
+    let hooks_dir = resolve_hooks_dir(&repo);
 
     let mut hooks = Vec::new();
 
     for (name, description) in HOOKS {
         let hook_path = hooks_dir.join(name);
         let sample_path = hooks_dir.join(format!("{}.sample", name));
+        // toggle_hook disables by renaming to `<name>.disabled`. Reporting
+        // only on the live path made the disabled state unrepresentable: the
+        // hook came back as "never configured", the UI dropped the toggle that
+        // is the only way to re-enable it, and re-creating the hook and
+        // disabling it again renamed OVER the stranded original, destroying
+        // the user's script.
+        let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
-        let exists = hook_path.exists();
-        let content = if exists {
+        let enabled = hook_path.exists();
+        let exists = enabled || disabled_path.exists();
+        let content = if enabled {
             std::fs::read_to_string(&hook_path).ok()
+        } else if disabled_path.exists() {
+            std::fs::read_to_string(&disabled_path).ok()
         } else if sample_path.exists() {
             // Return sample content as reference
             None
         } else {
             None
         };
-
-        let enabled = exists;
 
         hooks.push(GitHook {
             name: name.to_string(),
@@ -404,12 +416,17 @@ pub async fn get_hooks(path: String) -> Result<Vec<GitHook>> {
 #[command]
 pub async fn get_hook(path: String, name: String) -> Result<GitHook> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let git_dir = repo.path();
-    let hook_path = git_dir.join("hooks").join(&name);
+    let hooks_dir = resolve_hooks_dir(&repo);
+    let hook_path = hooks_dir.join(&name);
+    let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
-    let exists = hook_path.exists();
-    let content = if exists {
+    // A disabled hook still exists — see get_hooks.
+    let enabled = hook_path.exists();
+    let exists = enabled || disabled_path.exists();
+    let content = if enabled {
         std::fs::read_to_string(&hook_path).ok()
+    } else if exists {
+        std::fs::read_to_string(&disabled_path).ok()
     } else {
         None
     };
@@ -419,8 +436,6 @@ pub async fn get_hook(path: String, name: String) -> Result<GitHook> {
         .find(|(n, _)| *n == name.as_str())
         .map(|(_, d)| d.to_string())
         .unwrap_or_default();
-
-    let enabled = exists;
 
     Ok(GitHook {
         name,
@@ -436,8 +451,7 @@ pub async fn get_hook(path: String, name: String) -> Result<GitHook> {
 #[command]
 pub async fn save_hook(path: String, name: String, content: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let git_dir = repo.path();
-    let hooks_dir = git_dir.join("hooks");
+    let hooks_dir = resolve_hooks_dir(&repo);
 
     // Ensure hooks directory exists
     std::fs::create_dir_all(&hooks_dir)?;
@@ -461,11 +475,17 @@ pub async fn save_hook(path: String, name: String, content: String) -> Result<()
 #[command]
 pub async fn delete_hook(path: String, name: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let git_dir = repo.path();
-    let hook_path = git_dir.join("hooks").join(&name);
+    let hooks_dir = resolve_hooks_dir(&repo);
+    let hook_path = hooks_dir.join(&name);
+    // A disabled hook is still the user's script; Delete must remove it too,
+    // or the entry reappears on the next load.
+    let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
     if hook_path.exists() {
         std::fs::remove_file(&hook_path)?;
+    }
+    if disabled_path.exists() {
+        std::fs::remove_file(&disabled_path)?;
     }
 
     Ok(())
@@ -475,9 +495,9 @@ pub async fn delete_hook(path: String, name: String) -> Result<()> {
 #[command]
 pub async fn toggle_hook(path: String, name: String, enabled: bool) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let git_dir = repo.path();
-    let hook_path = git_dir.join("hooks").join(&name);
-    let disabled_path = git_dir.join("hooks").join(format!("{}.disabled", name));
+    let hooks_dir = resolve_hooks_dir(&repo);
+    let hook_path = hooks_dir.join(&name);
+    let disabled_path = hooks_dir.join(format!("{}.disabled", name));
 
     if enabled {
         // Enable: rename from .disabled if needed
@@ -609,6 +629,127 @@ mod tests {
         let git_dir = repo.path.join(".git").join("hooks");
         assert!(git_dir.join("pre-commit").exists());
         assert!(!git_dir.join("pre-commit.disabled").exists());
+    }
+
+    #[tokio::test]
+    async fn test_disabled_hook_is_still_reported_as_existing() {
+        // Disabling renames to `<name>.disabled`. Reporting only on the live
+        // path made the disabled state unrepresentable: the hook came back as
+        // "never configured", so the UI dropped the toggle that is the only way
+        // back on, and re-creating then disabling again renamed OVER the
+        // stranded original and destroyed the user's script.
+        let repo = TestRepo::with_initial_commit();
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\necho original\n".to_string(),
+        )
+        .await
+        .unwrap();
+        toggle_hook(repo.path_str(), "pre-commit".to_string(), false)
+            .await
+            .unwrap();
+
+        let hook = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(hook.exists, "a disabled hook still exists");
+        assert!(!hook.enabled, "and is reported as disabled");
+        assert!(
+            hook.content.unwrap().contains("original"),
+            "its script is still readable, so it can be re-enabled or inspected"
+        );
+
+        let listed = get_hooks(repo.path_str()).await.unwrap();
+        let pre_commit = listed.iter().find(|h| h.name == "pre-commit").unwrap();
+        assert!(pre_commit.exists);
+        assert!(!pre_commit.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_delete_removes_a_disabled_hook_too() {
+        let repo = TestRepo::with_initial_commit();
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\nexit 0\n".to_string(),
+        )
+        .await
+        .unwrap();
+        toggle_hook(repo.path_str(), "pre-commit".to_string(), false)
+            .await
+            .unwrap();
+
+        delete_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+
+        let hook = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(!hook.exists, "otherwise the entry reappears on next load");
+    }
+
+    #[tokio::test]
+    async fn test_hook_management_follows_core_hookspath() {
+        // The runner and git itself honour core.hooksPath (husky sets it).
+        // Managing `.git/hooks` instead meant every hook read as "not
+        // configured" in such a repo and every hook saved here was inert.
+        let repo = TestRepo::with_initial_commit();
+        let alt = repo.path.join(".husky");
+        std::fs::create_dir_all(&alt).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut cfg = git_repo.config().unwrap();
+            cfg.set_str("core.hooksPath", ".husky").unwrap();
+        }
+
+        save_hook(
+            repo.path_str(),
+            "pre-commit".to_string(),
+            "#!/bin/sh\nexit 0\n".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            alt.join("pre-commit").exists(),
+            "the hook must land where git will look for it"
+        );
+        assert!(
+            !repo
+                .path
+                .join(".git")
+                .join("hooks")
+                .join("pre-commit")
+                .exists(),
+            "and not in a directory nothing consults"
+        );
+
+        let hook = get_hook(repo.path_str(), "pre-commit".to_string())
+            .await
+            .unwrap();
+        assert!(hook.exists, "and the dialog must see the hook that runs");
+    }
+
+    #[tokio::test]
+    async fn test_existing_hookspath_hook_is_visible() {
+        // The inverse: a hook installed by husky before Leviathan ever opened
+        // the repo must not read as "not configured".
+        let repo = TestRepo::with_initial_commit();
+        let alt = repo.path.join(".husky");
+        std::fs::create_dir_all(&alt).unwrap();
+        std::fs::write(alt.join("pre-push"), "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut cfg = git_repo.config().unwrap();
+            cfg.set_str("core.hooksPath", ".husky").unwrap();
+        }
+
+        let listed = get_hooks(repo.path_str()).await.unwrap();
+        let pre_push = listed.iter().find(|h| h.name == "pre-push").unwrap();
+        assert!(pre_push.exists);
+        assert!(pre_push.enabled);
     }
 
     #[tokio::test]
