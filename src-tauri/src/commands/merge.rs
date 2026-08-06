@@ -820,12 +820,22 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
 /// Execute an interactive rebase using git CLI
 #[command]
 pub async fn execute_interactive_rebase(path: String, onto: String, todo: String) -> Result<()> {
-    // Write the todo to a temp file
-    let todo_path = std::env::temp_dir().join("leviathan-rebase-todo");
+    // Unique names per call, like apply_patch_to_index. The fixed
+    // /tmp/leviathan-rebase-todo these replace meant two rebases running at
+    // once would read each other's plan — one repo silently rewritten with the
+    // other's drops — and the predictable path in a world-writable directory
+    // was a symlink target for anyone on the machine.
+    let todo_file = tempfile::Builder::new()
+        .prefix("leviathan-rebase-todo-")
+        .tempfile()?;
+    let todo_path = todo_file.path().to_path_buf();
     std::fs::write(&todo_path, &todo)?;
 
     // Create a script that outputs the todo file content
-    let script_path = std::env::temp_dir().join("leviathan-rebase-editor");
+    let script_file = tempfile::Builder::new()
+        .prefix("leviathan-rebase-editor-")
+        .tempfile()?;
+    let script_path = script_file.path().to_path_buf();
 
     #[cfg(target_os = "windows")]
     {
@@ -850,9 +860,10 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
-    // Clean up temp files
-    let _ = std::fs::remove_file(&todo_path);
-    let _ = std::fs::remove_file(&script_path);
+    // NamedTempFile removes the file on drop; dropping here keeps the cleanup
+    // adjacent to the run it belongs to.
+    drop(todo_file);
+    drop(script_file);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

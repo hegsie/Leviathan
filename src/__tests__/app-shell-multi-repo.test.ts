@@ -136,6 +136,17 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  /** start_auto_fetch now resolves a credential token first, so the invoke
+   * lands a microtask later than a bare `setTimeout(0)` observes. */
+  const waitForCommand = async (command: string): Promise<{ command: string; args: any } | undefined> => {
+    for (let i = 0; i < 50; i++) {
+      const call = invokeCallArgs.find((c) => c.command === command);
+      if (call) return call;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return undefined;
+  };
+
   describe('auto-fetch lifecycle across open repos', () => {
     it('starts auto-fetch for newly opened repos when an interval is set', async () => {
       settingsStore.setState({ autoFetchInterval: 5 });
@@ -143,9 +154,8 @@ describe('app-shell multi-repo behavior', () => {
       document.body.appendChild(el);
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
-        await new Promise((r) => setTimeout(r, 0));
 
-        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        const startCall = await waitForCommand('start_auto_fetch');
         expect(startCall).to.not.be.undefined;
         expect(startCall!.args.path).to.equal('/repo/one');
       } finally {
@@ -177,7 +187,9 @@ describe('app-shell multi-repo behavior', () => {
       document.body.appendChild(el);
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
-        await new Promise((r) => setTimeout(r, 0));
+        // Let the initial start land before clearing, or its late arrival reads
+        // as a restart triggered by the settings write below.
+        await waitForCommand('start_auto_fetch');
         invokeCallArgs.length = 0;
 
         settingsStore.setState({ minimizeToTray: true });
@@ -186,8 +198,7 @@ describe('app-shell multi-repo behavior', () => {
 
         // An ACTUAL interval change does restart
         settingsStore.setState({ autoFetchInterval: 10 });
-        await new Promise((r) => setTimeout(r, 0));
-        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        const startCall = await waitForCommand('start_auto_fetch');
         expect(startCall).to.not.be.undefined;
         expect(startCall!.args.intervalMinutes).to.equal(10);
       } finally {

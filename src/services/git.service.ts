@@ -1405,6 +1405,21 @@ export async function deleteTag(
 export async function pushTag(
   args: PushTagCommand,
 ): Promise<CommandResult<void>> {
+  if (!await checkNetworkPermission('push tag', args.remote)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
+  // push_tag takes a token and feeds it to the same credentials helper `push`
+  // uses, but nothing ever supplied one — so on a token-authenticated HTTPS
+  // remote the toolbar Push worked and "Push tag" failed with "No valid
+  // credentials found".
+  if (!args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
   return invokeCommand<void>("push_tag", args);
 }
 
@@ -1925,6 +1940,11 @@ export async function addSubmodule(
   submodulePath: string,
   branch?: string,
 ): Promise<CommandResult<Submodule>> {
+  // `git submodule add` clones from `url` — a network operation despite living
+  // among the local submodule commands.
+  if (!await checkNetworkPermission('add submodule', url)) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
   return invokeCommand<Submodule>("add_submodule", {
     path: repoPath,
     url,
@@ -1953,6 +1973,12 @@ export async function updateSubmodules(
     token?: string;
   },
 ): Promise<CommandResult<void>> {
+  // `git submodule update` fetches (and clones with --init), so it belongs
+  // behind the same gate as fetch/pull.
+  if (!await checkNetworkPermission('update submodules')) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
+
   // Try to find a token if not provided
   let token = options?.token;
   if (!token) {
@@ -2143,6 +2169,9 @@ export async function getLfsFiles(
 export async function lfsPull(
   repoPath: string,
 ): Promise<CommandResult<string>> {
+  if (!await checkNetworkPermission('LFS pull')) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
   const token = await getRepoToken(repoPath);
   return invokeCommand<string>("lfs_pull", { path: repoPath, token });
 }
@@ -2151,6 +2180,9 @@ export async function lfsFetch(
   repoPath: string,
   refs?: string[],
 ): Promise<CommandResult<string>> {
+  if (!await checkNetworkPermission('LFS fetch')) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Operation blocked by security settings' } };
+  }
   const token = await getRepoToken(repoPath);
   return invokeCommand<string>("lfs_fetch", { path: repoPath, refs, token });
 }
@@ -4331,9 +4363,23 @@ export async function startAutoFetch(
   repoPath: string,
   intervalMinutes: number,
 ): Promise<CommandResult<void>> {
+  // Offline mode has to stop the background loop too, or "offline" leaks a
+  // fetch every N minutes. Checked without prompting: this is not a gesture the
+  // user is standing in front of, so a confirm here would be a dialog out of
+  // nowhere — offline/allowlist block it, confirmNetworkOps does not apply.
+  if (settingsStore.getState().offlineMode) {
+    return { success: false, error: { code: 'BLOCKED', message: 'Offline mode is enabled' } };
+  }
+
+  // The background loop authenticates with whatever token we hand it; without
+  // one it could only ever use SSH or an OS-keyring credential, so auto-fetch
+  // failed silently on token-authenticated HTTPS remotes.
+  const token = await getRepoToken(repoPath);
+
   return invokeCommand<void>("start_auto_fetch", {
     path: repoPath,
     intervalMinutes,
+    token,
   });
 }
 

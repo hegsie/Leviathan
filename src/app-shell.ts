@@ -1487,6 +1487,7 @@ export class AppShell extends LitElement {
       pull: () => this.handlePull(),
       push: () => this.handlePush(),
       createStash: () => this.handleCreateStash(),
+      createBranch: () => this.createBranchDialog?.open(),
       closeDiff: () => this.handleCloseOverlay(),
       nextTab: () => this.cycleRepositoryTab(1),
       previousTab: () => this.cycleRepositoryTab(-1),
@@ -3104,6 +3105,14 @@ export class AppShell extends LitElement {
         action: () => this.handleCreateStash(),
       },
       {
+        id: 'create-branch',
+        label: 'Create branch',
+        category: 'action',
+        icon: 'branch',
+        shortcut: `${mod}⇧N`,
+        action: this.requiresRepository(() => this.createBranchDialog?.open()),
+      },
+      {
         id: 'create-tag',
         label: 'Create tag',
         category: 'action',
@@ -3582,6 +3591,23 @@ export class AppShell extends LitElement {
     this.updateUnlisteners.push(unlistenUpdates);
   }
 
+  /** Repos whose auto-fetch failure has already been reported. Auto-fetch
+   * retries on a timer, so an un-deduped toast would repeat forever; a silent
+   * failure is worse, though — it freezes the ahead/behind badge the user reads
+   * before deciding to push or force-push. Report once per repo per outage. */
+  private autoFetchFailureReported = new Set<string>();
+
+  private reportAutoFetchFailure(repoPath: string, message?: string): void {
+    if (this.autoFetchFailureReported.has(repoPath)) return;
+    this.autoFetchFailureReported.add(repoPath);
+    const repoName = repoPath.split(/[\\/]/).filter(Boolean).pop() || repoPath;
+    showToast(
+      `${repoName}: auto-fetch failed${message ? ` — ${message}` : ''}. Ahead/behind counts may be stale.`,
+      'warning',
+      6000,
+    );
+  }
+
   // Auto-fetch runs for every open repo. Every successful result updates
   // that repo's ahead/behind in the store (so tab badges stay fresh even for
   // background tabs), but only the ACTIVE repo's result may drive the
@@ -3593,7 +3619,12 @@ export class AppShell extends LitElement {
     ahead: number;
     message?: string;
   }): void => {
-    if (!event.success) return;
+    if (!event.success) {
+      this.reportAutoFetchFailure(event.repoPath, event.message);
+      return;
+    }
+    // Recovered — let the next failure speak again.
+    this.autoFetchFailureReported.delete(event.repoPath);
 
     const store = repositoryStore.getState();
     const repo = store.openRepositories.find((r) => r.repository.path === event.repoPath);
@@ -3651,7 +3682,10 @@ export class AppShell extends LitElement {
     // Pinned: fetch is a slow network op; if the user switches tabs while it
     // runs, the refresh must target the repo that fetched, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.fetch({ path: repoPath });
+    // silent: this handler owns the messaging (and the backend's
+    // remote-operation-completed event toasts the success). Without it every
+    // toolbar fetch stacked two toasts, and every failure two errors.
+    const result = await gitService.fetch({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
@@ -3667,7 +3701,7 @@ export class AppShell extends LitElement {
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.
-    const result = await gitService.pull({ path: repoPath });
+    const result = await gitService.pull({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       // Pinned: a ref-only pull emits no working-tree watcher event, so a
@@ -3676,12 +3710,16 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
+      // Not a failure from the user's side — the pull landed and now needs
+      // resolving. A red "Pull failed" here reads as "nothing happened".
+      showToast('Pull produced conflicts — resolve them to finish the merge', 'warning');
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
       this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
+      showToast('Pull produced conflicts — resolve them to finish the rebase', 'warning');
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
@@ -3702,7 +3740,7 @@ export class AppShell extends LitElement {
     // Pinned: push is a slow network op; if the user switches tabs while it
     // runs, the refresh must target the repo that pushed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.push({ path: repoPath });
+    const result = await gitService.push({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
@@ -3991,7 +4029,14 @@ export class AppShell extends LitElement {
                 @tag-selected=${this.handleTagSelected}
                 @branch-selected=${this.handleBranchSelected}
                 @repository-changed=${() => this.handleRefresh()}
-                @create-tag=${() => this.createTagDialog?.open()}
+                @create-tag=${(e: CustomEvent<{ targetRef?: string }>) =>
+                  this.createTagDialog?.open(e.detail?.targetRef)}
+                @create-branch=${(e: CustomEvent<{ startPoint?: string }>) =>
+                  this.createBranchDialog?.open(e.detail?.startPoint)}
+                @interactive-rebase=${(e: CustomEvent<{ onto?: string }>) => {
+                  const onto = e.detail?.onto;
+                  if (onto) this.interactiveRebaseDialog?.open(onto);
+                }}
               >
                 <lv-left-panel></lv-left-panel>
               </aside>
@@ -4645,6 +4690,8 @@ export class AppShell extends LitElement {
         <lv-interactive-rebase-dialog
           id="app-rebase-dialog"
           .repositoryPath=${this.activeRepository.repository.path}
+          @rebase-complete=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-interactive-rebase-dialog>
       ` : ''}
 

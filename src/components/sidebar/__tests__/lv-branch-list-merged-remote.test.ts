@@ -174,13 +174,12 @@ describe('lv-branch-list create-branch-from remote (Finding 14)', () => {
       isRemote: true,
     });
 
-    // Capture what the create-branch dialog is opened with.
+    // The list no longer mounts its own dialog — it asks the host to open the
+    // single instance, carrying the start point.
     let openedWith: string | undefined;
-    const dialog = (el as unknown as { createBranchDialog: { open: (sp?: string) => void } }).createBranchDialog;
-    expect(dialog, 'create-branch dialog should be rendered').to.exist;
-    dialog.open = (sp?: string) => {
-      openedWith = sp;
-    };
+    el.addEventListener('create-branch', (e) => {
+      openedWith = (e as CustomEvent<{ startPoint?: string }>).detail?.startPoint;
+    });
 
     (el as unknown as { contextMenu: unknown }).contextMenu = {
       visible: true,
@@ -201,10 +200,9 @@ describe('lv-branch-list create-branch-from remote (Finding 14)', () => {
     const localBranch = makeBranch({ name: 'feature/x', shorthand: 'feature/x' });
 
     let openedWith: string | undefined;
-    const dialog = (el as unknown as { createBranchDialog: { open: (sp?: string) => void } }).createBranchDialog;
-    dialog.open = (sp?: string) => {
-      openedWith = sp;
-    };
+    el.addEventListener('create-branch', (e) => {
+      openedWith = (e as CustomEvent<{ startPoint?: string }>).detail?.startPoint;
+    });
 
     (el as unknown as { contextMenu: unknown }).contextMenu = {
       visible: true,

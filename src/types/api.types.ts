@@ -450,6 +450,7 @@ export interface PushTagCommand {
   name: string;
   remote?: string;
   force?: boolean;
+  token?: string;
 }
 
 export interface GetTagDetailsCommand {

@@ -492,7 +492,7 @@ export class LvWorktreeDialog extends LitElement {
 
     const confirmed = await showConfirm(
       'Remove Worktree',
-      `Are you sure you want to remove the worktree at "${worktree.path}"?`,
+      `Remove the worktree at "${worktree.path}"? Its working directory will be deleted; committed work stays in the repository.`,
       'warning'
     );
 
@@ -501,10 +501,30 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.removeWorktree(repoPath, worktree.path);
+    let result = await gitService.removeWorktree(repoPath, worktree.path);
+
+    // git refuses to remove a worktree holding uncommitted or untracked work
+    // and tells the user to pass --force — a flag this dialog never exposed, so
+    // the flow dead-ended on a raw CLI error with no way to finish. Offer the
+    // same force escalation the branch-delete paths do, naming what is at stake.
+    if (!result.success && this.isDirtyWorktreeError(result.error?.message)) {
+      this.loading = false;
+      const forced = await showConfirm(
+        'Remove Worktree',
+        `The worktree at "${worktree.path}" contains modified or untracked files. Removing it will permanently discard that work. Continue?`,
+        'error'
+      );
+      if (!forced) {
+        this.error = '';
+        return;
+      }
+      this.loading = true;
+      result = await gitService.removeWorktree(repoPath, worktree.path, true);
+    }
 
     if (result.success) {
       this.success = 'Worktree removed';
+      this.error = '';
       await this.loadWorktrees();
       this.dispatchEvent(new CustomEvent('worktrees-changed'));
     } else {
@@ -512,6 +532,12 @@ export class LvWorktreeDialog extends LitElement {
     }
 
     this.loading = false;
+  }
+
+  /** git's refusal when a worktree still holds working-tree state. */
+  private isDirtyWorktreeError(message?: string): boolean {
+    if (!message) return false;
+    return /contains modified or untracked files/i.test(message);
   }
 
   private async handleLock(worktree: Worktree): Promise<void> {

@@ -8,10 +8,6 @@ import { dragDropService, type DragItem } from '../../services/drag-drop.service
 import { settingsStore } from '../../stores/settings.store.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import { fuzzyScore } from '../../utils/fuzzy-search.ts';
-import '../dialogs/lv-create-branch-dialog.ts';
-import type { LvCreateBranchDialog } from '../dialogs/lv-create-branch-dialog.ts';
-import '../dialogs/lv-interactive-rebase-dialog.ts';
-import type { LvInteractiveRebaseDialog } from '../dialogs/lv-interactive-rebase-dialog.ts';
 import '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
@@ -586,8 +582,6 @@ export class LvBranchList extends LitElement {
    */
   @state() private cleanupCheckFailed = false;
 
-  @query('lv-create-branch-dialog') private createBranchDialog!: LvCreateBranchDialog;
-  @query('lv-interactive-rebase-dialog') private interactiveRebaseDialog!: LvInteractiveRebaseDialog;
   @query('lv-branch-cleanup-dialog') private branchCleanupDialog!: LvBranchCleanupDialog;
 
   private static readonly HIDDEN_BRANCHES_STORAGE_PREFIX = 'lv-hidden-branches:';
@@ -607,28 +601,11 @@ export class LvBranchList extends LitElement {
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadBranches();
-    // Close our OWN embedded interactive-rebase dialog when its pinned repo's
-    // tab is closed — mirrors app-shell's guard for the app-level dialogs.
-    // Without it, the dialog (kept alive across refreshes by the single
-    // stable template) floats over a closed repo and Execute would rewrite
-    // a repo with no tab to observe it.
+    // Close the branch-cleanup dialog when its pinned repo's tab is closed.
     this.storeUnsubscribe = repositoryStore.subscribe((state) => {
       const gone = (p: string | null): boolean =>
         !!p && !state.openRepositories.some((r) => r.repository.path === p);
-      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (gone(rbPinned)) {
-        this.interactiveRebaseDialog.close();
-        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
-      }
-      // Same for our OWN embedded create-branch dialog: app-shell's guard only
-      // reaches app-shell's instance, not this one in the sidebar's shadow
-      // root. Create + checkout on a closed repo would be a silent mutation.
-      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (gone(cbPinned)) {
-        this.createBranchDialog.close();
-        showToast('The repository tab was closed — branch creation cancelled', 'warning');
-      }
-      // And the branch-cleanup dialog: its Delete force-deletes branches +
+      // The branch-cleanup dialog: its Delete force-deletes branches +
       // prunes remotes on the pinned repo, so a closed tab must dismiss it.
       const clPinned = this.branchCleanupDialog?.pinnedRepositoryPathIfOpen ?? null;
       if (gone(clPinned)) {
@@ -938,7 +915,20 @@ export class LvBranchList extends LitElement {
   }
 
   private handleCreateBranch(): void {
-    this.createBranchDialog.open();
+    this.requestCreateBranch();
+  }
+
+  /** Ask app-shell to open THE create-branch dialog. This list used to mount a
+   * second instance of its own: with two copies alive, each `open()`'s "already
+   * open, don't wipe the input" guard only knew about itself, so opening from
+   * here and then from the palette stacked two dialogs with different pinned
+   * start points over each other. */
+  private requestCreateBranch(startPoint?: string): void {
+    this.dispatchEvent(new CustomEvent('create-branch', {
+      bubbles: true,
+      composed: true,
+      detail: { startPoint },
+    }));
   }
 
   private handleFilterInput(e: InputEvent): void {
@@ -1052,20 +1042,7 @@ export class LvBranchList extends LitElement {
     // The cleanup dialog pins to the repo it ran on and reports it here. The
     // user may have switched tabs while it was open (rebinding our live
     // repositoryPath), so trust the event's repo and only reload OUR view when
-    // it matches. Mirrors handleBranchCreated / handleRebaseComplete.
-    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
-    if (repoPath === this.repositoryPath) {
-      await this.loadBranches();
-    }
-    this.dispatchBranchesChanged(repoPath);
-  }
-
-  private async handleBranchCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
-    // The dialog pins to the repo it was opened for and reports it here. The
-    // user may have switched tabs while the dialog was open (rebinding our live
-    // repositoryPath), so trust the event's repo — not our current prop — and
-    // only reload OUR view when it matches the repo we're showing. Mirrors
-    // handleRebaseComplete.
+    // it matches.
     const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
     if (repoPath === this.repositoryPath) {
       await this.loadBranches();
@@ -1331,10 +1308,14 @@ export class LvBranchList extends LitElement {
 
   private handleInteractiveRebase(): void {
     const branch = this.contextMenu.branch;
-    if (!branch) return;
+    if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.interactiveRebaseDialog.open(branch.shorthand);
+    this.dispatchEvent(new CustomEvent('interactive-rebase', {
+      bubbles: true,
+      composed: true,
+      detail: { onto: branch.shorthand },
+    }));
   }
 
   /** Dispatch branches-changed carrying the repo the mutating operation ran
@@ -1349,19 +1330,6 @@ export class LvBranchList extends LitElement {
     }));
   }
 
-  private async handleRebaseComplete(e: Event): Promise<void> {
-    // Reload our OWN view only when the rebase ran on the repo we're
-    // showing. After a mid-rebase tab switch the completed repo may be
-    // backgrounded (this.repositoryPath has rebound) — reloading it here
-    // would refresh the wrong repo; app-shell's host-level rebase-complete
-    // listener marks the originating repo stale for refresh on
-    // reactivation. The event still bubbles there (no stopPropagation).
-    const repoPath = (e as CustomEvent<{ repositoryPath?: string }>).detail?.repositoryPath;
-    if (repoPath && repoPath !== this.repositoryPath) return;
-    await this.loadBranches();
-    this.dispatchBranchesChanged(repoPath ?? this.repositoryPath);
-  }
-
   private handleCreateBranchFrom(): void {
     const branch = this.contextMenu.branch;
     if (!branch) return;
@@ -1370,7 +1338,7 @@ export class LvBranchList extends LitElement {
     // For remote branches the start point must be the full remote-tracking name
     // (e.g. "origin/feature"); the stripped shorthand ("feature") either fails to
     // resolve or resolves to a same-named LOCAL branch at a different commit.
-    this.createBranchDialog.open(branch.isRemote ? branch.name : branch.shorthand);
+    this.requestCreateBranch(branch.isRemote ? branch.name : branch.shorthand);
   }
 
   private async handleTrackRemoteBranch(): Promise<void> {
@@ -1568,7 +1536,7 @@ export class LvBranchList extends LitElement {
       <li
         class="branch-item ${branch.isHead ? 'active' : ''} ${nested ? 'nested' : ''} ${isDragging ? 'dragging' : ''} ${dropClass} ${staleClass} ${hiddenClass} ${this.contextMenu.visible && this.contextMenu.branch?.name === branch.name ? 'context-target' : ''}"
         role="listitem"
-        draggable=${!branch.isHead ? 'true' : 'false'}
+        draggable=${!branch.isHead && !this.operationInProgress ? 'true' : 'false'}
         @click=${() => this.handleBranchClick(branch)}
         @dblclick=${() => this.handleCheckout(branch)}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, branch)}
@@ -1653,6 +1621,25 @@ export class LvBranchList extends LitElement {
 
     const sourceBranch = this.draggingBranch;
     if (!sourceBranch || sourceBranch.name === targetBranch.name) return;
+
+    // Every context-menu handler beside this one takes `operationInProgress`
+    // before it starts. Drop did not, so a drag-merge landed on top of an
+    // in-flight merge/checkout from the menu — two git operations mutating the
+    // same worktree at once.
+    if (this.operationInProgress) return;
+    this.operationInProgress = true;
+    try {
+      await this.runDrop(e, targetBranch, sourceBranch);
+    } finally {
+      this.operationInProgress = false;
+    }
+  }
+
+  private async runDrop(
+    e: DragEvent,
+    targetBranch: Branch,
+    sourceBranch: Branch,
+  ): Promise<void> {
 
     // Determine action based on alt key
     const action = e.altKey ? 'rebase' : 'merge';
@@ -2018,7 +2005,7 @@ export class LvBranchList extends LitElement {
             </svg>
             Rebase current onto this
           </button>
-          <button class="context-menu-item" role="menuitem" @click=${this.handleInteractiveRebase}>
+          <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleInteractiveRebase}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
               <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
               <line x1="9" y1="9" x2="15" y2="9"></line>
@@ -2170,16 +2157,6 @@ export class LvBranchList extends LitElement {
     // tabs. Keeping them at a stable template position preserves the element
     // instances across loading/error toggles.
     const dialogs = html`
-      <lv-create-branch-dialog
-        .repositoryPath=${this.repositoryPath}
-        @branch-created=${this.handleBranchCreated}
-      ></lv-create-branch-dialog>
-
-      <lv-interactive-rebase-dialog
-        .repositoryPath=${this.repositoryPath}
-        @rebase-complete=${this.handleRebaseComplete}
-      ></lv-interactive-rebase-dialog>
-
       <lv-branch-cleanup-dialog
         .repositoryPath=${this.repositoryPath}
         @cleanup-complete=${this.handleCleanupComplete}
