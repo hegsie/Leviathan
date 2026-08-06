@@ -221,6 +221,10 @@ pub async fn fetch(
 /// recover it. git itself refuses such a fast-forward.
 fn fast_forward_to(repo: &git2::Repository, refname: &str, target_oid: git2::Oid) -> Result<()> {
     let target_commit = repo.find_commit(target_oid)?;
+    // Resolved before the checkout: a refname that does not exist must abort
+    // while the working tree is still untouched, not after it has been
+    // rewritten to content HEAD does not point at.
+    repo.find_reference(refname)?;
 
     // Collect the conflicting paths so the error can name them, like git's own
     // "Your local changes to the following files ..." message.
@@ -294,11 +298,30 @@ pub async fn pull(
 
                 let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-                let branch_name = if let Some(ref b) = branch_for_task {
-                    b.clone()
+                // On a detached HEAD, shorthand() is the literal "HEAD" — so
+                // this used to resolve origin/HEAD (a symref that DOES exist in
+                // a normal clone), fast-forward-check-out its tree, and only
+                // then fail looking up "refs/heads/HEAD". The tree ended up
+                // holding origin/main's content while HEAD still pointed at the
+                // tag, so every diverging file showed as an uncommitted change.
+                // git refuses to pull with no upstream; so do we. merge() gets
+                // this right by using head.name() rather than rebuilding it.
+                let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
+                    (b.clone(), format!("refs/heads/{}", b))
                 } else {
                     let head = repo.head()?;
-                    head.shorthand().unwrap_or("main").to_string()
+                    if !head.is_branch() {
+                        return Err(LeviathanError::OperationFailed(
+                            "You are not currently on a branch. Check out a branch before \
+                             pulling, or say which branch to pull."
+                                .to_string(),
+                        ));
+                    }
+                    let refname = head
+                        .name()
+                        .map_err(|_| LeviathanError::InvalidReference)?
+                        .to_string();
+                    (head.shorthand().unwrap_or("main").to_string(), refname)
                 };
 
                 let remote_ref = format!("{}/{}", remote_for_task, branch_name);
@@ -352,8 +375,7 @@ pub async fn pull(
                     if analysis.is_up_to_date() {
                         message = "Already up to date".to_string();
                     } else if analysis.is_fast_forward() {
-                        let refname = format!("refs/heads/{}", branch_name);
-                        fast_forward_to(&repo, &refname, fetch_commit.id())?;
+                        fast_forward_to(&repo, &head_refname, fetch_commit.id())?;
                         message = "Fast-forward merge completed".to_string();
                     } else {
                         // Normal merge. Anything that fails AFTER repo.merge()
@@ -1220,6 +1242,43 @@ mod tests {
             std::fs::read_to_string(test_repo.path.join("other.txt")).unwrap(),
             "uncommitted\n",
             "the unrelated edit survives"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_aborts_before_touching_the_tree_when_the_ref_is_missing() {
+        // On a detached HEAD, pull used to rebuild the refname from
+        // shorthand() — "refs/heads/HEAD" — and only look it up AFTER the
+        // checkout had already rewritten the working tree. HEAD stayed on the
+        // tag while every tracked file held the incoming content, so the whole
+        // diverging file set showed up as uncommitted modifications.
+        let (test_repo, incoming) = repo_behind_by_one();
+        let before = std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap();
+        let head_before = test_repo
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        fast_forward_to(&test_repo.repo(), "refs/heads/HEAD", incoming)
+            .expect_err("a missing ref must abort the fast-forward");
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            before,
+            "the working tree must be untouched when the ref lookup fails"
+        );
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            head_before
         );
     }
 

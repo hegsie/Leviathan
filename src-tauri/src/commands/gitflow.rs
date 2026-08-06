@@ -142,6 +142,13 @@ pub async fn init_gitflow(
 #[command]
 pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    // Every gitflow start/finish switches branches (checkout_tree + set_head)
+    // without being called checkout, so the hand-placed ensure_checkoutable
+    // calls in branch.rs missed all six. Switching out of a paused rebase or
+    // an unresolved merge orphans the state on disk: the still-visible Abort
+    // then yanks the user back to the original branch, discarding whatever
+    // they did on the new one.
+    crate::commands::branch::ensure_checkoutable(&repo)?;
     let config = repo.config()?;
 
     let develop = config
@@ -273,6 +280,13 @@ pub async fn gitflow_finish_feature(
     squash: Option<bool>,
 ) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    // Every gitflow start/finish switches branches (checkout_tree + set_head)
+    // without being called checkout, so the hand-placed ensure_checkoutable
+    // calls in branch.rs missed all six. Switching out of a paused rebase or
+    // an unresolved merge orphans the state on disk: the still-visible Abort
+    // then yanks the user back to the original branch, discarding whatever
+    // they did on the new one.
+    crate::commands::branch::ensure_checkoutable(&repo)?;
     let config = repo.config()?;
 
     let develop = config
@@ -375,6 +389,13 @@ pub async fn gitflow_finish_feature(
 #[command]
 pub async fn gitflow_start_release(path: String, version: String) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    // Every gitflow start/finish switches branches (checkout_tree + set_head)
+    // without being called checkout, so the hand-placed ensure_checkoutable
+    // calls in branch.rs missed all six. Switching out of a paused rebase or
+    // an unresolved merge orphans the state on disk: the still-visible Abort
+    // then yanks the user back to the original branch, discarding whatever
+    // they did on the new one.
+    crate::commands::branch::ensure_checkoutable(&repo)?;
     let config = repo.config()?;
 
     let develop = config
@@ -444,6 +465,9 @@ async fn finish_release_like(
     prefix_default: &str,
 ) -> Result<GitFlowFinishResult> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    // Backs both gitflow_finish_release and gitflow_finish_hotfix, and switches
+    // branches twice — see the comment on the start commands above.
+    crate::commands::branch::ensure_checkoutable(&repo)?;
     let config = repo.config()?;
 
     let master = config
@@ -584,6 +608,13 @@ async fn finish_release_like(
 #[command]
 pub async fn gitflow_start_hotfix(path: String, version: String) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    // Every gitflow start/finish switches branches (checkout_tree + set_head)
+    // without being called checkout, so the hand-placed ensure_checkoutable
+    // calls in branch.rs missed all six. Switching out of a paused rebase or
+    // an unresolved merge orphans the state on disk: the still-visible Abort
+    // then yanks the user back to the original branch, discarding whatever
+    // they did on the new one.
+    crate::commands::branch::ensure_checkoutable(&repo)?;
     let config = repo.config()?;
 
     let master = config
@@ -656,6 +687,52 @@ mod tests {
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(!config.initialized);
+    }
+
+    /// Every gitflow start/finish switches branches without being called
+    /// checkout, so the hand-placed ensure_checkoutable calls in branch.rs
+    /// missed all of them. Switching out of a paused rebase orphans the state
+    /// on disk; the still-visible Abort then discards the new branch's work.
+    #[tokio::test]
+    async fn test_gitflow_start_refuses_mid_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Pause an interactive rebase the way an `edit` line does.
+        let head = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
+        std::fs::create_dir_all(repo.path.join(".git/rebase-merge")).unwrap();
+        std::fs::write(repo.path.join(".git/rebase-merge/interactive"), "").unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/head-name"),
+            "refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/onto"),
+            format!("{}\n", head),
+        )
+        .unwrap();
+        assert_ne!(repo.repo().state(), git2::RepositoryState::Clean);
+
+        for err in [
+            gitflow_start_feature(repo.path_str(), "escape".to_string())
+                .await
+                .expect_err("start feature must refuse mid-rebase"),
+            gitflow_start_release(repo.path_str(), "9.9.9".to_string())
+                .await
+                .expect_err("start release must refuse mid-rebase"),
+            gitflow_start_hotfix(repo.path_str(), "9.9.9".to_string())
+                .await
+                .expect_err("start hotfix must refuse mid-rebase"),
+        ] {
+            assert!(
+                err.to_string().contains("rebase is in progress"),
+                "unexpected error: {}",
+                err
+            );
+        }
     }
 
     /// A preventDeletion rule must survive a git-flow finish. These finishes

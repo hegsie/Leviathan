@@ -112,6 +112,14 @@ pub async fn create_branch(
 ) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // "Checkout new branch after creation" is the dialog's default, so this
+    // switches branches without being called checkout — which is how it was
+    // missed when ensure_checkoutable was added to the two commands that are.
+    // Checked BEFORE the ref is created so a refusal leaves nothing behind.
+    if checkout.unwrap_or(false) {
+        ensure_checkoutable(&repo)?;
+    }
+
     let commit = if let Some(ref start) = start_point {
         let obj = repo.revparse_single(start)?;
         obj.peel_to_commit()?
@@ -125,10 +133,24 @@ pub async fn create_branch(
     if checkout.unwrap_or(false) {
         let old_head = crate::commands::hooks::head_oid_string(&repo);
         let obj = reference.peel(git2::ObjectType::Commit)?;
-        repo.checkout_tree(&obj, None)?;
-        repo.set_head(reference.name().map_err(|_| {
-            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-        })?)?;
+        // The checkout is fallible (a dirty file that differs between HEAD and
+        // the start point conflicts), and the ref already exists by now. Roll
+        // it back so "create failed" stays literally true — otherwise the
+        // dialog showed an error while the refs watcher made the branch appear
+        // in the sidebar, and a retry dead-ended on "already exists".
+        let switch = (|| -> Result<()> {
+            repo.checkout_tree(&obj, None)?;
+            repo.set_head(reference.name().map_err(|_| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?)?;
+            Ok(())
+        })();
+        if let Err(e) = switch {
+            if let Ok(mut created) = repo.find_branch(&name, git2::BranchType::Local) {
+                let _ = created.delete();
+            }
+            return Err(e);
+        }
         let new_head = crate::commands::hooks::head_oid_string(&repo);
         crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
     }
@@ -301,7 +323,7 @@ pub async fn rename_branch(
 /// refused with "Another operation is in progress", and the still-visible
 /// Abort would yank the user back to the original branch. Canonical git
 /// refuses the same way.
-fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
+pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
     use git2::RepositoryState::*;
     let what = match repo.state() {
         Clean => return Ok(()),
@@ -1034,6 +1056,124 @@ mod tests {
         let branch = result.unwrap();
         assert_eq!(branch.name, "new-feature");
         assert!(branch.is_head); // checkout was true
+    }
+
+    /// Put `repo` into a paused interactive rebase, the way an `edit` line
+    /// leaves it: state on disk, HEAD detached, working tree clean. Nothing is
+    /// modal on screen in this state, so every branch-switching surface stays
+    /// live.
+    fn pause_an_interactive_rebase(repo: &TestRepo) {
+        let git = repo.repo();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        std::fs::create_dir_all(repo.path.join(".git/rebase-merge")).unwrap();
+        std::fs::write(repo.path.join(".git/rebase-merge/interactive"), "").unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/head-name"),
+            "refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/onto"),
+            format!("{}\n", head.id()),
+        )
+        .unwrap();
+        assert_ne!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "the fixture must actually put the repo mid-rebase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_checkoutable_refuses_mid_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        pause_an_interactive_rebase(&repo);
+
+        let err = checkout(repo.path_str(), "main".to_string(), None)
+            .await
+            .expect_err("checkout must refuse while a rebase is in progress");
+        assert!(
+            err.to_string().contains("rebase is in progress"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_with_checkout_refuses_mid_rebase() {
+        // "Checkout new branch after creation" is the dialog default, so this
+        // switched branches without being called checkout — orphaning the
+        // rebase state on disk. The still-visible Abort would then yank the
+        // user back to the original branch, discarding the new branch's work.
+        let repo = TestRepo::with_initial_commit();
+        let head_before = repo.repo().head().unwrap().target();
+        pause_an_interactive_rebase(&repo);
+
+        let err = create_branch(repo.path_str(), "escape".to_string(), None, Some(true))
+            .await
+            .expect_err("create+checkout must refuse while a rebase is in progress");
+        assert!(
+            err.to_string().contains("rebase is in progress"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            repo.repo()
+                .find_branch("escape", git2::BranchType::Local)
+                .is_err(),
+            "a refusal must not leave the branch behind"
+        );
+        assert_eq!(repo.repo().head().unwrap().target(), head_before);
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_without_checkout_is_allowed_mid_rebase() {
+        // Creating a ref does not switch branches, so it must stay available.
+        let repo = TestRepo::with_initial_commit();
+        pause_an_interactive_rebase(&repo);
+
+        create_branch(repo.path_str(), "bookmark".to_string(), None, Some(false))
+            .await
+            .expect("creating a ref mid-rebase is not a branch switch");
+        assert!(repo
+            .repo()
+            .find_branch("bookmark", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_rolls_back_when_the_checkout_fails() {
+        // A dirty file that differs between HEAD and the start point makes the
+        // SAFE checkout conflict. The ref already exists by then; without a
+        // rollback the dialog showed an error while the sidebar grew the
+        // branch, and a retry dead-ended on "already exists".
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.head_oid();
+        repo.create_commit("second", &[("conflicted.txt", "from HEAD\n")]);
+        // Uncommitted content that differs from BOTH sides.
+        repo.create_file("conflicted.txt", "my unsaved work\n");
+
+        let result = create_branch(
+            repo.path_str(),
+            "from-initial".to_string(),
+            Some(initial.to_string()),
+            Some(true),
+        )
+        .await;
+
+        if result.is_err() {
+            assert!(
+                repo.repo()
+                    .find_branch("from-initial", git2::BranchType::Local)
+                    .is_err(),
+                "a failed create+checkout must not leave the ref behind"
+            );
+        }
+        // The uncommitted work survives either way.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("conflicted.txt")).unwrap(),
+            "my unsaved work\n"
+        );
     }
 
     #[tokio::test]
