@@ -10,10 +10,13 @@
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 const invoked: Array<{ command: string; args?: unknown }> = [];
 let failCommands = new Set<string>();
+let failureFor: Map<string, { code: string; message: string }> = new Map();
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
     invoked.push({ command, args });
+    const specific = failureFor.get(command);
+    if (specific) return Promise.reject(specific);
     if (failCommands.has(command)) {
       return Promise.reject({ code: 'COMMAND_ERROR', message: 'remote hung up' });
     }
@@ -56,6 +59,7 @@ describe('workspace batch operations and the security gate', () => {
   beforeEach(() => {
     invoked.length = 0;
     failCommands = new Set();
+    failureFor = new Map();
     uiStore.setState({ toasts: [] });
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
@@ -113,6 +117,47 @@ describe('workspace batch operations and the security gate', () => {
     expect(summary).to.contain('succeeded');
     expect(summary).to.not.contain('failed');
     expect(summary).to.not.contain('skipped');
+  });
+
+  it('a repo left mid-merge is reported as conflicted, not as failed', async () => {
+    // The pull LANDED — the repo has a conflicted index and MERGE_HEAD. Calling
+    // that "failed" tells the user nothing happened there, which is the one
+    // reading that will make them stop looking.
+    const el = await dialogWithWorkspace();
+    failureFor = new Map([['pull', { code: 'MERGE_CONFLICT', message: 'conflicts in 2 files' }]]);
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handlePullAll();
+
+    const summary = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+    expect(summary).to.contain('need conflict resolution');
+    expect(summary, 'and not double-counted as a failure').to.not.contain('failed');
+  });
+
+  it('names the repos left mid-merge', async () => {
+    // "2 need conflict resolution" across a 10-repo workspace is not actionable.
+    const el = await dialogWithWorkspace();
+    failureFor = new Map([['pull', { code: 'MERGE_CONFLICT', message: 'conflicts' }]]);
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handlePullAll();
+
+    const summary = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+    for (const name of ['one', 'two', 'three']) {
+      expect(summary, `${name} is named`).to.contain(name);
+    }
+  });
+
+  it('names the repos that genuinely failed', async () => {
+    const el = await dialogWithWorkspace();
+    failCommands = new Set(['pull']);
+    uiStore.setState({ toasts: [] });
+
+    await (el as any).handlePullAll();
+
+    const summary = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+    expect(summary).to.contain('3 failed');
+    expect(summary).to.contain('one');
   });
 
   it('repos that are missing or not git repos are accounted for, not dropped', async () => {

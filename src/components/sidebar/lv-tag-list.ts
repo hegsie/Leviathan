@@ -597,6 +597,11 @@ export class LvTagList extends LitElement {
 
       if (result.success) {
         await this.loadTags();
+        // The same delete from the graph's ref menu toasts (app-shell
+        // handleDeleteTag). Here the row just vanished from a list that is
+        // often filtered or scrolled away from the deleted row, so the only
+        // signal the destructive operation ran at all was absence.
+        showToast(`Deleted tag ${tag.name}`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
           detail: { repositoryPath: repoPath },
           bubbles: true,
@@ -665,6 +670,9 @@ export class LvTagList extends LitElement {
         // push surface still building a raw toast.
         showErrorWithSuggestion(result.error?.message ?? '', 'Failed to push tag', {
           operation: 'push-tag',
+          // The Force Push Tag action needs the tag name; without it the
+          // suggestion renders a button that dispatches an undefined target.
+          branchName: tag.name,
           repoPath,
         });
       }

@@ -1040,8 +1040,14 @@ export class AppShell extends LitElement {
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
   private handleMergeConflictEvent = (e?: Event): void => {
-    const detail = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail;
-    this.conflictOperationType = 'merge';
+    const detail = (
+      e as CustomEvent<{ repositoryPath?: string; operationType?: 'merge' | 'rebase' }> | undefined
+    )?.detail;
+    // A pull configured to rebase raises REBASE_CONFLICT, and the dialog's
+    // Complete/Abort actions differ per operation — continuing a rebase is not
+    // committing a merge. Dispatchers that omit the type are all merges, so the
+    // default keeps them working unchanged.
+    this.conflictOperationType = detail?.operationType ?? 'merge';
     this.resetConflictDetailState();
     this.openConflictDialogPinned(detail?.repositoryPath);
     this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
@@ -1414,6 +1420,8 @@ export class AppShell extends LitElement {
     window.addEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.addEventListener('open-settings', this.handleOpenSettings);
     window.addEventListener('trigger-abort', this.handleTriggerAbort);
+    window.addEventListener('force-push', this.handleForcePush);
+    window.addEventListener('force-push-tag', this.handleForcePushTag);
     this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
@@ -1568,6 +1576,8 @@ export class AppShell extends LitElement {
     window.removeEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.removeEventListener('open-settings', this.handleOpenSettings);
     window.removeEventListener('trigger-abort', this.handleTriggerAbort);
+    window.removeEventListener('force-push', this.handleForcePush);
+    window.removeEventListener('force-push-tag', this.handleForcePushTag);
     this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     this.removeEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
@@ -2099,6 +2109,8 @@ export class AppShell extends LitElement {
       log.error('Push tag failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
         operation: 'push-tag',
+        // Carries the tag through to the Force Push Tag suggestion action.
+        branchName: tagName,
         repoPath,
       });
     }
@@ -2536,6 +2548,103 @@ export class AppShell extends LitElement {
     if (!repoPath) return;
     void this.handleAbortOperation(repoPath);
   };
+
+  /**
+   * "Force Push" from a rejected-push suggestion toast.
+   *
+   * The suggestion for libgit2's "non-fastforwardable" told the user to
+   * force-push — the only correct recovery after an amend or rebase — but the
+   * app had no affordance for it anywhere, so the advice dead-ended. This is
+   * that affordance, and it uses force-with-lease: if the remote moved since
+   * the last fetch (someone else pushed while the toast was up) the push is
+   * refused rather than silently discarding their commits.
+   */
+  private handleForcePush = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.forcePush(repoPath);
+  };
+
+  private async forcePush(repoPath: string): Promise<void> {
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) return;
+
+    const confirmed = await showConfirm(
+      'Force Push',
+      `This replaces the remote branch of ${repo.repository.name} with your local ` +
+        `commits. Any commits on the remote that you do not have will be removed ` +
+        `from it. The push is refused if the remote has moved since your last fetch.`,
+      'error'
+    );
+    if (!confirmed) return;
+
+    const opId = progressService.startOperation('push', 'Force pushing to remote...');
+    const result = await gitService.push({
+      path: repoPath,
+      forceWithLease: true,
+      silent: true,
+    });
+    if (result.success) {
+      progressService.completeOperation(opId);
+      showToast('Force pushed to remote', 'success');
+      this.refreshConflictDialogRepo(repoPath);
+    } else {
+      progressService.failOperation(opId);
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        // NOT through showErrorWithSuggestion: a force push that is itself
+        // rejected would match the same branch that produced this toast and
+        // offer Force Push again, an unbounded loop over the one action that
+        // discards remote commits.
+        showToast(result.error?.message || 'Force push failed', 'error');
+      }
+    }
+  }
+
+  /**
+   * "Force Push Tag" from a rejected tag-push suggestion toast. The previous
+   * suggestion said to delete the remote tag first, which Leviathan cannot do.
+   */
+  private handleForcePushTag = (e: Event): void => {
+    const detail = (e as CustomEvent<{ tagName?: string; repoPath?: string }>).detail;
+    const tagName = detail?.tagName;
+    const repoPath = this.resolvePinnedRepo(detail?.repoPath);
+    if (!tagName || !repoPath) return;
+    void this.forcePushTag(tagName, repoPath);
+  };
+
+  private async forcePushTag(tagName: string, repoPath: string): Promise<void> {
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) return;
+
+    const confirmed = await showConfirm(
+      'Force Push Tag',
+      `This moves the remote tag "${tagName}" in ${repo.repository.name} to your ` +
+        `local commit. Anyone who already fetched the tag keeps the old one until ` +
+        `they delete it locally.`,
+      'error'
+    );
+    if (!confirmed) return;
+
+    const result = await gitService.pushTag({
+      path: repoPath,
+      name: tagName,
+      force: true,
+    });
+    if (result.success) {
+      showToast(`Force pushed tag ${tagName}`, 'success');
+      this.refreshConflictDialogRepo(repoPath);
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
+      // Plain toast, same reason as forcePush: routing through the suggestion
+      // service would offer Force Push Tag again.
+      showToast(result.error?.message || 'Force push tag failed', 'error');
+    }
+  }
 
   private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     const commit = this.contextMenu.commit;

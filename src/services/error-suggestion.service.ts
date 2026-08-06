@@ -51,14 +51,32 @@ export function getErrorSuggestion(
     // refspec-generic pre-check, and neither pulling nor "newer changes"
     // describes it.
     if (context?.operation === 'push-tag') {
+      // "Delete the remote tag first" named something Leviathan cannot do —
+      // there is no remote-tag deletion anywhere in the app. push_tag already
+      // implements the force refspec, so offer that instead of advice the user
+      // cannot follow.
       return {
-        message:
-          'The remote already has this tag at a different commit. Delete the remote tag first if you mean to move it.',
+        message: 'The remote already has this tag at a different commit.',
+        action: {
+          label: 'Force Push Tag',
+          callback: () => window.dispatchEvent(new CustomEvent('force-push-tag', {
+            detail: { tagName: context?.branchName, repoPath: context?.repoPath },
+          })),
+        },
       };
     }
+    // Deliberately does NOT suggest pulling: that merges the pre-amend commits
+    // back in, duplicating them and undoing the amend. Force-with-lease is the
+    // safe recovery, and it refuses if the remote moved since the last fetch.
     return {
       message:
-        'Your local history has diverged from the remote (an amend or rebase). Pull to merge the remote commits back in, or force-push to replace them.',
+        'Your local history has diverged from the remote (an amend or rebase). Force-push to replace the remote commits with yours.',
+      action: {
+        label: 'Force Push',
+        callback: () => window.dispatchEvent(new CustomEvent('force-push', {
+          detail: { repoPath: context?.repoPath },
+        })),
+      },
     };
   }
 
@@ -112,7 +130,12 @@ export function getErrorSuggestion(
     context?.operation === 'clone' ||
     context?.operation === 'push-tag';
   if (
-    msg.includes('authentication') ||
+    // `authenticat` covers BOTH "authentication failed" and libssh2's verb form
+    // ("Failed to authenticate SSH session: ..."). Scoping the permission-denied
+    // axis accidentally dropped a bare `auth` match that was catching the verb;
+    // restoring `auth` wholesale would also match "Author identity unknown",
+    // git's message when user.name is unset.
+    msg.includes('authenticat') ||
     msg.includes('credentials') ||
     msg.includes('publickey') ||
     (msg.includes('permission denied') && isNetworkOp)

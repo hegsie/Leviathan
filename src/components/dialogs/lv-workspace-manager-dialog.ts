@@ -894,7 +894,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
     this.batchRunning = true;
     let successCount = 0;
-    let failCount = 0;
+    // Named, not just counted: "2 failed" across a 10-repo workspace gave the
+    // user nothing to act on.
+    const failed: string[] = [];
+    const conflicted: string[] = [];
     // A security-gate refusal is not a failure: with offline mode on, every
     // repo in the workspace used to count as "failed" and the summary read
     // "0 succeeded, 8 failed" for eight operations that were never attempted.
@@ -916,18 +919,32 @@ export class LvWorkspaceManagerDialog extends LitElement {
         successCount++;
       } else if (gitService.isNetworkGateRefusal(result.error)) {
         skippedCount++;
+      } else if (
+        result.error?.code === 'MERGE_CONFLICT' ||
+        result.error?.code === 'REBASE_CONFLICT'
+      ) {
+        // Counting this as "failed" is wrong in the direction that matters: the
+        // pull LANDED and left a conflicted index behind. A summary reading
+        // "6 succeeded, 2 failed" told the user nothing happened in two repos
+        // that are in fact sitting mid-merge, and named neither of them — so
+        // there was no way to find them short of opening all eight.
+        conflicted.push(repo.name);
       } else {
-        failCount++;
+        failed.push(repo.name);
       }
     }
 
+    const failCount = failed.length;
     this.batchRunning = false;
     showToast(
       `Pull all: ${successCount} succeeded` +
-        (failCount > 0 ? `, ${failCount} failed` : '') +
+        (conflicted.length > 0
+          ? `, ${conflicted.length} need conflict resolution (${conflicted.join(', ')})`
+          : '') +
+        (failCount > 0 ? `, ${failCount} failed (${failed.join(', ')})` : '') +
         (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
         (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
-      failCount > 0 || unavailableCount > 0
+      failCount > 0 || conflicted.length > 0 || unavailableCount > 0
         ? 'warning'
         : skippedCount > 0
           ? 'info'

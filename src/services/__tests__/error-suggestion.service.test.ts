@@ -210,7 +210,13 @@ describe('error-suggestion.service', () => {
       const result = getErrorSuggestion(LOCAL_DIVERGED, { operation: 'push' });
       expect(result).to.not.equal(null);
       expect(result!.message).to.match(/diverged/i);
-      expect(result!.action, 'no one-click action that would undo their work').to.be.undefined;
+      // The action offered is the OPPOSITE one — force-push, which is what
+      // actually recovers an amend. Asserting on the label, not on the object:
+      // chai's diff of an action object hangs the browser on a function value.
+      expect(
+        result!.action?.label,
+        'no one-click action that would undo their work',
+      ).to.not.equal('Pull Now');
     });
 
     it('a tag already on the remote gets tag-specific advice, not "pull"', () => {
@@ -279,6 +285,101 @@ describe('error-suggestion.service', () => {
     it('publickey wording is recognised regardless of operation', () => {
       const result = getErrorSuggestion('Permission denied (publickey)');
       expect(result!.message).to.match(/credentials or SSH keys/);
+    });
+
+    it("libssh2's verb form is still recognised", () => {
+      // Scoping the permission-denied axis dropped a bare `auth` match that had
+      // been catching this. libssh2 says "Failed to authenticate SSH session",
+      // which contains neither "authentication" nor "permission denied", so the
+      // most common SSH failure fell through every branch and suggested nothing.
+      const result = getErrorSuggestion(
+        'Failed to authenticate SSH session: Unable to open public key file',
+        { operation: 'push' },
+      );
+      expect(result, 'the commonest SSH failure must not fall through').to.not.be.null;
+      expect(result!.message).to.match(/credentials or SSH keys/);
+    });
+
+    it('"Author identity unknown" is not an auth failure', () => {
+      // Why the match is `authenticat` and not `auth`: git says this when
+      // user.name is unset, and it has nothing to do with credentials.
+      const result = getErrorSuggestion(
+        "Author identity unknown\n*** Please tell me who you are.",
+      );
+      expect(String(result?.message ?? '')).to.not.contain('credentials or SSH keys');
+    });
+  });
+
+  describe('a rejected push offers an action the app can actually perform', () => {
+    it('an amended history offers Force Push, not Pull', () => {
+      // libgit2's "non-fastforwardable" means the remote tip IS in your object
+      // database — you rewrote history. Pulling merges the pre-amend commits
+      // back in and undoes the amend, so the suggestion must not say to.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push',
+        repoPath: '/repo/a',
+      });
+      expect(result).to.not.be.null;
+      expect(result!.message, 'pulling here undoes the amend').to.not.match(/\bPull\b/);
+      expect(result!.action!.label).to.equal('Force Push');
+    });
+
+    it('Force Push pins the repo the push failed in', () => {
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push',
+        repoPath: '/repo/a',
+      });
+      let detail: { repoPath?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ repoPath?: string }>).detail;
+      };
+      window.addEventListener('force-push', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push', handler);
+      }
+      expect(detail!.repoPath).to.equal('/repo/a');
+    });
+
+    it('a tag already on the remote offers Force Push Tag', () => {
+      // The old copy said to delete the remote tag first — an operation
+      // Leviathan implements nowhere, so the advice dead-ended.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+      });
+      expect(result!.message).to.not.contain('Delete the remote tag');
+      expect(result!.action!.label).to.equal('Force Push Tag');
+    });
+
+    it('Force Push Tag carries the tag name and the repo', () => {
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+      });
+      let detail: { tagName?: string; repoPath?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ tagName?: string; repoPath?: string }>).detail;
+      };
+      window.addEventListener('force-push-tag', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push-tag', handler);
+      }
+      expect(detail!.tagName).to.equal('v1.2.0');
+      expect(detail!.repoPath).to.equal('/repo/a');
+    });
+
+    it('being behind the remote still offers Pull Now', () => {
+      // The git CLI's hyphenated spelling means the opposite of libgit2's.
+      const result = getErrorSuggestion('Updates were rejected: non-fast-forward', {
+        operation: 'push',
+      });
+      expect(result!.action!.label).to.equal('Pull Now');
     });
   });
 });

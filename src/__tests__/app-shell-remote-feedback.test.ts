@@ -254,7 +254,27 @@ describe('app-shell remote-operation feedback', () => {
   });
 
   describe('a rejected push offers the recovery the app already implements', () => {
-    it('a non-fast-forward rejection carries a Pull Now action', async () => {
+    it('being behind the remote carries a Pull Now action', async () => {
+      failures['push'] = {
+        code: 'COMMAND_ERROR',
+        message: 'the remote contains commits that are not present locally',
+      };
+      const el = shellOnRepo();
+
+      await (el as any).handlePush();
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.length, 'the failure is reported').to.be.greaterThan(0);
+      expect(
+        toasts.some((t) => t.action?.label === 'Pull Now'),
+        'the Pull Now recovery is reachable from the only push surface',
+      ).to.equal(true);
+    });
+
+    it('an amended history carries a Force Push action instead', async () => {
+      // libgit2's "non-fastforwardable" means YOU rewrote history. Pulling
+      // merges the pre-amend commits back in and undoes the amend, so the only
+      // correct recovery is a force push — which had no affordance anywhere.
       failures['push'] = {
         code: 'COMMAND_ERROR',
         message: 'cannot push non-fastforwardable reference',
@@ -264,11 +284,122 @@ describe('app-shell remote-operation feedback', () => {
       await (el as any).handlePush();
 
       const toasts = uiStore.getState().toasts;
-      expect(toasts.length, 'the failure is reported').to.be.greaterThan(0);
+      expect(toasts.some((t) => t.action?.label === 'Force Push')).to.equal(true);
       expect(
-        toasts.some((t) => /pull/i.test(t.message) || t.action?.label === 'Pull Now'),
-        'the Pull Now recovery is reachable from the only push surface',
-      ).to.equal(true);
+        toasts.some((t) => /pull/i.test(t.message)),
+        'and does not tell the user to do the thing that undoes their amend',
+      ).to.equal(false);
+    });
+  });
+
+  describe('force push', () => {
+    function shellWithStoreRepo(): AppShell {
+      const el = shellOnRepo();
+      repositoryStore.setState({
+        openRepositories: [{ repository: mockRepo('/repo/one', 'one') }],
+        activeIndex: 0,
+      } as any);
+      return el;
+    }
+
+    it('asks before replacing the remote branch', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePush('/repo/one');
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'push'),
+        'declining the confirm blocks the push',
+      ).to.equal(false);
+    });
+
+    it('uses force-with-lease, not a bare force', async () => {
+      // If someone else pushed while the suggestion toast was up, a bare force
+      // would silently discard their commits. With-lease refuses instead.
+      // confirm() resolves to (message-dialog result === okLabel), and the
+      // default ok label is 'Ok'.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePush('/repo/one');
+
+      const push = invokeCallArgs.find((c) => c.command === 'push');
+      expect(push, 'the push runs once confirmed').to.not.be.undefined;
+      expect(push!.args.forceWithLease).to.equal(true);
+      expect(push!.args.force).to.not.equal(true);
+    });
+
+    it('a force push that is itself rejected does not offer Force Push again', async () => {
+      // Routing this through the suggestion service would match the same branch
+      // that produced the toast and loop the user back onto the one action that
+      // discards remote commits.
+      // confirm() resolves to (message-dialog result === okLabel), and the
+      // default ok label is 'Ok'.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      failures['push'] = {
+        code: 'COMMAND_ERROR',
+        message: 'cannot push non-fastforwardable reference',
+      };
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePush('/repo/one');
+
+      expect(
+        uiStore.getState().toasts.some((t) => t.action?.label === 'Force Push'),
+        'no unbounded loop through the destructive action',
+      ).to.equal(false);
+    });
+
+    it('force pushing a tag asks first and sends the force flag', async () => {
+      // confirm() resolves to (message-dialog result === okLabel), and the
+      // default ok label is 'Ok'.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one');
+
+      const pushTag = invokeCallArgs.find((c) => c.command === 'push_tag');
+      expect(pushTag).to.not.be.undefined;
+      expect(pushTag!.args.name).to.equal('v1.2.0');
+      expect(pushTag!.args.force).to.equal(true);
+    });
+
+    it('declining blocks the tag force push', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one');
+
+      expect(invokeCallArgs.some((c) => c.command === 'push_tag')).to.equal(false);
+    });
+
+    it('the suggestion action reaches the handler through the window event', async () => {
+      // The suggestion service dispatches on `window`; app-shell has to be
+      // listening, or the button is dead.
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      await (el as any).updateComplete;
+      try {
+        let reached: string | null = null;
+        (el as any).forcePush = (p: string): Promise<void> => {
+          reached = p;
+          return Promise.resolve();
+        };
+        window.dispatchEvent(
+          new CustomEvent('force-push', { detail: { repoPath: '/repo/one' } }),
+        );
+        expect(reached, 'the Force Push button is wired to something').to.equal('/repo/one');
+      } finally {
+        el.remove();
+      }
     });
   });
 
