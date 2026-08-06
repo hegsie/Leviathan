@@ -493,9 +493,17 @@ export class LvLfsDialog extends LitElement {
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsTrack(this.pinnedRepoPath, this.newPattern);
+    // Captured before the await: the input is cleared on success, and the
+    // message has to name what was actually tracked.
+    const pattern = this.newPattern;
+    const result = await gitService.lfsTrack(this.pinnedRepoPath, pattern);
 
     if (result.success) {
+      // Init, Pull and Prune in this same dialog all report success; Track and
+      // Untrack did not, and the pattern list is long enough that a row
+      // appearing or vanishing is not by itself a signal. The dialog stays
+      // open, so it gets the same inline message its siblings use.
+      this.success = `Now tracking ${pattern}`;
       this.newPattern = '';
       await this.loadStatus();
       this.dispatchEvent(new CustomEvent('lfs-changed'));
@@ -513,6 +521,8 @@ export class LvLfsDialog extends LitElement {
     const result = await gitService.lfsUntrack(this.pinnedRepoPath, pattern);
 
     if (result.success) {
+      // Same asymmetry as handleTrack — see the note there.
+      this.success = `No longer tracking ${pattern}`;
       await this.loadStatus();
       this.dispatchEvent(new CustomEvent('lfs-changed'));
     } else {

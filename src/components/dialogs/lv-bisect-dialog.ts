@@ -10,6 +10,7 @@ import * as gitService from '../../services/git.service.ts';
 import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -681,9 +682,32 @@ export class LvBisectDialog extends LitElement {
   }
 
   private async handleReset(): Promise<void> {
+    if (this.loading) return;
     const repoPath = this.repositoryPath;
+    // Claimed before the confirm, like every other destructive gate here: the
+    // confirm is an IPC round trip before the native dialog takes focus, and
+    // this button stays live through it.
     this.loading = true;
     this.error = '';
+
+    // A bisect session is many deliberate good/bad decisions, and aborting
+    // discards all of them — nothing in git records them, so the only way back
+    // is to redo the whole search. Every other destructive button in the app
+    // asks first; this one, styled danger and sitting next to Good/Bad, did not.
+    const stepsTaken = this.status?.currentStep ?? 0;
+    const confirmed = await showConfirm(
+      'Abort Bisect',
+      stepsTaken > 0
+        ? `End this bisect and discard the ${stepsTaken} step${stepsTaken === 1 ? '' : 's'} ` +
+          `already narrowed down? The original HEAD is checked back out; the search itself ` +
+          `is not recorded anywhere and would have to be repeated.`
+        : `End this bisect? The original HEAD is checked back out.`,
+      'warning'
+    );
+    if (!confirmed) {
+      this.loading = false;
+      return;
+    }
 
     const result = await gitService.bisectReset(repoPath);
 

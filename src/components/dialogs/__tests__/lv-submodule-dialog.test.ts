@@ -291,4 +291,49 @@ describe('lv-submodule-dialog', () => {
       expect(messages).to.match(/update failed/i);
     });
   });
+
+  describe('successful operations tell the user they happened', () => {
+    it('Init reports success', async () => {
+      // Add, Remove and Update All in this same dialog all report; Init and
+      // Update left the user to infer it from a status badge in a row.
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleInit(mockSubmodules[0]);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).success, 'the dialog stays open, so it says so inline').to.contain(
+        mockSubmodules[0].path,
+      );
+    });
+
+    it('Update reports success', async () => {
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleUpdate(mockSubmodules[0]);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).success).to.contain(mockSubmodules[0].path);
+    });
+
+    it('a failed Update says nothing about success', async () => {
+      failingCommands = new Set(['update_submodules']);
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-submodule-dialog>`,
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleUpdate(mockSubmodules[0]);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).success ?? '').to.equal('');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.contain('Operation failed');
+    });
+  });
 });

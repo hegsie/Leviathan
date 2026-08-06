@@ -64,6 +64,8 @@ function status(overrides: Partial<BisectStatus> = {}): BisectStatus {
 
 /** Status per repository path, so a tab switch yields a different session. */
 let statusByPath: Record<string, BisectStatus> = {};
+let confirmAnswer = 'Ok';
+const dialogPrompts: string[] = [];
 
 function installMock(): void {
   mockInvoke = (command: string, args?: unknown) => {
@@ -80,6 +82,10 @@ function installMock(): void {
         return Promise.resolve({ status: statusByPath[path] ?? status(), message: 'ok', culprit: null });
       case 'bisect_reset':
         return Promise.resolve(null);
+      case 'plugin:dialog|message':
+        dialogPrompts.push(String((args as { message?: string })?.message ?? ''));
+        // confirm() resolves to (result === okLabel); the default ok is 'Ok'.
+        return Promise.resolve(confirmAnswer);
       default:
         return Promise.resolve(null);
     }
@@ -216,5 +222,85 @@ describe('lv-bisect-dialog repository targeting', () => {
     const good = invokeCalls.find((c) => c.command === 'bisect_good');
     expect(good, 'bisect_good issued').to.not.be.undefined;
     expect((good!.args as { path: string }).path).to.equal(REPO_A);
+  });
+
+  describe('aborting a bisect', () => {
+    beforeEach(() => {
+      invokeCalls.length = 0;
+      dialogPrompts.length = 0;
+      confirmAnswer = 'Ok';
+      statusByPath = { [REPO_A]: status(), [REPO_B]: { active: false } };
+      installMock();
+    });
+
+    it('asks first — the session is many decisions git does not record', async () => {
+      const el = await openOn(REPO_A);
+      confirmAnswer = 'Cancel';
+      invokeCalls.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset();
+
+      expect(
+        invokeCalls.some((c) => c.command === 'bisect_reset'),
+        'declining leaves the session running',
+      ).to.equal(false);
+    });
+
+    it('names how much narrowing is discarded', async () => {
+      const el = await openOn(REPO_A);
+      confirmAnswer = 'Cancel';
+      dialogPrompts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset();
+
+      const prompt = dialogPrompts.join(' ');
+      expect(prompt, 'the step count is stated').to.contain('1 step');
+      expect(prompt, 'and that HEAD comes back').to.contain('original HEAD');
+    });
+
+    it('declining releases the in-flight flag', async () => {
+      const el = await openOn(REPO_A);
+      confirmAnswer = 'Cancel';
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loading, 'or the dialog wedges').to.equal(false);
+    });
+
+    it('confirming aborts and still pins the refresh to the origin repo', async () => {
+      const el = await openOn(REPO_A);
+      confirmAnswer = 'Ok';
+      let detail: { repositoryPath?: string } | null = null;
+      el.addEventListener('bisect-complete', (e) => {
+        detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+      });
+      invokeCalls.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset();
+
+      expect(invokeCalls.some((c) => c.command === 'bisect_reset')).to.equal(true);
+      expect(detail!.repositoryPath).to.equal(REPO_A);
+    });
+
+    it('a double-click raises one prompt', async () => {
+      const el = await openOn(REPO_A);
+      confirmAnswer = 'Ok';
+      dialogPrompts.length = 0;
+      invokeCalls.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const first = (el as any).handleReset();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const second = (el as any).handleReset();
+      await Promise.all([first, second]);
+
+      expect(dialogPrompts.length, 'one prompt, not two').to.equal(1);
+      expect(invokeCalls.filter((c) => c.command === 'bisect_reset').length).to.equal(1);
+    });
   });
 });

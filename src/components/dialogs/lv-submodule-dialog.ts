@@ -487,6 +487,12 @@ export class LvSubmoduleDialog extends LitElement {
       // decision a failed update is worse still.
       if (!updateResult.success && !gitService.isNetworkGateRefusal(updateResult.error)) {
         showToast('Initialized but update failed: ' + (updateResult.error?.message || 'Unknown error'), 'warning');
+      } else {
+        // Add, Remove and Update All in this same dialog all report success;
+        // Init and Update did not, leaving the user to infer it from a status
+        // badge in a row they may not be looking at. The dialog stays open, so
+        // it gets the inline message its siblings use.
+        this.success = `Initialized ${submodule.path}`;
       }
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
@@ -511,6 +517,8 @@ export class LvSubmoduleDialog extends LitElement {
     });
 
     if (result.success) {
+      // Same asymmetry as handleInit — see the note there.
+      this.success = `Updated ${submodule.path}`;
       await this.loadSubmodules();
       this.dispatchEvent(new CustomEvent('submodules-changed'));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {

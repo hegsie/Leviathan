@@ -161,4 +161,37 @@ describe('lv-lfs-dialog', () => {
 
     expect(eventFired).to.be.false;
   });
+
+  describe('successful operations tell the user they happened', () => {
+    it('Track names the pattern it added', async () => {
+      // Init, Pull and Prune in this same dialog all report; Track and Untrack
+      // did not, and the pattern list is long enough that a row appearing or
+      // vanishing is not by itself a signal.
+      const el = await fixture<LvLfsDialog>(
+        html`<lv-lfs-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-lfs-dialog>`,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).newPattern = '*.psd';
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleTrack();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).success, 'named, and not blanked by the input clear').to.contain('*.psd');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).newPattern, 'the input is still cleared').to.equal('');
+    });
+
+    it('Untrack names the pattern it removed', async () => {
+      const el = await fixture<LvLfsDialog>(
+        html`<lv-lfs-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-lfs-dialog>`,
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleUntrack('*.bin');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).success).to.contain('*.bin');
+    });
+  });
 });
