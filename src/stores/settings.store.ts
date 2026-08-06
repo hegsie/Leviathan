@@ -105,7 +105,10 @@ const defaultSettings = {
   fetchOnFocus: false,
   confirmBeforeDiscard: true,
   openLastRepository: true,
-  autoStashOnCheckout: false,
+  // Defaults ON: until the setting was wired up it was never read and every
+  // checkout auto-stashed, so `false` here would silently change behaviour for
+  // every existing user — turning a seamless branch switch into a refusal.
+  autoStashOnCheckout: true,
   staleBranchDays: 90,
   networkOperationTimeout: 300,
   offlineMode: false,

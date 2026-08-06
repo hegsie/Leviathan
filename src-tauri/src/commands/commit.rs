@@ -960,7 +960,12 @@ async fn edit_commit_date_with_rebase(
         parent.id().to_string()
     };
 
-    let git_dir = std::path::Path::new(path).join(".git");
+    // Resolve via repo.path(): in a linked worktree `<wt>/.git` is a gitdir
+    // POINTER FILE, so writing to `<wt>/.git/<script>` fails with ENOTDIR and
+    // the whole operation dies on a raw OS error.
+    let git_dir = git2::Repository::open(std::path::Path::new(path))?
+        .path()
+        .to_path_buf();
     let short_oid = &oid[..std::cmp::min(7, oid.len())];
 
     // Create a GIT_SEQUENCE_EDITOR script that changes 'pick <oid>' to 'edit <oid>'
@@ -1139,7 +1144,9 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
     let parent_oid = parent_oid.expect("parent_oid should be set for non-HEAD commits");
 
     // Write the new message to a temporary file
-    let git_dir = Path::new(&path).join(".git");
+    let git_dir = git2::Repository::open(Path::new(&path))?
+        .path()
+        .to_path_buf();
     let msg_file = git_dir.join("REWORD_MSG");
     std::fs::write(&msg_file, &message)?;
 

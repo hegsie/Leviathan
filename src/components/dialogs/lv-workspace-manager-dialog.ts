@@ -847,6 +847,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
     this.batchRunning = true;
     let successCount = 0;
     let failCount = 0;
+    // A security-gate refusal is not a failure: with offline mode on, every
+    // repo in the workspace used to count as "failed" and the summary read
+    // "0 succeeded, 8 failed" for eight operations that were never attempted.
+    let skippedCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
@@ -855,6 +859,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
       const result = await gitService.fetch({ path: repo.path, silent: true });
       if (result.success) {
         successCount++;
+      } else if (gitService.isNetworkGateRefusal(result.error)) {
+        skippedCount++;
       } else {
         failCount++;
       }
@@ -862,8 +868,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
     this.batchRunning = false;
     showToast(
-      `Fetch all: ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}`,
-      failCount > 0 ? 'warning' : 'success',
+      `Fetch all: ${successCount} succeeded` +
+        (failCount > 0 ? `, ${failCount} failed` : '') +
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : ''),
+      failCount > 0 ? 'warning' : skippedCount > 0 ? 'info' : 'success',
     );
     await this.refreshStatus();
   }
@@ -875,6 +883,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
     this.batchRunning = true;
     let successCount = 0;
     let failCount = 0;
+    // A security-gate refusal is not a failure: with offline mode on, every
+    // repo in the workspace used to count as "failed" and the summary read
+    // "0 succeeded, 8 failed" for eight operations that were never attempted.
+    let skippedCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
@@ -883,6 +895,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
       const result = await gitService.pull({ path: repo.path, silent: true });
       if (result.success) {
         successCount++;
+      } else if (gitService.isNetworkGateRefusal(result.error)) {
+        skippedCount++;
       } else {
         failCount++;
       }
@@ -890,8 +904,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
     this.batchRunning = false;
     showToast(
-      `Pull all: ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}`,
-      failCount > 0 ? 'warning' : 'success',
+      `Pull all: ${successCount} succeeded` +
+        (failCount > 0 ? `, ${failCount} failed` : '') +
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : ''),
+      failCount > 0 ? 'warning' : skippedCount > 0 ? 'info' : 'success',
     );
     await this.refreshStatus();
   }

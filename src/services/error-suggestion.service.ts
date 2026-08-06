@@ -110,6 +110,16 @@ export function getErrorSuggestion(
     };
   }
 
+  // git refuses a checkout that would overwrite local changes. libgit2's own
+  // wording ("1 conflict prevents checkout") names neither the files nor a way
+  // forward, and this path is reachable whenever Auto-Stash on Checkout is off.
+  if (/conflicts? prevent(s)? checkout|would be overwritten by checkout/.test(msg)) {
+    return {
+      message:
+        'Your local changes would be overwritten by this checkout. Stash or commit them first, or turn on Auto-Stash on Checkout in Settings > Behavior.',
+    };
+  }
+
   // Repository lock. Matched on a word boundary: plain `includes('lock')` also
   // matches "blocked", so a security-gate refusal ("Operation blocked by
   // security settings") was diagnosed as a stuck index.lock and sent the user

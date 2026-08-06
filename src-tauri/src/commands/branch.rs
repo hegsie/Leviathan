@@ -1448,6 +1448,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checkout_with_autostash_disabled_does_not_stash() {
+        // With the setting off the checkout is attempted as-is. A clean tree
+        // still switches — only a checkout that would clobber work is refused.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(false)).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(
+            !data.stashed,
+            "the setting was off, so nothing may be stashed"
+        );
+        assert_eq!(repo.current_branch(), "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_disabled_leaves_changes_in_place() {
+        // The uncommitted work must still be there afterwards, whether git
+        // allowed the switch or refused it — what must NOT happen is a silent
+        // stash behind the back of a user who turned the setting off.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+        repo.create_file("README.md", "modified content");
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(false)).await;
+
+        if let Ok(data) = result {
+            assert!(
+                !data.stashed,
+                "no stash may be created when the setting is off"
+            );
+        }
+        let content =
+            std::fs::read_to_string(std::path::Path::new(&repo.path_str()).join("README.md"))
+                .unwrap();
+        assert_eq!(content, "modified content", "the user's changes survive");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_none_keeps_stashing() {
+        // Absent means "behave as before": older callers must not change.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+        repo.create_file("README.md", "modified content");
+        repo.stage_file("README.md");
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), None).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().stashed);
+    }
+
+    #[tokio::test]
     async fn test_checkout_with_autostash_nonexistent_ref_fails() {
         let repo = TestRepo::with_initial_commit();
 

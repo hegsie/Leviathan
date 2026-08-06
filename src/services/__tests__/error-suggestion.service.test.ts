@@ -159,4 +159,35 @@ describe('error-suggestion.service', () => {
       window.removeEventListener('open-settings', handler);
     });
   });
+
+  describe('security-gate refusals are not diagnosed as git failures', () => {
+    it('does not call a blocked operation a stuck lock file', () => {
+      // 'blocked' contains 'lock', so a plain includes('lock') matched and told
+      // the user to go remove an index.lock that does not exist.
+      expect(getErrorSuggestion('Operation blocked by security settings')).to.equal(null);
+    });
+
+    it('still recognises the real lock messages', () => {
+      expect(getErrorSuggestion('Unable to create index.lock: File exists')).to.not.equal(null);
+      expect(getErrorSuggestion('the index is locked')).to.not.equal(null);
+    });
+  });
+
+  describe('a checkout refused for local changes explains itself', () => {
+    it("translates libgit2's bare conflict count", () => {
+      // Reachable whenever Auto-Stash on Checkout is off. libgit2 says
+      // "1 conflict prevents checkout" — no files, no way forward.
+      const result = getErrorSuggestion('Checkout failed: 1 conflict prevents checkout');
+      expect(result).to.not.equal(null);
+      expect(result!.message).to.contain('Stash or commit');
+      expect(result!.message).to.contain('Auto-Stash on Checkout');
+    });
+
+    it('handles the plural form and git\'s own wording', () => {
+      expect(getErrorSuggestion('3 conflicts prevent checkout')).to.not.equal(null);
+      expect(
+        getErrorSuggestion('Your local changes would be overwritten by checkout'),
+      ).to.not.equal(null);
+    });
+  });
 });

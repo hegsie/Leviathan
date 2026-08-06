@@ -260,6 +260,8 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
     it('opens conflict dialog on MERGE_CONFLICT', async () => {
       mockInvoke = async (command: string) => {
+        // These handlers now confirm first, like their sidebar counterparts.
+        if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'merge') {
           throw { code: 'MERGE_CONFLICT', message: 'Merge conflict' };
         }
@@ -276,6 +278,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect((el as any).showConflictDialog).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('merge');
+    });
+  });
+
+  describe('handleRefMerge confirmation', () => {
+    it('declining blocks the merge', async () => {
+      setupDefaultMocks();
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+      invokeHistory.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefMerge();
+
+      expect(invokeHistory.some((c) => c.command === 'merge')).to.be.false;
     });
   });
 
@@ -307,6 +324,8 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
     it('opens conflict dialog on REBASE_CONFLICT', async () => {
       mockInvoke = async (command: string) => {
+        // These handlers now confirm first, like their sidebar counterparts.
+        if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'rebase') {
           throw { code: 'REBASE_CONFLICT', message: 'Rebase conflict' };
         }
@@ -323,6 +342,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect((el as any).showConflictDialog).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('rebase');
+    });
+  });
+
+  describe('handleRefRebase confirmation', () => {
+    it('declining blocks the rebase', async () => {
+      setupDefaultMocks();
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+      invokeHistory.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      expect(invokeHistory.some((c) => c.command === 'rebase')).to.be.false;
     });
   });
 

@@ -509,4 +509,81 @@ describe('lv-clone-dialog', () => {
       expect(modal.open, 'dialog reopens after a successful clone').to.be.true;
     });
   });
+
+  describe('security-gate refusals are not shown as clone errors', () => {
+    it('a declined network confirm leaves no error in the dialog', async () => {
+      const { settingsStore } = await import('../../../stores/settings.store.ts');
+      settingsStore.setState({ confirmNetworkOps: true });
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Cancel');
+        }
+        return Promise.resolve(null);
+      };
+      try {
+        const internal = el as unknown as {
+          url: string;
+          destination: string;
+          error: string;
+          isCloning: boolean;
+          handleClone: () => Promise<void>;
+        };
+        internal.url = 'https://github.com/user/repo.git';
+        internal.destination = '/home/user/projects';
+
+        await internal.handleClone();
+        await el.updateComplete;
+
+        expect(internal.error, "the user's own Cancel is not an error").to.equal('');
+        expect(internal.isCloning, 'the dialog is usable again').to.equal(false);
+      } finally {
+        settingsStore.setState({ confirmNetworkOps: false });
+      }
+    });
+
+    it('offline mode leaves the gate to explain, without a second red error', async () => {
+      const { settingsStore } = await import('../../../stores/settings.store.ts');
+      settingsStore.setState({ offlineMode: true });
+      mockInvoke = () => Promise.resolve(null);
+      try {
+        const internal = el as unknown as {
+          url: string;
+          destination: string;
+          error: string;
+          handleClone: () => Promise<void>;
+        };
+        internal.url = 'https://github.com/user/repo.git';
+        internal.destination = '/home/user/projects';
+
+        await internal.handleClone();
+        await el.updateComplete;
+
+        expect(internal.error).to.equal('');
+      } finally {
+        settingsStore.setState({ offlineMode: false });
+      }
+    });
+
+    it('a genuine clone failure is still reported', async () => {
+      mockInvoke = (command: string) => {
+        if (command === 'clone_repository') {
+          return Promise.reject({ code: 'COMMAND_ERROR', message: 'repository not found' });
+        }
+        return Promise.resolve(null);
+      };
+      const internal = el as unknown as {
+        url: string;
+        destination: string;
+        error: string;
+        handleClone: () => Promise<void>;
+      };
+      internal.url = 'https://github.com/user/repo.git';
+      internal.destination = '/home/user/projects';
+
+      await internal.handleClone();
+      await el.updateComplete;
+
+      expect(internal.error).to.contain('repository not found');
+    });
+  });
 });
