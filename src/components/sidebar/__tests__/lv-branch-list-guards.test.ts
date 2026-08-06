@@ -29,6 +29,7 @@ import type { Repository } from '../../../types/git.types.ts';
 
 // Import the actual component
 import '../lv-branch-list.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 function mockRepo(path: string, name: string): Repository {
   return {
@@ -106,6 +107,7 @@ async function createComponent(): Promise<LvBranchList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-branch-list operationInProgress guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCalls.length = 0;
   });
 
@@ -186,7 +188,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     // The only context-menu item that was still live during an in-flight
     // operation while its five neighbours were greyed out.
     const el = await createComponent();
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
     let fired = 0;
     el.addEventListener('interactive-rebase', () => { fired++; });
 
@@ -213,7 +215,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     };
 
     internal.draggingBranch = makeBranch({ name: 'feature-b', shorthand: 'feature-b' });
-    internal.operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
     invokeCalls.length = 0;
 
     await internal.handleDrop(
@@ -256,7 +258,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     const el = await createComponent();
 
     // Set operationInProgress = true to simulate an in-flight operation
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     // Reset call tracking
     invokeCalls.length = 0;
@@ -306,7 +308,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -323,7 +325,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -340,7 +342,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -357,7 +359,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 

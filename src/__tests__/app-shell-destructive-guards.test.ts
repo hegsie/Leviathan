@@ -31,6 +31,7 @@ import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
 import type { Repository } from '../types/git.types.ts';
+import { tryAcquireRefOp, isRefOpRunning, resetRefOpLocks } from '../utils/ref-lock.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -54,6 +55,7 @@ function commit(oid: string) {
 
 describe('app-shell destructive guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCallArgs.length = 0;
     for (const k of Object.keys(mockResponses)) delete mockResponses[k];
     uiStore.setState({ toasts: [] });
@@ -388,6 +390,55 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('the graph lock is shared with the sidebar lists', () => {
+    // app-shell and lv-branch-list/lv-tag-list/lv-stash-list used to hold two
+    // disjoint locks over the same commands, and <lv-left-panel> is rendered
+    // with no props, so nothing passed a busy signal between them. A hard
+    // reset from the graph and a double-clicked sidebar checkout ran
+    // concurrently against the same working tree; the auto-stash checkout
+    // saves, applies and drops by position, so the reset landed on the
+    // just-applied tree with the stash entry already gone.
+    it('a sidebar claim makes the graph menu inert', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '', refType: 'localBranch', refName: 'feature',
+      };
+      // What lv-branch-list.handleCheckout does when the user double-clicks a row.
+      tryAcquireRefOp('/repo/one');
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleRefDeleteBranch();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'delete_branch'),
+        'the graph must not run a second operation on the sidebar\u2019s working tree',
+      ).to.equal(false);
+    });
+
+    it('a graph claim is visible to the sidebar', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '', refType: 'localBranch', refName: 'feature',
+      };
+
+      let heldDuringOperation = false;
+      mockResponses['delete_branch'] = () => {
+        // lv-branch-list reads exactly this to gate its own handlers.
+        heldDuringOperation = isRefOpRunning('/repo/one');
+        return null;
+      };
+
+      await (el as any).handleRefDeleteBranch();
+
+      expect(heldDuringOperation, 'the sidebar would have seen a free lock').to.equal(true);
+      expect(isRefOpRunning('/repo/one'), 'released afterwards').to.equal(false);
+    });
+  });
+
   describe('the graph ref menu serializes its own operations', () => {
     // The ref lock was introduced to stop Merge and Rebase racing each
     // other; delete-branch, delete-tag and push-tag were never folded in, so
@@ -411,7 +462,7 @@ describe('app-shell destructive guards', () => {
         mockResponses['plugin:dialog|message'] = () => 'Ok';
         const el = shellOnRepo();
         (el as any).refContextMenu = { visible: true, x: 0, y: 0, fullName: '', ...menu };
-        (el as any).refOperationsInFlight = new Set(['/repo/one']);
+        tryAcquireRefOp('/repo/one');
         invokeCallArgs.length = 0;
 
         await (el as any)[handler]();
@@ -431,7 +482,7 @@ describe('app-shell destructive guards', () => {
         await (el as any)[handler]();
 
         expect(
-          (el as any).refOperationsInFlight.has('/repo/one'),
+          isRefOpRunning('/repo/one'),
           'released, or the menu wedges for the rest of the session',
         ).to.equal(false);
       });
@@ -445,7 +496,7 @@ describe('app-shell destructive guards', () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Ok';
       mockResponses['plugin:dialog|message'] = () => 'Ok';
       const el = shellOnRepo();
-      (el as any).refOperationsInFlight = new Set(['/repo/two']);
+      tryAcquireRefOp('/repo/two');
       (el as any).refContextMenu = {
         visible: true, x: 0, y: 0, fullName: '', refType: 'localBranch', refName: 'feature',
       };
@@ -470,7 +521,7 @@ describe('app-shell destructive guards', () => {
 
       await (el as any).handleRefDeleteBranch();
 
-      expect((el as any).refOperationsInFlight.has('/repo/one')).to.equal(false);
+      expect(isRefOpRunning('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'delete_branch')).to.equal(false);
     });
   });
@@ -699,7 +750,7 @@ describe('app-shell destructive guards', () => {
           visible: true, x: 0, y: 0,
           commit: { ...commit('olderoid'), parentIds: ['parentoid'] },
         };
-        (el as any).refOperationsInFlight = new Set(['/repo/one']);
+        tryAcquireRefOp('/repo/one');
         invokeCallArgs.length = 0;
 
         await (el as any)[methods[label]](...args());
@@ -724,7 +775,7 @@ describe('app-shell destructive guards', () => {
         await (el as any)[methods[label]](...args());
 
         expect(
-          (el as any).refOperationsInFlight.has('/repo/one'),
+          isRefOpRunning('/repo/one'),
           'or the whole graph menu wedges for the session',
         ).to.equal(false);
       });
@@ -740,7 +791,7 @@ describe('app-shell destructive guards', () => {
       document.body.appendChild(el);
       try {
         (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
-        (el as any).refOperationsInFlight = new Set(['/repo/one']);
+        tryAcquireRefOp('/repo/one');
         await (el as any).updateComplete;
 
         const items = Array.from(
@@ -770,7 +821,7 @@ describe('app-shell destructive guards', () => {
       // The third checkout surface — round 33 folded the ref menu's and the
       // graph label's into this lock and left the palette's out.
       const el = shellOnRepo();
-      (el as any).refOperationsInFlight = new Set(['/repo/one']);
+      tryAcquireRefOp('/repo/one');
       invokeCallArgs.length = 0;
 
       await (el as any).handleCheckoutBranch(
@@ -791,7 +842,7 @@ describe('app-shell destructive guards', () => {
         new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
       );
 
-      expect((el as any).refOperationsInFlight.has('/repo/one')).to.equal(false);
+      expect(isRefOpRunning('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
     });
   });

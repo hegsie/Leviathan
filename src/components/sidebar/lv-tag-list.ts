@@ -13,6 +13,12 @@ import { showErrorWithSuggestion } from '../../services/error-suggestion.service
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
 
@@ -319,7 +325,37 @@ export class LvTagList extends LitElement {
   @state() private showFilter = false;
   @state() private showSortMenu = false;
   @state() private collapsedGroups = new Set<string>();
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell and the other sidebar lists.
+   *
+   * This was a component-local boolean, so a hard reset started from the graph
+   * and a checkout started here ran concurrently against the same working
+   * tree. See utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /**
+   * Claim the lock for `repoPath`; false when it is already held.
+   *
+   * The path is passed explicitly rather than read from `this.repositoryPath`
+   * at release time: the prop rebinds when the user switches repo tabs
+   * mid-operation, so a release that re-read it would free the WRONG repo's
+   * lock and wedge the one that is actually running.
+   */
+  private claimOperation(repoPath: string): boolean {
+    return tryAcquireRefOp(repoPath);
+  }
+
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
 
 
   async connectedCallback(): Promise<void> {
@@ -335,6 +371,8 @@ export class LvTagList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
@@ -512,7 +550,9 @@ export class LvTagList extends LitElement {
 
   private async handleCheckoutTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -525,9 +565,11 @@ export class LvTagList extends LitElement {
       `Checking out tag "${tag.name}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
       'warning'
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
@@ -565,13 +607,15 @@ export class LvTagList extends LitElement {
         showErrorWithSuggestion(errorMsg, 'Failed to checkout tag');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleDeleteTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -585,9 +629,11 @@ export class LvTagList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.deleteTag({
@@ -612,7 +658,7 @@ export class LvTagList extends LitElement {
         showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -641,10 +687,11 @@ export class LvTagList extends LitElement {
 
   private async handlePushTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
 
     // Captured BEFORE the push await: the push and its refresh must pin to the
     // repo it was invoked on, even if the user switches tabs during the (often
@@ -677,7 +724,7 @@ export class LvTagList extends LitElement {
         });
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 

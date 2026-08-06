@@ -27,6 +27,7 @@ import type { LvStashList } from '../lv-stash-list.ts';
 
 // Import the actual component
 import '../lv-stash-list.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -70,6 +71,7 @@ async function createComponent(): Promise<LvStashList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-stash-list operationInProgress guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCalls.length = 0;
   });
 
@@ -85,7 +87,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -102,7 +104,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -119,7 +121,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 

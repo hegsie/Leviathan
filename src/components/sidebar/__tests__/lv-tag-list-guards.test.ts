@@ -29,6 +29,7 @@ import type { LvTagList } from '../lv-tag-list.ts';
 import '../lv-tag-list.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import type { Repository } from '../../../types/git.types.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -85,6 +86,7 @@ async function createComponent(): Promise<LvTagList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-tag-list operationInProgress guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCalls.length = 0;
   });
 
@@ -128,7 +130,7 @@ describe('lv-tag-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
       visible: true, x: 0, y: 0, tag,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -145,7 +147,7 @@ describe('lv-tag-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
       visible: true, x: 0, y: 0, tag,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -162,7 +164,7 @@ describe('lv-tag-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
       visible: true, x: 0, y: 0, tag,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 

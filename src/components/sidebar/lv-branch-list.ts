@@ -13,6 +13,12 @@ import '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 type BranchSortMode = 'name' | 'date' | 'date-asc';
 
@@ -566,7 +572,37 @@ export class LvBranchList extends LitElement {
   @state() private showFilter = false;
   @state() private hiddenBranches = new Set<string>();
   @state() private showSortMenu = false;
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell and the other sidebar lists.
+   *
+   * This was a component-local boolean, so a hard reset started from the graph
+   * and a checkout started here ran concurrently against the same working
+   * tree. See utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /**
+   * Claim the lock for `repoPath`; false when it is already held.
+   *
+   * The path is passed explicitly rather than read from `this.repositoryPath`
+   * at release time: the prop rebinds when the user switches repo tabs
+   * mid-operation, so a release that re-read it would free the WRONG repo's
+   * lock and wedge the one that is actually running.
+   */
+  private claimOperation(repoPath: string): boolean {
+    return tryAcquireRefOp(repoPath);
+  }
+
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
   /**
    * Every branch the cleanup dialog would list, by name and across ALL
    * categories. The button used merged+stale computed locally, which
@@ -618,6 +654,8 @@ export class LvBranchList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
     window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
@@ -1061,9 +1099,10 @@ export class LvBranchList extends LitElement {
   }
 
   private async handleCheckout(branch: Branch): Promise<void> {
-    if (branch.isHead || this.operationInProgress) return;
+    if (branch.isHead) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
-    this.operationInProgress = true;
     // Close context menu immediately
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1113,7 +1152,7 @@ export class LvBranchList extends LitElement {
         );
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -1131,7 +1170,13 @@ export class LvBranchList extends LitElement {
 
   private async handleRenameBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch || this.operationInProgress) return;
+    // Cannot rename HEAD branch or remote branches. Checked before the claim,
+    // so a refused gesture never takes the lock.
+    if (!branch || branch.isHead || branch.isRemote) return;
+    // Claimed BEFORE the prompt: showPrompt is an await, and a claim taken
+    // after it does not serialize two dispatches that both passed the check.
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
     // Captured BEFORE the in-app prompt await (a Lit overlay, NOT a native
     // modal — the window stays interactive, so the user can switch tabs while
     // it is open). The rename must run against the repo it was invoked on, not
@@ -1140,17 +1185,12 @@ export class LvBranchList extends LitElement {
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Cannot rename HEAD branch or remote branches
-    if (branch.isHead || branch.isRemote) {
-      return;
-    }
-
     const newName = await showPrompt('Rename Branch', `Rename branch "${branch.name}" to:`, branch.name);
     if (!newName || newName === branch.name) {
+      this.releaseOperation(lockedRepo);
       return;
     }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.renameBranch(repoPath, {
@@ -1166,21 +1206,21 @@ export class LvBranchList extends LitElement {
         showToast(`Failed to rename branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleDeleteBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch || this.operationInProgress) return;
+    // Cannot delete the HEAD branch. Checked before the claim, so a refused
+    // gesture never takes the lock.
+    if (!branch || branch.isHead) return;
+    // Claimed BEFORE the confirm — see handleRenameBranch.
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
     const repoPath = this.repositoryPath;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-
-    // Cannot delete HEAD branch
-    if (branch.isHead) {
-      return;
-    }
 
     const confirmed = await showConfirm(
       'Delete Branch',
@@ -1188,9 +1228,11 @@ export class LvBranchList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       let result = await gitService.deleteBranch(
@@ -1226,13 +1268,15 @@ export class LvBranchList extends LitElement {
         showToast(`Failed to delete branch: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleMergeBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch || this.operationInProgress) return;
+    if (!branch) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1245,9 +1289,11 @@ export class LvBranchList extends LitElement {
       'info'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.merge({
@@ -1278,13 +1324,15 @@ export class LvBranchList extends LitElement {
         showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleRebaseBranch(): Promise<void> {
     const branch = this.contextMenu.branch;
-    if (!branch || this.operationInProgress) return;
+    if (!branch) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -1297,9 +1345,11 @@ export class LvBranchList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.rebase({
@@ -1327,12 +1377,14 @@ export class LvBranchList extends LitElement {
         showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private handleInteractiveRebase(): void {
     const branch = this.contextMenu.branch;
+    // Only opens the dialog — it starts no git operation itself, so it checks
+    // the lock rather than taking one it would never release.
     if (!branch || this.operationInProgress) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
@@ -1652,12 +1704,12 @@ export class LvBranchList extends LitElement {
     // before it starts. Drop did not, so a drag-merge landed on top of an
     // in-flight merge/checkout from the menu — two git operations mutating the
     // same worktree at once.
-    if (this.operationInProgress) return;
-    this.operationInProgress = true;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
     try {
       await this.runDrop(e, targetBranch, sourceBranch);
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 

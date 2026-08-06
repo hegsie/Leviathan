@@ -36,6 +36,7 @@ import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
 import type { Repository } from '../types/git.types.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../utils/ref-lock.ts';
 
 function createAppShell(): AppShell {
   return document.createElement('lv-app-shell') as AppShell;
@@ -59,6 +60,7 @@ function mockRepo(path: string, name: string): Repository {
 
 describe('app-shell remote-operation feedback', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCallArgs.length = 0;
     for (const k of Object.keys(mockResponses)) delete mockResponses[k];
     for (const k of Object.keys(failures)) delete failures[k];
@@ -524,7 +526,7 @@ describe('app-shell remote-operation feedback', () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Ok';
       mockResponses['plugin:dialog|message'] = () => 'Ok';
       const el = await refMenuShell();
-      (el as any).refOperationsInFlight = new Set([(el as any).activeRepository.repository.path]);
+      tryAcquireRefOp((el as any).activeRepository.repository.path);
 
       await (el as any).handleRefRebase();
 

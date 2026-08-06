@@ -11,6 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { Stash } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface ContextMenuState {
   visible: boolean;
@@ -148,7 +154,37 @@ export class LvStashList extends LitElement {
   @state() private stashes: Stash[] = [];
   @state() private loading = true;
   @state() private isStashing = false;
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell and the other sidebar lists.
+   *
+   * This was a component-local boolean, so a hard reset started from the graph
+   * and a checkout started here ran concurrently against the same working
+   * tree. See utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /**
+   * Claim the lock for `repoPath`; false when it is already held.
+   *
+   * The path is passed explicitly rather than read from `this.repositoryPath`
+   * at release time: the prop rebinds when the user switches repo tabs
+   * mid-operation, so a release that re-read it would free the WRONG repo's
+   * lock and wedge the one that is actually running.
+   */
+  private claimOperation(repoPath: string): boolean {
+    return tryAcquireRefOp(repoPath);
+  }
+
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, stash: null };
 
   async connectedCallback(): Promise<void> {
@@ -164,6 +200,8 @@ export class LvStashList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
@@ -360,10 +398,11 @@ export class LvStashList extends LitElement {
 
   private async handleApplyStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
 
     // Captured BEFORE the await: the conflict event must carry the repo the
     // apply actually ran on, even if the prop is rebound mid-flight.
@@ -405,7 +444,7 @@ export class LvStashList extends LitElement {
         }
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -419,7 +458,9 @@ export class LvStashList extends LitElement {
 
   private async handlePopStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -433,9 +474,11 @@ export class LvStashList extends LitElement {
       `This will apply the stash "${stash.message}" and remove it from the stash list. Any conflicts will need to be resolved manually. Continue?`,
       'warning'
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const index = await this.resolveStashIndex(repoPath, stash, 'popped');
@@ -473,13 +516,15 @@ export class LvStashList extends LitElement {
         }
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleDropStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -494,9 +539,11 @@ export class LvStashList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const index = await this.resolveStashIndex(repoPath, stash, 'dropped');
@@ -519,7 +566,7 @@ export class LvStashList extends LitElement {
         showToast(result.error?.message ?? 'Failed to drop stash', 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 

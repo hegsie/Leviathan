@@ -108,6 +108,12 @@ import {
   releaseMaintenance,
   isMaintenanceRunning,
 } from './utils/maintenance-confirms.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -768,7 +774,8 @@ export class AppShell extends LitElement {
    * explain why, because those repos are clean. Separate repos have separate
    * working trees and nothing to serialize against each other. Reassigned
    * rather than mutated so Lit sees the change and re-renders the menus. */
-  @state() private refOperationsInFlight = new Set<string>();
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
   /**
    * Keys for destructive actions already running.
    *
@@ -801,21 +808,20 @@ export class AppShell extends LitElement {
 
   /** True when `repoPath` (default: the active repo) has a ref operation running. */
   private isRefOperationInFlight(repoPath?: string): boolean {
-    const path = repoPath ?? this.activeRepository?.repository.path;
-    return path !== undefined && this.refOperationsInFlight.has(path);
+    // Reading refOpsVersion is what makes this a reactive binding: the lock
+    // itself is module state (shared with the sidebar lists), which Lit cannot
+    // observe. The subscription in connectedCallback bumps the counter.
+    void this.refOpsVersion;
+    return isRefOpRunning(repoPath ?? this.activeRepository?.repository.path);
   }
 
   /** Claim the lock for `repoPath`; false when it is already held. */
   private claimRefOperation(repoPath: string): boolean {
-    if (this.refOperationsInFlight.has(repoPath)) return false;
-    this.refOperationsInFlight = new Set(this.refOperationsInFlight).add(repoPath);
-    return true;
+    return tryAcquireRefOp(repoPath);
   }
 
   private releaseRefOperation(repoPath: string): void {
-    const next = new Set(this.refOperationsInFlight);
-    next.delete(repoPath);
-    this.refOperationsInFlight = next;
+    releaseRefOp(repoPath);
   }
 
   /** Run `fn` unless an identical action is already in flight. */
@@ -1221,6 +1227,11 @@ export class AppShell extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    // The ref lock is module state shared with the sidebar lists, so a claim
+    // taken there must re-render this component's ?disabled bindings too.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
 
     this.unsubscribe = repositoryStore.subscribe((state) => {
       const newActiveRepo = state.getActiveRepository();
@@ -1632,6 +1643,8 @@ export class AppShell extends LitElement {
   // Verified: every addEventListener has a corresponding removeEventListener below.
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     this.unsubscribe?.();
     this.unsubscribeUi?.();
     this.unsubscribeWatcher?.();
