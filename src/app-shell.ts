@@ -762,6 +762,28 @@ export class AppShell extends LitElement {
    * its own: from the graph you could right-click a second ref and start a
    * second history rewrite while the first was still running. */
   @state() private refOperationInFlight = false;
+  /**
+   * Keys for destructive actions already running.
+   *
+   * Force push, force push tag and force delete are reachable only from an
+   * error-suggestion toast's action button, so they never got the
+   * claim-before-confirm guard every dialog-hosted destructive button has.
+   * Keyed so two repos can each run one, and claimed before the confirm — that
+   * confirm is an IPC round trip, and a second dispatch during it would raise a
+   * second native prompt for the same operation.
+   */
+  private destructiveActionsInFlight = new Set<string>();
+
+  /** Run `fn` unless an identical action is already in flight. */
+  private async runExclusive(key: string, fn: () => Promise<void>): Promise<void> {
+    if (this.destructiveActionsInFlight.has(key)) return;
+    this.destructiveActionsInFlight.add(key);
+    try {
+      await fn();
+    } finally {
+      this.destructiveActionsInFlight.delete(key);
+    }
+  }
   private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
@@ -1891,7 +1913,13 @@ export class AppShell extends LitElement {
   }
 
   private async handleRefCheckout(): Promise<void> {
-    if (!this.activeRepository) return;
+    if (!this.activeRepository || this.refOperationInFlight) return;
+    // Checkout mutates the same working tree merge/rebase/delete do, and was
+    // left out when this flag was extended to them — so it stayed clickable
+    // during an in-flight merge and ran concurrently against it. There is no
+    // per-repo lock in the backend. The sidebar has always guarded its own
+    // checkout with the flag it shares with merge/rebase/rename.
+    this.refOperationInFlight = true;
 
     const refName = this.refContextMenu.refName;
     const repoPath = this.activeRepository.repository.path;
@@ -1908,19 +1936,29 @@ export class AppShell extends LitElement {
         `Checking out tag "${refName}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
         'warning',
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.refOperationInFlight = false;
+        return;
+      }
     }
 
-    const result = await gitService.checkoutWithAutoStash(repoPath, refName);
+    try {
+      const result = await gitService.checkoutWithAutoStash(repoPath, refName);
 
-    if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, refName, repoPath);
-      // Pinned refresh, matching the sibling command-palette checkout: the
-      // checkout ran on repoPath, which may be backgrounded by completion.
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      log.error('Checkout failed:', result.data?.message || result.error);
-      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
+      if (result.success && result.data?.success) {
+        this.handleAutoStashToast(result.data, refName, repoPath);
+        // Pinned refresh, matching the sibling command-palette checkout: the
+        // checkout ran on repoPath, which may be backgrounded by completion.
+        this.refreshConflictDialogRepo(repoPath);
+      } else {
+        log.error('Checkout failed:', result.data?.message || result.error);
+        showErrorWithSuggestion(
+          result.data?.message || result.error?.message || '',
+          'Checkout failed',
+        );
+      }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
@@ -2449,7 +2487,11 @@ export class AppShell extends LitElement {
   ): void => {
     const branchName = e.detail?.branchName;
     const repoPath = e.detail?.repoPath;
-    if (branchName && repoPath) void this.forceDeleteBranch(branchName, repoPath);
+    if (branchName && repoPath) {
+      void this.runExclusive(`delete:${repoPath}:${branchName}`, () =>
+        this.forceDeleteBranch(branchName, repoPath),
+      );
+    }
   };
 
   private async forceDeleteBranch(branchName: string, repoPath: string): Promise<void> {
@@ -2613,7 +2655,7 @@ export class AppShell extends LitElement {
       (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
     );
     if (!repoPath) return;
-    void this.forcePush(repoPath);
+    void this.runExclusive(`push:${repoPath}`, () => this.forcePush(repoPath));
   };
 
   private async forcePush(repoPath: string): Promise<void> {
@@ -2670,7 +2712,9 @@ export class AppShell extends LitElement {
     const tagName = detail?.tagName;
     const repoPath = this.resolvePinnedRepo(detail?.repoPath);
     if (!tagName || !repoPath) return;
-    void this.forcePushTag(tagName, repoPath);
+    void this.runExclusive(`push-tag:${repoPath}:${tagName}`, () =>
+      this.forcePushTag(tagName, repoPath),
+    );
   };
 
   private async forcePushTag(tagName: string, repoPath: string): Promise<void> {
@@ -2900,6 +2944,7 @@ export class AppShell extends LitElement {
       await this.dispatchAmend(commit);
     } else {
       // For other commits, open interactive rebase dialog pre-configured for rewording
+      if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
         rewordCommitOid: commit.oid,
       });
@@ -2918,6 +2963,39 @@ export class AppShell extends LitElement {
    * checkout, and still correct in detached HEAD, where the first commit in
    * history is HEAD.
    */
+  /**
+   * Refuse the interactive-rebase reword/amend route for a commit that is not
+   * in HEAD's history.
+   *
+   * The graph loads every branch, so both menu items are offered on commits
+   * that live only elsewhere. `<oid>^` is a valid revspec for any commit, so
+   * nothing downstream noticed: the plan came back as the CURRENT branch's
+   * history with the target absent, no reword row appeared, and Start Rebase
+   * was still enabled — one click from replaying this branch onto an unrelated
+   * one.
+   */
+  private async canRewriteInPlace(
+    oid: string,
+    shortId: string,
+    repoPath: string,
+  ): Promise<boolean> {
+    const result = await gitService.isAncestorOfHead(repoPath, oid);
+    if (this.activeRepository?.repository.path !== repoPath) return false;
+    if (!result.success) {
+      showToast(result.error?.message ?? 'Could not check where that commit lives', 'error');
+      return false;
+    }
+    if (!result.data) {
+      showToast(
+        `${shortId} is not on the current branch — check out the branch that ` +
+          `contains it first`,
+        'warning',
+      );
+      return false;
+    }
+    return true;
+  }
+
   private async isHeadCommit(
     oid: string,
     repoPath: string,
@@ -2964,6 +3042,10 @@ export class AppShell extends LitElement {
     if (isHead) {
       await this.dispatchAmend(commit);
     } else {
+      // Same gate as reword — see canRewriteInPlace. Checked BEFORE the
+      // "opening interactive rebase" toast, so a refusal is not preceded by a
+      // promise the app is about to break.
+      if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
       showToast('Only the latest commit can be amended — opening interactive rebase', 'info');
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
         rewordCommitOid: commit.oid,
@@ -3044,19 +3126,32 @@ export class AppShell extends LitElement {
   }
 
   private async handleCheckoutBranchFromGraph(e: CustomEvent<{ branchName: string }>): Promise<void> {
-    if (!this.activeRepository) return;
+    // A SINGLE left-click on a branch label reaches here, so this is the
+    // easiest checkout in the app to fire twice. With a dirty tree,
+    // checkout_with_autostash stashes, applies index 0, then drops index 0 —
+    // and a stash index is a position, so a second run's save shifts the
+    // first's entry and the two cross-apply and cross-drop each other's work.
+    if (!this.activeRepository || this.refOperationInFlight) return;
+    this.refOperationInFlight = true;
 
     const branchName = e.detail.branchName;
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
+    try {
+      const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
 
-    if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, branchName, repoPath);
-      // Pinned refresh, matching the sibling checkout handlers.
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      log.error('Failed to checkout branch:', result.data?.message || result.error);
-      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
+      if (result.success && result.data?.success) {
+        this.handleAutoStashToast(result.data, branchName, repoPath);
+        // Pinned refresh, matching the sibling checkout handlers.
+        this.refreshConflictDialogRepo(repoPath);
+      } else {
+        log.error('Failed to checkout branch:', result.data?.message || result.error);
+        showErrorWithSuggestion(
+          result.data?.message || result.error?.message || '',
+          'Failed to checkout branch',
+        );
+      }
+    } finally {
+      this.refOperationInFlight = false;
     }
   }
 
@@ -4804,7 +4899,11 @@ export class AppShell extends LitElement {
               <div class="context-menu-divider"></div>
               ${this.refContextMenu.refType === 'localBranch'
                 ? html`
-                    <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                    <button
+                      class="context-menu-item"
+                      ?disabled=${this.refOperationInFlight}
+                      @click=${this.handleRefCheckout}
+                    >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="20 6 9 17 4 12"></polyline>
                       </svg>
@@ -4851,7 +4950,11 @@ export class AppShell extends LitElement {
                   `
                 : this.refContextMenu.refType === 'remoteBranch'
                   ? html`
-                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.refOperationInFlight}
+                        @click=${this.handleRefCheckout}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="20 6 9 17 4 12"></polyline>
                         </svg>
@@ -4876,7 +4979,11 @@ export class AppShell extends LitElement {
                       </button>
                     `
                   : html`
-                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.refOperationInFlight}
+                        @click=${this.handleRefCheckout}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="20 6 9 17 4 12"></polyline>
                         </svg>

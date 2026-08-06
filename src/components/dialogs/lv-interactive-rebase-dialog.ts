@@ -903,7 +903,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
         // paused on purpose.
         if (result.data?.paused) {
           showToast(
-            'Rebase paused — amend the commit, then Continue from the banner',
+            // Names the control that actually exists. The banner renders only
+            // Resolve Conflicts / Abort / Manage Bisect — there is no
+            // "Continue" — so following the old text literally left Abort as
+            // the most obvious button, which discards the rebase this message
+            // exists to protect.
+            'Rebase paused — amend the commit, then click "Resolve Conflicts" ' +
+              'in the banner and choose Continue Rebase',
             'warning',
             8000,
           );

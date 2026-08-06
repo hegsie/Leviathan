@@ -175,6 +175,8 @@ export class LvToastContainer extends LitElement {
 
   private unsubscribe?: () => void;
   private timeouts: Map<string, number> = new Map();
+  /** Toast ids whose action has already run; see handleAction. */
+  private firedActions: Set<string> = new Set();
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -226,6 +228,7 @@ export class LvToastContainer extends LitElement {
     setTimeout(() => {
       uiStore.getState().removeToast(id);
       this.exitingToasts.delete(id);
+      this.firedActions.delete(id);
       this.requestUpdate();
     }, 200);
   }
@@ -277,6 +280,18 @@ export class LvToastContainer extends LitElement {
   }
 
   private handleAction(toast: Toast): void {
+    // Dismissal is animated: dismissToast only marks the toast `.exiting` and
+    // removes it from the store 200ms later, and `.exiting` drives a slideOut
+    // animation without pointer-events: none. So the action button stays
+    // rendered and clickable after the first click, and a double-click fired
+    // the action twice — which for the destructive ones (Force Push, Force Push
+    // Tag, Force Delete) meant two native confirms for one gesture, the second
+    // operating on something the first had already deleted or moved.
+    //
+    // Guarded here rather than in each handler so it covers every toast action,
+    // including any added later.
+    if (this.firedActions.has(toast.id)) return;
+    this.firedActions.add(toast.id);
     if (toast.action?.callback) {
       toast.action.callback();
     }

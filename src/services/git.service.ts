@@ -1286,6 +1286,14 @@ export async function getRebaseCommits(
   return invokeCommand<RebaseCommit[]>("get_rebase_commits", { path, onto });
 }
 
+/** Is `oid` reachable from HEAD? Gates the reword/amend rebase route. */
+export async function isAncestorOfHead(
+  path: string,
+  oid: string,
+): Promise<CommandResult<boolean>> {
+  return invokeCommand<boolean>("is_ancestor_of_head", { path, oid });
+}
+
 export async function executeInteractiveRebase(
   path: string,
   onto: string,

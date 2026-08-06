@@ -73,6 +73,8 @@ describe('app-shell destructive guards', () => {
   describe('amend from the graph context menu', () => {
     it('does not put a non-HEAD commit into amend mode', async () => {
       mockResponses['get_commit_history'] = () => [commit('headoid')];
+      // The commit is on this branch — the off-branch refusal is covered below.
+      mockResponses['is_ancestor_of_head'] = () => true;
       const el = shellOnRepo();
       (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
 
@@ -92,6 +94,8 @@ describe('app-shell destructive guards', () => {
 
     it('routes a non-HEAD commit to interactive rebase instead of dead-ending', async () => {
       mockResponses['get_commit_history'] = () => [commit('headoid')];
+      // The commit is on this branch — the off-branch refusal is covered below.
+      mockResponses['is_ancestor_of_head'] = () => true;
       const el = shellOnRepo();
       (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
 
@@ -343,6 +347,10 @@ describe('app-shell destructive guards', () => {
       ['delete branch', 'handleRefDeleteBranch', { refType: 'localBranch', refName: 'feature' }],
       ['delete tag', 'handleRefDeleteTag', { refType: 'tag', refName: 'v1.0.0' }],
       ['push tag', 'handleRefPushTag', { refType: 'tag', refName: 'v1.0.0' }],
+      // Checkout mutates the same working tree and was left out when this flag
+      // was extended to the deletes — so it stayed clickable during an
+      // in-flight merge and ran concurrently against it.
+      ['checkout', 'handleRefCheckout', { refType: 'localBranch', refName: 'feature' }],
     ];
 
     for (const [label, handler, menu] of cases) {
@@ -389,6 +397,204 @@ describe('app-shell destructive guards', () => {
 
       expect((el as any).refOperationInFlight).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'delete_branch')).to.equal(false);
+    });
+  });
+
+  describe('the toast-driven destructive actions claim before their confirm', () => {
+    // These three live only on an error-suggestion toast's action button, so
+    // they never got the claim-before-confirm guard every dialog-hosted
+    // destructive button has. The toast container now guards the double-click
+    // itself, but a second dispatch from any source must still be inert.
+    function shellWithStoreRepo(): AppShell {
+      const el = shellOnRepo();
+      repositoryStore.setState({
+        openRepositories: [{ repository: mockRepo('/repo/one', 'one') }],
+        activeIndex: 0,
+      } as any);
+      return el;
+    }
+
+    it('a second force-push event during the confirm is inert', async () => {
+      let confirms = 0;
+      mockResponses['plugin:dialog|message'] = () => {
+        confirms++;
+        return 'Cancel';
+      };
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        const evt = (): CustomEvent =>
+          new CustomEvent('force-push', { detail: { repoPath: '/repo/one' } });
+        window.dispatchEvent(evt());
+        window.dispatchEvent(evt());
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(confirms, 'one prompt, not two').to.equal(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a second force-delete event during the confirm is inert', async () => {
+      let confirms = 0;
+      mockResponses['plugin:dialog|message'] = () => {
+        confirms++;
+        return 'Cancel';
+      };
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        const evt = (): CustomEvent =>
+          new CustomEvent('force-delete-branch', {
+            detail: { branchName: 'feature', repoPath: '/repo/one' },
+          });
+        window.dispatchEvent(evt());
+        window.dispatchEvent(evt());
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(confirms).to.equal(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('the claim is released, so the action can be retried', async () => {
+      let confirms = 0;
+      mockResponses['plugin:dialog|message'] = () => {
+        confirms++;
+        return 'Cancel';
+      };
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        window.dispatchEvent(
+          new CustomEvent('force-push', { detail: { repoPath: '/repo/one' } }),
+        );
+        await new Promise((r) => setTimeout(r, 50));
+        window.dispatchEvent(
+          new CustomEvent('force-push', { detail: { repoPath: '/repo/one' } }),
+        );
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(confirms, 'declining must not wedge the action forever').to.equal(2);
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
+  describe('checkout from a graph branch label', () => {
+    it('a double-click issues one checkout', async () => {
+      // A SINGLE left-click on the label reaches this, so it is the easiest
+      // checkout in the app to fire twice. checkout_with_autostash stashes,
+      // applies index 0 and drops index 0 — and a stash index is a position, so
+      // two runs cross-apply and cross-drop each other's work.
+      let resolveCheckout: ((v: unknown) => void) | undefined;
+      mockResponses['checkout_with_autostash'] = () =>
+        new Promise((r) => {
+          resolveCheckout = r;
+        });
+      const el = shellOnRepo();
+      const evt = (): CustomEvent =>
+        new CustomEvent('checkout-branch', { detail: { branchName: 'feature' } });
+
+      const first = (el as any).handleCheckoutBranchFromGraph(evt());
+      const second = (el as any).handleCheckoutBranchFromGraph(evt());
+      await new Promise((r) => setTimeout(r, 10));
+      (resolveCheckout as ((v: unknown) => void) | undefined)?.({
+        success: true,
+        stashed: false,
+      });
+      await Promise.all([first, second]);
+
+      expect(
+        invokeCallArgs.filter((c) => c.command === 'checkout_with_autostash').length,
+        'the second click is swallowed',
+      ).to.equal(1);
+    });
+
+    it('the flag is released so a later checkout still works', async () => {
+      mockResponses['checkout_with_autostash'] = () => ({ success: true, stashed: false });
+      const el = shellOnRepo();
+      const evt = (): CustomEvent =>
+        new CustomEvent('checkout-branch', { detail: { branchName: 'feature' } });
+
+      await (el as any).handleCheckoutBranchFromGraph(evt());
+      invokeCallArgs.length = 0;
+      await (el as any).handleCheckoutBranchFromGraph(evt());
+
+      expect(
+        invokeCallArgs.filter((c) => c.command === 'checkout_with_autostash').length,
+      ).to.equal(1);
+    });
+  });
+
+  describe('reword and amend refuse a commit that is not on this branch', () => {
+    function offBranchShell(): AppShell {
+      const el = shellOnRepo();
+      mockResponses['get_commit_history'] = () => [commit('headoid')];
+      // The target lives only on another branch.
+      mockResponses['is_ancestor_of_head'] = () => false;
+      (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('elsewhere') };
+      return el;
+    }
+
+    it('reword does not open a plan that would rebase onto an unrelated commit', async () => {
+      const el = offBranchShell();
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        get: () => ({ open: () => { opened = true; } }),
+      });
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).handleRewordCommit();
+
+      expect(opened, 'the dialog never opens').to.equal(false);
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'and the user is told why').to.not.be.undefined;
+      expect(warning!.message).to.contain('not on the current branch');
+    });
+
+    it('amend refuses before promising to open the rebase dialog', async () => {
+      const el = offBranchShell();
+      let opened = false;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        get: () => ({ open: () => { opened = true; } }),
+      });
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).handleQuickAmend();
+
+      expect(opened).to.equal(false);
+      const messages = uiStore.getState().toasts.map((t) => t.message).join(' | ');
+      expect(
+        messages,
+        'no "opening interactive rebase" promise the app then breaks',
+      ).to.not.contain('opening interactive rebase');
+    });
+
+    it('a commit on the current branch still opens the plan', async () => {
+      const el = shellOnRepo();
+      mockResponses['get_commit_history'] = () => [commit('headoid')];
+      mockResponses['is_ancestor_of_head'] = () => true;
+      (el as any).contextMenu = { visible: true, x: 0, y: 0, commit: commit('olderoid') };
+      let openedOnto: string | null = null;
+      Object.defineProperty(el, 'interactiveRebaseDialog', {
+        configurable: true,
+        get: () => ({ open: (onto: string) => { openedOnto = onto; } }),
+      });
+
+      await (el as any).handleRewordCommit();
+
+      expect(openedOnto).to.equal('olderoid^');
     });
   });
 });

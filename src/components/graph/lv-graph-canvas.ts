@@ -2119,6 +2119,12 @@ export class LvGraphCanvas extends LitElement {
 
       const refLabelHit = this.renderer.getRefLabelAtPoint(canvasX, canvasY);
       if (refLabelHit && refLabelHit.refType === 'localBranch') {
+        // Clicking the branch already checked out is a no-op worth skipping,
+        // not performing: with a dirty tree it would still run a full
+        // stash -> checkout-to-the-same-commit -> apply -> drop cycle, parking
+        // the user's whole working tree in a stash for the duration. The
+        // sidebar's checkout returns early on isHead for the same reason.
+        if (refLabelHit.isHead) return;
         // Dispatch checkout event for local branches
         this.dispatchEvent(
           new CustomEvent('checkout-branch', {

@@ -1494,6 +1494,9 @@ describe('app-shell multi-repo behavior', () => {
         new Promise((res) => {
           resolveHistory = res;
         });
+      // Reword now refuses a commit that is not in HEAD's history — this test
+      // is about the repo-switch pinning, so the commit is on this branch.
+      mockResponses['is_ancestor_of_head'] = () => true;
 
       const promise = (el as any).handleRewordCommit();
       await new Promise((r) => setTimeout(r, 0));
@@ -1532,6 +1535,9 @@ describe('app-shell multi-repo behavior', () => {
       });
 
       mockResponses['get_commit_history'] = () => [{ oid: 'headOfA' }];
+      // On this branch — the off-branch refusal is covered in
+      // app-shell-destructive-guards.test.ts.
+      mockResponses['is_ancestor_of_head'] = () => true;
 
       await (el as any).handleRewordCommit();
 

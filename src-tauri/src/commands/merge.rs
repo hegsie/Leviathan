@@ -786,6 +786,34 @@ pub async fn abort_rebase(path: String) -> Result<()> {
     Ok(())
 }
 
+/// Is `oid` reachable from HEAD (or HEAD itself)?
+///
+/// The graph is loaded with every branch, so Reword and Amend are offered on
+/// commits that live only on OTHER branches. Both route non-HEAD commits to the
+/// interactive-rebase dialog as `<oid>^`, and `get_rebase_commits` then walks
+/// HEAD while hiding that parent — which for an off-branch commit yields the
+/// current branch's own history and never contains the target. The dialog
+/// opened with no reword row but an enabled Start Rebase, one click from
+/// replaying the current branch onto an unrelated branch's commit.
+///
+/// A plain rebase onto another branch is legitimate and stays available from
+/// the branch list; it is only the reword/amend route that requires the target
+/// to be in the history being rewritten, so the check lives here rather than in
+/// get_rebase_commits.
+#[command]
+pub async fn is_ancestor_of_head(path: String, oid: String) -> Result<bool> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let target = repo.revparse_single(&oid)?.peel_to_commit()?.id();
+    let head = repo
+        .head()?
+        .target()
+        .ok_or(LeviathanError::InvalidReference)?;
+    if head == target {
+        return Ok(true);
+    }
+    Ok(repo.graph_descendant_of(head, target)?)
+}
+
 /// Get commits between HEAD and a target ref for interactive rebase
 #[command]
 pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<RebaseCommit>> {
@@ -2452,6 +2480,46 @@ mod tests {
             git2::RepositoryState::Clean,
             "and the repository is not left mid-rebase"
         );
+    }
+
+    #[tokio::test]
+    async fn test_is_ancestor_of_head() {
+        // The graph offers Reword and Amend on every branch's commits. Routing
+        // an off-branch commit to `<oid>^` produced a plan holding the CURRENT
+        // branch's history with the target absent, and an enabled Start Rebase
+        // one click from replaying this branch onto an unrelated one.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        let on_main = repo.create_commit("on main", &[("a.txt", "a")]).to_string();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let on_feature = repo
+            .create_commit("on feature", &[("b.txt", "b")])
+            .to_string();
+        repo.checkout_branch(&main_branch);
+
+        assert!(
+            is_ancestor_of_head(repo.path_str(), on_main.clone())
+                .await
+                .unwrap(),
+            "a commit on the current branch can be rewritten in place"
+        );
+        assert!(
+            !is_ancestor_of_head(repo.path_str(), on_feature)
+                .await
+                .unwrap(),
+            "one that lives only on another branch cannot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_head_is_its_own_ancestor_for_this_check() {
+        // graph_descendant_of is false for equal oids, but HEAD is obviously
+        // rewritable in place.
+        let repo = TestRepo::with_initial_commit();
+        let head = repo.head_oid().to_string();
+        assert!(is_ancestor_of_head(repo.path_str(), head).await.unwrap());
     }
 
     #[tokio::test]
