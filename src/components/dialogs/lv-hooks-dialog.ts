@@ -854,7 +854,7 @@ export class LvHooksDialog extends LitElement {
           }
         }
       } else {
-        showToast(`Failed to save hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to save hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to save hook:', err);
@@ -887,7 +887,7 @@ export class LvHooksDialog extends LitElement {
           }
         }
       } else {
-        showToast(`Failed to toggle hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to toggle hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to toggle hook:', err);
@@ -926,7 +926,7 @@ export class LvHooksDialog extends LitElement {
           this.hooks = hooksResult.data;
         }
       } else {
-        showToast(`Failed to delete hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to delete hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to delete hook:', err);

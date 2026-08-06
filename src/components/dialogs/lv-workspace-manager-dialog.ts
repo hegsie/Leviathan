@@ -1105,7 +1105,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
         await this.loadWorkspaces();
         this.selectWorkspace(result.data.id);
       } else {
-        showToast(`Import failed: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Import failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to import workspace:', err);

@@ -2317,6 +2317,15 @@ export class AppShell extends LitElement {
     // gates this behind an explicit confirmation panel; the banner button
     // reaches the same command, so it needs the same gate rather than being a
     // one-click path to the identical loss.
+    // Claimed BEFORE the confirm, not after. There is an IPC round trip between
+    // the click and the native dialog actually opening and taking focus, so a
+    // double-click landed a second call while the flag was still false and
+    // raised two abort prompts — the second then ran against an
+    // already-restored tree with a stale `state` and reported a failure for an
+    // operation that had in fact succeeded. Same reasoning as
+    // lv-gitflow-panel's handleFinishFeature.
+    this.abortInProgress = true;
+
     const confirmed = await showConfirm(
       `Abort ${state}?`,
       `This discards all conflict resolutions and restores the working tree to ` +
@@ -2324,11 +2333,10 @@ export class AppShell extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
-
-    // Guards against a double-click firing two aborts: the second would run
-    // against an already-restored tree and surface a confusing failure.
-    this.abortInProgress = true;
+    if (!confirmed) {
+      this.abortInProgress = false;
+      return;
+    }
 
     try {
       switch (state) {
@@ -2835,25 +2843,8 @@ export class AppShell extends LitElement {
     // Captured BEFORE the history await: the reword targets THIS repo's commit.
     const repoPath = this.activeRepository.repository.path;
 
-    // Check if this is HEAD commit by comparing with the first commit in history.
-    // Note: This works for the common case of a branch checkout. In detached HEAD state,
-    // the first commit in history is still HEAD, so this approach remains valid.
-    const historyResult = await gitService.getCommitHistory({
-      path: repoPath,
-      limit: 1,
-    });
-
-    // The interactive-rebase dialog and the commit panel both bind to the LIVE
-    // active repo. If the user switched tabs during the history await, opening
-    // either would configure a reword of THIS repo's commit against another
-    // repo (rewriting the wrong history, or dead-ending on a missing commit).
-    if (this.activeRepository?.repository.path !== repoPath) {
-      showToast('Repository changed — reword cancelled', 'warning');
-      return;
-    }
-
-    const isHead = historyResult.success && historyResult.data &&
-      historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
+    const isHead = await this.isHeadCommit(commit.oid, repoPath, 'reword');
+    if (isHead === null) return;
 
     if (isHead) {
       // For HEAD, just trigger amend mode
@@ -2869,19 +2860,70 @@ export class AppShell extends LitElement {
   }
 
   /**
-   * Quick amend - only available for HEAD commit
-   * Triggers amend mode in commit panel
+   * Is `oid` the commit HEAD points at?
+   *
+   * Returns null when the answer must not be acted on — the user switched
+   * repository during the history await, and both the commit panel and the
+   * interactive-rebase dialog bind to the LIVE active repo, so acting would
+   * configure THIS repo's commit against another one.
+   *
+   * Compares against the first commit in history: correct for a branch
+   * checkout, and still correct in detached HEAD, where the first commit in
+   * history is HEAD.
    */
-  private handleQuickAmend(): void {
+  private async isHeadCommit(
+    oid: string,
+    repoPath: string,
+    operation: string,
+  ): Promise<boolean | null> {
+    const historyResult = await gitService.getCommitHistory({ path: repoPath, limit: 1 });
+    if (this.activeRepository?.repository.path !== repoPath) {
+      showToast(`Repository changed — ${operation} cancelled`, 'warning');
+      return null;
+    }
+    return !!(
+      historyResult.success &&
+      historyResult.data &&
+      historyResult.data.length > 0 &&
+      historyResult.data[0].oid === oid
+    );
+  }
+
+  /**
+   * Quick amend from the graph's commit context menu.
+   *
+   * Amend ONLY ever rewrites HEAD — create_commit re-parents
+   * `repo.head()?.peel_to_commit()` regardless of which commit the UI thinks
+   * it is amending. This handler used to trust the clicked commit, so amending
+   * any older commit replaced HEAD instead: HEAD's message became the clicked
+   * commit's, any staged changes were folded into HEAD, the commit the user
+   * actually right-clicked was untouched, and HEAD's original commit survived
+   * only in the reflog. The commit panel showed the clicked commit's short id
+   * throughout, so nothing said otherwise.
+   *
+   * Reword has always performed this check; amend was left behind. Non-HEAD
+   * commits go to the same interactive-rebase route rather than dead-ending.
+   */
+  private async handleQuickAmend(): Promise<void> {
     const commit = this.contextMenu.commit;
-    if (!commit) return;
+    if (!commit || !this.activeRepository) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Dispatch event to trigger amend mode in commit panel
-    window.dispatchEvent(new CustomEvent('trigger-amend', {
-      detail: { commit },
-    }));
+    const repoPath = this.activeRepository.repository.path;
+    const isHead = await this.isHeadCommit(commit.oid, repoPath, 'amend');
+    if (isHead === null) return;
+
+    if (isHead) {
+      window.dispatchEvent(new CustomEvent('trigger-amend', {
+        detail: { commit },
+      }));
+    } else {
+      showToast('Only the latest commit can be amended — opening interactive rebase', 'info');
+      this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
+        rewordCommitOid: commit.oid,
+      });
+    }
   }
 
   private handleConflictResolved(): void {
@@ -4377,7 +4419,11 @@ export class AppShell extends LitElement {
                             : ''}
                           ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
-                                <button class="operation-abort-btn" @click=${() => this.handleAbortOperation()}>
+                                <button
+                                  class="operation-abort-btn"
+                                  ?disabled=${this.abortInProgress}
+                                  @click=${() => this.handleAbortOperation()}
+                                >
                                   Abort
                                 </button>
                               `
@@ -4567,7 +4613,7 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleQuickAmend} title="Amend (edit) this commit">
+              <button class="context-menu-item" @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>

@@ -53,6 +53,8 @@ const mockHooks: GitHook[] = [
 ];
 
 let lastInvokedCommand: string | null = null;
+/** When set, the mutating hook commands reject with this. */
+let failWith: { code?: string; message: string } | null = null;
 const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -73,8 +75,10 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
     case 'save_hook':
       return null;
     case 'delete_hook':
+      if (failWith) throw failWith;
       return null;
     case 'toggle_hook':
+      if (failWith) throw failWith;
       return null;
     case 'plugin:notification|is_permission_granted':
       return false;
@@ -90,10 +94,12 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 // Import the component AFTER setting up the mock
 import '../lv-hooks-dialog.ts';
 import type { LvHooksDialog } from '../lv-hooks-dialog.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 describe('lv-hooks-dialog', () => {
   beforeEach(() => {
     lastInvokedCommand = null;
+    failWith = null;
   });
 
   it('renders when open', async () => {
@@ -338,5 +344,46 @@ describe('lv-hooks-dialog', () => {
     const del = invokeCalls.find((c) => c.command === 'delete_hook');
     expect(del, 'delete_hook issued').to.not.be.undefined;
     expect((del!.args as { path: string }).path).to.equal('/repo/a');
+  });
+
+  it('a failed delete reports the reason, not "[object Object]"', async () => {
+    // result.error is a CommandError object, not a string. Interpolating it
+    // straight into the template produced a toast reading literally
+    // "Failed to delete hook: [object Object]" — for a real failure the user
+    // could have acted on (read-only file, wrong owner, locked filesystem).
+    const el = await fixture<LvHooksDialog>(
+      html`<lv-hooks-dialog ?open=${true} .repoPath=${'/repo/a'}></lv-hooks-dialog>`,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    failWith = { code: 'COMMAND_ERROR', message: 'Permission denied (os error 13)' };
+    uiStore.setState({ toasts: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).confirmingDelete = 'pre-commit';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).confirmDelete();
+
+    const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+    expect(errors.length, 'the failure is reported').to.equal(1);
+    expect(errors[0].message).to.contain('Permission denied');
+    expect(errors[0].message).to.not.contain('[object Object]');
+  });
+
+  it('a failed toggle reports the reason too', async () => {
+    const el = await fixture<LvHooksDialog>(
+      html`<lv-hooks-dialog ?open=${true} .repoPath=${'/repo/a'}></lv-hooks-dialog>`,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    failWith = { code: 'COMMAND_ERROR', message: 'Read-only file system' };
+    uiStore.setState({ toasts: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleToggle(mockHooks[0]);
+
+    const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+    expect(errors.length).to.equal(1);
+    expect(errors[0].message).to.contain('Read-only file system');
   });
 });

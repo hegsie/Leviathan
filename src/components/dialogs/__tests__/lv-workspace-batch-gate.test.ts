@@ -105,6 +105,12 @@ describe('deleting a workspace', () => {
     expect(invoked.some((c) => c.command === 'delete_workspace')).to.equal(true);
     const summary = uiStore.getState().toasts.map((t) => `${t.type}:${t.message}`).join(' | ');
     expect(summary).to.contain('success:Deleted workspace Team');
+    // The service used to toast "Workspace deleted" as well, so one click
+    // produced two stacked success messages.
+    expect(
+      uiStore.getState().toasts.filter((t) => t.type === 'success').length,
+      'one confirmation for one click',
+    ).to.equal(1);
   });
 });
 
