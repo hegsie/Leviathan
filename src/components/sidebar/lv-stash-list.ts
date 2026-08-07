@@ -436,6 +436,12 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
+              // The oid, not just the position: the dialog's identity capture
+              // is an async round trip, and a stash pushed in the meantime —
+              // from a terminal, or Ctrl+Shift+S — prepends and renumbers the
+              // list, so Complete would drop the wrong entry. Same threading
+              // the auto-stash dispatchers already do.
+              stashOid: stash.oid,
               stashIndex: index,
               dropStashOnComplete: false,
               repositoryPath: repoPath,
@@ -508,6 +514,12 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
+              // The oid, not just the position: the dialog's identity capture
+              // is an async round trip, and a stash pushed in the meantime —
+              // from a terminal, or Ctrl+Shift+S — prepends and renumbers the
+              // list, so Complete would drop the wrong entry. Same threading
+              // the auto-stash dispatchers already do.
+              stashOid: stash.oid,
               stashIndex: index,
               dropStashOnComplete: true,
               repositoryPath: repoPath,

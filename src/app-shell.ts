@@ -2481,6 +2481,16 @@ export class AppShell extends LitElement {
     // already-restored tree with a stale `state` and reported a failure for an
     // operation that had in fact succeeded. Same reasoning as
     // lv-gitflow-panel's handleFinishFeature.
+    //
+    // The claim is on the SHARED working-tree lock, not just this banner's own
+    // flag. An abort is a full working-tree restore, and this is the only
+    // always-visible non-modal destructive control — so a hard reset from the
+    // graph could run beside it in one direction, and a sidebar discard could
+    // start during this confirm's IPC round trip in the other.
+    if (!this.claimRefOperation(path)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.abortInProgress = true;
 
     const confirmed = await showConfirm(
@@ -2492,6 +2502,7 @@ export class AppShell extends LitElement {
 
     if (!confirmed) {
       this.abortInProgress = false;
+      this.releaseRefOperation(path);
       return;
     }
 
@@ -2530,6 +2541,7 @@ export class AppShell extends LitElement {
       }
     } finally {
       this.abortInProgress = false;
+      this.releaseRefOperation(path);
     }
   }
 
@@ -3804,18 +3816,25 @@ export class AppShell extends LitElement {
               'warning'
             );
             if (confirmed) {
-              const resetResult = await git.resetToReflog(
-                repoPath,
-                match.index,
-                'soft',
-                target.oid
-              );
-              if (resetResult.success) {
-                showToast('Undo successful', 'success');
-                this.refreshConflictDialogRepo(repoPath);
-              } else {
-                showToast(resetResult.error?.message ?? 'Undo failed', 'error');
-              }
+              // The other caller of reset_to_reflog — lv-reflog-dialog — claims
+              // the shared working-tree lock; this palette route to the same
+              // command was missed by that sweep. The expected_oid pin guards
+              // against a STALE index, not against a checkout moving the branch
+              // underneath the reset.
+              await this.runRefExclusive(repoPath, async () => {
+                const resetResult = await git.resetToReflog(
+                  repoPath,
+                  match.index,
+                  'soft',
+                  target.oid
+                );
+                if (resetResult.success) {
+                  showToast('Undo successful', 'success');
+                  this.refreshConflictDialogRepo(repoPath);
+                } else {
+                  showToast(resetResult.error?.message ?? 'Undo failed', 'error');
+                }
+              });
             }
           } else {
             showToast(result.error?.message ?? 'Could not find matching reflog entry', 'error');
@@ -4336,9 +4355,16 @@ export class AppShell extends LitElement {
     // that both start clean both pass it, and the second calls repo.merge() on
     // top of the first, which deletes MERGE_HEAD and leaves a conflicted index
     // that abort_merge then refuses to clean up. Keyboard auto-repeat alone
-    // fires this ~30x a second. Keyed like the force-push sibling, and claimed
-    // before the network-permission confirm so that round trip is covered too.
-    return this.runExclusive(`pull:${repoPath}`, () => this.pullRepository(repoPath));
+    // fires this ~30x a second.
+    //
+    // Held on the SHARED working-tree lock, not a private key: a pull's
+    // fast-forward runs checkout_tree and moves the branch ref, and its merge
+    // and rebase paths rewrite the tree outright. Keying it separately
+    // serialized pull against pull but left every sidebar checkout, discard
+    // and reset fully enabled beside it — the exact split ref-lock.ts exists
+    // to close. Claimed before the network-permission confirm so that round
+    // trip is covered too.
+    return this.runRefExclusive(repoPath, () => this.pullRepository(repoPath));
   }
 
   private async pullRepository(repoPath: string): Promise<void> {
@@ -4774,7 +4800,7 @@ export class AppShell extends LitElement {
                             ? html`
                                 <button
                                   class="operation-abort-btn"
-                                  ?disabled=${this.abortInProgress}
+                                  ?disabled=${this.abortInProgress || this.isRefOperationInFlight()}
                                   @click=${() => this.handleAbortOperation()}
                                 >
                                   Abort

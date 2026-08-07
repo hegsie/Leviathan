@@ -732,32 +732,63 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     let signature = repo.signature()?;
     let mut rebase = repo.open_rebase(None)?;
 
+    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit.
+    // rebase() fires this when it completes in one go; a rebase that PAUSED on
+    // a conflict finishes here instead, and this path never fired it — so the
+    // hook ran or not depending only on whether the user hit a conflict.
+    let mut rewritten: Vec<String> = Vec::new();
+
     // Commit the current (just-resolved) operation; a patch that became
     // empty after resolution is skipped like `git rebase --skip` would.
-    commit_or_skip_empty(&mut rebase, &signature)?;
+    // The operation being resolved is the rebase's current one.
+    let resumed_old = rebase
+        .operation_current()
+        .and_then(|i| rebase.nth(i).map(|op| op.id()));
+    if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+        if let Some(old_oid) = resumed_old {
+            rewritten.push(format!("{} {}", old_oid, new_oid));
+        }
+    }
 
     // Continue with remaining operations
     while let Some(op) = rebase.next() {
-        let _op = op?;
+        let old_oid = op?.id();
 
         if repo.index()?.has_conflicts() {
             return Err(LeviathanError::RebaseConflict);
         }
 
-        commit_or_skip_empty(&mut rebase, &signature)?;
+        if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+            rewritten.push(format!("{} {}", old_oid, new_oid));
+        }
     }
 
     rebase.finish(Some(&signature))?;
+
+    if !rewritten.is_empty() {
+        crate::commands::hooks::run_hook_noblock_with_stdin(
+            &repo,
+            "post-rewrite",
+            &["rebase"],
+            Some(&format!("{}\n", rewritten.join("\n"))),
+        );
+    }
 
     Ok(())
 }
 
 /// Commit the current rebase operation, treating an empty patch
 /// (GIT_EAPPLIED) as a skip rather than a failure.
-fn commit_or_skip_empty(rebase: &mut git2::Rebase, signature: &git2::Signature) -> Result<()> {
+///
+/// Returns the new commit's oid, or None when the patch was skipped — the
+/// caller pairs it with the original oid for the post-rewrite hook.
+fn commit_or_skip_empty(
+    rebase: &mut git2::Rebase,
+    signature: &git2::Signature,
+) -> Result<Option<git2::Oid>> {
     match rebase.commit(None, signature, None) {
-        Ok(_) => Ok(()),
-        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(()),
+        Ok(oid) => Ok(Some(oid)),
+        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -2724,6 +2755,85 @@ mod tests {
                 c.summary
             );
         }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_continue_rebase_runs_post_rewrite() {
+        // rebase() fires post-rewrite when it completes in one go. A rebase
+        // that PAUSED on a conflict finishes in continue_rebase instead, which
+        // fired nothing — so whether the hook ran depended only on whether the
+        // user happened to hit a conflict.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_commit("on main", &[("shared.txt", "main side\n")]);
+        // A feature branch that conflicts with main on the same file.
+        repo.repo()
+            .reference(
+                "refs/heads/feature",
+                repo.repo()
+                    .find_reference(&format!("refs/heads/{}", main_branch))
+                    .unwrap()
+                    .target()
+                    .unwrap(),
+                true,
+                "test",
+            )
+            .unwrap();
+        repo.checkout_branch("feature");
+        // Rewind feature to before the main commit so the rebase has work.
+        repo.create_commit("on feature", &[("shared.txt", "feature side\n")]);
+
+        let marker = repo.path.join("post-rewrite-ran");
+        repo.install_hook(
+            "post-rewrite",
+            &format!("#!/bin/sh\ncat > \"{}\"\n", marker.display()),
+        );
+
+        // Drive a libgit2 rebase to a paused state, resolve, then continue.
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap();
+        let head_commit = git_repo.reference_to_annotated_commit(&head).unwrap();
+        let onto = git_repo
+            .find_reference(&format!("refs/heads/{}", main_branch))
+            .unwrap();
+        let onto_commit = git_repo.reference_to_annotated_commit(&onto).unwrap();
+        let mut rb = git_repo
+            .rebase(Some(&head_commit), Some(&onto_commit), None, None)
+            .unwrap();
+        let sig = git_repo.signature().unwrap();
+        let mut paused = false;
+        while let Some(op) = rb.next() {
+            op.unwrap();
+            if git_repo.index().unwrap().has_conflicts() {
+                paused = true;
+                break;
+            }
+            let _ = rb.commit(None, &sig, None);
+        }
+        drop(rb);
+
+        if !paused {
+            // No conflict arose; nothing for continue_rebase to finish.
+            return;
+        }
+
+        // Resolve the conflict the way the conflict dialog does.
+        repo.create_file("shared.txt", "resolved\n");
+        repo.stage_file("shared.txt");
+
+        continue_rebase(repo.path_str()).await.expect("continue");
+
+        assert!(
+            marker.exists(),
+            "post-rewrite must run when a paused rebase is continued"
+        );
+        let payload = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            payload.split_whitespace().count() >= 2,
+            "post-rewrite stdin must carry <old> <new> pairs, got: {:?}",
+            payload
+        );
     }
 
     #[tokio::test]

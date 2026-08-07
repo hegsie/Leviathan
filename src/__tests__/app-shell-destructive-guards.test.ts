@@ -433,6 +433,54 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('the operation banner Abort shares the working-tree lock', () => {
+    // An abort is a full working-tree restore, and the banner is the only
+    // always-visible non-modal destructive control — so a hard reset from the
+    // graph could run beside it, and a sidebar discard could start during the
+    // abort's confirm round trip.
+    it('is inert while another surface holds the lock', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo('cherrypick');
+      tryAcquireRefOp('/repo/one');
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleAbortOperation();
+
+      expect(
+        invokeCallArgs.some((c) => /^abort_/.test(c.command)),
+        'the abort must not run beside another working-tree operation',
+      ).to.equal(false);
+    });
+
+    it('claims and releases the lock around its own work', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo('cherrypick');
+
+      let heldDuringAbort = false;
+      mockResponses['abort_cherry_pick'] = () => {
+        heldDuringAbort = isRefOpRunning('/repo/one');
+        return null;
+      };
+
+      await (el as any).handleAbortOperation();
+
+      expect(heldDuringAbort, 'the sidebar would have seen a free lock').to.equal(true);
+      expect(isRefOpRunning('/repo/one'), 'released afterwards').to.equal(false);
+    });
+
+    it('a declined confirm releases the lock', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
+      mockResponses['plugin:dialog|message'] = () => 'Cancel';
+      const el = shellOnRepo('cherrypick');
+
+      await (el as any).handleAbortOperation();
+
+      expect(isRefOpRunning('/repo/one'), 'a stuck lock would wedge the repo').to.equal(false);
+    });
+  });
+
   describe('pull is serialized', () => {
     // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
     // "Pull Now" toast action — and none guarded a second call. The backend's
@@ -457,6 +505,24 @@ describe('app-shell destructive guards', () => {
       await new Promise((r) => setTimeout(r, 20));
 
       expect(started, 'the second pull must not reach the backend').to.equal(1);
+    });
+
+    it('holds the shared working-tree lock, so the sidebar is disabled too', async () => {
+      // Keying pull separately serialized pull against pull but left every
+      // sidebar checkout, discard and reset enabled beside it — and a
+      // fast-forward pull runs checkout_tree and moves the branch ref.
+      const el = shellOnRepo();
+      let heldDuringPull = false;
+      mockResponses['pull'] = () => {
+        // What lv-branch-list and lv-file-status read to gate their controls.
+        heldDuringPull = isRefOpRunning('/repo/one');
+        return null;
+      };
+
+      await (el as any).handlePull();
+
+      expect(heldDuringPull, 'the sidebar would have seen a free lock').to.equal(true);
+      expect(isRefOpRunning('/repo/one'), 'released afterwards').to.equal(false);
     });
 
     it('a later pull works once the first finished', async () => {
