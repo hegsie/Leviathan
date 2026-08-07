@@ -489,7 +489,15 @@ export class LvStashList extends LitElement {
         }));
       } else {
         console.error('Failed to apply stash:', result.error);
-        showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        // A conflict is not a failure: the stash content DID land in the
+        // working tree and the resolution dialog is about to open. A red
+        // "Merge conflict" beside it reads as "nothing happened" — the same
+        // reason pull, the dashboard and every auto-stash path warn instead.
+        if (this.isConflictError(result.error)) {
+          showToast('Stash applied — conflicts need resolution', 'warning');
+        } else {
+          showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        }
         // A conflicting apply left the changes in the working tree; open the
         // conflict resolution dialog. The stash was NOT dropped (apply, not pop),
         // so completion must keep it.
@@ -570,7 +578,15 @@ export class LvStashList extends LitElement {
         }));
       } else {
         console.error('Failed to pop stash:', result.error);
-        showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        // A conflict is not a failure: the stash content DID land in the
+        // working tree and the resolution dialog is about to open. A red
+        // "Merge conflict" beside it reads as "nothing happened" — the same
+        // reason pull, the dashboard and every auto-stash path warn instead.
+        if (this.isConflictError(result.error)) {
+          showToast('Stash popped — conflicts need resolution', 'warning');
+        } else {
+          showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        }
         // A conflicting pop left the changes in the working tree AND left the
         // stash entry in place. Open the conflict resolution dialog; completion
         // must drop the stash (pop semantics) once conflicts are resolved.

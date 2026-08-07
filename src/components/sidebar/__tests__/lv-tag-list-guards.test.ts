@@ -29,7 +29,13 @@ import type { LvTagList } from '../lv-tag-list.ts';
 import '../lv-tag-list.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import type { Repository } from '../../../types/git.types.ts';
-import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  resetRefOpLocks,
+  tryAcquirePush,
+  releasePush,
+  pushTagKey,
+} from '../../../utils/ref-lock.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -232,5 +238,57 @@ describe('lv-tag-list operationInProgress guards', () => {
     }
 
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
+  });
+
+  // The tag-push slot is SEPARATE from the working-tree lock, so
+  // operationInProgress cannot see it: Force Push Tag — from the rejected-push
+  // suggestion toast — holds only the push slot, and holds it across its
+  // confirm. Without observing it, Push stayed lit through that window and the
+  // click did nothing but raise a refusal toast.
+  it('greys out Push while a force push holds the same tag', async () => {
+    const el = await createComponent();
+    const tag = makeTag({ name: 'v1.0.0' });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, tag };
+    await el.updateComplete;
+
+    const pushBtn = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find((b) =>
+      /push/i.test(b.textContent ?? '')
+    ) as HTMLButtonElement;
+    expect(pushBtn, 'the Push item must be rendered').to.not.be.undefined;
+    expect(pushBtn.disabled, 'clickable while the tag is idle').to.equal(false);
+
+    const key = pushTagKey(REPO_PATH, 'v1.0.0');
+    tryAcquirePush(key);
+    await el.updateComplete;
+    expect(pushBtn.disabled, 'a force push on this tag must grey it out').to.equal(true);
+
+    releasePush(key);
+    await el.updateComplete;
+    expect(pushBtn.disabled, 'and the release must revive it').to.equal(false);
+  });
+
+  it('leaves Push clickable while a DIFFERENT tag is being pushed', async () => {
+    const el = await createComponent();
+    const tag = makeTag({ name: 'v1.0.0' });
+    (
+      el as unknown as {
+        contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null };
+      }
+    ).contextMenu = { visible: true, x: 0, y: 0, tag };
+    await el.updateComplete;
+
+    const pushBtn = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find((b) =>
+      /push/i.test(b.textContent ?? '')
+    ) as HTMLButtonElement;
+
+    const other = pushTagKey(REPO_PATH, 'v2.0.0');
+    tryAcquirePush(other);
+    await el.updateComplete;
+    expect(pushBtn.disabled, 'pushing another tag is unrelated').to.equal(false);
+    releasePush(other);
   });
 });

@@ -437,6 +437,14 @@ export class LvWorktreeDialog extends LitElement {
     }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
+      // Cleared on the OPEN transition, not just per handler. These dialogs
+      // stay mounted (app-shell only toggles ?open), so `success` survived
+      // close/reopen — and a Ctrl+Tab in between meant "Worktree removed" was
+      // replayed above a DIFFERENT repository's untouched list. `error` never
+      // leaked because every loader resets it; this is the third entry point
+      // in the same sweep, after the handlers and the mode-switch buttons.
+      this.success = '';
+      this.error = '';
       this.mode = 'list';
       await this.loadWorktrees();
       await this.loadBranches();

@@ -471,6 +471,14 @@ export class LvLfsDialog extends LitElement {
     }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
+      // Cleared on the OPEN transition, not just per handler. These dialogs
+      // stay mounted (app-shell only toggles ?open), so `success` survived
+      // close/reopen — and a Ctrl+Tab in between meant "Worktree removed" was
+      // replayed above a DIFFERENT repository's untouched list. `error` never
+      // leaked because every loader resets it; this is the third entry point
+      // in the same sweep, after the handlers and the mode-switch buttons.
+      this.success = '';
+      this.error = '';
       await this.loadStatus();
     }
   }
@@ -515,7 +523,9 @@ export class LvLfsDialog extends LitElement {
     const result = await gitService.initLfs(repoPath);
 
     if (result.success) {
-      this.success = 'Git LFS initialized';
+      // Says what actually happened: `git lfs install` sets hooks and config
+      // but writes no .gitattributes, so nothing is tracked yet.
+      this.success = 'Git LFS hooks installed — add a pattern below to start tracking files';
       await this.loadStatus();
       this.dispatchEvent(new CustomEvent('lfs-changed'));
     } else {
@@ -802,7 +812,15 @@ export class LvLfsDialog extends LitElement {
             `}
       </div>
 
-      ${this.status.enabled
+      <!-- Tracked Patterns is gated on INSTALLED, not enabled.
+           "enabled" means .gitattributes exists and contains filter=lfs, and
+           the only thing that writes that file is git lfs track — which lived
+           in here. git lfs install (the Initialize button) sets config and
+           hooks but never touches .gitattributes, so Initialize reported
+           success, the badge stayed "Not configured", and the one control that
+           could have changed it was unreachable. The dialog was a dead end on
+           every repo adopting LFS for the first time. -->
+      ${this.status.installed
         ? html`
             <div class="section">
               <div class="section-header">
@@ -852,6 +870,11 @@ export class LvLfsDialog extends LitElement {
                 </button>
               </div>
             </div>
+          `
+        : ''}
+
+      ${this.status.enabled
+        ? html`
 
             <div class="section">
               <div class="section-header">

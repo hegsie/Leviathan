@@ -27,6 +27,7 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 let cbId = 0;
 const invoked: string[] = [];
 
+let lfsEnabled = true;
 const failCommands = new Set<string>();
 
 const mockInvoke: MockInvoke = async (command: string) => {
@@ -89,7 +90,7 @@ const mockInvoke: MockInvoke = async (command: string) => {
       return {
         installed: true,
         version: '3.0.0',
-        enabled: true,
+        enabled: lfsEnabled,
         patterns: [],
         fileCount: 0,
         totalSize: 0,
@@ -158,6 +159,7 @@ describe('the worktree Add form offers only usable branches', () => {
     resetMaintenanceLocks();
     resetRefOpLocks();
     invoked.length = 0;
+    lfsEnabled = true;
   });
 
   // `git worktree add <path> origin/main` exits 0 having created a DETACHED
@@ -218,6 +220,7 @@ describe('a failure never renders under a stale success banner', () => {
     resetMaintenanceLocks();
     resetRefOpLocks();
     invoked.length = 0;
+    lfsEnabled = true;
   });
 
   it('lv-worktree-dialog clears the success banner when the next action fails', async () => {
@@ -259,6 +262,7 @@ describe('the success banner is cleared everywhere it can go stale', () => {
     resetMaintenanceLocks();
     resetRefOpLocks();
     invoked.length = 0;
+    lfsEnabled = true;
   });
 
   it('lv-lfs-dialog handleInit clears a stale success banner', async () => {
@@ -285,6 +289,31 @@ describe('the success banner is cleared everywhere it can go stale', () => {
     expect(internal.success, 'the stale success must not survive it').to.equal('');
   });
 
+  // These dialogs stay mounted — app-shell only toggles ?open — so `success`
+  // survived close/reopen, and a Ctrl+Tab in between replayed "Worktree
+  // removed" above a DIFFERENT repository's untouched list.
+  it('lv-worktree-dialog clears the banner when it is reopened', async () => {
+    const el = await fixture<Updatable>(html`
+      <lv-worktree-dialog .repositoryPath=${REPO_PATH} ?open=${true}></lv-worktree-dialog>
+    `);
+    await waitForRendered(el, '.action-btn');
+
+    const internal = el as unknown as { success: string; open: boolean };
+    internal.success = 'Worktree removed';
+    await el.updateComplete;
+
+    internal.open = false;
+    await el.updateComplete;
+    internal.open = true;
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(
+      internal.success,
+      'reopening must not replay a destructive operation that already finished'
+    ).to.equal('');
+  });
+
   it('lv-submodule-dialog Cancel clears the banner on the way back to the list', async () => {
     const el = await fixture<Updatable>(html`
       <lv-submodule-dialog .repositoryPath=${REPO_PATH} ?open=${true}></lv-submodule-dialog>
@@ -308,11 +337,55 @@ describe('the success banner is cleared everywhere it can go stale', () => {
   });
 });
 
+describe('the LFS dialog is not a dead end before .gitattributes exists', () => {
+  beforeEach(() => {
+    resetMaintenanceLocks();
+    resetRefOpLocks();
+    invoked.length = 0;
+    lfsEnabled = true;
+  });
+
+  // "enabled" means .gitattributes exists and contains filter=lfs. The only
+  // thing that writes it is `git lfs track`, whose input lived behind the same
+  // `enabled` flag — while `git lfs install` (the Initialize button) writes
+  // config and hooks and never touches .gitattributes. So Initialize reported
+  // success forever and nothing became usable.
+  it('offers the Track input on a repo with LFS installed but nothing tracked', async () => {
+    lfsEnabled = false;
+    const el = await fixture<Updatable>(html`
+      <lv-lfs-dialog .repositoryPath=${REPO_PATH} ?open=${true}></lv-lfs-dialog>
+    `);
+    await waitForRendered(el, '.status-section');
+
+    const titles = Array.from(el.shadowRoot!.querySelectorAll('.section-title')).map(
+      (n) => n.textContent ?? '',
+    );
+    expect(
+      titles.some((t) => /Tracked Patterns/.test(t)),
+      'the pattern list must be reachable before anything is tracked'
+    ).to.be.true;
+
+    const track = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+      (b) => (b.textContent ?? '').trim() === 'Track',
+    );
+    expect(track, 'the Track button is the only way out of "Not configured"').to.not.be.undefined;
+
+    // Pull/Prune still wait for a real LFS setup.
+    expect(
+      Array.from(el.shadowRoot!.querySelectorAll('button')).some((b) =>
+        /Prune/i.test(b.textContent ?? ''),
+      ),
+      'prune stays gated on a configured repo'
+    ).to.be.false;
+  });
+});
+
 describe('destructive dialogs hold the shared locks', () => {
   beforeEach(() => {
     resetMaintenanceLocks();
     resetRefOpLocks();
     invoked.length = 0;
+    lfsEnabled = true;
   });
 
   afterEach(() => {

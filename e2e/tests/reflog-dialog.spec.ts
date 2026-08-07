@@ -47,6 +47,12 @@ const REFLOG_ENTRIES = [
 
 /** Open the reflog dialog via command palette and wait for it to render */
 async function openReflogDialog(page: import('@playwright/test').Page): Promise<void> {
+  // Settle any navigation still in flight from setup BEFORE opening the
+  // dialog. Under a full parallel run a late reload landed mid-assertion —
+  // Playwright logged "waiting for navigation to finish ... navigated to" —
+  // which tore the dialog (and the installed Tauri mocks) down after the
+  // helper had already seen it open.
+  await page.waitForLoadState('domcontentloaded');
   await openViaCommandPalette(page, 'Undo');
   await page.locator('lv-reflog-dialog[open]').waitFor({ state: 'attached', timeout: 5000 });
   await expect(page.locator('lv-reflog-dialog .entry').first()).toBeAttached();

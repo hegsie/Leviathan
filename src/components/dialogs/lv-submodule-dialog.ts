@@ -440,6 +440,14 @@ export class LvSubmoduleDialog extends LitElement {
     }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
+      // Cleared on the OPEN transition, not just per handler. These dialogs
+      // stay mounted (app-shell only toggles ?open), so `success` survived
+      // close/reopen — and a Ctrl+Tab in between meant "Worktree removed" was
+      // replayed above a DIFFERENT repository's untouched list. `error` never
+      // leaked because every loader resets it; this is the third entry point
+      // in the same sweep, after the handlers and the mode-switch buttons.
+      this.success = '';
+      this.error = '';
       this.mode = 'list';
       this.addUrl = '';
       this.addPath = '';
@@ -607,7 +615,11 @@ export class LvSubmoduleDialog extends LitElement {
 
     const confirmed = await showConfirm(
       'Remove Submodule',
-      `Are you sure you want to remove the submodule "${submodule.name}"?\n\nThis deletes its working directory, including any uncommitted changes inside it. This cannot be undone.`,
+      // Names the PATH, not just the .gitmodules section key. The two are
+      // independent — git keeps the original section name after a directory
+      // move — so a confirm saying only "libfoo" never named vendor/foo, the
+      // directory about to be deleted with its uncommitted contents.
+      `Are you sure you want to remove the submodule "${submodule.name}" at "${submodule.path}"?\n\nThis deletes that directory, including any uncommitted changes inside it. This cannot be undone.`,
       'warning'
     );
 

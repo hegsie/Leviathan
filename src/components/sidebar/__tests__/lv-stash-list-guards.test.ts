@@ -458,4 +458,44 @@ describe('lv-stash-list operationInProgress guards', () => {
       'and the handler must refuse, not just the button'
     ).to.have.length(0);
   });
+
+  // A conflict is not a failure: the stash content DID land in the working
+  // tree and the resolution dialog is about to open. A red "Merge conflict"
+  // beside it reads as "nothing happened".
+  for (const { handler, command, word } of [
+    { handler: 'handleApplyStash', command: 'apply_stash', word: 'applied' },
+    { handler: 'handlePopStash', command: 'pop_stash', word: 'popped' },
+  ]) {
+    it(`${handler} warns rather than erroring on a conflict`, async () => {
+      const el = await createComponent();
+      const target = makeStash({ index: 0, message: 'WIP', oid: 'abc123' });
+      mockStashes = [target];
+      (
+        el as unknown as {
+          contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+        }
+      ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+      mockInvoke = (c: string) => {
+        if (c === 'plugin:dialog|message') return Promise.resolve('Ok');
+        if (c === command) {
+          return Promise.reject({ code: 'MERGE_CONFLICT', message: 'Merge conflict' });
+        }
+        return defaultMockInvoke(c);
+      };
+
+      uiStore.setState({ toasts: [] });
+      await (el as unknown as Record<string, () => Promise<void>>)[handler]();
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'error'),
+        'a conflict must not be reported as a failure'
+      ).to.be.false;
+      expect(
+        toasts.some((t) => t.type === 'warning' && new RegExp(word, 'i').test(t.message)),
+        'it must say the stash landed and needs resolving'
+      ).to.be.true;
+    });
+  }
 });

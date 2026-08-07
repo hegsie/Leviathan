@@ -22,6 +22,7 @@ import {
   tryAcquirePush,
   releasePush,
   warnRepositoryBusy,
+  isPushRunning,
 } from '../../utils/ref-lock.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
@@ -338,6 +339,22 @@ export class LvTagList extends LitElement {
    */
   @state() private refOpsVersion = 0;
   private unsubscribeRefOps?: () => void;
+
+  /**
+   * True when the right-clicked tag already has a push in flight.
+   *
+   * The tag-push slot is separate from the working-tree lock, so
+   * operationInProgress cannot see it: Force Push Tag — from the rejected-push
+   * suggestion toast — holds only the push slot, and holds it across its
+   * confirm. Without this the Push item stayed lit through that window and the
+   * click did nothing but raise a refusal toast. subscribeRefOps already fires
+   * on push-slot transitions (both share notify()), so the binding re-renders.
+   */
+  private get tagPushInFlight(): boolean {
+    void this.refOpsVersion;
+    const name = this.contextMenu.tag?.name;
+    return name !== undefined && isPushRunning(pushTagKey(this.repositoryPath, name));
+  }
 
   private get operationInProgress(): boolean {
     void this.refOpsVersion;
@@ -819,7 +836,7 @@ export class LvTagList extends LitElement {
           </svg>
           Create Tag Here
         </button>
-        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handlePushTag}>
+        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress || this.tagPushInFlight} @click=${this.handlePushTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="19" x2="12" y2="5"></line>
             <polyline points="5 12 12 5 19 12"></polyline>

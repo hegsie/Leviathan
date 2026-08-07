@@ -1265,7 +1265,16 @@ export class LvBranchList extends LitElement {
           `"${branch.shorthand}" is not fully merged (its changes may have been squash-merged). Force delete it anyway?\n\nThis action cannot be undone.`,
           'warning'
         );
-        if (!forceConfirmed) return;
+        if (!forceConfirmed) {
+          // The user answered YES to the first confirm, so silence here reads
+          // as "the delete did nothing and nobody will say why". The unmerged
+          // refusal that explains it was consumed by the escalation prompt.
+          showToast(
+            `"${branch.shorthand}" was not deleted — it is not fully merged`,
+            'warning'
+          );
+          return;
+        }
         result = await gitService.deleteBranch(repoPath, branch.name, true);
       }
 

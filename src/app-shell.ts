@@ -118,6 +118,7 @@ import {
   tryAcquirePush,
   releasePush,
   pushTagKey,
+  isPushRunning,
 } from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
@@ -836,6 +837,21 @@ export class AppShell extends LitElement {
     // observe. The subscription in connectedCallback bumps the counter.
     void this.refOpsVersion;
     return isRefOpRunning(repoPath ?? this.activeRepository?.repository.path);
+  }
+
+  /**
+   * True when THIS tag already has a push in flight.
+   *
+   * The tag-push slot is separate from the working-tree lock, so
+   * isRefOperationInFlight cannot see it: Force Push Tag holds only the push
+   * slot, and holds it across its confirm. Without this the Push Tag item
+   * stayed lit through that whole window and the click did nothing but raise a
+   * refusal toast — the dead control the lock work exists to remove.
+   */
+  private isTagPushInFlight(tagName: string, repoPath?: string): boolean {
+    void this.refOpsVersion;
+    const path = repoPath ?? this.activeRepository?.repository.path;
+    return path !== undefined && isPushRunning(pushTagKey(path, tagName));
   }
 
   /** Claim the lock for `repoPath`; false when it is already held. */
@@ -5320,7 +5336,8 @@ export class AppShell extends LitElement {
                       </button>
                       <button
                         class="context-menu-item"
-                        ?disabled=${this.isRefOperationInFlight()}
+                        ?disabled=${this.isRefOperationInFlight() ||
+                        this.isTagPushInFlight(this.refContextMenu.refName)}
                         @click=${this.handleRefPushTag}
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
