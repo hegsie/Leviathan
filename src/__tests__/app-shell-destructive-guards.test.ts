@@ -481,6 +481,60 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('the keyboard-only surfaces share the working-tree lock', () => {
+    // Ctrl+Shift+S and the Force Delete toast action have no rendered control
+    // in a list or menu, so the lock sweep never enumerated them — the same
+    // stale-enumeration pattern the earlier rounds kept closing. `git stash
+    // push` resets the working tree to HEAD and renumbers the stash list; a
+    // force delete is the most commit-destructive local operation there is.
+    it('create stash is inert while another surface holds the lock', async () => {
+      const el = shellOnRepo();
+      tryAcquireRefOp('/repo/one');
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleCreateStash();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'create_stash'),
+        'a stash must not reset the tree beside another operation',
+      ).to.equal(false);
+    });
+
+    it('create stash holds and releases the lock', async () => {
+      const el = shellOnRepo();
+      let heldDuringStash = false;
+      mockResponses['create_stash'] = () => {
+        heldDuringStash = isRefOpRunning('/repo/one');
+        return null;
+      };
+
+      await (el as any).handleCreateStash();
+
+      expect(heldDuringStash, 'other surfaces would have seen a free lock').to.equal(true);
+      expect(isRefOpRunning('/repo/one'), 'released afterwards').to.equal(false);
+    });
+
+    it('force delete from a suggestion toast is inert while the lock is held', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo();
+      tryAcquireRefOp('/repo/one');
+      invokeCallArgs.length = 0;
+
+      (el as any).handleForceDeleteBranch(
+        new CustomEvent('x', {
+          detail: { branchName: 'feature', repoPath: '/repo/one' },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'delete_branch'),
+        'an irreversible delete must not run beside a ref rewrite',
+      ).to.equal(false);
+    });
+  });
+
   describe('pull is serialized', () => {
     // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
     // "Pull Now" toast action — and none guarded a second call. The backend's

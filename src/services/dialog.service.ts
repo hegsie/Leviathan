@@ -163,17 +163,30 @@ export async function showPrompt(
   defaultValue?: string,
   placeholder?: string
 ): Promise<string | null> {
-  // Lazy-import to avoid circular dependencies; side-effect import registers the element
-  await import('../components/dialogs/lv-prompt-dialog.ts');
+  // A rejection here means we could not ask — the lazy chunk failed to load, or
+  // the element blew up constructing — so the only safe answer is "no input",
+  // the same as a cancel. It also matters for the callers: several claim the
+  // shared working-tree lock BEFORE this prompt (a claim taken after it does
+  // not serialize a double-click) and do so outside the try/finally that
+  // releases. A throw would unwind past the release and hold that repo's lock
+  // for the rest of the session, disabling every ref control in every surface.
+  // Swallowed here, in the one shared place, rather than at each call site —
+  // that is the hand-enumerated list that goes stale. showConfirm does the same.
+  try {
+    // Lazy-import to avoid circular dependencies; side-effect import registers the element
+    await import('../components/dialogs/lv-prompt-dialog.ts');
 
-  type PromptDialog = import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;
+    type PromptDialog = import('../components/dialogs/lv-prompt-dialog.ts').LvPromptDialog;
 
-  let dialog = document.querySelector<PromptDialog>('lv-prompt-dialog');
-  if (!dialog) {
-    dialog = document.createElement('lv-prompt-dialog') as PromptDialog;
-    document.body.appendChild(dialog);
-    await dialog.updateComplete;
+    let dialog = document.querySelector<PromptDialog>('lv-prompt-dialog');
+    if (!dialog) {
+      dialog = document.createElement('lv-prompt-dialog') as PromptDialog;
+      document.body.appendChild(dialog);
+      await dialog.updateComplete;
+    }
+
+    return await dialog.open({ title, message: messageText, defaultValue, placeholder });
+  } catch {
+    return null;
   }
-
-  return dialog.open({ title, message: messageText, defaultValue, placeholder });
 }

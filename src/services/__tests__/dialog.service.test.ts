@@ -30,6 +30,7 @@ import {
   showMessage,
   showConfirm,
   showAsk,
+  showPrompt,
 } from '../dialog.service.ts';
 
 describe('dialog.service', () => {
@@ -60,6 +61,32 @@ describe('dialog.service', () => {
       expect(await showConfirm('Title', 'Message')).to.equal(true);
       invokeResult = 'Cancel';
       expect(await showConfirm('Title', 'Message')).to.equal(false);
+    });
+  });
+
+  describe('showPrompt', () => {
+    it('returns null instead of rejecting when the prompt cannot be shown', async () => {
+      // Several callers claim the shared working-tree lock BEFORE this prompt
+      // and do so outside the try/finally that releases it, so a throw would
+      // unwind past the release and hold that repo's lock for the session —
+      // disabling every ref control in every surface. Being unable to ask is
+      // the same as a cancel.
+      const el = document.querySelector('lv-prompt-dialog');
+      el?.remove();
+      const original = document.createElement.bind(document);
+      (document as unknown as { createElement: unknown }).createElement = ((
+        tag: string,
+      ) => {
+        if (tag === 'lv-prompt-dialog') throw new Error('chunk load failed');
+        return original(tag);
+      }) as typeof document.createElement;
+
+      try {
+        const result = await showPrompt('Rename Branch', 'New name:');
+        expect(result, 'an unaskable prompt must read as cancelled').to.equal(null);
+      } finally {
+        (document as unknown as { createElement: unknown }).createElement = original;
+      }
     });
   });
 

@@ -449,6 +449,12 @@ pub async fn pull(
                         }
 
                         repo.cleanup_state()?;
+                        // git runs post-merge after a merge commit (flag 0 =
+                        // not a squash). The fast-forward arm of this same
+                        // function fires it; this one did not, so whether a
+                        // repo's hooks ran depended only on whether the history
+                        // happened to diverge.
+                        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
                         message = "Merge completed".to_string();
                     }
                 }

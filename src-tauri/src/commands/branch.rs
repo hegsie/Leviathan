@@ -834,32 +834,32 @@ pub async fn checkout_with_autostash(
     }; // obj dropped here
 
     if let Some(msg) = checkout_error {
-        // Restore stash if checkout fails
+        // Restore the auto-stash now the checkout has failed.
+        //
+        // Resolved by oid rather than verified at index 0: `git stash push`
+        // prepends, so a stash created during the (multi-second) checkout
+        // pushes ours down a slot. The old check only compared against index 0,
+        // so it declined to restore and returned a bare "Checkout failed" —
+        // leaving the user with an empty working tree, their changes in the
+        // stash list, and nothing on screen saying so.
         if stashed {
-            // Verify the stash at index 0 is our auto-stash before popping
-            let mut first_stash_oid: Option<git2::Oid> = None;
-            let _ = repo.stash_foreach(|idx, _name, oid| {
-                if idx == 0 {
-                    first_stash_oid = Some(*oid);
-                    false // Stop iteration
-                } else {
-                    true // Continue (shouldn't happen since we stop at 0)
+            match auto_stash_index(&mut repo, stash_oid) {
+                Some(idx) => {
+                    if let Err(pop_err) = repo.stash_pop(idx, None) {
+                        return Err(LeviathanError::OperationFailed(format!(
+                            "Checkout failed: {}. Additionally, failed to restore \
+                             stashed changes: {}",
+                            msg,
+                            pop_err.message()
+                        )));
+                    }
                 }
-            });
-
-            // Only pop if we can verify it's our stash, or if we didn't save the OID
-            let should_pop = match (stash_oid, first_stash_oid) {
-                (Some(expected), Some(actual)) => expected == actual,
-                (None, Some(_)) => true, // No expected OID, try to pop
-                _ => false,              // No stash found
-            };
-
-            if should_pop {
-                if let Err(pop_err) = repo.stash_pop(0, None) {
+                None => {
                     return Err(LeviathanError::OperationFailed(format!(
-                        "Checkout failed: {}. Additionally, failed to restore stashed changes: {}",
-                        msg,
-                        pop_err.message()
+                        "Checkout failed: {}. Your changes could not be found to \
+                         restore — they are still in the stash list, apply them \
+                         manually.",
+                        msg
                     )));
                 }
             }
@@ -1803,6 +1803,38 @@ mod tests {
         assert!(
             auto_stash_index(&mut repo, Some(foreign)).is_some(),
             "the failed checkout popped a stash it did not create"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_failure_restores_the_auto_stash_by_oid() {
+        // A stash pushed during the checkout renumbers the list. The old check
+        // only compared against index 0, so it declined to restore and returned
+        // a bare "Checkout failed" — leaving an empty working tree, the changes
+        // in the stash list, and nothing on screen saying so.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        test_repo.create_branch("feature");
+
+        test_repo.create_file("tracked.txt", "my work\n");
+
+        // A foreign stash that will sit at index 0 once the auto-stash lands.
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let _ =
+            checkout_with_autostash(test_repo.path_str(), "feature".to_string(), Some(true)).await;
+
+        // Whatever the outcome, the foreign stash must survive untouched.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the checkout restored a stash it did not create"
         );
     }
 

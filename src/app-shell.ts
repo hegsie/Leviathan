@@ -2578,7 +2578,12 @@ export class AppShell extends LitElement {
     const branchName = e.detail?.branchName;
     const repoPath = e.detail?.repoPath;
     if (branchName && repoPath) {
-      void this.runExclusive(`delete:${repoPath}:${branchName}`, () =>
+      // The SHARED working-tree lock, not a private key. Its sibling
+      // handleRefDeleteBranch says why: a delete can run concurrently with a
+      // still-running merge or rebase, and this flag is the only thing
+      // serializing them. Keying it privately left the toast button live while
+      // every menu was greyed out.
+      void this.runRefExclusive(repoPath, () =>
         this.forceDeleteBranch(branchName, repoPath),
       );
     }
@@ -3821,7 +3826,18 @@ export class AppShell extends LitElement {
               // command was missed by that sweep. The expected_oid pin guards
               // against a STALE index, not against a checkout moving the branch
               // underneath the reset.
-              await this.runRefExclusive(repoPath, async () => {
+              // runRefExclusive returns silently when the lock is held, which
+              // suits context-menu items whose buttons carry a ?disabled
+              // binding. This one sits behind a prompt, an AI call and a
+              // confirm, so a silent return reads as "the reset happened".
+              if (!this.claimRefOperation(repoPath)) {
+                showToast(
+                  'Another operation is already running in this repository.',
+                  'warning',
+                );
+                return;
+              }
+              try {
                 const resetResult = await git.resetToReflog(
                   repoPath,
                   match.index,
@@ -3834,7 +3850,9 @@ export class AppShell extends LitElement {
                 } else {
                   showToast(resetResult.error?.message ?? 'Undo failed', 'error');
                 }
-              });
+              } finally {
+                this.releaseRefOperation(repoPath);
+              }
             }
           } else {
             showToast(result.error?.message ?? 'Could not find matching reflog entry', 'error');
@@ -4440,11 +4458,20 @@ export class AppShell extends LitElement {
     progressService.cancelOperation(e.detail.id);
   }
 
-  private async handleCreateStash(): Promise<void> {
-    if (!this.activeRepository) return;
+  private handleCreateStash(): Promise<void> {
+    if (!this.activeRepository) return Promise.resolve();
     // Pinned: if the user switches tabs while the stash is being created, the
     // refresh must target the repo that was stashed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
+    // `git stash push` resets the working tree to HEAD and prepends to the
+    // stash list, renumbering every entry — a full working-tree mutation. This
+    // is a keyboard-only action with no rendered control, so it was never in
+    // the enumeration the lock sweep worked from, and the shortcut fires
+    // through open dialogs.
+    return this.runRefExclusive(repoPath, () => this.createStashOnRepo(repoPath));
+  }
+
+  private async createStashOnRepo(repoPath: string): Promise<void> {
     // includeUntracked matches the stash-list button (lv-stash-list.ts): both
     // surfaces report an identical "Stash created", so they must stash the same
     // set — otherwise the shortcut silently leaves untracked files behind and
