@@ -23,6 +23,24 @@ pub fn create_command(program: &str) -> Command {
     // Prevent git credential popup dialogs
     if program == "git" {
         cmd.env("GIT_TERMINAL_PROMPT", "0");
+
+        // Under test, cut the child off from the developer's (or CI
+        // container's) real git config.
+        //
+        // Several commands read settings by shelling out to `git config
+        // --get`, so a test asserting a DEFAULT was really asserting something
+        // about whoever's machine it ran on. This container's global gitconfig
+        // sets commit.gpgsign=true and a signing key, which made the gpg,
+        // signature and jira tests fail here while passing elsewhere. Done in
+        // the one factory every git subprocess goes through, rather than at
+        // each call site — the sibling isolation for libgit2's own config
+        // search path lives in test_utils::isolate_git_config.
+        #[cfg(test)]
+        {
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+            cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+            cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        }
     }
 
     cmd

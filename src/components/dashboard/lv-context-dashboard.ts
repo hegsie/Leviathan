@@ -729,6 +729,11 @@ export class LvContextDashboard extends LitElement {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
       }
@@ -756,6 +761,11 @@ export class LvContextDashboard extends LitElement {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
       } else if (
@@ -803,6 +813,11 @@ export class LvContextDashboard extends LitElement {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
       }

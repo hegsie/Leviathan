@@ -192,6 +192,14 @@ export class LvStashList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // isRefOpRunning is plain module state Lit cannot observe, so without this
+    // the ?disabled bindings never re-render on a lock transition: a context
+    // menu opened before an operation started stayed fully enabled through it,
+    // and one opened during an operation stayed disabled after it finished —
+    // a dead control with no explanation until the menu is reopened.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     // Conflicted applies/pops complete inside the shared conflict dialog
     // (which drops the stash there), so reload when the app-level refresh
     // fires — otherwise the dropped entry stays listed.

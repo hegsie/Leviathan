@@ -78,6 +78,17 @@ export function subscribeRefOps(cb: () => void): () => void {
   return () => listeners.delete(cb);
 }
 
+/**
+ * Re-run the subscribers without changing the lock.
+ *
+ * The maintenance lock gates the same buttons but does not always touch
+ * refOpsInFlight — the read-only fsck claim deliberately does not — so its
+ * transitions would otherwise never reach the components bound to them.
+ */
+export function notifyRefOpListeners(): void {
+  notify();
+}
+
 /** Test seam: drop all claims and listeners. */
 export function resetRefOpLocks(): void {
   refOpsInFlight.clear();

@@ -3,7 +3,41 @@
 #![cfg(test)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tempfile::TempDir;
+
+/// Empty directory the isolated config search paths point at. Held for the
+/// process lifetime: dropping it would let libgit2 fall back to a real path.
+static CONFIG_SANDBOX: OnceLock<TempDir> = OnceLock::new();
+
+/// Point libgit2's global/system/XDG config search at an empty directory.
+///
+/// Without this, every test that asserts a git DEFAULT is really asserting
+/// something about whoever's machine it runs on. This container's global
+/// gitconfig sets `commit.gpgsign=true`, `gpg.format=ssh` and a signing key,
+/// so the signing, gpg and jira config tests failed here while passing
+/// elsewhere — a suite that is green or red depending on the host is not
+/// telling you anything.
+///
+/// Process-global by nature, so it runs once and covers every test in the
+/// binary; each TestRepo still sets its own repo-local user.name/email.
+fn isolate_git_config() {
+    let dir =
+        CONFIG_SANDBOX.get_or_init(|| TempDir::new().expect("Failed to create git config sandbox"));
+    // SAFETY: libgit2 documents these as process-global and not thread-safe
+    // against concurrent repository use. OnceLock makes the write happen
+    // exactly once, and it happens before this thread opens any repository.
+    unsafe {
+        for level in [
+            git2::ConfigLevel::System,
+            git2::ConfigLevel::Global,
+            git2::ConfigLevel::XDG,
+            git2::ConfigLevel::ProgramData,
+        ] {
+            let _ = git2::opts::set_search_path(level, dir.path());
+        }
+    }
+}
 
 /// A temporary git repository for testing
 pub struct TestRepo {
@@ -19,6 +53,7 @@ pub struct TestRepo {
 impl TestRepo {
     /// Create a new empty git repository
     pub fn new() -> Self {
+        isolate_git_config();
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().to_path_buf();
 

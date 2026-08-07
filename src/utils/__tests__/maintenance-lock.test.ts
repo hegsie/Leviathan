@@ -15,7 +15,12 @@ import {
   isMaintenanceBlocked,
   resetMaintenanceLocks,
 } from '../maintenance-confirms.ts';
-import { isRefOpRunning, tryAcquireRefOp, resetRefOpLocks } from '../ref-lock.ts';
+import {
+  isRefOpRunning,
+  tryAcquireRefOp,
+  resetRefOpLocks,
+  subscribeRefOps,
+} from '../ref-lock.ts';
 
 describe('the maintenance lock and the working-tree lock', () => {
   beforeEach(() => {
@@ -47,6 +52,23 @@ describe('the maintenance lock and the working-tree lock', () => {
       'the pre-confirm check must agree with the claim, or the user reads a ' +
         'destructive warning for a run that was always going to be refused',
     ).to.equal(true);
+  });
+
+  it('a read-only claim still notifies, so gated buttons re-render', () => {
+    // The read-only claim takes no ref lock, so nothing else would tell the
+    // components bound to it that the maintenance buttons must change state.
+    let notifications = 0;
+    const stop = subscribeRefOps(() => {
+      notifications++;
+    });
+    try {
+      tryAcquireMaintenanceReadOnly('/repo/one');
+      expect(notifications, 'claim notifies').to.equal(1);
+      releaseMaintenance('/repo/one');
+      expect(notifications, 'release notifies').to.equal(2);
+    } finally {
+      stop();
+    }
   });
 
   it('fsck claims the slot WITHOUT freezing the working tree', () => {

@@ -445,10 +445,9 @@ export class LvGitflowPanel extends LitElement {
     // the init actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
     if (!this.claimOperation(repoPath)) {
-      // The name the user just typed in the prompt would otherwise vanish with
-      // no toast, no message and no branch. The finish siblings claim before
-      // their prompt; these three cannot, because the name IS the prompt.
-      this.error = 'Another operation is already running in this repository.';
+      // claimOperation reports the refusal itself now, so an inline copy of
+      // the same sentence would show it twice — once as a toast and once in
+      // this panel's error banner.
       return;
     }
     this.error = null;
@@ -481,10 +480,9 @@ export class LvGitflowPanel extends LitElement {
     if (!name || !name.trim()) return;
 
     if (!this.claimOperation(repoPath)) {
-      // The name the user just typed in the prompt would otherwise vanish with
-      // no toast, no message and no branch. The finish siblings claim before
-      // their prompt; these three cannot, because the name IS the prompt.
-      this.error = 'Another operation is already running in this repository.';
+      // claimOperation reports the refusal itself now, so an inline copy of
+      // the same sentence would show it twice — once as a toast and once in
+      // this panel's error banner.
       return;
     }
     this.error = null;
@@ -603,10 +601,9 @@ export class LvGitflowPanel extends LitElement {
     if (!version || !version.trim()) return;
 
     if (!this.claimOperation(repoPath)) {
-      // The name the user just typed in the prompt would otherwise vanish with
-      // no toast, no message and no branch. The finish siblings claim before
-      // their prompt; these three cannot, because the name IS the prompt.
-      this.error = 'Another operation is already running in this repository.';
+      // claimOperation reports the refusal itself now, so an inline copy of
+      // the same sentence would show it twice — once as a toast and once in
+      // this panel's error banner.
       return;
     }
     this.error = null;
@@ -716,10 +713,9 @@ export class LvGitflowPanel extends LitElement {
     if (!version || !version.trim()) return;
 
     if (!this.claimOperation(repoPath)) {
-      // The name the user just typed in the prompt would otherwise vanish with
-      // no toast, no message and no branch. The finish siblings claim before
-      // their prompt; these three cannot, because the name IS the prompt.
-      this.error = 'Another operation is already running in this repository.';
+      // claimOperation reports the refusal itself now, so an inline copy of
+      // the same sentence would show it twice — once as a toast and once in
+      // this panel's error banner.
       return;
     }
     this.error = null;

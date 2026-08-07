@@ -630,6 +630,14 @@ export class LvBranchList extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // isRefOpRunning is plain module state Lit cannot observe, so without this
+    // the ?disabled bindings never re-render on a lock transition: a context
+    // menu opened before an operation started stayed fully enabled through it,
+    // and one opened during an operation stayed disabled after it finished —
+    // a dead control with no explanation until the menu is reopened.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     this.loadHiddenBranches();
     // Registered BEFORE the load, not after. loadBranches() awaits three IPC
     // round-trips, and every event dispatched in that window was dropped on

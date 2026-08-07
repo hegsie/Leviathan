@@ -639,6 +639,7 @@ pub async fn create_branch_from_jira(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestRepo;
 
     #[test]
     fn test_get_jira_auth_header() {
@@ -842,10 +843,14 @@ mod tests {
 
     #[test]
     fn test_save_and_load_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo_path = dir.path();
+        // A REAL repository: leviathan_config_dir resolves the config location
+        // through git2::Repository::open, so a hand-made `.git/leviathan`
+        // directory with no HEAD, objects or refs is not a repository and the
+        // open fails. The test asserted a round trip it never performed.
+        let repo = TestRepo::with_initial_commit();
+        let repo_path = repo.path.clone();
+        let repo_path = repo_path.as_path();
 
-        // Create .git directory structure
         std::fs::create_dir_all(repo_path.join(".git").join("leviathan")).unwrap();
 
         let config = JiraConfig {

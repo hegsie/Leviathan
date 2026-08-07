@@ -251,9 +251,19 @@ export class LvRepositoryHealthDialog extends LitElement {
    * Maintenance takes that lock too now (see maintenance-confirms.ts), so
    * without this the buttons would stay enabled and then refuse on click.
    */
-  private get repositoryBusy(): boolean {
+  /**
+   * True when an EXCLUSIVE maintenance claim would be refused.
+   *
+   * Mirrors tryAcquireMaintenance rather than just the ref lock. After the
+   * claim was split into exclusive (gc/prune) and read-only (fsck), one shared
+   * predicate described the wrong condition in BOTH directions: fsck greyed
+   * out by a lock it deliberately does not take, and gc/prune left clickable
+   * when they were going to refuse. A gate that does not mirror its own claim
+   * is how "grey out rather than refuse on click" quietly stops holding.
+   */
+  private get maintenanceBlocked(): boolean {
     void this.refOpsVersion;
-    return isRefOpRunning(this.pinnedRepoPath || undefined);
+    return isMaintenanceBlocked(this.pinnedRepoPath);
   }
 
   /**
@@ -674,7 +684,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(false)}
-              ?disabled=${!!this.runningAction || this.repositoryBusy}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -691,7 +701,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(true)}
-              ?disabled=${!!this.runningAction || this.repositoryBusy}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
@@ -709,7 +719,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runFsck}
-              ?disabled=${!!this.runningAction || this.repositoryBusy}
+              ?disabled=${!!this.runningAction || isMaintenanceRunning(this.pinnedRepoPath)}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -728,7 +738,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runPrune}
-              ?disabled=${!!this.runningAction || this.repositoryBusy}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>

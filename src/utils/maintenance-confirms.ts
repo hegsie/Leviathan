@@ -9,7 +9,12 @@
  */
 
 import { showConfirm } from '../services/dialog.service.ts';
-import { tryAcquireRefOp, releaseRefOp, isRefOpRunning } from './ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  notifyRefOpListeners,
+} from './ref-lock.ts';
 
 /**
  * Confirm a `git gc` run.
@@ -118,6 +123,9 @@ export function tryAcquireMaintenanceReadOnly(repoPath: string): boolean {
   if (maintenanceInFlight.has(repoPath)) return false;
   maintenanceInFlight.add(repoPath);
   readOnlyMaintenance.add(repoPath);
+  // This claim takes no ref lock, so nothing else would tell the components
+  // bound to it that the maintenance buttons must re-render.
+  notifyRefOpListeners();
   return true;
 }
 
@@ -127,7 +135,11 @@ const readOnlyMaintenance = new Set<string>();
 /** Release the slot, and the working-tree lock if this claim took one. */
 export function releaseMaintenance(repoPath: string): void {
   if (!maintenanceInFlight.delete(repoPath)) return;
-  if (!readOnlyMaintenance.delete(repoPath)) releaseRefOp(repoPath);
+  if (readOnlyMaintenance.delete(repoPath)) {
+    notifyRefOpListeners();
+  } else {
+    releaseRefOp(repoPath);
+  }
 }
 
 /** True while a maintenance command is running against `repoPath`. */
