@@ -10,7 +10,9 @@ import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import {
   tryAcquireMaintenance,
+  tryAcquireMaintenanceReadOnly,
   releaseMaintenance,
+  isMaintenanceBlocked,
   isMaintenanceRunning,
 } from '../../utils/maintenance-confirms.ts';
 import {
@@ -18,7 +20,7 @@ import {
   confirmPrune,
   summariseFsck,
 } from '../../utils/maintenance-confirms.ts';
-import { isRefOpRunning, subscribeRefOps } from '../../utils/ref-lock.ts';
+import { isRefOpRunning, subscribeRefOps, warnRepositoryBusy } from '../../utils/ref-lock.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -421,8 +423,8 @@ export class LvRepositoryHealthDialog extends LitElement {
     // serialises, but taking it only after the prompt meant the user read a
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
-    if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(this.pinnedRepoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
@@ -450,7 +452,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
       this.runningAction = null;
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      warnRepositoryBusy();
       return;
     }
 
@@ -483,7 +485,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
     if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      warnRepositoryBusy();
       return;
     }
 
@@ -491,8 +493,10 @@ export class LvRepositoryHealthDialog extends LitElement {
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    // Read-only: fsck writes nothing, so it must not take the exclusive
+    // working-tree lock — see tryAcquireMaintenanceReadOnly.
+    if (!tryAcquireMaintenanceReadOnly(repoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
@@ -528,8 +532,8 @@ export class LvRepositoryHealthDialog extends LitElement {
     // serialises, but taking it only after the prompt meant the user read a
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
-    if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(this.pinnedRepoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
@@ -548,7 +552,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
       this.runningAction = null;
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      warnRepositoryBusy();
       return;
     }
 
@@ -744,11 +748,14 @@ export class LvRepositoryHealthDialog extends LitElement {
       <div class="footer">
         <!-- Disabled while an action runs: the host refuses to close mid-gc
              (closing destroys this element and would orphan the operation), so
-             an enabled Done was a button that silently did nothing. Every
-             sibling dialog with this guard disables its cancel control too. -->
+             an enabled Done was a button that silently did nothing. NOT gated
+             on repositoryBusy: Done destroys nothing, and greying it out
+             because something elsewhere touched the repo kills the button the
+             user aims at for a reason that has nothing to do with it — the
+             same copy-paste reverted on lv-clean-dialog's Cancel. -->
         <button
           class="primary"
-          ?disabled=${!!this.runningAction || this.repositoryBusy}
+          ?disabled=${!!this.runningAction}
           @click=${this.handleClose}
         >Done</button>
       </div>

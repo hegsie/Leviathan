@@ -1,3 +1,5 @@
+import { showToast } from '../services/notification.service.ts';
+
 /**
  * The working-tree lock for ref operations, shared across every surface.
  *
@@ -24,6 +26,26 @@ const listeners = new Set<() => void>();
 
 function notify(): void {
   for (const cb of listeners) cb();
+}
+
+/**
+ * The one refusal message every busy-repo path shows.
+ *
+ * app-shell's runRefExclusive/runExclusive report the refusal themselves. The
+ * sidebar components hold this same lock through their own claimOperation
+ * helpers and returned silently, so a gesture with no disabled binding — a
+ * double-clicked branch row — looked like a hung app for the whole duration
+ * of the other operation.
+ */
+export function warnRepositoryBusy(): void {
+  void showToast('Another operation is already running in this repository.', 'warning');
+}
+
+/** Claim the slot and report the refusal, for callers with no disabled state. */
+export function tryAcquireRefOpOrWarn(repoPath: string): boolean {
+  if (tryAcquireRefOp(repoPath)) return true;
+  warnRepositoryBusy();
+  return false;
 }
 
 /** Claim the ref-operation slot for a repo. False when one is already running. */

@@ -14,7 +14,7 @@ import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.
 import type { Branch } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
 import {
-  tryAcquireRefOp,
+  tryAcquireRefOpOrWarn,
   releaseRefOp,
   isRefOpRunning,
   subscribeRefOps,
@@ -596,7 +596,10 @@ export class LvBranchList extends LitElement {
    * lock and wedge the one that is actually running.
    */
   private claimOperation(repoPath: string): boolean {
-    return tryAcquireRefOp(repoPath);
+    // Reports the refusal: these components hold the same lock app-shell does,
+    // and a gesture with no disabled binding — the double-clicked branch row —
+    // otherwise looked like a hung app for the whole other operation.
+    return tryAcquireRefOpOrWarn(repoPath);
   }
 
   private releaseOperation(repoPath: string): void {

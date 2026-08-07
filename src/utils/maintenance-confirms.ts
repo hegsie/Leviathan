@@ -9,7 +9,7 @@
  */
 
 import { showConfirm } from '../services/dialog.service.ts';
-import { tryAcquireRefOp, releaseRefOp } from './ref-lock.ts';
+import { tryAcquireRefOp, releaseRefOp, isRefOpRunning } from './ref-lock.ts';
 
 /**
  * Confirm a `git gc` run.
@@ -103,9 +103,31 @@ export function tryAcquireMaintenance(repoPath: string): boolean {
   return true;
 }
 
-/** Release the slot, and the working-tree lock it took with it. */
+/**
+ * Claim the maintenance slot WITHOUT the working-tree lock, for a read-only
+ * command.
+ *
+ * `git fsck --full` writes nothing and can run for minutes on a large repo.
+ * Routing it through the same helper as gc/prune swept it into the exclusive
+ * lock, so for its whole run every branch row, every discard button and — the
+ * one that matters — the operation banner's Abort were greyed out, with no
+ * progress indicator to explain why. The prune argument (objects collected out
+ * from under a concurrent write) does not apply to a command that only reads.
+ */
+export function tryAcquireMaintenanceReadOnly(repoPath: string): boolean {
+  if (maintenanceInFlight.has(repoPath)) return false;
+  maintenanceInFlight.add(repoPath);
+  readOnlyMaintenance.add(repoPath);
+  return true;
+}
+
+/** Slots claimed read-only, so release knows not to free a lock it never took. */
+const readOnlyMaintenance = new Set<string>();
+
+/** Release the slot, and the working-tree lock if this claim took one. */
 export function releaseMaintenance(repoPath: string): void {
-  if (maintenanceInFlight.delete(repoPath)) releaseRefOp(repoPath);
+  if (!maintenanceInFlight.delete(repoPath)) return;
+  if (!readOnlyMaintenance.delete(repoPath)) releaseRefOp(repoPath);
 }
 
 /** True while a maintenance command is running against `repoPath`. */
@@ -113,8 +135,26 @@ export function isMaintenanceRunning(repoPath: string): boolean {
   return maintenanceInFlight.has(repoPath);
 }
 
+/**
+ * True when `tryAcquireMaintenance` would refuse — for ANY reason.
+ *
+ * Callers check this BEFORE showing their confirm, so a destructive prompt is
+ * never raised for a run the claim was always going to refuse. That check used
+ * to read isMaintenanceRunning alone, which stopped being the whole answer the
+ * moment maintenance also began claiming the working-tree lock: a checkout in
+ * flight let the confirm through and only then produced "a maintenance
+ * operation is already running", which was not true. Kept beside the claim so
+ * the two cannot describe different conditions.
+ */
+export function isMaintenanceBlocked(repoPath: string): boolean {
+  return maintenanceInFlight.has(repoPath) || isRefOpRunning(repoPath);
+}
+
 /** Test seam: drop all claims. */
 export function resetMaintenanceLocks(): void {
-  for (const repoPath of maintenanceInFlight) releaseRefOp(repoPath);
+  for (const repoPath of maintenanceInFlight) {
+    if (!readOnlyMaintenance.has(repoPath)) releaseRefOp(repoPath);
+  }
   maintenanceInFlight.clear();
+  readOnlyMaintenance.clear();
 }

@@ -21,6 +21,7 @@ import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssign
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';
+import { tryAcquireRefOpOrWarn, releaseRefOp } from '../../utils/ref-lock.ts';
 
 const STORAGE_KEY = 'lv-context-dashboard-expanded';
 
@@ -740,6 +741,14 @@ export class LvContextDashboard extends LitElement {
     if (!this.activeRepository || this.isPulling) return;
 
     const repoPath = this.activeRepository.repository.path;
+    // The fifth surface reaching pull. The other four claim the shared
+    // working-tree lock; this one lives in src/components/dashboard/, a
+    // directory no sweep had touched, and gated only on its own isPulling —
+    // so a dashboard Pull ran beside a sidebar checkout, and every destructive
+    // control stayed enabled for the duration of the pull. The backend's
+    // ensure_pullable only refuses on a non-Clean state, which a checkout or a
+    // discard does not produce.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
     this.isPulling = true;
     try {
       const result = await gitPull({ path: repoPath, silent: true });
@@ -777,6 +786,7 @@ export class LvContextDashboard extends LitElement {
       }
     } finally {
       this.isPulling = false;
+      releaseRefOp(repoPath);
     }
   }
 

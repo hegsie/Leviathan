@@ -13,7 +13,7 @@ import type { GitFlowConfig } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 import type { GitflowFinishContext } from '../dialogs/lv-conflict-resolution-dialog.ts';
 import {
-  tryAcquireRefOp,
+  tryAcquireRefOpOrWarn,
   releaseRefOp,
   isRefOpRunning,
   subscribeRefOps,
@@ -306,7 +306,10 @@ export class LvGitflowPanel extends LitElement {
 
   /** Claim the lock for `repoPath`; false when it is already held. */
   private claimOperation(repoPath: string): boolean {
-    return tryAcquireRefOp(repoPath);
+    // Reports the refusal: these components hold the same lock app-shell does,
+    // and a gesture with no disabled binding — the double-clicked branch row —
+    // otherwise looked like a hung app for the whole other operation.
+    return tryAcquireRefOpOrWarn(repoPath);
   }
 
   /**

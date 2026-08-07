@@ -105,14 +105,16 @@ import {
   confirmPrune,
   summariseFsck,
   tryAcquireMaintenance,
+  tryAcquireMaintenanceReadOnly,
   releaseMaintenance,
-  isMaintenanceRunning,
+  isMaintenanceBlocked,
 } from './utils/maintenance-confirms.ts';
 import {
   tryAcquireRefOp,
   releaseRefOp,
   isRefOpRunning,
   subscribeRefOps,
+  warnRepositoryBusy,
 } from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
@@ -821,7 +823,7 @@ export class AppShell extends LitElement {
 
   /** The one refusal message every busy-repo path shows. */
   private warnRepositoryBusy(): void {
-    showToast('Another operation is already running in this repository.', 'warning');
+    warnRepositoryBusy();
   }
 
   /** True when `repoPath` (default: the active repo) has a ref operation running. */
@@ -4552,8 +4554,8 @@ export class AppShell extends LitElement {
 
     // Checked before the confirm so a destructive prompt is never shown for a
     // run the shared claim below was always going to refuse.
-    if (isMaintenanceRunning(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -4577,7 +4579,7 @@ export class AppShell extends LitElement {
     // start a second gc over the dialog's — or race a prune against it on the
     // objects directory, which git does not serialise at all.
     if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -4605,8 +4607,10 @@ export class AppShell extends LitElement {
 
     const repoPath = this.activeRepository.repository.path;
 
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    // Read-only: fsck writes nothing, so it must not take the exclusive
+    // working-tree lock — see tryAcquireMaintenanceReadOnly.
+    if (!tryAcquireMaintenanceReadOnly(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -4632,8 +4636,8 @@ export class AppShell extends LitElement {
 
     const repoPath = this.activeRepository.repository.path;
 
-    if (isMaintenanceRunning(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -4645,7 +4649,7 @@ export class AppShell extends LitElement {
       if (!(await confirmPrune())) return;
 
       if (!tryAcquireMaintenance(repoPath)) {
-        showToast('A maintenance operation is already running on this repository', 'warning');
+        this.warnRepositoryBusy();
         return;
       }
 

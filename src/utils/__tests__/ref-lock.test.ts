@@ -15,6 +15,7 @@ import {
   isRefOpRunning,
   subscribeRefOps,
   resetRefOpLocks,
+  tryAcquireRefOpOrWarn,
 } from '../ref-lock.ts';
 
 describe('the shared ref-operation lock', () => {
@@ -57,6 +58,15 @@ describe('the shared ref-operation lock', () => {
 
   it('reports an undefined path as unlocked', () => {
     expect(isRefOpRunning(undefined)).to.equal(false);
+  });
+
+  it('reports the refusal when claimed via the OrWarn variant', () => {
+    // The sidebar components hold this lock through their own claimOperation
+    // helpers and returned silently, so a gesture with no disabled binding —
+    // a double-clicked branch row — looked like a hung app for the whole
+    // duration of the other operation.
+    expect(tryAcquireRefOpOrWarn('/repo/one')).to.equal(true);
+    expect(tryAcquireRefOpOrWarn('/repo/one'), 'second claim refused').to.equal(false);
   });
 
   it('notifies subscribers on claim and release, so ?disabled re-renders', () => {
