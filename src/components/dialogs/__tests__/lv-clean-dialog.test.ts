@@ -69,9 +69,15 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 import '../lv-clean-dialog.ts';
 import type { LvCleanDialog } from '../lv-clean-dialog.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import {
+  tryAcquireRefOp,
+  isRefOpRunning,
+  resetRefOpLocks,
+} from '../../../utils/ref-lock.ts';
 
 describe('lv-clean-dialog', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     failingCommands = new Set();
     cleanableEntries = [];
     lastCleanFilesArgs = null;
@@ -90,6 +96,39 @@ describe('lv-clean-dialog', () => {
 
     const dialog = el.shadowRoot!.querySelector('.dialog, .dialog-overlay');
     expect(dialog).to.not.be.null;
+  });
+
+  it('is inert while another surface holds the working-tree lock', async () => {
+    // Clean deletes files from the same working tree a checkout, reset, merge
+    // or rebase is mutating, and the backend takes no per-repo lock.
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+    tryAcquireRefOp('/test/repo');
+    lastCleanFilesArgs = null;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(lastCleanFilesArgs, 'nothing reaches the backend').to.be.null;
+  });
+
+  it('releases the lock so a later operation works', async () => {
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(
+      isRefOpRunning('/test/repo'),
+      'a stuck claim would freeze every ref operation for the session',
+    ).to.equal(false);
   });
 
   it('dispatches files-cleaned on success', async () => {

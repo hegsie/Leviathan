@@ -11,6 +11,12 @@ import type { CleanEntry } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-clean-dialog')
 export class LvCleanDialog extends LitElement {
@@ -349,6 +355,7 @@ export class LvCleanDialog extends LitElement {
    * have no trash and no recovery path.
    */
   private pinnedRepoPath = '';
+  private unsubscribeRefOps?: () => void;
 
   /** The repo this dialog is pinned to while open, or null when closed. */
   public get pinnedRepositoryPathIfOpen(): string | null {
@@ -432,11 +439,16 @@ export class LvCleanDialog extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.requestUpdate();
+    });
     document.addEventListener('keydown', this.handleKeyDown);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
@@ -477,12 +489,20 @@ export class LvCleanDialog extends LitElement {
     // warning that contradicted the success toast the user had just read. Same
     // claim-before-confirm the abort banner and the gitflow panel apply.
     if (this.cleaning || this.selectedPaths.size === 0) return;
-    this.cleaning = true;
 
     // The repo the listed files were read from — NOT the live prop. Pinning
     // only at click time still deleted from the wrong repository whenever the
     // tab switch happened before the click rather than during the confirm.
     const repoPath = this.pinnedRepoPath;
+
+    // Clean deletes files from the same working tree checkout, reset, merge and
+    // rebase mutate, and the backend takes no per-repo lock — so this joins the
+    // shared one rather than guarding only itself.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.cleaning = true;
 
     // Captured BEFORE the confirms too. loadFiles() reassigns selectedPaths on
     // every option change and on its own initial load, so reading it after an
@@ -509,6 +529,7 @@ export class LvCleanDialog extends LitElement {
     );
     if (!confirmedDelete) {
       this.cleaning = false;
+      releaseRefOp(repoPath);
       return;
     }
 
@@ -528,6 +549,7 @@ export class LvCleanDialog extends LitElement {
       );
       if (!confirmed) {
         this.cleaning = false;
+        releaseRefOp(repoPath);
         return;
       }
     }
@@ -567,6 +589,7 @@ export class LvCleanDialog extends LitElement {
       showToast('Clean operation failed', 'error');
     } finally {
       this.cleaning = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -725,10 +748,10 @@ export class LvCleanDialog extends LitElement {
             ` : html`No files selected`}
           </div>
           <div class="footer-right">
-            <button class="btn btn-secondary" ?disabled=${this.cleaning} @click=${this.dismiss}>Cancel</button>
+            <button class="btn btn-secondary" ?disabled=${this.cleaning || isRefOpRunning(this.pinnedRepoPath)} @click=${this.dismiss}>Cancel</button>
             <button
               class="btn btn-danger"
-              ?disabled=${!someSelected || this.cleaning}
+              ?disabled=${!someSelected || this.cleaning || isRefOpRunning(this.pinnedRepoPath)}
               @click=${this.handleClean}
             >
               ${this.cleaning ? 'Cleaning...' : 'Delete Selected'}

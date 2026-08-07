@@ -36,6 +36,11 @@ import '../lv-file-status.ts';
 import type { LvFileStatus } from '../lv-file-status.ts';
 import type { StatusEntry } from '../../../types/git.types.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
+import {
+  tryAcquireRefOp,
+  isRefOpRunning,
+  resetRefOpLocks,
+} from '../../../utils/ref-lock.ts';
 
 const REPO_PATH = '/test/repo';
 
@@ -80,6 +85,7 @@ async function render(entries: StatusEntry[]): Promise<LvFileStatus> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-file-status discard confirm copy', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeHistory.length = 0;
     lastConfirm = null;
     settingsStore.setState({ confirmBeforeDiscard: true });
@@ -87,6 +93,45 @@ describe('lv-file-status discard confirm copy', () => {
 
   afterEach(() => {
     settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  it('is inert while another surface holds the working-tree lock', async () => {
+    // discard_changes does its own forced checkout against the same tree a
+    // checkout, reset or rebase is mutating, and the backend takes no per-repo
+    // lock — so a discard started during one of those raced it.
+    const tracked = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([tracked]);
+    tryAcquireRefOp(REPO_PATH);
+    invokeHistory.length = 0;
+
+    await internalOf(el).handleDiscardFile(tracked, new Event('click'));
+
+    expect(
+      invokeHistory.some((h) => h.command === 'discard_changes'),
+      'nothing reaches the backend while another operation runs',
+    ).to.equal(false);
+  });
+
+  it('claims and releases the lock around its own work', async () => {
+    const tracked = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([tracked]);
+
+    let heldDuringDiscard = false;
+    mockInvoke = async (command: string) => {
+      if (command === 'discard_changes') {
+        heldDuringDiscard = isRefOpRunning(REPO_PATH);
+        return null;
+      }
+      return command === 'get_status' ? [tracked] : null;
+    };
+
+    await internalOf(el).handleDiscardFile(tracked, new Event('click'));
+
+    expect(heldDuringDiscard, 'other surfaces would have seen a free lock').to.equal(true);
+    expect(
+      isRefOpRunning(REPO_PATH),
+      'a stuck claim would freeze every ref operation for the session',
+    ).to.equal(false);
   });
 
   it('skips the confirm for a tracked file when the setting is off', async () => {

@@ -11,6 +11,12 @@ import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
 import { repositoryStore } from "../../stores/repository.store.ts";
 import { settingsStore } from "../../stores/settings.store.ts";
 import { isTopOverlay } from "../../utils/overlay-stack.ts";
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface FileContextMenuState {
   visible: boolean;
@@ -728,6 +734,14 @@ export class LvFileStatus extends LitElement {
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
     if (this.discarding) return;
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.discarding = true;
     try {
       if (!(await this.confirmDiscard(entries, dirPath))) return;
@@ -740,6 +754,7 @@ export class LvFileStatus extends LitElement {
       }
     } finally {
       this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -750,6 +765,9 @@ export class LvFileStatus extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.requestUpdate();
+    });
 
     // Add document click listener for closing context menu
     document.addEventListener("click", this.handleDocumentClick);
@@ -949,6 +967,8 @@ export class LvFileStatus extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
 
     // Remove document click listener
     document.removeEventListener("click", this.handleDocumentClick);
@@ -1055,6 +1075,7 @@ export class LvFileStatus extends LitElement {
   private statusLoadedForPath: string | null = null;
   /** Re-entrancy guard for the discard controls; see handleDiscardFile. */
   @state() private discarding = false;
+  private unsubscribeRefOps?: () => void;
   private statusDirtySeq = 1;
   private statusCleanSeq = 0;
   /** The load currently in flight, so a caller can await it instead of racing. */
@@ -1435,6 +1456,14 @@ export class LvFileStatus extends LitElement {
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
     if (this.discarding) return;
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.discarding = true;
     try {
       if (!(await this.confirmDiscard([file]))) return;
@@ -1447,6 +1476,7 @@ export class LvFileStatus extends LitElement {
       }
     } finally {
       this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1583,6 +1613,14 @@ export class LvFileStatus extends LitElement {
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
     if (this.discarding) return;
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.discarding = true;
     try {
       if (!(await this.confirmDiscard(entries))) return;
@@ -1598,6 +1636,7 @@ export class LvFileStatus extends LitElement {
       }
     } finally {
       this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1721,6 +1760,14 @@ export class LvFileStatus extends LitElement {
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
     if (this.discarding) return;
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     this.discarding = true;
     try {
       if (!(await this.confirmDiscard([file]))) return;
@@ -1733,6 +1780,7 @@ export class LvFileStatus extends LitElement {
       }
     } finally {
       this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1817,7 +1865,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard changes"
                   aria-label="Discard changes for ${name}"
-                  ?disabled=${this.discarding}
+                  ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                   @click=${(e: Event) => this.handleDiscardFile(file, e)}
                 >
                   <svg
@@ -1912,7 +1960,7 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="file-action"
                     title="Discard changes"
-                    ?disabled=${this.discarding}
+                    ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                     @click=${(e: Event) => this.handleDiscardFile(file, e)}
                   >
                     <svg
@@ -2012,7 +2060,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard directory changes"
                   aria-label="Discard changes for directory ${path}"
-                  ?disabled=${this.discarding}
+                  ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                   @click=${(e: Event) => this.handleDiscardDirectory(path, e)}
                 >
                   <svg
@@ -2089,7 +2137,7 @@ export class LvFileStatus extends LitElement {
               </button>
               <button
                 class="selection-action-btn danger"
-                ?disabled=${this.discarding}
+                ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                 @click=${() => this.handleDiscardSelected()}
                 title="Discard selected files"
               >

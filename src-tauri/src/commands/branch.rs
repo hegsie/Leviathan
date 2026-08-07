@@ -782,14 +782,24 @@ pub async fn checkout_with_autostash(
         Ok((commit.id(), is_local, is_remote))
     })();
 
-    let (target_oid, is_local_branch, is_remote_branch) = resolve_result.map_err(|msg| {
-        // Restore stash if checkout target resolution failed
-        if stashed {
-            // Best effort - try to pop stash, but don't fail if it doesn't work
-            let _ = repo.stash_pop(0, None);
+    let (target_oid, is_local_branch, is_remote_branch) = match resolve_result {
+        Ok(v) => v,
+        Err(msg) => {
+            // Restore the stash if the checkout target failed to resolve.
+            // Resolved by oid, not popped positionally: a stash created by
+            // another surface or a terminal in the meantime sits at index 0 and
+            // would be applied and destroyed in place of the auto-stash. The
+            // checkout-failure path below has always verified the oid; this one
+            // did not. Best effort — a failure to restore must not mask the
+            // resolution error the user actually needs to see.
+            if stashed {
+                if let Some(idx) = auto_stash_index(&mut repo, stash_oid) {
+                    let _ = repo.stash_pop(idx, None);
+                }
+            }
+            return Err(LeviathanError::OperationFailed(msg));
         }
-        LeviathanError::OperationFailed(msg)
-    })?;
+    };
 
     // Perform checkout using the OID
     let checkout_error: Option<String> = {
@@ -977,8 +987,28 @@ pub async fn checkout_with_autostash(
                     retry_opts.checkout_options(retry_checkout);
 
                     // Re-resolved: the failed apply above may itself have
-                    // changed the stash list.
-                    let retry_idx = auto_stash_index(&mut repo, stash_oid).unwrap_or(stash_idx);
+                    // changed the stash list. A missing entry must produce the
+                    // same refusal the initial resolve gives — falling back to
+                    // the earlier position would apply and drop whatever now
+                    // occupies it, which is the exact bug auto_stash_index
+                    // exists to close.
+                    let retry_idx = match auto_stash_index(&mut repo, stash_oid) {
+                        Some(idx) => idx,
+                        None => {
+                            return Ok(CheckoutWithStashResult {
+                                success: true,
+                                stashed: true,
+                                stash_applied: false,
+                                stash_conflict: false,
+                                message: format!(
+                                    "Switched to {}, but your stashed changes could not be \
+                                     found to re-apply. They are still in the stash list — \
+                                     apply them manually.",
+                                    ref_name
+                                ),
+                            });
+                        }
+                    };
                     if repo.stash_apply(retry_idx, Some(&mut retry_opts)).is_ok() {
                         if repo.index()?.has_conflicts() {
                             return Ok(CheckoutWithStashResult {
@@ -1718,6 +1748,42 @@ mod tests {
         assert!(
             auto_stash_index(&mut repo, Some(foreign)).is_some(),
             "the checkout applied and dropped a stash it did not create"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_bad_ref_leaves_a_foreign_stash_alone() {
+        // The resolve-failure path popped index 0 unverified while the
+        // checkout-failure path beside it checked the oid. A stash created in
+        // between sits at 0 and would be applied and destroyed in place of the
+        // auto-stash.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_file("README.md", "my work\n");
+
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's work\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        // A ref that cannot resolve drives the resolve-failure path.
+        let result = checkout_with_autostash(
+            test_repo.path_str(),
+            "no-such-branch".to_string(),
+            Some(true),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unresolvable ref must fail the checkout"
+        );
+
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the failed checkout popped a stash it did not create"
         );
     }
 
