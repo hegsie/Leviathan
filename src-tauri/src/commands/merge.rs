@@ -566,15 +566,22 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
         Ok(())
     })();
 
-    if result.is_ok() && !rewritten.is_empty() {
-        // Same hook the CLI rebase path gets for free — see the pre-rebase note
-        // above. Advertised by the Hooks dialog for "rebase, amend".
-        crate::commands::hooks::run_hook_noblock_with_stdin(
-            &repo,
-            "post-rewrite",
-            &["rebase"],
-            Some(&format!("{}\n", rewritten.join("\n"))),
-        );
+    if result.is_ok() {
+        if !rewritten.is_empty() {
+            // Same hook the CLI rebase path gets for free — see the pre-rebase
+            // note above. Advertised by the Hooks dialog for "rebase, amend".
+            crate::commands::hooks::run_hook_noblock_with_stdin(
+                &repo,
+                "post-rewrite",
+                &["rebase"],
+                Some(&format!("{}\n", rewritten.join("\n"))),
+            );
+        }
+    } else if matches!(result, Err(LeviathanError::RebaseConflict)) {
+        // Paused, not finished. Hand the pairs replayed so far to whichever
+        // continue_rebase eventually completes this rebase, so the hook
+        // describes the whole thing rather than only the last leg.
+        append_rewritten(&repo, &rewritten);
     }
 
     match result {
@@ -585,6 +592,49 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
         }
         Ok(()) => Ok(()),
     }
+}
+
+/// Where the `<old> <new>` pairs of a paused rebase are kept.
+///
+/// libgit2's rebase state lives in `<gitdir>/rebase-merge/`, which git removes
+/// when the rebase finishes or is aborted — so a file there is scoped to
+/// exactly one rebase and needs no separate cleanup.
+fn rewritten_list_path(repo: &git2::Repository) -> std::path::PathBuf {
+    repo.path().join("rebase-merge").join("leviathan-rewritten")
+}
+
+/// Append pairs replayed so far, so a conflict pause does not lose them.
+///
+/// post-rewrite must describe the WHOLE rebase. Both `rebase` and
+/// `continue_rebase` accumulated pairs in a local Vec and fired the hook only
+/// if that one invocation ran to completion, so every commit replayed before a
+/// conflict was dropped: rebase A-B-C where B conflicts reported only B and C.
+fn append_rewritten(repo: &git2::Repository, pairs: &[String]) {
+    if pairs.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    let path = rewritten_list_path(repo);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{}", pairs.join("\n"));
+    }
+}
+
+/// Read and clear the pairs persisted by earlier passes of this rebase.
+fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
+    let path = rewritten_list_path(repo);
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    contents
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
 }
 
 /// Preview a rebase by running it in a temporary worktree (ghost rebase)
@@ -732,10 +782,12 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     let signature = repo.signature()?;
     let mut rebase = repo.open_rebase(None)?;
 
-    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit.
-    // rebase() fires this when it completes in one go; a rebase that PAUSED on
-    // a conflict finishes here instead, and this path never fired it — so the
-    // hook ran or not depending only on whether the user hit a conflict.
+    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit,
+    // and must describe the WHOLE rebase. rebase() fires it when it completes
+    // in one go; a rebase that PAUSED finishes here instead, and this path
+    // never fired it at all — so the hook ran or not depending only on whether
+    // the user hit a conflict. Seeded from the pairs earlier passes persisted,
+    // so commits replayed before each pause are not dropped.
     let mut rewritten: Vec<String> = Vec::new();
 
     // Commit the current (just-resolved) operation; a patch that became
@@ -755,6 +807,9 @@ pub async fn continue_rebase(path: String) -> Result<()> {
         let old_oid = op?.id();
 
         if repo.index()?.has_conflicts() {
+            // Paused again. Persist this leg so the eventual completion still
+            // sees every commit replayed across all of them.
+            append_rewritten(&repo, &rewritten);
             return Err(LeviathanError::RebaseConflict);
         }
 
@@ -763,14 +818,19 @@ pub async fn continue_rebase(path: String) -> Result<()> {
         }
     }
 
+    // Read BEFORE finish(): it removes the rebase-merge directory the list
+    // lives in.
+    let mut all_rewritten = take_rewritten(&repo);
+    all_rewritten.extend(rewritten);
+
     rebase.finish(Some(&signature))?;
 
-    if !rewritten.is_empty() {
+    if !all_rewritten.is_empty() {
         crate::commands::hooks::run_hook_noblock_with_stdin(
             &repo,
             "post-rewrite",
             &["rebase"],
-            Some(&format!("{}\n", rewritten.join("\n"))),
+            Some(&format!("{}\n", all_rewritten.join("\n"))),
         );
     }
 
@@ -2755,6 +2815,47 @@ mod tests {
                 c.summary
             );
         }
+    }
+
+    #[test]
+    fn test_rewritten_list_survives_a_conflict_pause() {
+        // post-rewrite must describe the WHOLE rebase. Both rebase() and
+        // continue_rebase() accumulate pairs in a local Vec and fire the hook
+        // only if that one invocation runs to completion, so every commit
+        // replayed BEFORE a conflict was dropped: rebasing A-B-C where B
+        // conflicts reported only B and C.
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        std::fs::create_dir_all(test_repo.path.join(".git/rebase-merge")).unwrap();
+
+        append_rewritten(&repo, &["oldA newA".to_string()]);
+        append_rewritten(&repo, &["oldB newB".to_string(), "oldC newC".to_string()]);
+
+        let taken = take_rewritten(&repo);
+        assert_eq!(
+            taken,
+            vec!["oldA newA", "oldB newB", "oldC newC"],
+            "every leg of the rebase must reach the hook, in order"
+        );
+
+        assert!(
+            take_rewritten(&repo).is_empty(),
+            "the list must be consumed, or the next rebase inherits it"
+        );
+    }
+
+    #[test]
+    fn test_rewritten_list_ignores_an_empty_append() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        std::fs::create_dir_all(test_repo.path.join(".git/rebase-merge")).unwrap();
+
+        append_rewritten(&repo, &[]);
+
+        assert!(
+            take_rewritten(&repo).is_empty(),
+            "a pause with nothing replayed must leave no blank lines behind"
+        );
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ import { createBranch } from '../../services/git.service.ts';
 import { containsDeepActiveElement } from '../../utils/focus.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 @customElement('lv-create-branch-dialog')
 export class LvCreateBranchDialog extends LitElement {
@@ -239,11 +240,22 @@ export class LvCreateBranchDialog extends LitElement {
       return;
     }
 
+    const repoPath = this.pinnedRepoPath;
+    // "Checkout new branch after creation" is this dialog's default, and that
+    // path runs checkout_tree + set_head — the same working-tree mutation every
+    // other surface serializes on the shared lock. Creating a ref WITHOUT
+    // checking it out touches no working tree, so it stays unguarded rather
+    // than blocking on an unrelated operation.
+    const needsLock = this.checkoutAfterCreate;
+    if (needsLock && !tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
     this.isCreating = true;
     this.error = '';
 
     try {
-      const repoPath = this.pinnedRepoPath;
       const result = await createBranch(repoPath, {
         name,
         startPoint: this.startPoint || undefined,
@@ -268,6 +280,7 @@ export class LvCreateBranchDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.isCreating = false;
+      if (needsLock) releaseRefOp(repoPath);
     }
   }
 
