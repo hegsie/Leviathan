@@ -20,7 +20,7 @@ import {
   confirmPrune,
   summariseFsck,
 } from '../../utils/maintenance-confirms.ts';
-import { isRefOpRunning, subscribeRefOps, warnRepositoryBusy } from '../../utils/ref-lock.ts';
+import { subscribeRefOps, warnRepositoryBusy } from '../../utils/ref-lock.ts';
 
 interface HealthStats {
   objectCount: number;

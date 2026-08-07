@@ -165,20 +165,35 @@ export class RefLockController implements ReactiveController {
  */
 const pushInFlight = new Set<string>();
 
-/** Claim the push slot for a repo. False when a push is already running. */
-export function tryAcquirePush(repoPath: string): boolean {
-  if (pushInFlight.has(repoPath)) return false;
-  pushInFlight.add(repoPath);
+/**
+ * The key for a TAG push, so Push Tag and Force Push Tag exclude each other.
+ *
+ * Scoped to the tag rather than the repo: pushing two different tags, or a tag
+ * and a branch, are independent, and a repo-wide key would block them for no
+ * reason. The pairing that matters is the one the branch slot already has —
+ * app-shell holds the slot across the "this moves the remote tag" confirm, so
+ * a plain push of the SAME tag from the sidebar or the graph ref menu cannot
+ * race the force push the user is authorising. Force Push Tag used to hold a
+ * key private to app-shell that neither of those two surfaces could see.
+ */
+export function pushTagKey(repoPath: string, tagName: string): string {
+  return `${repoPath}\u0000tag:${tagName}`;
+}
+
+/** Claim the push slot for a key. False when a push already holds it. */
+export function tryAcquirePush(key: string): boolean {
+  if (pushInFlight.has(key)) return false;
+  pushInFlight.add(key);
   notify();
   return true;
 }
 
-/** Release the push slot. Safe for a repo that never held one. */
-export function releasePush(repoPath: string): void {
-  if (pushInFlight.delete(repoPath)) notify();
+/** Release the push slot. Safe for a key that never held one. */
+export function releasePush(key: string): void {
+  if (pushInFlight.delete(key)) notify();
 }
 
-/** True while a push or force push is running against `repoPath`. */
-export function isPushRunning(repoPath: string | undefined): boolean {
-  return repoPath !== undefined && pushInFlight.has(repoPath);
+/** True while a push or force push holds `key` (a repo path, or a tag key). */
+export function isPushRunning(key: string | undefined): boolean {
+  return key !== undefined && pushInFlight.has(key);
 }

@@ -16,6 +16,10 @@ import {
   subscribeRefOps,
   resetRefOpLocks,
   tryAcquireRefOpOrWarn,
+  tryAcquirePush,
+  releasePush,
+  isPushRunning,
+  pushTagKey,
 } from '../ref-lock.ts';
 
 describe('the shared ref-operation lock', () => {
@@ -90,5 +94,69 @@ describe('the shared ref-operation lock', () => {
     unsubscribe();
     tryAcquireRefOp('/repo/one');
     expect(calls, 'unsubscribed listeners stop firing').to.equal(2);
+  });
+});
+
+describe('the shared push slot', () => {
+  beforeEach(() => {
+    resetRefOpLocks();
+  });
+
+  afterEach(() => {
+    resetRefOpLocks();
+  });
+
+  // app-shell holds this across the "this replaces <branch> on the remote"
+  // confirm precisely so a plain push cannot race the force push the user is
+  // authorising. It only works if every push surface can see the same slot.
+  it('makes push and force push on one repo mutually exclusive', () => {
+    expect(tryAcquirePush('/repo/one')).to.be.true;
+    expect(tryAcquirePush('/repo/one'), 'a second push must be refused').to.be.false;
+    expect(isPushRunning('/repo/one')).to.be.true;
+
+    releasePush('/repo/one');
+    expect(isPushRunning('/repo/one')).to.be.false;
+    expect(tryAcquirePush('/repo/one')).to.be.true;
+  });
+
+  it('does not let one repo block another', () => {
+    expect(tryAcquirePush('/repo/one')).to.be.true;
+    expect(tryAcquirePush('/repo/two'), 'separate repos push independently').to.be.true;
+  });
+
+  // Force Push Tag held a key private to app-shell, which neither the sidebar's
+  // Push nor the graph ref menu's Push Tag could see — so a click on either
+  // pushed the tag out from under the force push sitting on its confirm.
+  it('makes push tag and force push tag on the SAME tag mutually exclusive', () => {
+    const key = pushTagKey('/repo/one', 'v1.0.0');
+    expect(tryAcquirePush(key)).to.be.true;
+    expect(tryAcquirePush(pushTagKey('/repo/one', 'v1.0.0'))).to.be.false;
+
+    releasePush(key);
+    expect(tryAcquirePush(key)).to.be.true;
+  });
+
+  it('keeps different tags, and tags vs branches, independent', () => {
+    expect(tryAcquirePush(pushTagKey('/repo/one', 'v1.0.0'))).to.be.true;
+    expect(
+      tryAcquirePush(pushTagKey('/repo/one', 'v2.0.0')),
+      'pushing a different tag is unrelated'
+    ).to.be.true;
+    expect(
+      tryAcquirePush('/repo/one'),
+      'a branch push is not blocked by a tag push'
+    ).to.be.true;
+  });
+
+  it('notifies subscribers so bound controls re-render', () => {
+    let calls = 0;
+    const unsubscribe = subscribeRefOps(() => {
+      calls++;
+    });
+    tryAcquirePush('/repo/one');
+    expect(calls, 'a claim notifies').to.equal(1);
+    releasePush('/repo/one');
+    expect(calls, 'and so does the release').to.equal(2);
+    unsubscribe();
   });
 });

@@ -474,6 +474,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     const result = await gitService.addSubmodule(
@@ -510,6 +511,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     const result = await gitService.initSubmodules(repoPath, [submodule.path]);
@@ -551,6 +553,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
 
@@ -616,6 +619,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
       const result = await gitService.removeSubmodule(repoPath, submodule.path);
@@ -642,6 +646,7 @@ export class LvSubmoduleDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     const result = await gitService.updateSubmodules(repoPath, {

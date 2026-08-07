@@ -332,6 +332,46 @@ pub async fn rename_branch(
 /// slot down — and the success toast still said the changes had been
 /// re-applied. The checkout-FAILURE path in this same function already
 /// verified the OID before popping; the success path, the common one, did not.
+/// The one way a HALF-COMPLETED auto-stash checkout is reported.
+///
+/// `checkout_tree` rewrites the working tree before HEAD moves, so any failure
+/// after it leaves the tree at the target commit with the user's changes still
+/// in the stash list. Whatever went wrong, the error has to say so — a bare
+/// message sends the user to a working tree they do not recognise with no clue
+/// that their work is recoverable. Both the checkout failure and the set_head
+/// failure route through here so they cannot describe the same situation
+/// differently.
+fn autostash_failure(
+    repo: &mut git2::Repository,
+    stashed: bool,
+    stash_oid: Option<git2::Oid>,
+    msg: &str,
+) -> LeviathanError {
+    if stashed {
+        match auto_stash_index(repo, stash_oid) {
+            Some(idx) => {
+                if let Err(pop_err) = repo.stash_pop(idx, None) {
+                    return LeviathanError::OperationFailed(format!(
+                        "Checkout failed: {}. Additionally, failed to restore \
+                         stashed changes: {}",
+                        msg,
+                        pop_err.message()
+                    ));
+                }
+            }
+            None => {
+                return LeviathanError::OperationFailed(format!(
+                    "Checkout failed: {}. Your changes could not be found to \
+                     restore — they are still in the stash list, apply them \
+                     manually.",
+                    msg
+                ));
+            }
+        }
+    }
+    LeviathanError::OperationFailed(format!("Checkout failed: {}", msg))
+}
+
 fn auto_stash_index(repo: &mut git2::Repository, stash_oid: Option<git2::Oid>) -> Option<usize> {
     let expected = stash_oid?;
     let mut found = None;
@@ -864,32 +904,7 @@ pub async fn checkout_with_autostash(
         // so it declined to restore and returned a bare "Checkout failed" —
         // leaving the user with an empty working tree, their changes in the
         // stash list, and nothing on screen saying so.
-        if stashed {
-            match auto_stash_index(&mut repo, stash_oid) {
-                Some(idx) => {
-                    if let Err(pop_err) = repo.stash_pop(idx, None) {
-                        return Err(LeviathanError::OperationFailed(format!(
-                            "Checkout failed: {}. Additionally, failed to restore \
-                             stashed changes: {}",
-                            msg,
-                            pop_err.message()
-                        )));
-                    }
-                }
-                None => {
-                    return Err(LeviathanError::OperationFailed(format!(
-                        "Checkout failed: {}. Your changes could not be found to \
-                         restore — they are still in the stash list, apply them \
-                         manually.",
-                        msg
-                    )));
-                }
-            }
-        }
-        return Err(LeviathanError::OperationFailed(format!(
-            "Checkout failed: {}",
-            msg
-        )));
+        return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
     }
 
     // Set HEAD.
@@ -902,38 +917,54 @@ pub async fn checkout_with_autostash(
     // showing as uncommitted modifications. `if let Ok(..)` made that the
     // outcome whenever the branch was deleted from a terminal during the
     // checkout. The plain `checkout` command has always used `?` here.
-    if is_local_branch {
-        let branch = repo.find_branch(&ref_name, git2::BranchType::Local)?;
-        repo.set_head(branch.get().name().map_err(|_| {
-            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-        })?)?;
-    } else if is_remote_branch {
-        // Check out a remote branch by finding or creating a local tracking branch.
-        // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
-        let local_name = if let Some(pos) = ref_name.find('/') {
-            &ref_name[pos + 1..]
-        } else {
-            &ref_name
-        };
-
-        // Use existing local branch if it exists, otherwise create one
-        let local_branch =
-            if let Ok(existing) = repo.find_branch(local_name, git2::BranchType::Local) {
-                existing
+    let set_head_result = (|| -> Result<()> {
+        if is_local_branch {
+            let branch = repo.find_branch(&ref_name, git2::BranchType::Local)?;
+            repo.set_head(branch.get().name().map_err(|_| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?)?;
+        } else if is_remote_branch {
+            // Check out a remote branch by finding or creating a local tracking branch.
+            // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
+            let local_name = if let Some(pos) = ref_name.find('/') {
+                &ref_name[pos + 1..]
             } else {
-                let commit = repo.find_commit(target_oid)?;
-                let mut new_branch = repo.branch(local_name, &commit, false)?;
-                // Best effort: set upstream tracking (may fail if remote config is incomplete)
-                let _ = new_branch.set_upstream(Some(&ref_name));
-                new_branch
+                &ref_name
             };
 
-        let name = local_branch.get().name().map_err(|_| {
-            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-        })?;
-        repo.set_head(name)?;
-    } else {
-        repo.set_head_detached(target_oid)?;
+            // Use existing local branch if it exists, otherwise create one
+            let local_branch =
+                if let Ok(existing) = repo.find_branch(local_name, git2::BranchType::Local) {
+                    existing
+                } else {
+                    let commit = repo.find_commit(target_oid)?;
+                    let mut new_branch = repo.branch(local_name, &commit, false)?;
+                    // Best effort: set upstream tracking (may fail if remote config is incomplete)
+                    let _ = new_branch.set_upstream(Some(&ref_name));
+                    new_branch
+                };
+
+            let name = local_branch.get().name().map_err(|_| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?;
+            repo.set_head(name)?;
+        } else {
+            repo.set_head_detached(target_oid)?;
+        }
+        Ok(())
+    })();
+
+    // Routed through the SAME restore path a failed checkout_tree takes.
+    // Propagating alone still left the auto-stash orphaned and unmentioned:
+    // the tree is at the target commit, HEAD is not, and the raw set_head
+    // error says nothing about where the user's changes went.
+    if let Err(err) = set_head_result {
+        return Err(autostash_failure(
+            &mut repo,
+            stashed,
+            stash_oid,
+            &err.to_string(),
+        ));
     }
 
     // HEAD/working tree switched — run post-checkout (flag=1), non-blocking.
@@ -1866,6 +1897,67 @@ mod tests {
         assert!(
             auto_stash_index(&mut repo, Some(foreign)).is_some(),
             "the checkout restored a stash it did not create"
+        );
+    }
+
+    /// A failure AFTER checkout_tree must restore the auto-stash and say so.
+    ///
+    /// checkout_tree rewrites the working tree before HEAD moves, so anything
+    /// that fails after it — a failed set_head, say, when the branch is deleted
+    /// from a terminal mid-checkout — leaves the tree at the target commit with
+    /// the user's work in the stash list. Propagating the raw error alone sent
+    /// them to a working tree they did not recognise with no clue their changes
+    /// were recoverable. Both failure paths now route through this one function
+    /// so they cannot describe the same situation differently.
+    #[test]
+    fn test_autostash_failure_restores_the_stash_and_reports_it() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        test_repo.create_file("tracked.txt", "my work\n");
+
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        let stash_oid = repo
+            .stash_save(&sig, "auto-stash", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let err = autostash_failure(&mut repo, true, Some(stash_oid), "set_head exploded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("set_head exploded"),
+            "names the failure: {msg}"
+        );
+
+        // The user's work is back in the working tree, not stranded.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(stash_oid)).is_none(),
+            "the auto-stash must have been popped"
+        );
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "my work\n"
+        );
+    }
+
+    #[test]
+    fn test_autostash_failure_says_where_the_changes_are_when_it_cannot_restore() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+
+        // An oid that is not in the stash list — the entry was dropped from a
+        // terminal while the checkout ran.
+        let missing = git2::Oid::from_str("0123456789012345678901234567890123456789").unwrap();
+        let err = autostash_failure(&mut repo, true, Some(missing), "set_head exploded");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("set_head exploded"),
+            "names the failure: {msg}"
+        );
+        assert!(
+            msg.contains("still in the stash list"),
+            "must tell the user where their work went: {msg}"
         );
     }
 

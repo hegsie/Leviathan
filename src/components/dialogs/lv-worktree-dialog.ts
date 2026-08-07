@@ -461,9 +461,17 @@ export class LvWorktreeDialog extends LitElement {
   private async loadBranches(): Promise<void> {
     const result = await gitService.getBranches(this.pinnedRepoPath);
     if (result.success && result.data) {
-      // Filter out branches already checked out in other worktrees
+      // LOCAL branches only, and only those free.
+      //
+      // get_branches returns remotes too, and they rendered here as plain rows
+      // — `origin/main` sitting among the local names, visually identical.
+      // `git worktree add <path> origin/main` exits 0 having created a
+      // DETACHED worktree: the DWIM that creates a tracking branch fires only
+      // for a bare name, not `remote/name`. So the dialog reported "Worktree
+      // added successfully" and the row it then drew read `detached HEAD`,
+      // not the branch the user had picked.
       const usedBranches = new Set(this.worktrees.map((wt) => wt.branch).filter(Boolean));
-      this.branches = result.data.filter((b) => !usedBranches.has(b.name));
+      this.branches = result.data.filter((b) => !b.isRemote && !usedBranches.has(b.name));
     } else {
       showToast(result.error?.message || 'Failed to load branches', 'error');
     }
@@ -490,6 +498,7 @@ export class LvWorktreeDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     const result = await gitService.addWorktree(repoPath, this.addPath, {
@@ -505,6 +514,12 @@ export class LvWorktreeDialog extends LitElement {
       this.createNewBranch = false;
       this.mode = 'list';
       await this.loadWorktrees();
+      // The dropdown's "only branches not checked out elsewhere" filter is
+      // derived from this.worktrees at LOAD time, so without this the branch
+      // just consumed stayed listed and the next Add dead-ended on git's raw
+      // "already used by worktree at ..." — and a freed branch stayed missing
+      // until the dialog was closed and reopened.
+      await this.loadBranches();
       this.dispatchEvent(new CustomEvent('worktrees-changed'));
     } else {
       this.error = result.error?.message || 'Failed to add worktree';
@@ -553,6 +568,7 @@ export class LvWorktreeDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     let result = await gitService.removeWorktree(repoPath, worktree.path);
@@ -586,6 +602,7 @@ export class LvWorktreeDialog extends LitElement {
       this.success = 'Worktree removed';
       this.error = '';
       await this.loadWorktrees();
+      await this.loadBranches();
       this.dispatchEvent(new CustomEvent('worktrees-changed'));
     } else {
       this.error = result.error?.message || 'Failed to remove worktree';
@@ -614,6 +631,7 @@ export class LvWorktreeDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
       const result = await gitService.lockWorktree(repoPath, worktree.path);
@@ -642,6 +660,7 @@ export class LvWorktreeDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
       const result = await gitService.unlockWorktree(repoPath, worktree.path);

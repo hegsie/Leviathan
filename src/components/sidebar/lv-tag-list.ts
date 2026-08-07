@@ -18,6 +18,10 @@ import {
   releaseRefOp,
   isRefOpRunning,
   subscribeRefOps,
+  pushTagKey,
+  tryAcquirePush,
+  releasePush,
+  warnRepositoryBusy,
 } from '../../utils/ref-lock.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
@@ -705,6 +709,17 @@ export class LvTagList extends LitElement {
     const lockedRepo = this.repositoryPath;
     if (!this.claimOperation(lockedRepo)) return;
 
+    // Also the shared tag-push key. Force Push Tag — reachable from the
+    // rejected-push suggestion toast — holds this across its "moves the remote
+    // tag" confirm and takes no working-tree claim, so without it a click here
+    // pushed the same tag out from under the force push being authorised.
+    const tagKey = pushTagKey(lockedRepo, tag.name);
+    if (!tryAcquirePush(tagKey)) {
+      this.releaseOperation(lockedRepo);
+      warnRepositoryBusy();
+      return;
+    }
+
     this.contextMenu = { ...this.contextMenu, visible: false };
 
     // Captured BEFORE the push await: the push and its refresh must pin to the
@@ -738,6 +753,7 @@ export class LvTagList extends LitElement {
         });
       }
     } finally {
+      releasePush(tagKey);
       this.releaseOperation(lockedRepo);
     }
   }

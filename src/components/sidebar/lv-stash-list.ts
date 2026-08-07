@@ -478,6 +478,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash applied', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
           detail: { repositoryPath: repoPath },
@@ -556,6 +559,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash popped', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
           detail: { repositoryPath: repoPath },
@@ -627,6 +633,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash dropped', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-dropped', {
           detail: { stash, repositoryPath: repoPath },

@@ -538,6 +538,7 @@ export class LvLfsDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
 
@@ -578,6 +579,7 @@ export class LvLfsDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
 

@@ -117,6 +117,7 @@ import {
   warnRepositoryBusy,
   tryAcquirePush,
   releasePush,
+  pushTagKey,
 } from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
@@ -855,6 +856,24 @@ export class AppShell extends LitElement {
    * confirm raised from a suggestion toast was still on screen. The shared
    * slot is what both can see.
    */
+  /** The same exclusion as runPushExclusive, scoped to one tag. */
+  private async runTagPushExclusive(
+    repoPath: string,
+    tagName: string,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const key = pushTagKey(repoPath, tagName);
+    if (!tryAcquirePush(key)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      releasePush(key);
+    }
+  }
+
   private async runPushExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
     if (!tryAcquirePush(repoPath)) {
       this.warnRepositoryBusy();
@@ -2225,7 +2244,11 @@ export class AppShell extends LitElement {
     // handleDeleteBranch). Without this, one click on a graph label is enough.
     const confirmed = await showConfirm(
       'Delete Branch',
-      `Are you sure you want to delete the branch "${branchName}"?`,
+      // Same stakes, same words as the sidebar's delete. Two surfaces for
+      // one irreversible operation must not state them differently — and
+      // the graph route is the faster gesture.
+      `Are you sure you want to delete the branch "${branchName}"?\n\n` +
+        `This action cannot be undone.`,
       'warning'
     );
 
@@ -2266,7 +2289,9 @@ export class AppShell extends LitElement {
     // menu deletes the same tag and must not be the one unguarded path.
     const confirmed = await showConfirm(
       'Delete Tag',
-      `Are you sure you want to delete the tag "${tagName}"?`,
+      // See handleRefDeleteBranch — the sidebar says this too.
+      `Are you sure you want to delete the tag "${tagName}"?\n\n` +
+        `This action cannot be undone.`,
       'warning'
     );
 
@@ -2298,6 +2323,14 @@ export class AppShell extends LitElement {
     // must target the repo it was invoked on, even if the user switches tabs.
     const repoPath = this.activeRepository.repository.path;
     if (!this.claimRefOperation(repoPath)) return;
+    // Also the shared tag-push key, so this cannot race a Force Push Tag
+    // sitting on its confirm — that one holds no working-tree claim.
+    const tagKey = pushTagKey(repoPath, tagName);
+    if (!tryAcquirePush(tagKey)) {
+      this.releaseRefOperation(repoPath);
+      this.warnRepositoryBusy();
+      return;
+    }
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     try {
@@ -2316,6 +2349,7 @@ export class AppShell extends LitElement {
         });
       }
     } finally {
+      releasePush(tagKey);
       this.releaseRefOperation(repoPath);
     }
   }
@@ -2864,7 +2898,11 @@ export class AppShell extends LitElement {
     const tagName = detail?.tagName;
     const repoPath = this.resolvePinnedRepo(detail?.repoPath);
     if (!tagName || !repoPath) return;
-    void this.runExclusive(`push-tag:${repoPath}:${tagName}`, () =>
+    // The SHARED tag-push key, not a private one. This slot is held across the
+    // "this moves the remote tag" confirm, and the sidebar's Push and the graph
+    // ref menu's Push Tag claim the same key — so neither can push the tag out
+    // from under the force push the user is authorising.
+    void this.runTagPushExclusive(repoPath, tagName, () =>
       this.forcePushTag(tagName, repoPath),
     );
   };

@@ -403,6 +403,41 @@ describe('lv-stash-list operationInProgress guards', () => {
     ).to.be.true;
   });
 
+  // Create toasts, and so do branch delete and tag delete — for the same
+  // reason: the only signal these ran at all was a row changing or vanishing.
+  // The three siblings in this component were left out.
+  for (const { handler, command, word } of [
+    { handler: 'handleApplyStash', command: 'apply_stash', word: 'applied' },
+    { handler: 'handlePopStash', command: 'pop_stash', word: 'popped' },
+    { handler: 'handleDropStash', command: 'drop_stash', word: 'dropped' },
+  ]) {
+    it(`${handler} reports success`, async () => {
+      const el = await createComponent();
+      const target = makeStash({ index: 0, message: 'WIP', oid: 'abc123' });
+      mockStashes = [target];
+      (
+        el as unknown as {
+          contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+        }
+      ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+      mockInvoke = (c: string) =>
+        c === 'plugin:dialog|message' ? Promise.resolve('Ok') : defaultMockInvoke(c);
+
+      uiStore.setState({ toasts: [] });
+      await (el as unknown as Record<string, () => Promise<void>>)[handler]();
+
+      expect(
+        invokeCalls.some((c) => c.command === command),
+        `${command} ran`
+      ).to.be.true;
+      expect(
+        uiStore.getState().toasts.some((t) => new RegExp(word, 'i').test(t.message)),
+        `a successful ${word} stash must report itself`
+      ).to.be.true;
+    });
+  }
+
   it('the Stash Changes button is refused and disabled while the repo is busy', async () => {
     const el = await createComponent();
     const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
