@@ -10,7 +10,11 @@ import { createBranch } from '../../services/git.service.ts';
 import { containsDeepActiveElement } from '../../utils/focus.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-create-branch-dialog')
 export class LvCreateBranchDialog extends LitElement {
@@ -126,6 +130,16 @@ export class LvCreateBranchDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
   @property({ type: String }) startPoint = '';
 
   /** The repo this dialog was opened for, captured at open(). The
@@ -367,7 +381,12 @@ export class LvCreateBranchDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleCreate}
-            ?disabled=${!this.canCreate}
+            ?disabled=${!this.canCreate ||
+              // ONLY when it will also check out. handleCreate claims the lock
+              // only for that case — creating a ref without checking it out
+              // touches no working tree — so gating unconditionally made the
+              // binding and the handler describe different contracts.
+              (this.checkoutAfterCreate && this.lock.busy)}
           >
             ${this.isCreating ? 'Creating...' : 'Create Branch'}
           </button>

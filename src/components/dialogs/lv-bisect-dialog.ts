@@ -11,7 +11,11 @@ import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts'
 import type { Commit } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -425,6 +429,16 @@ export class LvBisectDialog extends LitElement {
 
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.repositoryPath);
 
   @state() private step: BisectStep = 'setup';
   @state() private status: BisectStatus | null = null;
@@ -854,7 +868,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn good"
           @click=${this.handleGood}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#10003;</div>
           <div class="action-btn-label">Good</div>
@@ -862,7 +876,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn bad"
           @click=${this.handleBad}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#10007;</div>
           <div class="action-btn-label">Bad</div>
@@ -870,7 +884,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn skip"
           @click=${this.handleSkip}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#8594;</div>
           <div class="action-btn-label">Skip</div>
@@ -980,7 +994,7 @@ export class LvBisectDialog extends LitElement {
                   <button
                     class="btn btn-primary"
                     @click=${this.handleStart}
-                    ?disabled=${this.loading || !this.badCommitInput || !this.goodCommitInput}
+                    ?disabled=${this.loading || this.lock.busy || !this.badCommitInput || !this.goodCommitInput}
                   >
                     Start Bisect
                   </button>
@@ -990,7 +1004,7 @@ export class LvBisectDialog extends LitElement {
                     <button
                       class="btn btn-danger"
                       @click=${this.handleReset}
-                      ?disabled=${this.loading}
+                      ?disabled=${this.loading || this.lock.busy}
                     >
                       Abort Bisect
                     </button>
@@ -999,7 +1013,7 @@ export class LvBisectDialog extends LitElement {
                     <button
                       class="btn btn-primary"
                       @click=${this.handleReset}
-                      ?disabled=${this.loading}
+                      ?disabled=${this.loading || this.lock.busy}
                     >
                       Finish
                     </button>

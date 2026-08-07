@@ -12,7 +12,11 @@ import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { RebaseCommit, RebaseAction } from '../../types/git.types.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 
 interface EditableRebaseCommit extends RebaseCommit {
@@ -474,6 +478,16 @@ export class LvInteractiveRebaseDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
 
   @state() private onto = '';
   @state() private commits: EditableRebaseCommit[] = [];
@@ -1215,7 +1229,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleExecute}
-            ?disabled=${!this.canExecute}
+            ?disabled=${!this.canExecute || this.lock.busy}
           >
             ${this.executing ? 'Rebasing...' : 'Start Rebase'}
           </button>

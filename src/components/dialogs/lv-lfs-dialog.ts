@@ -501,10 +501,17 @@ export class LvLfsDialog extends LitElement {
   }
 
   private async handleInit(): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initLfs(this.pinnedRepoPath);
+    try {
+    const result = await gitService.initLfs(repoPath);
 
     if (result.success) {
       this.success = 'Git LFS initialized';
@@ -513,20 +520,31 @@ export class LvLfsDialog extends LitElement {
     } else {
       this.error = result.error?.message || 'Failed to initialize LFS';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handleTrack(): Promise<void> {
     if (!this.newPattern) return;
 
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes — see handlePull.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
+
+    try {
 
     // Captured before the await: the input is cleared on success, and the
     // message has to name what was actually tracked.
     const pattern = this.newPattern;
-    const result = await gitService.lfsTrack(this.pinnedRepoPath, pattern);
+    const result = await gitService.lfsTrack(repoPath, pattern);
 
     if (result.success) {
       // Init, Pull and Prune in this same dialog all report success; Track and
@@ -540,15 +558,30 @@ export class LvLfsDialog extends LitElement {
     } else {
       this.error = result.error?.message || 'Failed to track pattern';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handleUntrack(pattern: string): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes. These write the superproject too — pull runs
+    // `git lfs fetch` + `git lfs checkout` into the working tree, track and
+    // untrack rewrite .gitattributes, init rewrites .git/config and the hooks
+    // — so a `git gc` from Repository Health, or this dialog's own prune
+    // through its confirm, could run straight over them.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lfsUntrack(this.pinnedRepoPath, pattern);
+    try {
+
+    const result = await gitService.lfsUntrack(repoPath, pattern);
 
     if (result.success) {
       // Same asymmetry as handleTrack — see the note there.
@@ -558,16 +591,31 @@ export class LvLfsDialog extends LitElement {
     } else {
       this.error = result.error?.message || 'Failed to untrack pattern';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handlePull(): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes. These write the superproject too — pull runs
+    // `git lfs fetch` + `git lfs checkout` into the working tree, track and
+    // untrack rewrite .gitattributes, init rewrites .git/config and the hooks
+    // — so a `git gc` from Repository Health, or this dialog's own prune
+    // through its confirm, could run straight over them.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPull(this.pinnedRepoPath);
+    try {
+
+    const result = await gitService.lfsPull(repoPath);
 
     if (result.success) {
       this.success = 'LFS files pulled successfully';
@@ -577,8 +625,10 @@ export class LvLfsDialog extends LitElement {
       // The gate already said why; a declined confirm needs no message at all.
       this.error = result.error?.message || 'Failed to pull LFS files';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handlePrune(): Promise<void> {
@@ -742,7 +792,7 @@ export class LvLfsDialog extends LitElement {
             `
           : html`
               <div class="actions">
-                <button class="btn btn-primary" @click=${this.handleInit} ?disabled=${this.loading}>
+                <button class="btn btn-primary" @click=${this.handleInit} ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}>
                   Initialize LFS
                 </button>
               </div>
@@ -766,7 +816,7 @@ export class LvLfsDialog extends LitElement {
                             class="btn-icon danger"
                             title="Remove"
                             @click=${() => this.handleUntrack(p.pattern)}
-                            ?disabled=${this.loading}
+                            ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}
                           >
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -793,7 +843,7 @@ export class LvLfsDialog extends LitElement {
                 <button
                   class="btn btn-primary btn-sm"
                   @click=${this.handleTrack}
-                  ?disabled=${this.loading || !this.newPattern}
+                  ?disabled=${this.loading || this.pruning || this.maintenanceBlocked || !this.newPattern}
                 >
                   Track
                 </button>
@@ -835,7 +885,7 @@ export class LvLfsDialog extends LitElement {
             </div>
 
             <div class="actions">
-              <button class="btn btn-secondary" @click=${this.handlePull} ?disabled=${this.loading}>
+              <button class="btn btn-secondary" @click=${this.handlePull} ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                   <polyline points="7 10 12 15 17 10"/>

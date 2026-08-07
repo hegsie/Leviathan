@@ -11,7 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -324,6 +329,26 @@ export class LvReflogDialog extends LitElement {
   @state() private loading = false;
   @state() private selectedIndex: number | null = null;
   @state() private resetting = false;
+
+  /**
+   * The OBSERVATION half of the shared lock, which this dialog was missing.
+   *
+   * handleReset already CLAIMS the lock and correctly refuses when another
+   * surface holds it — but the Undo and Hard buttons were bound to `resetting`
+   * alone, a flag that only ever tracked this dialog. So while a checkout or a
+   * merge ran elsewhere, "Hard reset (discard all changes)" stayed fully
+   * clickable and did nothing but raise a refusal toast: exactly the dead
+   * control the rest of the lock rollout exists to eliminate. isRefOpRunning is
+   * plain module state Lit cannot observe, so the subscription is what makes
+   * the binding re-render on a transition.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get repositoryBusy(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private contextMenu: ReflogContextMenuState = { visible: false, x: 0, y: 0, entry: null };
 
   private handleDocumentClick = (): void => {
@@ -418,6 +443,9 @@ export class LvReflogDialog extends LitElement {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
   }
 
   disconnectedCallback(): void {
@@ -425,6 +453,8 @@ export class LvReflogDialog extends LitElement {
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   public close(): void {
@@ -608,7 +638,7 @@ export class LvReflogDialog extends LitElement {
             <button
               class="reset-btn"
               @click=${(e: Event) => { e.stopPropagation(); this.handleReset(entry, 'mixed'); }}
-              ?disabled=${this.resetting}
+              ?disabled=${this.resetting || this.repositoryBusy}
               title="Reset (keep changes unstaged)"
             >
               Undo
@@ -616,7 +646,7 @@ export class LvReflogDialog extends LitElement {
             <button
               class="reset-btn hard"
               @click=${(e: Event) => { e.stopPropagation(); this.handleReset(entry, 'hard'); }}
-              ?disabled=${this.resetting}
+              ?disabled=${this.resetting || this.repositoryBusy}
               title="Hard reset (discard all changes)"
             >
               Hard
@@ -679,7 +709,11 @@ export class LvReflogDialog extends LitElement {
     return html`
       <div class="context-menu" style="left: ${x}px; top: ${y}px">
         ${!isCurrent ? html`
-          <button class="context-menu-item" @click=${this.handleContextCheckout}>
+          <button
+            class="context-menu-item"
+            ?disabled=${this.resetting || this.repositoryBusy}
+            @click=${this.handleContextCheckout}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="1 4 1 10 7 10"></polyline>
               <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>

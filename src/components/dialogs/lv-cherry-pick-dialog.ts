@@ -10,7 +10,11 @@ import { cherryPick } from '../../services/git.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { Commit } from '../../types/git.types.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-cherry-pick-dialog')
 export class LvCherryPickDialog extends LitElement {
@@ -199,6 +203,16 @@ export class LvCherryPickDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
   @property({ type: String }) currentBranch = '';
 
   @query('lv-modal') private modal!: LvModal;
@@ -460,7 +474,7 @@ export class LvCherryPickDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleCherryPick}
-            ?disabled=${this.isExecuting}
+            ?disabled=${this.isExecuting || this.lock.busy}
           >
             ${this.isExecuting ? 'Cherry-picking...' : 'Cherry-Pick'}
           </button>

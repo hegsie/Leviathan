@@ -892,13 +892,21 @@ pub async fn checkout_with_autostash(
         )));
     }
 
-    // Set HEAD
+    // Set HEAD.
+    //
+    // Propagated, not swallowed. checkout_tree above has ALREADY rewritten the
+    // working tree to the target commit, so skipping set_head leaves HEAD and
+    // the working tree describing different commits — and this function went
+    // on to return success: true, so the UI toasted "Switched to <branch>" and
+    // the user was left on the old branch with the whole inter-branch diff
+    // showing as uncommitted modifications. `if let Ok(..)` made that the
+    // outcome whenever the branch was deleted from a terminal during the
+    // checkout. The plain `checkout` command has always used `?` here.
     if is_local_branch {
-        if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
-            repo.set_head(branch.get().name().map_err(|_| {
-                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-            })?)?;
-        }
+        let branch = repo.find_branch(&ref_name, git2::BranchType::Local)?;
+        repo.set_head(branch.get().name().map_err(|_| {
+            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+        })?)?;
     } else if is_remote_branch {
         // Check out a remote branch by finding or creating a local tracking branch.
         // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
@@ -920,9 +928,10 @@ pub async fn checkout_with_autostash(
                 new_branch
             };
 
-        if let Ok(name) = local_branch.get().name() {
-            repo.set_head(name)?;
-        }
+        let name = local_branch.get().name().map_err(|_| {
+            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+        })?;
+        repo.set_head(name)?;
     } else {
         repo.set_head_detached(target_oid)?;
     }

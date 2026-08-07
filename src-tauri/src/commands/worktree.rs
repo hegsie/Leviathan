@@ -186,15 +186,33 @@ pub async fn add_worktree(
 
     run_git_command(repo_path, &args)?;
 
-    // Get the newly added worktree info
-    let worktrees = get_worktrees(path).await?;
-    let abs_path = std::fs::canonicalize(&worktree_path)
+    // Get the newly added worktree info.
+    //
+    // Canonicalize against the REPO, not the process CWD. run_git_command runs
+    // git with .current_dir(repo_path), so git resolved a relative path like
+    // `../my-feature-worktree` — the very form the dialog's placeholder
+    // suggests — against the repository, while std::fs::canonicalize resolved
+    // it against wherever Tauri happened to be started. The lookup then missed
+    // a worktree git had just created successfully, and the dialog reported
+    // "Failed to find newly created worktree" for a worktree and branch that
+    // both now existed. The user's obvious retry then failed with "already
+    // exists", still with no sign the first attempt had worked.
+    //
+    // The `ends_with` fallback went with it: a suffix match can name a
+    // DIFFERENT worktree (`/a/feature` ends with `feature`).
+    let abs_path = std::fs::canonicalize(repo_path.join(&worktree_path))
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(worktree_path.clone());
+        .unwrap_or_else(|_| worktree_path.clone());
 
+    let worktrees = get_worktrees(path).await?;
     worktrees
         .into_iter()
-        .find(|wt| wt.path == abs_path || wt.path.ends_with(&worktree_path))
+        .find(|wt| {
+            wt.path == abs_path
+                || std::fs::canonicalize(&wt.path)
+                    .map(|p| p.to_string_lossy() == abs_path)
+                    .unwrap_or(false)
+        })
         .ok_or_else(|| {
             LeviathanError::OperationFailed("Failed to find newly created worktree".to_string())
         })
@@ -358,9 +376,7 @@ mod tests {
         let worktree_dir = TempDir::new().expect("Failed to create temp dir");
         let worktree_path = worktree_dir.path().join("feature-worktree");
 
-        // Use the function - even if it returns an error finding the worktree,
-        // the worktree should still be created
-        let _ = add_worktree(
+        add_worktree(
             repo.path_str(),
             worktree_path.to_string_lossy().to_string(),
             None,
@@ -369,7 +385,8 @@ mod tests {
             None,
             None,
         )
-        .await;
+        .await
+        .expect("adding a worktree must report the worktree it created");
 
         // Verify worktree directory exists
         assert!(worktree_path.exists());
@@ -377,6 +394,41 @@ mod tests {
         // Verify worktrees count increased
         let worktrees = get_worktrees(repo.path_str()).await.unwrap();
         assert_eq!(worktrees.len(), 2);
+    }
+
+    /// A RELATIVE worktree path must not be reported as a failure.
+    ///
+    /// git resolves it against the repo (run_git_command sets current_dir),
+    /// but the lookup canonicalized it against the Tauri process's CWD, so the
+    /// worktree git had just created could not be found. The dialog showed
+    /// "Failed to find newly created worktree" for a worktree and branch that
+    /// both existed, and the user's retry then failed with "already exists".
+    /// `../<name>` is exactly the form the dialog's own placeholder suggests.
+    #[tokio::test]
+    async fn test_add_worktree_relative_path_reports_success() {
+        let repo = TestRepo::with_initial_commit();
+        // Unique per test run: `..` from the repo's TempDir is the SHARED
+        // system temp dir, so a fixed name collides with other tests running
+        // in parallel.
+        let unique = repo.path.file_name().unwrap().to_string_lossy().to_string();
+        let relative = format!("../wt-{}", unique);
+        let relative = relative.as_str();
+
+        let created = add_worktree(
+            repo.path_str(),
+            relative.to_string(),
+            None,
+            Some("relative-branch".to_string()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a relative path must not be reported as a failure");
+
+        assert!(!created.is_main);
+        assert!(repo.path.join(relative).exists());
+        assert_eq!(get_worktrees(repo.path_str()).await.unwrap().len(), 2);
     }
 
     #[tokio::test]

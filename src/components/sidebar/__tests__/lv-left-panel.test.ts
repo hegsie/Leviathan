@@ -466,4 +466,29 @@ describe('lv-left-panel', () => {
       expect(collapsedChevrons.length).to.be.greaterThan(0);
     });
   });
+
+  // The Stashes SECTION was `display: none` at count 0 — hidden in exactly the
+  // state where a user goes looking for it: a dirty tree with nothing stashed
+  // yet. That also made lv-stash-list's "Stash Changes" button and its "No
+  // stashes" empty state unreachable, so stashing was keyboard-only for anyone
+  // who had never stashed before.
+  it('keeps the Stashes section reachable with no stashes', async () => {
+    setupDefaultMocks();
+    const el = await fixture<LvLeftPanel>(
+      html`<lv-left-panel .repositoryPath=${REPO_PATH}></lv-left-panel>`
+    );
+    await el.updateComplete;
+
+    expect((el as unknown as { stashCount: number }).stashCount).to.equal(0);
+
+    const headers = Array.from(el.shadowRoot!.querySelectorAll('.section-header'));
+    const stashHeader = headers.find((h) => /Stashes/.test(h.textContent ?? ''));
+    expect(stashHeader, 'the Stashes header must exist').to.not.be.undefined;
+
+    const section = stashHeader!.closest('section') as HTMLElement;
+    expect(
+      section.style.display,
+      'the section must not be hidden when the repo has no stashes'
+    ).to.not.equal('none');
+  });
 });

@@ -571,7 +571,12 @@ export class LvWorktreeDialog extends LitElement {
         'error'
       );
       if (!forced) {
-        this.error = '';
+        // NOT cleared. Blanking it left the list unchanged with no message at
+        // all, so the git refusal that explains why the worktree is still
+        // there — the only thing that makes the outcome legible — vanished
+        // with the prompt.
+        this.error =
+          'Removal cancelled — the worktree still contains modified or untracked files.';
         return;
       }
       result = await gitService.removeWorktree(repoPath, worktree.path, true);
@@ -599,37 +604,59 @@ export class LvWorktreeDialog extends LitElement {
   }
 
   private async handleLock(worktree: Worktree): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // Claims like Add and Remove do. These share the single `loading` flag
+    // with a removal, and Remove holds the lock across its confirm with
+    // `loading` still false — so this could set loading true, hide the list,
+    // then set it false and re-run loadWorktrees() while the removal was
+    // still in flight, repainting from a half-removed state.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.lockWorktree(this.pinnedRepoPath, worktree.path);
+    try {
+      const result = await gitService.lockWorktree(repoPath, worktree.path);
 
-    if (result.success) {
-      this.success = 'Worktree locked successfully';
-      await this.loadWorktrees();
-      this.dispatchEvent(new CustomEvent('worktrees-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to lock worktree';
+      if (result.success) {
+        this.success = 'Worktree locked successfully';
+        await this.loadWorktrees();
+        this.dispatchEvent(new CustomEvent('worktrees-changed'));
+      } else {
+        this.error = result.error?.message || 'Failed to lock worktree';
+      }
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
     }
-
-    this.loading = false;
   }
 
   private async handleUnlock(worktree: Worktree): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // Claims like Add and Remove do. These share the single `loading` flag
+    // with a removal, and Remove holds the lock across its confirm with
+    // `loading` still false — so this could set loading true, hide the list,
+    // then set it false and re-run loadWorktrees() while the removal was
+    // still in flight, repainting from a half-removed state.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.unlockWorktree(this.pinnedRepoPath, worktree.path);
+    try {
+      const result = await gitService.unlockWorktree(repoPath, worktree.path);
 
-    if (result.success) {
-      this.success = 'Worktree unlocked successfully';
-      await this.loadWorktrees();
-      this.dispatchEvent(new CustomEvent('worktrees-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to unlock worktree';
+      if (result.success) {
+        this.success = 'Worktree unlocked successfully';
+        await this.loadWorktrees();
+        this.dispatchEvent(new CustomEvent('worktrees-changed'));
+      } else {
+        this.error = result.error?.message || 'Failed to unlock worktree';
+      }
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
     }
-
-    this.loading = false;
   }
 
   private handleClose(): void {
@@ -670,7 +697,7 @@ export class LvWorktreeDialog extends LitElement {
                         class="action-btn"
                         title="Unlock"
                         @click=${() => this.handleUnlock(wt)}
-                        ?disabled=${this.loading}
+                        ?disabled=${this.loading || this.repositoryBusy || this.removingPath !== null}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
@@ -683,7 +710,10 @@ export class LvWorktreeDialog extends LitElement {
                         class="action-btn"
                         title="Lock"
                         @click=${() => this.handleLock(wt)}
-                        ?disabled=${this.loading || wt.isMain}
+                        ?disabled=${this.loading ||
+                        this.repositoryBusy ||
+                        this.removingPath !== null ||
+                        wt.isMain}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>

@@ -14,6 +14,13 @@ import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+// DELIBERATELY claim-only: this dialog does NOT bind its buttons to
+// isRefOpRunning the way its siblings do. Abort and Continue are the only two
+// exits from a conflicted repository, and greying an exit out because an
+// unrelated surface holds the lock is the trap that greying Abort out during a
+// minutes-long fsck already produced once. Both handlers still claim the lock
+// and report the refusal, so the operation stays serialized; only the
+// affordance stays live.
 import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 

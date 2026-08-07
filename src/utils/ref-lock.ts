@@ -1,3 +1,4 @@
+import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import { showToast } from '../services/notification.service.ts';
 
 /**
@@ -92,5 +93,92 @@ export function notifyRefOpListeners(): void {
 /** Test seam: drop all claims and listeners. */
 export function resetRefOpLocks(): void {
   refOpsInFlight.clear();
+  pushInFlight.clear();
   listeners.clear();
+}
+
+/**
+ * Observe the working-tree lock from a component, in one line.
+ *
+ * Claiming the lock and OBSERVING it are separate halves, and only the claim
+ * kept getting applied. A component that claims but never subscribes still
+ * refuses correctly — but its buttons stay lit through the other operation and
+ * do nothing except raise a refusal toast, which is the dead control this
+ * whole mechanism exists to remove. Six dialogs were in that state, and the
+ * hand-rolled version of the observation half (a refOpsVersion field, a
+ * subscription in connectedCallback, teardown in disconnectedCallback, a
+ * getter) had already been mis-applied once by a scripted edit that silently
+ * skipped three files.
+ *
+ * A reactive controller removes the boilerplate — and with it the chance to
+ * apply only part of it:
+ *
+ *   private lock = new RefLockController(this, () => this.pinnedRepoPath);
+ *   ...
+ *   ?disabled=${this.deleting || this.lock.busy}
+ *
+ * Bind it ONLY to the controls that START a git operation. Cancel/Close and
+ * plain form inputs must stay live: `busy` reflects ANY operation anywhere in
+ * the repo, so gating them greys out the most obvious way to leave a dialog —
+ * or freezes a textarea mid-keystroke — for a reason that has nothing to do
+ * with the dialog. lv-clean-dialog and lv-repository-health-dialog already
+ * carry that decision in comments; applying the controller uniformly to every
+ * binding in a footer walked straight back into it.
+ */
+export class RefLockController implements ReactiveController {
+  private unsubscribe?: () => void;
+
+  constructor(
+    private readonly host: ReactiveControllerHost,
+    private readonly repoPath: () => string | undefined,
+  ) {
+    host.addController(this);
+  }
+
+  hostConnected(): void {
+    this.unsubscribe = subscribeRefOps(() => this.host.requestUpdate());
+  }
+
+  hostDisconnected(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+  }
+
+  /** True while any operation holds this repo's working tree. */
+  get busy(): boolean {
+    return isRefOpRunning(this.repoPath());
+  }
+}
+
+/**
+ * The push slot, per repository — separate from the working-tree lock.
+ *
+ * A push does not touch the working tree, so it must not block a checkout; but
+ * two pushes to the same branch must not overlap, and Push and Force Push in
+ * particular must be mutually exclusive: a plain push launched while the
+ * "this replaces <branch> on the remote" confirm is still up races the force
+ * push it is about to authorise. app-shell enforced that with a
+ * component-local `destructiveActionsInFlight` keyed `push:<repo>`, which the
+ * context dashboard's own Push button — a fourth push surface, in a directory
+ * no sweep had reached — could not see. Hoisted here for the same reason the
+ * working-tree lock was.
+ */
+const pushInFlight = new Set<string>();
+
+/** Claim the push slot for a repo. False when a push is already running. */
+export function tryAcquirePush(repoPath: string): boolean {
+  if (pushInFlight.has(repoPath)) return false;
+  pushInFlight.add(repoPath);
+  notify();
+  return true;
+}
+
+/** Release the push slot. Safe for a repo that never held one. */
+export function releasePush(repoPath: string): void {
+  if (pushInFlight.delete(repoPath)) notify();
+}
+
+/** True while a push or force push is running against `repoPath`. */
+export function isPushRunning(repoPath: string | undefined): boolean {
+  return repoPath !== undefined && pushInFlight.has(repoPath);
 }

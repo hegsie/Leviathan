@@ -187,17 +187,19 @@ export class LvLeftPanel extends LitElement {
         </div>
       </section>
 
-      <!-- Stashes Section - only show when there are stashes -->
-      <!-- ONE template position, as above: swapping literals on the count
-           rebuilt <lv-stash-list> and anything stateful inside it. -->
-      <section
-        class="section refs-section ${stashesExpanded ? '' : 'collapsed'}"
-        style=${this.stashCount > 0 ? '' : 'display: none;'}
-      >
+      <!-- Stashes Section - header always visible, like Tags.
+           Hiding the whole SECTION at count 0 hid it in exactly the state
+           where a user goes looking for it: a dirty tree with nothing stashed
+           yet. That also made lv-stash-list's "Stash Changes" button and its
+           "No stashes" empty state unreachable, so stashing was keyboard-only
+           for anyone who had never stashed before. Only the body is hidden;
+           ONE template position, as above, because swapping literals on the
+           count rebuilt <lv-stash-list> and anything stateful inside it. -->
+      <section class="section refs-section ${stashesExpanded ? '' : 'collapsed'}">
         <header class="section-header" @click=${() => this.toggleSection('stashes')}>
           ${this.renderChevron(stashesExpanded)}
           <span class="title">Stashes</span>
-          <span class="count">${this.stashCount}</span>
+          ${this.stashCount > 0 ? html`<span class="count">${this.stashCount}</span>` : ''}
         </header>
         <div class="section-content">
           <lv-stash-list

@@ -373,6 +373,10 @@ export class LvStashList extends LitElement {
           showToast('No local changes to save', 'info');
           return;
         }
+        // The shortcut and the palette both toast "Stash created"; this
+        // surface reloaded the list and said nothing, so the same operation
+        // reported differently depending on where it was started.
+        showToast('Stash created', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-created', {
           detail: { repositoryPath: repoPath },

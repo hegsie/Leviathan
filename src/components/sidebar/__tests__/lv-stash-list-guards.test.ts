@@ -28,6 +28,7 @@ import type { LvStashList } from '../lv-stash-list.ts';
 // Import the actual component
 import '../lv-stash-list.ts';
 import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -380,6 +381,26 @@ describe('lv-stash-list operationInProgress guards', () => {
       invokeCalls.filter((c) => c.command === 'create_stash'),
       'the button must reach the backend'
     ).to.have.length(1);
+  });
+
+  // The shortcut and the palette both toast "Stash created"; this surface
+  // reloaded the list and said nothing, so the same operation reported
+  // differently depending on where it was started.
+  it('toasts on a successful stash, like the other stash surfaces', async () => {
+    const el = await createComponent();
+    mockStashes = [makeStash({ index: 0, message: 'WIP', oid: 'new-oid' })];
+    mockInvoke = (command: string) =>
+      command === 'create_stash'
+        ? Promise.resolve({ index: 0, message: 'WIP', oid: 'new-oid' })
+        : defaultMockInvoke(command);
+
+    uiStore.setState({ toasts: [] });
+    await (el as unknown as { handleCreateStash: () => Promise<void> }).handleCreateStash();
+
+    expect(
+      uiStore.getState().toasts.some((t) => /stash created/i.test(t.message)),
+      'a successful stash must report itself'
+    ).to.be.true;
   });
 
   it('the Stash Changes button is refused and disabled while the repo is busy', async () => {

@@ -115,6 +115,8 @@ import {
   isRefOpRunning,
   subscribeRefOps,
   warnRepositoryBusy,
+  tryAcquirePush,
+  releasePush,
 } from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
@@ -845,6 +847,26 @@ export class AppShell extends LitElement {
   }
 
   /** Run `fn` unless an identical action is already in flight. */
+  /**
+   * Push and Force Push must be mutually exclusive across EVERY surface.
+   *
+   * `destructiveActionsInFlight` is this component's own state, so the context
+   * dashboard's Push button could launch a plain push while the force-push
+   * confirm raised from a suggestion toast was still on screen. The shared
+   * slot is what both can see.
+   */
+  private async runPushExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
+    if (!tryAcquirePush(repoPath)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      releasePush(repoPath);
+    }
+  }
+
   private async runExclusive(key: string, fn: () => Promise<void>): Promise<void> {
     if (this.destructiveActionsInFlight.has(key)) {
       // Audible for the same reason as runRefExclusive: every caller of this
@@ -2785,7 +2807,7 @@ export class AppShell extends LitElement {
       (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
     );
     if (!repoPath) return;
-    void this.runExclusive(`push:${repoPath}`, () => this.forcePush(repoPath));
+    void this.runPushExclusive(repoPath, () => this.forcePush(repoPath));
   };
 
   private async forcePush(repoPath: string): Promise<void> {
@@ -4471,7 +4493,7 @@ export class AppShell extends LitElement {
     // it many times a second and every repeat launched a fully concurrent
     // push. Sharing the key also makes Push and Force Push mutually exclusive
     // on one repo.
-    return this.runExclusive(`push:${repoPath}`, () => this.pushRepository());
+    return this.runPushExclusive(repoPath, () => this.pushRepository());
   }
 
   private async pushRepository(): Promise<void> {

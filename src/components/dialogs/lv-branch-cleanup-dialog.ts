@@ -14,7 +14,11 @@ import { settingsStore } from '../../stores/settings.store.ts';
 import type { Branch, CleanupCandidate } from '../../types/git.types.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
-import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 type CleanupTab = 'merged' | 'stale' | 'gone';
 type RiskLevel = 'safe' | 'warning' | 'danger';
@@ -281,6 +285,16 @@ export class LvBranchCleanupDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
 
   /** The repo this dialog was opened for, captured at open(). repositoryPath is
    * bound live to the active tab, so a tab switch while the modal is open would
@@ -1067,7 +1081,7 @@ export class LvBranchCleanupDialog extends LitElement {
               <button
                 class="btn btn-danger"
                 @click=${this.handleDelete}
-                ?disabled=${this.totalSelected === 0 || this.deleting || this.loading}
+                ?disabled=${this.totalSelected === 0 || this.deleting || this.loading || this.lock.busy}
               >
                 ${this.deleting
                   ? 'Deleting...'

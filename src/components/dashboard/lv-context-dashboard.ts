@@ -21,7 +21,15 @@ import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssign
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';
-import { tryAcquireRefOpOrWarn, releaseRefOp } from '../../utils/ref-lock.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  RefLockController,
+  releasePush,
+  isPushRunning,
+  tryAcquirePush,
+  warnRepositoryBusy,
+} from '../../utils/ref-lock.ts';
 
 const STORAGE_KEY = 'lv-context-dashboard-expanded';
 
@@ -677,6 +685,17 @@ export class LvContextDashboard extends LitElement {
     }
   }
 
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * Pull claims it (see handlePull) but the button was bound to
+   * isRemoteOperationInProgress alone, which only ever tracked this component
+   * — so during a sidebar checkout the dashboard's Pull stayed lit and did
+   * nothing but raise a refusal toast. Fetch and Push do not touch the working
+   * tree, so they keep the local gate only.
+   */
+  private lock = new RefLockController(this, () => this.activeRepository?.repository.path);
+
   private get isRemoteOperationInProgress(): boolean {
     return this.isFetching || this.isPulling || this.isPushing;
   }
@@ -800,10 +819,22 @@ export class LvContextDashboard extends LitElement {
     }
   }
 
+  /** Claim the shared push slot, reporting the refusal like its siblings. */
+  private tryAcquirePushOrWarn(repoPath: string): boolean {
+    if (tryAcquirePush(repoPath)) return true;
+    warnRepositoryBusy();
+    return false;
+  }
+
   private async handlePush(): Promise<void> {
     if (!this.activeRepository || this.isPushing) return;
 
     const repoPath = this.activeRepository.repository.path;
+    // The shared push slot, not just isPushing. A rejected push raises a Force
+    // Push suggestion toast; app-shell holds this slot across that confirm
+    // precisely so a second, plain push cannot race the force push the user is
+    // authorising — and this button could not see a flag private to app-shell.
+    if (!this.tryAcquirePushOrWarn(repoPath)) return;
     this.isPushing = true;
     try {
       const result = await gitPush({ path: repoPath, silent: true });
@@ -823,6 +854,7 @@ export class LvContextDashboard extends LitElement {
       }
     } finally {
       this.isPushing = false;
+      releasePush(repoPath);
     }
   }
 
@@ -1204,7 +1236,7 @@ export class LvContextDashboard extends LitElement {
               class="remote-btn ${this.isPulling ? 'loading' : ''}"
               title="Pull from remote${this.behind > 0 ? ` (${this.behind} commits behind)` : ''}"
               @click=${this.handlePull}
-              ?disabled=${this.isRemoteOperationInProgress}
+              ?disabled=${this.isRemoteOperationInProgress || this.lock.busy}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 3v18"></path>
@@ -1219,7 +1251,7 @@ export class LvContextDashboard extends LitElement {
               class="remote-btn ${this.isPushing ? 'loading' : ''}"
               title="Push to remote${this.ahead > 0 ? ` (${this.ahead} commits ahead)` : ''}"
               @click=${this.handlePush}
-              ?disabled=${this.isRemoteOperationInProgress}
+              ?disabled=${this.isRemoteOperationInProgress || isPushRunning(this.activeRepository?.repository.path)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 3v18"></path>
