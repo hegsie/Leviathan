@@ -668,6 +668,16 @@ pub struct CheckoutWithStashResult {
     pub stash_applied: bool,
     /// Whether stash apply had conflicts
     pub stash_conflict: bool,
+    /// The auto-stash's oid, when one was created and still exists.
+    ///
+    /// The conflict flow has to drop this entry once the user resolves, and it
+    /// used to find it by position: every frontend caller passed
+    /// `stashIndex: 0`. `git stash push` prepends, so a stash created by
+    /// another surface or a terminal renumbers the entry and the conflict
+    /// dialog would drop the wrong one. This function resolves its own stash by
+    /// oid; carrying the oid across the boundary lets the dialog do the same
+    /// instead of trusting a position the backend has stopped trusting.
+    pub stash_oid: Option<String>,
     /// Message describing what happened
     pub message: String,
 }
@@ -736,6 +746,7 @@ pub async fn checkout_with_autostash(
                     stashed: false,
                     stash_applied: false,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!("Failed to stash changes: {}", e.message()),
                 });
             }
@@ -934,6 +945,7 @@ pub async fn checkout_with_autostash(
                     stashed: true,
                     stash_applied: false,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!(
                         "Switched to {}, but your stashed changes could not be found to \
                          re-apply. They are still in the stash list — apply them manually.",
@@ -954,6 +966,7 @@ pub async fn checkout_with_autostash(
                         stashed: true,
                         stash_applied: false,
                         stash_conflict: true,
+                        stash_oid: stash_oid.map(|o| o.to_string()),
                         message: conflict_message,
                     });
                 }
@@ -963,6 +976,7 @@ pub async fn checkout_with_autostash(
                     stashed: true,
                     stash_applied: true,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!("Switched to {} and re-applied stashed changes", ref_name),
                 });
             }
@@ -1000,6 +1014,7 @@ pub async fn checkout_with_autostash(
                                 stashed: true,
                                 stash_applied: false,
                                 stash_conflict: false,
+                                stash_oid: stash_oid.map(|o| o.to_string()),
                                 message: format!(
                                     "Switched to {}, but your stashed changes could not be \
                                      found to re-apply. They are still in the stash list — \
@@ -1016,6 +1031,7 @@ pub async fn checkout_with_autostash(
                                 stashed: true,
                                 stash_applied: false,
                                 stash_conflict: true,
+                                stash_oid: stash_oid.map(|o| o.to_string()),
                                 message: conflict_message,
                             });
                         }
@@ -1031,6 +1047,7 @@ pub async fn checkout_with_autostash(
                             stashed: true,
                             stash_applied: true,
                             stash_conflict: false,
+                            stash_oid: stash_oid.map(|o| o.to_string()),
                             message: format!(
                                 "Switched to {} and re-applied stashed changes (staged status was not preserved)",
                                 ref_name
@@ -1045,6 +1062,7 @@ pub async fn checkout_with_autostash(
                     stashed: true,
                     stash_applied: false,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!(
                         "Switched to {} but failed to re-apply stash: {}. Your changes remain stashed.",
                         ref_name,
@@ -1060,6 +1078,7 @@ pub async fn checkout_with_autostash(
         stashed: false,
         stash_applied: false,
         stash_conflict: false,
+        stash_oid: stash_oid.map(|o| o.to_string()),
         message: format!("Switched to {}", ref_name),
     })
 }
@@ -2150,6 +2169,7 @@ mod tests {
             stashed: true,
             stash_applied: false,
             stash_conflict: true,
+            stash_oid: Some("abc123".to_string()),
             message: "test message".to_string(),
         };
 
@@ -2157,6 +2177,8 @@ mod tests {
         // Verify camelCase serialization
         assert!(json.contains("stashApplied"));
         assert!(json.contains("stashConflict"));
+        // The conflict flow drops the auto-stash by oid, not by position.
+        assert!(json.contains("stashOid"));
     }
 
     #[tokio::test]

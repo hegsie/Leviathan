@@ -608,6 +608,7 @@ export class AppShell extends LitElement {
     initialFilePath: string | null;
     stashSourceCertain: boolean;
     stashIndex: number;
+    stashOid: string | null;
     dropStashOnComplete: boolean;
     squashMerge: boolean;
     gitflowFinish: GitflowFinishContext | null;
@@ -616,6 +617,8 @@ export class AppShell extends LitElement {
   // Stash-completion semantics for the conflict dialog (which entry to drop and
   // whether to drop it at all — pop drops, plain apply keeps).
   @state() private conflictStashIndex = 0;
+  /** The auto-stash's oid, when the operation reported one. Preferred over the index. */
+  @state() private conflictStashOid: string | null = null;
   @state() private conflictDropStashOnComplete = true;
   // Whether a conflicted merge should complete as a squash (single-parent) commit.
   @state() private conflictSquashMerge = false;
@@ -1092,6 +1095,7 @@ export class AppShell extends LitElement {
     const customEvent = e as CustomEvent<{
       operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
       stashIndex?: number;
+      stashOid?: string | null;
       dropStashOnComplete?: boolean;
       squash?: boolean;
       gitflowFinish?: GitflowFinishContext;
@@ -1103,6 +1107,7 @@ export class AppShell extends LitElement {
       // Thread stash-completion semantics so the dialog drops the correct entry
       // (and only when the failed operation had pop semantics).
       this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+      this.conflictStashOid = customEvent.detail?.stashOid ?? null;
       this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
       // A squash finish that conflicted must complete as a squash, not a merge commit.
       this.conflictSquashMerge = customEvent.detail?.squash ?? false;
@@ -1179,6 +1184,7 @@ export class AppShell extends LitElement {
       initialFilePath: this.conflictInitialFilePath,
       stashSourceCertain: this.conflictStashSourceCertain,
       stashIndex: this.conflictStashIndex,
+      stashOid: this.conflictStashOid,
       dropStashOnComplete: this.conflictDropStashOnComplete,
       squashMerge: this.conflictSquashMerge,
       gitflowFinish: this.conflictGitflowFinish,
@@ -1196,6 +1202,7 @@ export class AppShell extends LitElement {
   // stash index) can't leak into an unrelated conflict resolution.
   private resetConflictDetailState(): void {
     this.conflictStashIndex = 0;
+    this.conflictStashOid = null;
     this.conflictDropStashOnComplete = true;
     this.conflictSquashMerge = false;
     this.conflictGitflowFinish = null;
@@ -2026,10 +2033,14 @@ export class AppShell extends LitElement {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
       // Open the conflict dialog so the user can resolve the failed stash pop.
-      // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
-      // must be dropped once its changes are applied and resolved.
+      // Auto-stash is pop semantics: the entry must be dropped once its changes
+      // are applied and resolved. Identified by oid rather than assumed to sit
+      // at index 0 — checkout_with_autostash no longer trusts that position
+      // either, because another surface or a terminal can push a stash in
+      // between and renumber the list.
       this.conflictOperationType = 'stash';
       this.resetConflictDetailState();
+      this.conflictStashOid = data.stashOid ?? null;
       this.conflictDropStashOnComplete = true;
       this.openConflictDialogPinned(repoPath);
       this.refreshConflictDialogRepo(repoPath);
@@ -4934,6 +4945,7 @@ export class AppShell extends LitElement {
               .initialFilePath=${this.conflictDialogConfig.initialFilePath}
               .stashSourceCertain=${this.conflictDialogConfig.stashSourceCertain}
               .stashIndex=${this.conflictDialogConfig.stashIndex}
+              .stashOid=${this.conflictDialogConfig.stashOid}
               .dropStashOnComplete=${this.conflictDialogConfig.dropStashOnComplete}
               .squashMerge=${this.conflictDialogConfig.squashMerge}
               .gitflowFinish=${this.conflictDialogConfig.gitflowFinish}

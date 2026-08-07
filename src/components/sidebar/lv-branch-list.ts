@@ -1122,9 +1122,12 @@ export class LvBranchList extends LitElement {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
-            // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+            // Auto-stash is pop semantics: drop it once resolved. Identified by
+            // oid, not position — another surface or a terminal can push a stash
+            // in between and renumber the list.
             detail: {
               operationType: 'stash',
+              stashOid: data.stashOid ?? null,
               stashIndex: 0,
               dropStashOnComplete: true,
               repositoryPath: repoPath,
@@ -1829,9 +1832,11 @@ export class LvBranchList extends LitElement {
         this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
           bubbles: true,
           composed: true,
-          // Auto-stash is pop semantics: entry at index 0, drop it once resolved.
+          // Auto-stash is pop semantics: drop it once resolved. Identified by
+          // oid, not position — see handleCheckout.
           detail: {
             operationType: 'stash',
+            stashOid: checkoutResult.data.stashOid ?? null,
             stashIndex: 0,
             dropStashOnComplete: true,
             repositoryPath: repoPath,

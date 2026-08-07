@@ -441,7 +441,13 @@ export class LvGitflowPanel extends LitElement {
     // Captured BEFORE the await — the host's refresh must target the repo
     // the init actually ran on, even if the prop is rebound mid-flight.
     const repoPath = this.repositoryPath;
-    if (!this.claimOperation(repoPath)) return;
+    if (!this.claimOperation(repoPath)) {
+      // The name the user just typed in the prompt would otherwise vanish with
+      // no toast, no message and no branch. The finish siblings claim before
+      // their prompt; these three cannot, because the name IS the prompt.
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.error = null;
     try {
       const result = await gitService.initGitFlow(repoPath);
@@ -471,7 +477,13 @@ export class LvGitflowPanel extends LitElement {
     const name = await showPrompt('Start Feature', 'Enter feature name:');
     if (!name || !name.trim()) return;
 
-    if (!this.claimOperation(repoPath)) return;
+    if (!this.claimOperation(repoPath)) {
+      // The name the user just typed in the prompt would otherwise vanish with
+      // no toast, no message and no branch. The finish siblings claim before
+      // their prompt; these three cannot, because the name IS the prompt.
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.error = null;
 
     try {
@@ -587,7 +599,13 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Release', 'Enter release version:');
     if (!version || !version.trim()) return;
 
-    if (!this.claimOperation(repoPath)) return;
+    if (!this.claimOperation(repoPath)) {
+      // The name the user just typed in the prompt would otherwise vanish with
+      // no toast, no message and no branch. The finish siblings claim before
+      // their prompt; these three cannot, because the name IS the prompt.
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.error = null;
 
     try {
@@ -694,7 +712,13 @@ export class LvGitflowPanel extends LitElement {
     const version = await showPrompt('Start Hotfix', 'Enter hotfix version:');
     if (!version || !version.trim()) return;
 
-    if (!this.claimOperation(repoPath)) return;
+    if (!this.claimOperation(repoPath)) {
+      // The name the user just typed in the prompt would otherwise vanish with
+      // no toast, no message and no branch. The finish siblings claim before
+      // their prompt; these three cannot, because the name IS the prompt.
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.error = null;
 
     try {

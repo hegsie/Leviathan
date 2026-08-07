@@ -39,6 +39,30 @@ describe('dialog.service', () => {
     invokeShouldThrow = false;
   });
 
+  describe('showConfirm', () => {
+    it('returns false when the dialog IPC rejects, rather than throwing', async () => {
+      // Every destructive handler claims the shared working-tree lock BEFORE
+      // this confirm — showConfirm is an IPC round trip, so a claim taken after
+      // it does not serialize a double-click — and most claim outside the
+      // try/finally that releases. A throw from here would unwind past the
+      // release and leave the repo's lock held for the rest of the session,
+      // disabling every ref control in every surface. Not being able to ask
+      // also means the only safe answer is "no".
+      invokeShouldThrow = true;
+
+      const result = await showConfirm('Delete Branch', 'Are you sure?', 'warning');
+
+      expect(result, 'an unaskable confirm must read as declined').to.equal(false);
+    });
+
+    it('still returns the answer on the happy path', async () => {
+      invokeResult = 'Ok';
+      expect(await showConfirm('Title', 'Message')).to.equal(true);
+      invokeResult = 'Cancel';
+      expect(await showConfirm('Title', 'Message')).to.equal(false);
+    });
+  });
+
   describe('openDialog', () => {
     it('should return null when dialog is cancelled', async () => {
       invokeResult = null;

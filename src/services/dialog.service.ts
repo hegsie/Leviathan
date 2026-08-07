@@ -125,7 +125,21 @@ export async function showConfirm(
   messageText: string,
   kind: 'info' | 'warning' | 'error' = 'info'
 ): Promise<boolean> {
-  return await confirm(messageText, { title, kind });
+  // A rejection here means we could not ask — an IPC failure or a window
+  // tearing down — so the only safe answer is "no". It also matters for the
+  // callers: every destructive handler claims the shared working-tree lock
+  // BEFORE this confirm (showConfirm is an IPC round trip, so a claim taken
+  // after it does not serialize a double-click), and most of them do that
+  // outside the try/finally that releases it. A throw from here would unwind
+  // past the release and leave the repo's lock held for the rest of the
+  // session, disabling every ref control in every surface. Swallowing it in
+  // the one shared place beats wrapping each call site — that is the
+  // hand-enumerated list that goes stale.
+  try {
+    return await confirm(messageText, { title, kind });
+  } catch {
+    return false;
+  }
 }
 
 /**

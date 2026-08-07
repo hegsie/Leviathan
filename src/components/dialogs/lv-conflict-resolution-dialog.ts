@@ -352,6 +352,16 @@ export class LvConflictResolutionDialog extends LitElement {
   /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
   @property({ type: Number }) stashIndex = 0;
   /**
+   * The stash's oid, when the caller knows it. Preferred over `stashIndex`.
+   *
+   * `git stash push` prepends, so a stash created by another surface or a
+   * terminal renumbers the list — and checkout_with_autostash now resolves its
+   * own entry by oid rather than assuming position 0. Its callers used to pass
+   * `stashIndex: 0` regardless, so the identity captured here could be a
+   * foreign stash, which Complete would then drop.
+   */
+  @property({ type: String }) stashOid: string | null = null;
+  /**
    * For 'stash' completion: whether to drop stash@{stashIndex} on Complete. Pop
    * semantics (auto-stash, explicit pop) drop it; a plain apply keeps it.
    */
@@ -459,13 +469,19 @@ export class LvConflictResolutionDialog extends LitElement {
       this.stashOidToDrop = null;
       this.stashCaptureEpoch++;
       if (this.operationType === 'stash' && this.dropStashOnComplete) {
-        const idx = this.stashIndex;
-        const epoch = this.stashCaptureEpoch;
-        void gitService.getStashes(this.repositoryPath).then((result) => {
-          if (this.open && epoch === this.stashCaptureEpoch && result.success) {
-            this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
-          }
-        });
+        if (this.stashOid) {
+          // The caller knows exactly which entry it created; no position
+          // lookup, so nothing to get wrong.
+          this.stashOidToDrop = this.stashOid;
+        } else {
+          const idx = this.stashIndex;
+          const epoch = this.stashCaptureEpoch;
+          void gitService.getStashes(this.repositoryPath).then((result) => {
+            if (this.open && epoch === this.stashCaptureEpoch && result.success) {
+              this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
+            }
+          });
+        }
       }
     }
   }

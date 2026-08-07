@@ -507,6 +507,8 @@ export interface CheckoutWithStashResult {
   stashed: boolean;
   stashApplied: boolean;
   stashConflict: boolean;
+  /** The auto-stash's oid. Identifies the entry to drop without trusting a position. */
+  stashOid: string | null;
   message: string;
 }
 

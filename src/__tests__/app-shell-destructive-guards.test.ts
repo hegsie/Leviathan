@@ -390,6 +390,49 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('the auto-stash conflict identifies its stash by oid', () => {
+    // checkout_with_autostash resolves its own entry by oid because a stash
+    // pushed by another surface or a terminal renumbers the list. The result
+    // struct dropped that oid, so every frontend caller passed stashIndex: 0
+    // and the conflict dialog captured whatever sat at position 0 — then
+    // dropped it on Complete, destroying a stash the checkout never created.
+    it('carries stashOid from the checkout result into the dialog config', async () => {
+      const el = shellOnRepo();
+      (el as any).handleAutoStashToast(
+        {
+          success: true,
+          stashed: true,
+          stashApplied: false,
+          stashConflict: true,
+          stashOid: 'deadbeefcafe',
+          message: 'conflicts',
+        },
+        'feature',
+        '/repo/one',
+      );
+
+      expect((el as any).conflictDialogConfig?.stashOid).to.equal('deadbeefcafe');
+    });
+
+    it('leaves stashOid null when the backend reported none', async () => {
+      const el = shellOnRepo();
+      (el as any).handleAutoStashToast(
+        {
+          success: true,
+          stashed: true,
+          stashApplied: false,
+          stashConflict: true,
+          stashOid: null,
+          message: 'conflicts',
+        },
+        'feature',
+        '/repo/one',
+      );
+
+      expect((el as any).conflictDialogConfig?.stashOid).to.equal(null);
+    });
+  });
+
   describe('pull is serialized', () => {
     // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
     // "Pull Now" toast action — and none guarded a second call. The backend's

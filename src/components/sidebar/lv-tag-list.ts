@@ -579,12 +579,15 @@ export class LvTagList extends LitElement {
         if (data.stashed && data.stashConflict) {
           showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
           // Open the conflict resolution dialog so the user can resolve the failed
-          // auto-stash pop (pop semantics: entry at index 0, drop it once resolved).
+          // auto-stash pop (pop semantics: drop it once resolved). Identified by
+          // oid, not position — another surface or a terminal can push a stash
+          // in between and renumber the list.
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
             detail: {
               operationType: 'stash',
+              stashOid: data.stashOid ?? null,
               stashIndex: 0,
               dropStashOnComplete: true,
               repositoryPath: repoPath,

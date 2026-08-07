@@ -318,14 +318,25 @@ pub async fn bisect_start(
     // Start bisect
     run_git_command(repo_path, &["bisect", "start"])?;
 
-    // Mark bad commit if provided
-    if let Some(bad) = &bad_commit {
-        run_git_command(repo_path, &["bisect", "bad", bad])?;
-    }
-
-    // Mark good commit if provided
-    if let Some(good) = &good_commit {
-        run_git_command(repo_path, &["bisect", "good", good])?;
+    // The two marking steps take free-text refs straight from the dialog, so a
+    // typo fails them — but `git bisect start` has already written BISECT_LOG,
+    // and libgit2 keys RepositoryState::Bisect off that file. Reporting the
+    // failure and leaving the state behind meant ensure_checkoutable and
+    // ensure_resettable then refused EVERY checkout, reset and git-flow
+    // operation in the app, while the dialog said the bisect had not started.
+    // Rolled back the way create_branch and the git-flow starts are.
+    let marked = (|| -> Result<()> {
+        if let Some(bad) = &bad_commit {
+            run_git_command(repo_path, &["bisect", "bad", bad])?;
+        }
+        if let Some(good) = &good_commit {
+            run_git_command(repo_path, &["bisect", "good", good])?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = marked {
+        let _ = run_git_command(repo_path, &["bisect", "reset"]);
+        return Err(e);
     }
 
     let status = get_bisect_status(path.clone()).await?;
@@ -490,6 +501,42 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// `git bisect start` writes BISECT_LOG before the marking steps run, and
+    /// libgit2 keys RepositoryState::Bisect off that file. A failed start that
+    /// left it behind put the repo in a state where ensure_checkoutable and
+    /// ensure_resettable refuse every checkout and reset in the app.
+    #[tokio::test]
+    async fn test_bisect_start_rolls_back_when_a_ref_is_bogus() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("second", &[("f.txt", "b\n")]);
+
+        let result = bisect_start(
+            repo.path_str(),
+            Some("HEAD".to_string()),
+            Some("no-such-ref".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err(), "an unresolvable ref must fail the start");
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "a start that reports failure must leave the repo as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bisect_start_succeeds_with_valid_refs() {
+        let repo = TestRepo::with_initial_commit();
+        let first = repo.head_oid().to_string();
+        repo.create_commit("second", &[("f.txt", "b\n")]);
+
+        bisect_start(repo.path_str(), Some("HEAD".to_string()), Some(first))
+            .await
+            .expect("a valid start must not be rolled back");
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Bisect);
+    }
 
     #[test]
     fn test_git_command_pins_the_locale() {
