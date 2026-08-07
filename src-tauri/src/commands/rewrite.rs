@@ -24,6 +24,28 @@ const CHERRY_PICK_SEQUENCE: &str = "CHERRY_PICK_SEQUENCE";
 /// picks on the branch.
 const CHERRY_PICK_SEQUENCE_HEAD: &str = "CHERRY_PICK_SEQUENCE_HEAD";
 
+/// Interpret a git path (raw bytes) as a filesystem path.
+///
+/// git stores paths as bytes, and on unix a name that is not valid UTF-8 is
+/// still a perfectly ordinary filename. Routing it through
+/// `str::from_utf8(..).unwrap_or("")` turned such a path into the empty string,
+/// so `workdir.join(rel)` became the workdir itself and the removal below
+/// silently did nothing — a file the aborted operation had ADDED was left
+/// behind in the working tree. Returns None only where the platform genuinely
+/// cannot represent the bytes.
+#[cfg(unix)]
+fn git_path_to_pathbuf(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+fn git_path_to_pathbuf(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
 /// Restore the working tree and index to HEAD when aborting a cherry-pick or
 /// revert, while preserving uncommitted changes to files the operation did not
 /// touch. This mirrors `git cherry-pick --abort` / `git revert --abort`, which
@@ -73,9 +95,11 @@ fn restore_after_abort(repo: &git2::Repository) -> Result<()> {
     // unrelated untracked files are untouched).
     if let Some(workdir) = repo.workdir() {
         for path in &affected {
-            let rel = Path::new(std::str::from_utf8(path).unwrap_or(""));
-            if head_tree.get_path(rel).is_err() {
-                let _ = std::fs::remove_file(workdir.join(rel));
+            let Some(rel) = git_path_to_pathbuf(path) else {
+                continue;
+            };
+            if head_tree.get_path(&rel).is_err() {
+                let _ = std::fs::remove_file(workdir.join(&rel));
             }
         }
     }
@@ -3166,6 +3190,63 @@ mod tests {
         assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
         let unrelated = std::fs::read_to_string(test_repo.path.join("unrelated.txt")).unwrap();
         assert_eq!(unrelated, "PRECIOUS WORK");
+    }
+
+    /// A cherry-pick that ADDS a file whose name is not valid UTF-8 must still
+    /// have that file removed on abort.
+    ///
+    /// git paths are bytes; on unix a non-UTF-8 filename is ordinary. Decoding
+    /// it with `from_utf8(..).unwrap_or("")` collapsed the path to the workdir
+    /// root, so the explicit removal — the step that handles files ADDED by the
+    /// operation, which a path-scoped checkout_head cannot restore because they
+    /// are absent from HEAD — silently did nothing and left the file behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_abort_cherry_pick_removes_added_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+
+        let odd_name = std::ffi::OsStr::from_bytes(b"added-\xff.txt");
+        let odd_rel = std::path::Path::new(odd_name);
+
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        // Commit the odd-named file alongside a conflicting edit, so the pick
+        // both adds it and fails.
+        std::fs::write(test_repo.path.join(odd_rel), "picked").unwrap();
+        std::fs::write(test_repo.path.join("shared.txt"), "feature").unwrap();
+        let feature_oid = {
+            let repo = test_repo.repo();
+            let mut index = repo.index().unwrap();
+            index.add_path(odd_rel).unwrap();
+            index.add_path(std::path::Path::new("shared.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = repo.signature().unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Feature", &tree, &[&parent])
+                .unwrap()
+        };
+
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main edits shared", &[("shared.txt", "main")]);
+
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+        assert!(
+            test_repo.path.join(odd_rel).exists(),
+            "the conflicting pick writes the added file into the working tree"
+        );
+
+        abort_cherry_pick(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert!(
+            !test_repo.path.join(odd_rel).exists(),
+            "abort must remove a file the pick added, whatever its name encodes to"
+        );
     }
 
     // ---- Finding 44: multi-commit sequencer abort rewinds & continue resumes ----

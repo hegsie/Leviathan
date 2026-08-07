@@ -11,6 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  isMaintenanceBlocked,
+} from '../../utils/maintenance-confirms.ts';
+import { warnRepositoryBusy, subscribeRefOps } from '../../utils/ref-lock.ts';
 
 @customElement('lv-lfs-dialog')
 export class LvLfsDialog extends LitElement {
@@ -385,6 +391,25 @@ export class LvLfsDialog extends LitElement {
   @state() private loading = false;
   /** Re-entrancy guard for Prune, kept separate from the load spinner. */
   @state() private pruning = false;
+
+  /**
+   * The shared maintenance lock, which LFS prune alone was missing.
+   *
+   * gc, prune and fsck are reachable from both the Repository Health dialog and
+   * the command palette, so maintenance-confirms.ts hoisted their concurrency
+   * gate out of either surface. `git lfs prune` is the same class of
+   * irreversible object deletion against the same `.git` — its own confirm says
+   * objects that were never pushed cannot be recovered — but it was never
+   * routed through the helper, leaving it the one destructive maintenance
+   * command that could run concurrently with a `git gc`.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get maintenanceBlocked(): boolean {
+    void this.refOpsVersion;
+    return isMaintenanceBlocked(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private error = '';
   @state() private success = '';
   @state() private newPattern = '';
@@ -408,6 +433,9 @@ export class LvLfsDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     if (this.open) {
       await this.loadStatus();
     }
@@ -417,6 +445,8 @@ export class LvLfsDialog extends LitElement {
     super.disconnectedCallback();
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   /**
@@ -560,11 +590,20 @@ export class LvLfsDialog extends LitElement {
     // enabled through that window — so a double-click made the user read and
     // dismiss the same irreversible-deletion warning twice for one gesture.
     if (this.pruning) return;
-    this.pruning = true;
 
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
+
+    // Checked before the confirm, claimed after it — the same order gc and
+    // prune use in the Repository Health dialog, so the user is not walked
+    // through an irreversible-deletion warning only to be refused at the end.
+    if (isMaintenanceBlocked(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
+    this.pruning = true;
 
     // `git lfs prune` deletes local LFS objects that recent commits don't
     // reference. Unless lfs.pruneverifyremotealways is configured it does not
@@ -582,22 +621,31 @@ export class LvLfsDialog extends LitElement {
       return;
     }
 
+    if (!tryAcquireMaintenance(repoPath)) {
+      this.pruning = false;
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPrune(repoPath);
+    try {
+      const result = await gitService.lfsPrune(repoPath);
 
-    if (result.success) {
-      this.success = result.data || 'LFS files pruned';
-      await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to prune LFS files';
+      if (result.success) {
+        this.success = result.data || 'LFS files pruned';
+        await this.loadStatus();
+        this.dispatchEvent(new CustomEvent('lfs-changed'));
+      } else {
+        this.error = result.error?.message || 'Failed to prune LFS files';
+      }
+    } finally {
+      this.loading = false;
+      this.pruning = false;
+      releaseMaintenance(repoPath);
     }
-
-    this.loading = false;
-    this.pruning = false;
   }
 
   private formatSize(bytes: number): string {
@@ -798,7 +846,7 @@ export class LvLfsDialog extends LitElement {
               <button
                 class="btn btn-secondary"
                 @click=${this.handlePrune}
-                ?disabled=${this.loading || this.pruning}
+                ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="3 6 5 6 21 6"/>

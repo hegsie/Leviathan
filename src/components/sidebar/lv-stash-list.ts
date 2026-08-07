@@ -83,6 +83,43 @@ export class LvStashList extends LitElement {
         text-align: center;
       }
 
+      .stash-actions {
+        display: flex;
+        justify-content: center;
+        padding: 4px 12px 6px;
+      }
+
+      .stash-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 4px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-family: inherit;
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+      }
+
+      .stash-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .stash-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .stash-btn svg {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+      }
+
       .loading {
         display: flex;
         align-items: center;
@@ -313,9 +350,16 @@ export class LvStashList extends LitElement {
   private async handleCreateStash(): Promise<void> {
     if (this.isStashing || !this.repositoryPath) return;
 
+    const repoPath = this.repositoryPath;
+    // The SHARED lock, like every sibling handler here. `git stash push` resets
+    // the working tree to HEAD and prepends to the stash list, renumbering
+    // every entry — the same mutation app-shell wraps in runRefExclusive for
+    // the keyboard shortcut. `isStashing` alone only ever guarded this one
+    // component.
+    if (!this.claimOperation(repoPath)) return;
+
     this.isStashing = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.createStash({
         path: repoPath,
@@ -344,6 +388,7 @@ export class LvStashList extends LitElement {
       showToast('Failed to create stash', 'error');
     } finally {
       this.isStashing = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -659,6 +704,25 @@ export class LvStashList extends LitElement {
                 `)}
               </ul>
             `}
+
+      ${this.loading
+        ? nothing
+        : html`
+            <div class="stash-actions">
+              <button
+                class="stash-btn"
+                title="Save your uncommitted changes to a new stash"
+                ?disabled=${this.isStashing || this.operationInProgress}
+                @click=${this.handleCreateStash}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                  <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"></path>
+                </svg>
+                ${this.isStashing ? 'Stashing...' : 'Stash Changes'}
+              </button>
+            </div>
+          `}
 
       ${this.renderContextMenu()}
     `;

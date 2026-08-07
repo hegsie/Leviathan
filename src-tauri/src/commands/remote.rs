@@ -709,6 +709,20 @@ fn push_via_cli(
     // force_with_lease takes priority over force
     if force_with_lease {
         cmd.arg("--force-with-lease");
+        // --force-if-includes is what makes the lease mean what the confirm
+        // says it means. A BARE --force-with-lease leases against the local
+        // remote-tracking ref, and this app ships a background auto-fetch
+        // (services/autofetch_service.rs) that updates exactly that ref on a
+        // timer. With auto-fetch on, a colleague's push landed in
+        // refs/remotes/<remote>/<branch> seconds later, the lease then matched
+        // it, and the force push destroyed their commits — the one outcome the
+        // confirm promises cannot happen. --force-if-includes additionally
+        // requires that the remote tip be reachable from the local branch's
+        // reflog, i.e. that the user actually SAW and integrated it, which a
+        // background fetch cannot fake. Verified: with a background fetch in
+        // between, bare --force-with-lease overwrites the colleague's commit
+        // and --force-if-includes refuses it.
+        cmd.arg("--force-if-includes");
     } else if force {
         cmd.arg("--force");
     }
@@ -757,6 +771,17 @@ fn push_via_cli(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // git older than 2.30 has no --force-if-includes. Say so instead of
+        // reporting a bare "unknown option", and do NOT retry without it: the
+        // whole point of the flag is that the lease is unsafe on this app
+        // without it, so silently dropping it would trade a clear error for a
+        // force push that can discard a colleague's commits.
+        if force_with_lease && stderr.contains("force-if-includes") {
+            return Err(LeviathanError::OperationFailed(
+                "Force push needs git 2.30 or newer for its safety check (--force-if-includes). Please update git."
+                    .to_string(),
+            ));
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "git push failed: {}",
             stderr.trim()
@@ -1370,6 +1395,156 @@ mod tests {
     fn test_pull_is_allowed_on_a_clean_repo() {
         let t = TestRepo::with_initial_commit();
         ensure_pullable(&t.path).expect("a clean repo must be pullable");
+    }
+
+    // ---- force push lease must survive the app's own background fetch ----
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A colleague pushes, THEN the app's auto-fetch runs, THEN the user force
+    /// pushes. The force push must be refused.
+    ///
+    /// A bare `--force-with-lease` leases against the local remote-tracking
+    /// ref, and this app ships a background auto-fetch that updates exactly
+    /// that ref on a timer. Without --force-if-includes the lease matched the
+    /// colleague's brand-new commit and the push destroyed it — while the
+    /// confirm the user had just read promised "the push is refused if the
+    /// remote has moved since your last fetch".
+    #[cfg(unix)]
+    #[test]
+    fn test_force_push_refused_after_background_fetch_moved_the_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let alice = root.path().join("alice");
+        let bob = root.path().join("bob");
+        git2::Repository::init_bare(&origin).unwrap();
+
+        for (dir, email) in [(&alice, "alice@test"), (&bob, "bob@test")] {
+            let out = crate::utils::create_command("git")
+                .arg("clone")
+                .arg(&origin)
+                .arg(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            git_in(dir, &["config", "user.email", email]);
+            git_in(dir, &["config", "user.name", email]);
+        }
+
+        // Alice publishes `main`.
+        std::fs::write(alice.join("f.txt"), "1").unwrap();
+        git_in(&alice, &["add", "f.txt"]);
+        git_in(&alice, &["commit", "-m", "base"]);
+        git_in(&alice, &["branch", "-M", "main"]);
+        git_in(&alice, &["push", "-u", "origin", "main"]);
+        git_in(&bob, &["fetch"]);
+        git_in(&bob, &["checkout", "main"]);
+
+        // Alice amends — the classic reason to force push.
+        std::fs::write(alice.join("f.txt"), "2").unwrap();
+        git_in(&alice, &["commit", "-am", "amended", "--amend"]);
+
+        // Bob pushes work Alice has never seen.
+        std::fs::write(bob.join("g.txt"), "bob").unwrap();
+        git_in(&bob, &["add", "g.txt"]);
+        git_in(&bob, &["commit", "-m", "bob work"]);
+        git_in(&bob, &["push", "origin", "main"]);
+        let bob_oid = {
+            let repo = git2::Repository::open(&bob).unwrap();
+            repo.refname_to_id("refs/heads/main").unwrap()
+        };
+
+        // The app's background auto-fetch ticks, updating origin/main.
+        git_in(&alice, &["fetch", "origin"]);
+
+        let result = push_via_cli(
+            &alice.to_string_lossy(),
+            "origin",
+            "main",
+            false,
+            true,
+            false,
+            false,
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "the lease must refuse a remote the user has not integrated"
+        );
+
+        let origin_repo = git2::Repository::open(&origin).unwrap();
+        assert_eq!(
+            origin_repo.refname_to_id("refs/heads/main").unwrap(),
+            bob_oid,
+            "the colleague's commit must still be the remote tip"
+        );
+    }
+
+    /// The legitimate case still works: amend, nobody else pushed, force push.
+    #[cfg(unix)]
+    #[test]
+    fn test_force_push_still_succeeds_when_nobody_else_pushed() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let alice = root.path().join("alice");
+        git2::Repository::init_bare(&origin).unwrap();
+
+        let out = crate::utils::create_command("git")
+            .arg("clone")
+            .arg(&origin)
+            .arg(&alice)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        git_in(&alice, &["config", "user.email", "alice@test"]);
+        git_in(&alice, &["config", "user.name", "alice"]);
+
+        std::fs::write(alice.join("f.txt"), "1").unwrap();
+        git_in(&alice, &["add", "f.txt"]);
+        git_in(&alice, &["commit", "-m", "base"]);
+        git_in(&alice, &["branch", "-M", "main"]);
+        git_in(&alice, &["push", "-u", "origin", "main"]);
+
+        // An auto-fetch tick that changes nothing, then an amend.
+        git_in(&alice, &["fetch", "origin"]);
+        std::fs::write(alice.join("f.txt"), "2").unwrap();
+        git_in(&alice, &["commit", "-am", "amended", "--amend"]);
+
+        push_via_cli(
+            &alice.to_string_lossy(),
+            "origin",
+            "main",
+            false,
+            true,
+            false,
+            false,
+            None,
+        )
+        .expect("an uncontested force push must still go through");
+
+        let alice_oid = git2::Repository::open(&alice)
+            .unwrap()
+            .refname_to_id("refs/heads/main")
+            .unwrap();
+        let origin_repo = git2::Repository::open(&origin).unwrap();
+        assert_eq!(
+            origin_repo.refname_to_id("refs/heads/main").unwrap(),
+            alice_oid
+        );
     }
 
     // ---- pre-push hook parity (git2 push path) ----

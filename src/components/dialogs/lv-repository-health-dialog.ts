@@ -304,6 +304,24 @@ export class LvRepositoryHealthDialog extends LitElement {
     }
   }
 
+  /**
+   * The ONE way an action stops running.
+   *
+   * settleClosePending used to be wired only into the `finally` blocks, on the
+   * assumption that the operation's own completion was the only exit from
+   * "running". It is not: gc and prune claim `runningAction` BEFORE the confirm
+   * (so a double-click cannot stack two warnings), and so they also clear it on
+   * a declined confirm and on a lost claim race. Closing the pinned repo's tab
+   * during that window left closePending stuck true with nothing running — the
+   * dialog stayed open pinned to a repo with no tab, promising in a toast that
+   * it would close, with every action button rendering enabled and silently
+   * no-opping against the `closePending` guard.
+   */
+  private clearRunningAction(): void {
+    this.runningAction = null;
+    this.settleClosePending();
+  }
+
   /** The repo this dialog is pinned to, for the host's tab-close sweep. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.pinnedRepoPath || null;
@@ -453,7 +471,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // Same gate as the command palette (shared helper) — this dialog reaches
     // the identical irreversible command and must not be the unguarded route.
     if (!(await confirmGarbageCollection(aggressive))) {
-      this.runningAction = null;
+      this.clearRunningAction();
       return;
     }
 
@@ -461,7 +479,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
-      this.runningAction = null;
+      this.clearRunningAction();
       warnRepositoryBusy();
       return;
     }
@@ -481,9 +499,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`Garbage collection failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 
@@ -529,9 +546,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`File system check failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 
@@ -553,7 +569,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     this.runningAction = 'prune';
 
     if (!(await confirmPrune())) {
-      this.runningAction = null;
+      this.clearRunningAction();
       return;
     }
 
@@ -561,7 +577,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
-      this.runningAction = null;
+      this.clearRunningAction();
       warnRepositoryBusy();
       return;
     }
@@ -580,9 +596,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`Prune failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 

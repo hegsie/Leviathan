@@ -11,6 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import type { Submodule } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -352,6 +358,24 @@ export class LvSubmoduleDialog extends LitElement {
   @state() private loading = false;
   /** Re-entrancy guard for Remove, kept separate from the load spinner. */
   @state() private removingPath: string | null = null;
+
+  /**
+   * The shared working-tree lock, which this dialog was missing entirely.
+   *
+   * `git submodule deinit -f` + `git rm -f` rewrite the SUPERPROJECT's index
+   * and working tree — the same state a checkout, a discard, a reset and a
+   * rebase all take this lock for. There is no per-repo lock in the backend, so
+   * while a removal ran every branch row, Discard button and graph ref menu
+   * stayed live, and a checkout's auto-stash could capture a half-removed tree
+   * or die on `index.lock`. `git submodule add`/`update` write the same index.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get repositoryBusy(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private error = '';
   @state() private success = '';
 
@@ -378,6 +402,9 @@ export class LvSubmoduleDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     if (this.open) {
       await this.loadSubmodules();
     }
@@ -387,6 +414,8 @@ export class LvSubmoduleDialog extends LitElement {
     super.disconnectedCallback();
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   /**
@@ -440,11 +469,15 @@ export class LvSubmoduleDialog extends LitElement {
       return;
     }
 
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
+    try {
     const result = await gitService.addSubmodule(
-      this.pinnedRepoPath,
+      repoPath,
       this.addUrl,
       this.addPath,
       this.addBranch || undefined
@@ -465,19 +498,25 @@ export class LvSubmoduleDialog extends LitElement {
       this.error = result.error?.message || 'Failed to add submodule';
       showToast(result.error?.message || 'Failed to add submodule', 'error');
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
+    }
   }
 
   private async handleInit(submodule: Submodule): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.initSubmodules(this.pinnedRepoPath, [submodule.path]);
+    try {
+    const result = await gitService.initSubmodules(repoPath, [submodule.path]);
 
     if (result.success) {
       // Also update after init
-      const updateResult = await gitService.updateSubmodules(this.pinnedRepoPath, {
+      const updateResult = await gitService.updateSubmodules(repoPath, {
         submodulePaths: [submodule.path],
       });
       // Same gate contract every other handler in this file honours: BLOCKED
@@ -500,19 +539,26 @@ export class LvSubmoduleDialog extends LitElement {
       this.error = result.error?.message || 'Failed to initialize submodule';
       showToast(result.error?.message || 'Failed to initialize submodule', 'error');
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
+    }
   }
 
   private async handleUpdate(submodule: Submodule): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
+
+    try {
 
     // Canonical `git submodule update <path>`: check out the commit the
     // superproject has recorded for this submodule, leaving the superproject
     // clean. (Passing remote:true would run `--remote`, checking out the
     // upstream branch tip instead and dirtying the working tree.)
-    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
+    const result = await gitService.updateSubmodules(repoPath, {
       submodulePaths: [submodule.path],
     });
 
@@ -525,8 +571,10 @@ export class LvSubmoduleDialog extends LitElement {
       this.error = result.error?.message || 'Failed to update submodule';
       showToast(result.error?.message || 'Failed to update submodule', 'error');
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
+    }
   }
 
   private async handleRemove(submodule: Submodule): Promise<void> {
@@ -539,7 +587,6 @@ export class LvSubmoduleDialog extends LitElement {
     // the same submodule, and the second removal then failed against a working
     // tree that was already gone, contradicting the success the user just read.
     if (this.removingPath === submodule.path) return;
-    this.removingPath = submodule.path;
 
     // Captured BEFORE the confirm await: removal runs `git submodule deinit -f`
     // + `git rm -f`, deleting the submodule's working tree (including any
@@ -547,6 +594,13 @@ export class LvSubmoduleDialog extends LitElement {
     // repository and rebinds live, so a mid-confirm tab switch would otherwise
     // aim that at the repo the user switched TO.
     const repoPath = this.pinnedRepoPath;
+
+    // The SHARED lock, not just this dialog's flag: `git rm -f` rewrites the
+    // superproject's index and working tree, so it has to serialize against
+    // checkout, discard, reset and rebase the same way they serialize against
+    // each other.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+    this.removingPath = submodule.path;
 
     const confirmed = await showConfirm(
       'Remove Submodule',
@@ -556,33 +610,41 @@ export class LvSubmoduleDialog extends LitElement {
 
     if (!confirmed) {
       this.removingPath = null;
+      releaseRefOp(repoPath);
       return;
     }
 
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.removeSubmodule(repoPath, submodule.path);
+    try {
+      const result = await gitService.removeSubmodule(repoPath, submodule.path);
 
-    if (result.success) {
-      this.success = 'Submodule removed successfully';
-      showToast('Submodule removed successfully', 'success');
-      await this.loadSubmodules();
-      this.dispatchEvent(new CustomEvent('submodules-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to remove submodule';
-      showToast(result.error?.message || 'Failed to remove submodule', 'error');
+      if (result.success) {
+        this.success = 'Submodule removed successfully';
+        showToast('Submodule removed successfully', 'success');
+        await this.loadSubmodules();
+        this.dispatchEvent(new CustomEvent('submodules-changed'));
+      } else {
+        this.error = result.error?.message || 'Failed to remove submodule';
+        showToast(result.error?.message || 'Failed to remove submodule', 'error');
+      }
+    } finally {
+      this.loading = false;
+      this.removingPath = null;
+      releaseRefOp(repoPath);
     }
-
-    this.loading = false;
-    this.removingPath = null;
   }
 
   private async handleUpdateAll(): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.updateSubmodules(this.pinnedRepoPath, {
+    try {
+    const result = await gitService.updateSubmodules(repoPath, {
       init: true,
       recursive: true,
     });
@@ -596,8 +658,10 @@ export class LvSubmoduleDialog extends LitElement {
       this.error = result.error?.message || 'Failed to update submodules';
       showToast(result.error?.message || 'Failed to update submodules', 'error');
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
+    }
   }
 
   private handleClose(): void {
@@ -637,7 +701,7 @@ export class LvSubmoduleDialog extends LitElement {
     return html`
       ${this.submodules.length > 1 ? html`
         <div class="bulk-actions">
-          <button class="btn btn-secondary" @click=${this.handleUpdateAll} ?disabled=${this.loading}>
+          <button class="btn btn-secondary" @click=${this.handleUpdateAll} ?disabled=${this.loading || this.repositoryBusy}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M23 4v6h-6M1 20v-6h6"/>
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
@@ -671,7 +735,7 @@ export class LvSubmoduleDialog extends LitElement {
                         class="action-btn"
                         title="Initialize"
                         @click=${() => this.handleInit(sub)}
-                        ?disabled=${this.loading}
+                        ?disabled=${this.loading || this.repositoryBusy}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -685,7 +749,7 @@ export class LvSubmoduleDialog extends LitElement {
                         class="action-btn"
                         title="Update"
                         @click=${() => this.handleUpdate(sub)}
-                        ?disabled=${this.loading}
+                        ?disabled=${this.loading || this.repositoryBusy}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M23 4v6h-6M1 20v-6h6"/>
@@ -697,7 +761,7 @@ export class LvSubmoduleDialog extends LitElement {
                   class="action-btn danger"
                   title="Remove"
                   @click=${() => this.handleRemove(sub)}
-                  ?disabled=${this.loading || this.removingPath === sub.path}
+                  ?disabled=${this.loading || this.repositoryBusy || this.removingPath === sub.path}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6"/>
@@ -816,7 +880,7 @@ export class LvSubmoduleDialog extends LitElement {
                     <button
                       class="btn btn-primary"
                       @click=${this.handleAdd}
-                      ?disabled=${this.loading || !this.addUrl || !this.addPath}
+                      ?disabled=${this.loading || this.repositoryBusy || !this.addUrl || !this.addPath}
                     >
                       Add Submodule
                     </button>

@@ -357,4 +357,49 @@ describe('lv-stash-list operationInProgress guards', () => {
     const createCalls = invokeCalls.filter(c => c.command === 'create_stash');
     expect(createCalls).to.have.length(0);
   });
+
+  // handleCreateStash existed but nothing rendered called it, so stashing was
+  // a keyboard-only action and the panel that lists stashes offered no way to
+  // make one. Being unreachable is also why it was the ONE stash handler that
+  // never claimed the shared lock: `git stash push` resets the working tree to
+  // HEAD and renumbers every entry, exactly what its siblings serialize for.
+  it('renders a Stash Changes button that creates a stash', async () => {
+    const el = await createComponent();
+
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /Stash Changes/i.test(b.textContent ?? '')
+    );
+    expect(btn, 'the stash panel must offer a way to create a stash').to.not.be.undefined;
+
+    invokeCalls.length = 0;
+    (btn as HTMLButtonElement).click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(
+      invokeCalls.filter((c) => c.command === 'create_stash'),
+      'the button must reach the backend'
+    ).to.have.length(1);
+  });
+
+  it('the Stash Changes button is refused and disabled while the repo is busy', async () => {
+    const el = await createComponent();
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /Stash Changes/i.test(b.textContent ?? '')
+    ) as HTMLButtonElement;
+
+    expect(btn.disabled, 'enabled while idle').to.equal(false);
+
+    // Another surface — the graph's hard reset, say — takes the working tree.
+    tryAcquireRefOp(REPO_PATH);
+    await el.updateComplete;
+    expect(btn.disabled, 'a claim elsewhere must disable it').to.equal(true);
+
+    invokeCalls.length = 0;
+    await (el as unknown as { handleCreateStash: () => Promise<void> }).handleCreateStash();
+    expect(
+      invokeCalls.filter((c) => c.command === 'create_stash'),
+      'and the handler must refuse, not just the button'
+    ).to.have.length(0);
+  });
 });

@@ -4515,10 +4515,10 @@ export class AppShell extends LitElement {
     // refresh must target the repo that was stashed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
     // `git stash push` resets the working tree to HEAD and prepends to the
-    // stash list, renumbering every entry — a full working-tree mutation. This
-    // is a keyboard-only action with no rendered control, so it was never in
-    // the enumeration the lock sweep worked from, and the shortcut fires
-    // through open dialogs.
+    // stash list, renumbering every entry — a full working-tree mutation. The
+    // shortcut fires through open dialogs, and it was for a long time the only
+    // route to a stash at all, so it was never in the enumeration the lock
+    // sweep worked from.
     return this.runRefExclusive(repoPath, () => this.createStashOnRepo(repoPath));
   }
 

@@ -12,6 +12,12 @@ import { showToast } from '../../services/notification.service.ts';
 import type { Worktree } from '../../services/git.service.ts';
 import type { Branch } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -349,6 +355,23 @@ export class LvWorktreeDialog extends LitElement {
   @state() private loading = false;
   /** Re-entrancy guard for Remove, kept separate from the load spinner. */
   @state() private removingPath: string | null = null;
+
+  /**
+   * The shared working-tree lock, which this dialog was missing entirely.
+   *
+   * `git worktree add -b <name>` CREATES a branch and `git worktree remove`
+   * deletes a checkout and prunes the shared worktree metadata — both write
+   * refs the sidebar branch list, the graph ref menu and the branch-cleanup
+   * dialog all take this lock for. There is no per-repo lock in the backend, so
+   * without it a removal ran with every one of those surfaces still live.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get repositoryBusy(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private error = '';
   @state() private success = '';
 
@@ -376,6 +399,9 @@ export class LvWorktreeDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     if (this.open) {
       await this.loadWorktrees();
     }
@@ -385,6 +411,8 @@ export class LvWorktreeDialog extends LitElement {
     super.disconnectedCallback();
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   /**
@@ -457,10 +485,14 @@ export class LvWorktreeDialog extends LitElement {
       return;
     }
 
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.addWorktree(this.pinnedRepoPath, this.addPath, {
+    try {
+    const result = await gitService.addWorktree(repoPath, this.addPath, {
       branch: this.createNewBranch ? undefined : this.addBranch,
       newBranch: this.createNewBranch ? this.newBranchName : undefined,
     });
@@ -477,8 +509,10 @@ export class LvWorktreeDialog extends LitElement {
     } else {
       this.error = result.error?.message || 'Failed to add worktree';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseRefOp(repoPath);
+    }
   }
 
   private async handleRemove(worktree: Worktree): Promise<void> {
@@ -495,12 +529,15 @@ export class LvWorktreeDialog extends LitElement {
     // the same worktree, and the second removal then failed against a directory
     // that was already gone, contradicting the success the user just read.
     if (this.removingPath === worktree.path) return;
-    this.removingPath = worktree.path;
 
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live, so a mid-confirm tab switch would otherwise
     // run the removal against the repo the user switched TO.
     const repoPath = this.pinnedRepoPath;
+
+    // The SHARED lock, not just this dialog's flag — see repositoryBusy.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+    this.removingPath = worktree.path;
 
     const confirmed = await showConfirm(
       'Remove Worktree',
@@ -510,12 +547,14 @@ export class LvWorktreeDialog extends LitElement {
 
     if (!confirmed) {
       this.removingPath = null;
+      releaseRefOp(repoPath);
       return;
     }
 
     this.loading = true;
     this.error = '';
 
+    try {
     let result = await gitService.removeWorktree(repoPath, worktree.path);
 
     // git refuses to remove a worktree holding uncommitted or untracked work
@@ -533,8 +572,6 @@ export class LvWorktreeDialog extends LitElement {
       );
       if (!forced) {
         this.error = '';
-        this.loading = false;
-        this.removingPath = null;
         return;
       }
       result = await gitService.removeWorktree(repoPath, worktree.path, true);
@@ -548,9 +585,11 @@ export class LvWorktreeDialog extends LitElement {
     } else {
       this.error = result.error?.message || 'Failed to remove worktree';
     }
-
-    this.loading = false;
-    this.removingPath = null;
+    } finally {
+      this.loading = false;
+      this.removingPath = null;
+      releaseRefOp(repoPath);
+    }
   }
 
   /** git's refusal when a worktree still holds working-tree state. */
@@ -657,6 +696,7 @@ export class LvWorktreeDialog extends LitElement {
                   title="Remove"
                   @click=${() => this.handleRemove(wt)}
                   ?disabled=${this.loading ||
+                  this.repositoryBusy ||
                   this.removingPath === wt.path ||
                   wt.isMain ||
                   wt.isLocked}
@@ -813,7 +853,7 @@ export class LvWorktreeDialog extends LitElement {
                     <button
                       class="btn btn-primary"
                       @click=${this.handleAdd}
-                      ?disabled=${this.loading || !this.addPath}
+                      ?disabled=${this.loading || this.repositoryBusy || !this.addPath}
                     >
                       Add Worktree
                     </button>
