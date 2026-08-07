@@ -509,6 +509,7 @@ export class LvLfsDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     try {
     const result = await gitService.initLfs(repoPath);

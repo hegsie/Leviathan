@@ -250,6 +250,64 @@ describe('a failure never renders under a stale success banner', () => {
   });
 });
 
+// The scripted edit that added the success reset matched a shape two sites did
+// not have: lv-lfs-dialog's handleInit (restructured earlier, so the pattern
+// no longer matched) and the mode-switch Cancel buttons, which are inline
+// arrow handlers in render rather than methods.
+describe('the success banner is cleared everywhere it can go stale', () => {
+  beforeEach(() => {
+    resetMaintenanceLocks();
+    resetRefOpLocks();
+    invoked.length = 0;
+  });
+
+  it('lv-lfs-dialog handleInit clears a stale success banner', async () => {
+    const el = await fixture<Updatable>(html`
+      <lv-lfs-dialog .repositoryPath=${REPO_PATH} ?open=${true}></lv-lfs-dialog>
+    `);
+    await waitForRendered(el, '.actions');
+
+    const internal = el as unknown as {
+      success: string;
+      error: string;
+      handleInit: () => Promise<void>;
+    };
+    internal.success = 'Now tracking *.psd';
+
+    failCommands.add('init_lfs');
+    try {
+      await internal.handleInit();
+    } finally {
+      failCommands.delete('init_lfs');
+    }
+
+    expect(internal.error, 'the failure is reported').to.not.equal('');
+    expect(internal.success, 'the stale success must not survive it').to.equal('');
+  });
+
+  it('lv-submodule-dialog Cancel clears the banner on the way back to the list', async () => {
+    const el = await fixture<Updatable>(html`
+      <lv-submodule-dialog .repositoryPath=${REPO_PATH} ?open=${true}></lv-submodule-dialog>
+    `);
+    await waitForRendered(el, '.action-btn');
+
+    const internal = el as unknown as { mode: string; success: string };
+    internal.mode = 'add';
+    internal.success = 'Submodule added successfully';
+    await el.updateComplete;
+
+    const cancel = Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+      (b) => (b.textContent ?? '').trim() === 'Cancel',
+    ) as HTMLButtonElement;
+    expect(cancel, 'the Cancel button must be rendered in add mode').to.not.be.undefined;
+
+    cancel.click();
+    await el.updateComplete;
+
+    expect(internal.success, 'leaving the form must not carry the banner back').to.equal('');
+  });
+});
+
 describe('destructive dialogs hold the shared locks', () => {
   beforeEach(() => {
     resetMaintenanceLocks();

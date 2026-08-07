@@ -894,6 +894,7 @@ export class LvWorktreeDialog extends LitElement {
                     @click=${() => {
                       this.mode = 'list';
                       this.error = '';
+                      this.success = '';
                     }}
                   >
                     Cancel

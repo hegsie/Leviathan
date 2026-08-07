@@ -878,7 +878,7 @@ export class LvSubmoduleDialog extends LitElement {
                   </div>
                 `
               : html`
-                  <button class="btn btn-secondary" @click=${() => { this.mode = 'list'; this.error = ''; }}>
+                  <button class="btn btn-secondary" @click=${() => { this.mode = 'list'; this.error = ''; this.success = ''; }}>
                     Cancel
                   </button>
                   <div class="dialog-footer-right">
