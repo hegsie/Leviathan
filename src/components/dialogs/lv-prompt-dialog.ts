@@ -64,6 +64,24 @@ export class LvPromptDialog extends LitElement {
   private resolve: ((value: string | null) => void) | null = null;
 
   open(options: PromptDialogOptions): Promise<string | null> {
+    // This element is a singleton reused by every showPrompt() call, and open()
+    // used to overwrite `this.resolve` outright — orphaning the previous
+    // promise, which then never settled. That is not just a leak: several
+    // callers claim the shared working-tree lock BEFORE awaiting a prompt
+    // (lv-branch-list's rename among them), so the awaiting handler never
+    // reached its release and the repo's lock was held for the rest of the
+    // session, disabling every ref control in every surface. The command
+    // palette renders over other dialogs by design and its own actions call
+    // showPrompt, so one Ctrl+P away from a focused prompt was enough.
+    //
+    // Settle the superseded prompt as cancelled: its caller unblocks, releases
+    // whatever it holds, and the newer request takes the dialog.
+    if (this.resolve) {
+      const superseded = this.resolve;
+      this.resolve = null;
+      superseded(null);
+    }
+
     this.promptTitle = options.title;
     this.message = options.message;
     this.value = options.defaultValue ?? '';

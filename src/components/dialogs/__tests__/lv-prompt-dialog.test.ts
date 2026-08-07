@@ -26,6 +26,37 @@ describe('lv-prompt-dialog', () => {
     el = await fixture<LvPromptDialog>(html`<lv-prompt-dialog></lv-prompt-dialog>`);
   });
 
+  it('settles a superseded prompt instead of orphaning it', async () => {
+    // This element is a singleton reused by every showPrompt() call. open()
+    // used to overwrite its resolver, so the first promise never settled —
+    // and several callers claim the shared working-tree lock BEFORE awaiting a
+    // prompt, so the handler never reached its release and the repo's lock was
+    // held for the rest of the session. The command palette renders over other
+    // dialogs by design and its own actions call showPrompt, so one Ctrl+P away
+    // from a focused prompt was enough.
+    const first = el.open({ title: 'Rename Branch', message: 'New name:' });
+
+    let settled = false;
+    let firstValue: string | null | undefined;
+    void first.then((v) => {
+      settled = true;
+      firstValue = v;
+    });
+
+    // A second flow takes the singleton over.
+    const second = el.open({ title: 'Smart Undo', message: 'Describe:' });
+    await el.updateComplete;
+    await Promise.resolve();
+
+    expect(settled, 'the superseded prompt must not hang forever').to.equal(true);
+    expect(firstValue, 'it reads as cancelled').to.equal(null);
+
+    // The newer prompt still works.
+    (el as unknown as { value: string }).value = 'answer';
+    (el as unknown as { handleConfirm: () => void }).handleConfirm();
+    expect(await second).to.equal('answer');
+  });
+
   it('opens and shows title and message', async () => {
     // Don't await the promise — just trigger open
     const resultPromise = el.open({
