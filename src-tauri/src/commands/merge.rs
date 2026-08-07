@@ -883,11 +883,7 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
                 .path()
                 .to_path_buf();
             if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-                return Err(LeviathanError::OperationFailed(
-                    "Rebase paused at the next step — amend the commit if you need to, \
-                     then choose Continue Rebase again."
-                        .to_string(),
-                ));
+                return Err(LeviathanError::RebasePaused);
             }
             return Ok(());
         }

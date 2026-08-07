@@ -801,12 +801,27 @@ export class AppShell extends LitElement {
    * early return can leak the claim.
    */
   private async runRefExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
-    if (!this.claimRefOperation(repoPath)) return;
+    if (!this.claimRefOperation(repoPath)) {
+      // Audible by DEFAULT rather than at a hand-picked set of call sites.
+      // A silent return only reads correctly for controls carrying a
+      // ?disabled binding, where the refusal is already visible — and every
+      // attempt to enumerate "the ones without a binding" has gone stale
+      // within a round (toast actions, keyboard shortcuts, palette entries,
+      // a batch loop). For a disabled control this can only fire in the race
+      // window, where saying so is right too.
+      this.warnRepositoryBusy();
+      return;
+    }
     try {
       await fn();
     } finally {
       this.releaseRefOperation(repoPath);
     }
+  }
+
+  /** The one refusal message every busy-repo path shows. */
+  private warnRepositoryBusy(): void {
+    showToast('Another operation is already running in this repository.', 'warning');
   }
 
   /** True when `repoPath` (default: the active repo) has a ref operation running. */
@@ -829,7 +844,12 @@ export class AppShell extends LitElement {
 
   /** Run `fn` unless an identical action is already in flight. */
   private async runExclusive(key: string, fn: () => Promise<void>): Promise<void> {
-    if (this.destructiveActionsInFlight.has(key)) return;
+    if (this.destructiveActionsInFlight.has(key)) {
+      // Audible for the same reason as runRefExclusive: every caller of this
+      // helper is a toast action button, whose affordance the click destroys.
+      this.warnRepositoryBusy();
+      return;
+    }
     this.destructiveActionsInFlight.add(key);
     try {
       await fn();
@@ -2488,7 +2508,7 @@ export class AppShell extends LitElement {
     // graph could run beside it in one direction, and a sidebar discard could
     // start during this confirm's IPC round trip in the other.
     if (!this.claimRefOperation(path)) {
-      showToast('Another operation is already running in this repository.', 'warning');
+      this.warnRepositoryBusy();
       return;
     }
     this.abortInProgress = true;
@@ -2584,17 +2604,12 @@ export class AppShell extends LitElement {
       // serializing them. Keying it privately left the toast button live while
       // every menu was greyed out.
       //
-      // Claimed directly rather than through runRefExclusive, whose silent
-      // return suits context-menu items carrying a ?disabled binding. A toast
-      // action button has none — and clicking it destroys the toast, so a
-      // silent refusal takes the affordance away with it.
-      if (!this.claimRefOperation(repoPath)) {
-        showToast('Another operation is already running in this repository.', 'warning');
-        return;
-      }
-      void this.forceDeleteBranch(branchName, repoPath).finally(() => {
-        this.releaseRefOperation(repoPath);
-      });
+      // runRefExclusive reports the refusal itself, which matters here: a toast
+      // action button carries no ?disabled binding, and clicking it destroys
+      // the toast — so a silent refusal takes the affordance away with it.
+      void this.runRefExclusive(repoPath, () =>
+        this.forceDeleteBranch(branchName, repoPath),
+      );
     }
   };
 
@@ -3275,26 +3290,34 @@ export class AppShell extends LitElement {
     // checkout_with_autostash stashes, applies index 0, then drops index 0 —
     // and a stash index is a position, so a second run's save shifts the
     // first's entry and the two cross-apply and cross-drop each other's work.
+    // Routed through the helper rather than claiming inline: the canvas draws
+    // its ref labels itself, so this control can render no disabled state and
+    // a silent refusal is indistinguishable from a dead click. The helper
+    // reports it. The ref-menu handlers below still claim inline, which is
+    // fine — their buttons carry ?disabled bindings, so the refusal is
+    // already visible there.
     if (!this.activeRepository) return;
-    const branchName = e.detail.branchName;
     const repoPath = this.activeRepository.repository.path;
-    if (!this.claimRefOperation(repoPath)) return;
-    try {
-      const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
+    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromGraph(e, repoPath));
+  }
 
-      if (result.success && result.data?.success) {
-        this.handleAutoStashToast(result.data, branchName, repoPath);
-        // Pinned refresh, matching the sibling checkout handlers.
-        this.refreshConflictDialogRepo(repoPath);
-      } else {
-        log.error('Failed to checkout branch:', result.data?.message || result.error);
-        showErrorWithSuggestion(
-          result.data?.message || result.error?.message || '',
-          'Failed to checkout branch',
-        );
-      }
-    } finally {
-      this.releaseRefOperation(repoPath);
+  private async checkoutBranchFromGraph(
+    e: CustomEvent<{ branchName: string }>,
+    repoPath: string,
+  ): Promise<void> {
+    const branchName = e.detail.branchName;
+    const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
+
+    if (result.success && result.data?.success) {
+      this.handleAutoStashToast(result.data, branchName, repoPath);
+      // Pinned refresh, matching the sibling checkout handlers.
+      this.refreshConflictDialogRepo(repoPath);
+    } else {
+      log.error('Failed to checkout branch:', result.data?.message || result.error);
+      showErrorWithSuggestion(
+        result.data?.message || result.error?.message || '',
+        'Failed to checkout branch',
+      );
     }
   }
 
@@ -3840,10 +3863,7 @@ export class AppShell extends LitElement {
               // binding. This one sits behind a prompt, an AI call and a
               // confirm, so a silent return reads as "the reset happened".
               if (!this.claimRefOperation(repoPath)) {
-                showToast(
-                  'Another operation is already running in this repository.',
-                  'warning',
-                );
+                this.warnRepositoryBusy();
                 return;
               }
               try {

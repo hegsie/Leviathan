@@ -1147,6 +1147,26 @@ export class LvConflictResolutionDialog extends LitElement {
         case 'rebase':
           result = await gitService.continueRebase({ path: this.repositoryPath });
           if (!result.success) {
+            // A PAUSE is not a failure. `git rebase --continue` stops again at
+            // the next `edit`/`break` line, and the remedy — amend the commit —
+            // lives in the commit panel, outside this dialog. Staying open
+            // would trap the user: there is no ×, Escape is swallowed, the
+            // backdrop is inert, and the only working exit is Abort, which
+            // discards the whole rebase. Close and let the banner drive the
+            // next Continue, exactly as the initial execute does.
+            if (result.error?.code === 'REBASE_PAUSED') {
+              showToast(
+                'Rebase paused at the next step — amend the commit if you need to, ' +
+                  'then choose Continue Rebase again.',
+                'warning',
+                8000,
+              );
+              this.dispatchEvent(
+                new CustomEvent('operation-completed', { bubbles: true, composed: true }),
+              );
+              this.close();
+              return;
+            }
             console.error('Failed to continue rebase:', result.error);
             // Might have more conflicts — reload and stay open if any appeared.
             await this.loadConflicts();

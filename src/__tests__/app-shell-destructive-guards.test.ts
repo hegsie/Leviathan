@@ -498,6 +498,12 @@ describe('app-shell destructive guards', () => {
         invokeCallArgs.some((c) => c.command === 'create_stash'),
         'a stash must not reset the tree beside another operation',
       ).to.equal(false);
+      // Ctrl+Shift+S has no rendered control at all, so a silent refusal is
+      // indistinguishable from "the stash was created".
+      expect(
+        uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
+        'the refusal must be audible',
+      ).to.equal(true);
     });
 
     it('create stash holds and releases the lock', async () => {
@@ -542,6 +548,42 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('the graph branch label shares the lock and says so', () => {
+    // The canvas draws its ref labels itself, so this control can render no
+    // disabled state — a silent refusal is indistinguishable from a dead
+    // click. It is also a SINGLE left-click, the easiest checkout in the app
+    // to fire twice.
+    it('is inert with a message while another surface holds the lock', async () => {
+      const el = shellOnRepo();
+      tryAcquireRefOp('/repo/one');
+      invokeCallArgs.length = 0;
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).handleCheckoutBranchFromGraph(
+        new CustomEvent('checkout-branch', { detail: { branchName: 'feature' } }),
+      );
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'checkout_with_autostash'),
+        'two auto-stash checkouts cross-apply each other\u2019s stashes',
+      ).to.equal(false);
+      expect(
+        uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
+        'a dead click with no message is indistinguishable from a broken app',
+      ).to.equal(true);
+    });
+
+    it('releases the lock so a later checkout works', async () => {
+      const el = shellOnRepo();
+
+      await (el as any).handleCheckoutBranchFromGraph(
+        new CustomEvent('checkout-branch', { detail: { branchName: 'feature' } }),
+      );
+
+      expect(isRefOpRunning('/repo/one'), 'a stuck lock would wedge the repo').to.equal(false);
+    });
+  });
+
   describe('pull is serialized', () => {
     // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
     // "Pull Now" toast action — and none guarded a second call. The backend's
@@ -566,6 +608,12 @@ describe('app-shell destructive guards', () => {
       await new Promise((r) => setTimeout(r, 20));
 
       expect(started, 'the second pull must not reach the backend').to.equal(1);
+      // Reached from a shortcut, the palette and a toast action — none of
+      // which carries a ?disabled binding.
+      expect(
+        uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
+        'the refusal must be audible',
+      ).to.equal(true);
     });
 
     it('holds the shared working-tree lock, so the sidebar is disabled too', async () => {
