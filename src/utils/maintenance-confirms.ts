@@ -9,6 +9,7 @@
  */
 
 import { showConfirm } from '../services/dialog.service.ts';
+import { tryAcquireRefOp, releaseRefOp } from './ref-lock.ts';
 
 /**
  * Confirm a `git gc` run.
@@ -82,16 +83,29 @@ export function summariseFsck(message: string | undefined): string {
  */
 const maintenanceInFlight = new Set<string>();
 
-/** Claim the maintenance slot for a repo. False when one is already running. */
+/**
+ * Claim the maintenance slot for a repo. False when one is already running,
+ * OR when a working-tree operation holds that repo's ref lock.
+ *
+ * The two used to be disjoint sets that never consulted each other, so
+ * "maintenance" and "working tree" were each serialized only against
+ * themselves. `git prune` runs with no `--expire`, deleting every unreachable
+ * loose object immediately — and libgit2 writes an object before the ref that
+ * makes it reachable, so a stash, commit or rebase running beside a prune had
+ * a window in which its fresh objects were unreachable and got collected. It
+ * is done here rather than at each call site because that enumeration has gone
+ * stale in this codebase every time it has been attempted.
+ */
 export function tryAcquireMaintenance(repoPath: string): boolean {
   if (maintenanceInFlight.has(repoPath)) return false;
+  if (!tryAcquireRefOp(repoPath)) return false;
   maintenanceInFlight.add(repoPath);
   return true;
 }
 
-/** Release the slot. Safe to call for a repo that never held one. */
+/** Release the slot, and the working-tree lock it took with it. */
 export function releaseMaintenance(repoPath: string): void {
-  maintenanceInFlight.delete(repoPath);
+  if (maintenanceInFlight.delete(repoPath)) releaseRefOp(repoPath);
 }
 
 /** True while a maintenance command is running against `repoPath`. */
@@ -101,5 +115,6 @@ export function isMaintenanceRunning(repoPath: string): boolean {
 
 /** Test seam: drop all claims. */
 export function resetMaintenanceLocks(): void {
+  for (const repoPath of maintenanceInFlight) releaseRefOp(repoPath);
   maintenanceInFlight.clear();
 }

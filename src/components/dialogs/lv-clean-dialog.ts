@@ -748,7 +748,13 @@ export class LvCleanDialog extends LitElement {
             ` : html`No files selected`}
           </div>
           <div class="footer-right">
-            <button class="btn btn-secondary" ?disabled=${this.cleaning || isRefOpRunning(this.pinnedRepoPath)} @click=${this.dismiss}>Cancel</button>
+            <!-- Cancel destroys nothing, so it is gated on this dialog's own
+                 in-flight flag only. The lock check belongs on Delete, and was
+                 copy-pasted onto Cancel in the same edit — greying out the most
+                 obvious way to close the dialog whenever anything else touched
+                 the repo, which reads as a broken dialog. dismiss() already
+                 guards itself on the cleaning flag alone. -->
+            <button class="btn btn-secondary" ?disabled=${this.cleaning} @click=${this.dismiss}>Cancel</button>
             <button
               class="btn btn-danger"
               ?disabled=${!someSelected || this.cleaning || isRefOpRunning(this.pinnedRepoPath)}

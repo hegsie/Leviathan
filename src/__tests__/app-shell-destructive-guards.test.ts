@@ -584,6 +584,69 @@ describe('app-shell destructive guards', () => {
     });
   });
 
+  describe('push is serialized', () => {
+    // The shortcut has no e.repeat guard, so holding Ctrl+Shift+U fires it
+    // many times a second. Its force-push sibling was hardened against exactly
+    // this and shares the key, so Push and Force Push are mutually exclusive
+    // on one repo too.
+    it('a second push is refused while the first is in flight', async () => {
+      const el = shellOnRepo();
+      let started = 0;
+      mockResponses['push'] = () => {
+        started++;
+        return new Promise(() => {});
+      };
+
+      void (el as any).handlePush();
+      void (el as any).handlePush();
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(started, 'auto-repeat must not launch concurrent pushes').to.equal(1);
+    });
+  });
+
+  describe('checking out the branch you are already on', () => {
+    // A no-op that still parks the entire working tree in a stash and
+    // re-applies it. The sidebar and the direct graph-label click both refuse
+    // it; the ref menu and the palette were never folded into that guard.
+    it('the ref menu refuses it and says why', async () => {
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '',
+        refType: 'localBranch', refName: 'main', isHead: true,
+      };
+      invokeCallArgs.length = 0;
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).handleRefCheckout();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'checkout_with_autostash'),
+        'no stash round trip for a branch we are already on',
+      ).to.equal(false);
+      expect(
+        uiStore.getState().toasts.some((t) => /already on this branch/i.test(t.message)),
+      ).to.equal(true);
+    });
+
+    it('still checks out a different branch', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellOnRepo();
+      (el as any).refContextMenu = {
+        visible: true, x: 0, y: 0, fullName: '',
+        refType: 'localBranch', refName: 'feature', isHead: false,
+      };
+      invokeCallArgs.length = 0;
+
+      await (el as any).handleRefCheckout();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'checkout_with_autostash'),
+      ).to.equal(true);
+    });
+  });
+
   describe('pull is serialized', () => {
     // Three surfaces reach handlePull — Ctrl+Shift+P, the palette and the
     // "Pull Now" toast action — and none guarded a second call. The backend's

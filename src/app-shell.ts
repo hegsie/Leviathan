@@ -1998,6 +1998,15 @@ export class AppShell extends LitElement {
 
   private async handleRefCheckout(): Promise<void> {
     if (!this.activeRepository) return;
+    // Checking out the branch you are already on is a no-op that nonetheless
+    // parks the entire working tree in a stash and re-applies it. The sidebar
+    // and the direct graph-label click both refuse it; this menu item and the
+    // palette's "Switch to <branch>" were never folded into that guard.
+    if (this.refContextMenu.refType === 'localBranch' && this.refContextMenu.isHead) {
+      showToast('Already on this branch', 'info');
+      this.refContextMenu = { ...this.refContextMenu, visible: false };
+      return;
+    }
     // Checkout mutates the same working tree merge/rebase/delete do, and was
     // left out when this flag was extended to them — so it stayed clickable
     // during an in-flight merge and ran concurrently against it. There is no
@@ -4452,7 +4461,18 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handlePush(): Promise<void> {
+  private handlePush(): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    // Keyed like the force-push sibling, which was hardened against exactly
+    // this: the shortcut has no e.repeat guard, so holding Ctrl+Shift+U fires
+    // it many times a second and every repeat launched a fully concurrent
+    // push. Sharing the key also makes Push and Force Push mutually exclusive
+    // on one repo.
+    return this.runExclusive(`push:${repoPath}`, () => this.pushRepository());
+  }
+
+  private async pushRepository(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('push', 'Pushing to remote...');
     // gitService.push returns a CommandResult (invokeCommand never throws), so we

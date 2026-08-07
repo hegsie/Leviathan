@@ -13,6 +13,7 @@ import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { RebaseCommit, RebaseAction } from '../../types/git.types.ts';
 import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 
 interface EditableRebaseCommit extends RebaseCommit {
   action: RebaseAction;
@@ -939,8 +940,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
             // "Continue" — so following the old text literally left Abort as
             // the most obvious button, which discards the rebase this message
             // exists to protect.
-            'Rebase paused — amend the commit, then click "Resolve Conflicts" ' +
-              'in the banner and choose Continue Rebase',
+            REBASE_PAUSED_MESSAGE,
             'warning',
             8000,
           );

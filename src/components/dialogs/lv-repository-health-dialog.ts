@@ -18,6 +18,7 @@ import {
   confirmPrune,
   summariseFsck,
 } from '../../utils/maintenance-confirms.ts';
+import { isRefOpRunning, subscribeRefOps } from '../../utils/ref-lock.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -237,6 +238,21 @@ export class LvRepositoryHealthDialog extends LitElement {
    * destroying unreachable objects the user never chose to expire.
    */
   private pinnedRepoPath = '';
+  private unsubscribeRefOps?: () => void;
+  /** Bumped by the ref-lock subscription; read by `repositoryBusy` so Lit
+   * re-renders when another surface claims or releases this repo. */
+  @state() private refOpsVersion = 0;
+
+  /**
+   * True while a working-tree operation holds this repo.
+   *
+   * Maintenance takes that lock too now (see maintenance-confirms.ts), so
+   * without this the buttons would stay enabled and then refuse on click.
+   */
+  private get repositoryBusy(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.pinnedRepoPath || undefined);
+  }
 
   /**
    * True while gc / prune / fsck is running. The host must refuse to close on
@@ -283,8 +299,17 @@ export class LvRepositoryHealthDialog extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     this.pinnedRepoPath = this.repositoryPath;
     await this.loadHealthStats();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   private async loadHealthStats(): Promise<void> {
@@ -645,7 +670,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(false)}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.repositoryBusy}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -662,7 +687,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(true)}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.repositoryBusy}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
@@ -680,7 +705,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runFsck}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.repositoryBusy}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -699,7 +724,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runPrune}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.repositoryBusy}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
@@ -723,7 +748,7 @@ export class LvRepositoryHealthDialog extends LitElement {
              sibling dialog with this guard disables its cancel control too. -->
         <button
           class="primary"
-          ?disabled=${!!this.runningAction}
+          ?disabled=${!!this.runningAction || this.repositoryBusy}
           @click=${this.handleClose}
         >Done</button>
       </div>

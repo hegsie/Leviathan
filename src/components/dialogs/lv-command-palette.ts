@@ -304,7 +304,12 @@ export class LvCommandPalette extends LitElement {
   }
 
   private getAllCommands(): PaletteCommand[] {
-    const branchCommands: PaletteCommand[] = this.branches.map(branch => ({
+    // The branch you are already on is excluded: "Switch to <current>" is a
+    // no-op that still stashes the whole working tree and re-applies it. The
+    // sidebar hides it for the same reason.
+    const branchCommands: PaletteCommand[] = this.branches
+      .filter(branch => !branch.isHead)
+      .map(branch => ({
       id: `branch:${branch.name}`,
       label: `Switch to ${branch.name}`,
       category: 'branch' as const,
@@ -316,7 +321,7 @@ export class LvCommandPalette extends LitElement {
           composed: true,
         }));
       },
-    }));
+      }));
 
     // Graph navigation: reveal a branch/tag tip in the commit graph
     const revealBranchCommands: PaletteCommand[] = this.branches

@@ -15,6 +15,7 @@ import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
 import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -1156,8 +1157,7 @@ export class LvConflictResolutionDialog extends LitElement {
             // next Continue, exactly as the initial execute does.
             if (result.error?.code === 'REBASE_PAUSED') {
               showToast(
-                'Rebase paused at the next step — amend the commit if you need to, ' +
-                  'then choose Continue Rebase again.',
+                REBASE_PAUSED_MESSAGE,
                 'warning',
                 8000,
               );
