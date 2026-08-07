@@ -9,6 +9,7 @@ import { repositoryStore } from '../../stores/index.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommitTemplate, ConventionalType } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
+import { RefLockController, tryAcquireRefOpOrWarn, releaseRefOp } from '../../utils/ref-lock.ts';
 
 /**
  * Commit panel component
@@ -631,6 +632,19 @@ export class LvCommitPanel extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath: string = '';
+
+  /**
+   * The shared working-tree lock.
+   *
+   * The graph's Amend menu entry is gated on it, but that entry runs no git
+   * command — it just reveals this panel in amend mode. The command that
+   * actually rewrites HEAD is this panel's Commit button, and this component
+   * never observed the lock at all. So during a graph-initiated rebase, merge,
+   * hard reset or discard — with every list, menu and dialog correctly greyed
+   * out — Commit stayed live and create_commit ran against the tree those
+   * commands were rewriting.
+   */
+  private lock = new RefLockController(this, () => this.repositoryPath);
   @property({ type: Number }) stagedCount: number = 0;
 
   @state() private summary: string = '';
@@ -1026,7 +1040,8 @@ export class LvCommitPanel extends LitElement {
     return (
       this.summary.trim().length > 0 &&
       (this.stagedCount > 0 || this.amend) &&
-      !this.isCommitting
+      !this.isCommitting &&
+      !this.lock.busy
     );
   }
 
@@ -1234,6 +1249,11 @@ export class LvCommitPanel extends LitElement {
   private async handleCommit(): Promise<void> {
     if (!this.canCommit) return;
 
+    // Claimed, not just observed: canCommit is also the Cmd+Enter gate, and a
+    // lock taken between that check and this call would otherwise slip through.
+    const repoPath = this.repositoryPath;
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
+
     this.isCommitting = true;
     this.error = null;
     this.success = null;
@@ -1280,6 +1300,7 @@ export class LvCommitPanel extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
       this.isCommitting = false;
+      releaseRefOp(repoPath);
     }
   }
 

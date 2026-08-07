@@ -527,6 +527,11 @@ export class LvReflogDialog extends LitElement {
       const result = await gitService.resetToReflog(repoPath, entry.index, mode, entry.oid);
 
       if (result.success) {
+        // The graph's reset toasts this exact line and Smart Undo toasts too;
+        // this surface closed in silence, so the strongest signal after the
+        // most destructive action here was nothing — indistinguishable from
+        // having pressed Escape.
+        showToast(`Reset to ${entry.shortId} (${mode})`, 'success');
         this.dispatchEvent(new CustomEvent('undo-complete', {
           // repositoryPath so the host refreshes the repo the reset ran on —
           // the user may have switched tabs during the IPC await.

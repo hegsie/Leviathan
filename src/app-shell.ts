@@ -1271,6 +1271,35 @@ export class AppShell extends LitElement {
     this.showConflictDialog = true;
   }
 
+  /** Dialog flags that are NOT tied to an open repository. */
+  private static readonly REPO_INDEPENDENT_DIALOGS = new Set([
+    'showSettings',
+    'showShortcuts',
+    'showOutputPanel',
+    'showCommandPalette',
+    'showWorkspaceManager',
+  ]);
+
+  /**
+   * Clear every repo-scoped `show*` flag. See the call site for why this is an
+   * exclusion list: an inclusion list has gone stale here more than once.
+   */
+  private closeRepoScopedDialogs(): void {
+    // Enumerated from Lit's own reactive-property map, NOT Object.keys: an
+    // @state() field is an accessor on the prototype backed by a private slot,
+    // so it never appears as an own enumerable key.
+    const self = this as unknown as Record<string, unknown>;
+    const declared = (this.constructor as unknown as {
+      elementProperties: Map<PropertyKey, unknown>;
+    }).elementProperties;
+    for (const key of declared.keys()) {
+      if (typeof key !== 'string') continue;
+      if (!/^show[A-Z]/.test(key)) continue;
+      if (AppShell.REPO_INDEPENDENT_DIALOGS.has(key)) continue;
+      if (self[key] === true) self[key] = false;
+    }
+  }
+
   private closeConflictDialog(): void {
     this.showConflictDialog = false;
     this.conflictDialogConfig = null;
@@ -1323,6 +1352,25 @@ export class AppShell extends LitElement {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
+
+      // Every repo-scoped dialog flag must die with the last repository.
+      //
+      // These dialogs render inside the `${this.activeRepository ? ...}` block,
+      // so closing the last tab destroys the ELEMENT while its `show*` flag
+      // stays true. Open the next repository and the element is reconstructed
+      // with ?open=true — a full-screen overlay springing up unbidden over a
+      // repo the user just opened, freshly constructed with every button
+      // re-enabled. lv-repository-health-dialog carries that exact story, and
+      // lv-bisect-dialog then reproduced it because it has no pinned path and
+      // so was in neither hand-written sweep.
+      //
+      // Written as an EXCLUSION list, not an inclusion one. A list of dialogs
+      // to close goes stale every time one is added — which is how this keeps
+      // recurring — whereas the handful that are genuinely not repo-scoped is
+      // stable, and a new dialog defaults to the safe behaviour.
+      if (state.openRepositories.length === 0) {
+        this.closeRepoScopedDialogs();
+      }
 
       // Closing the pinned repo's TAB while its conflict dialog is up
       // would leave the dialog floating over whatever renders next, with
@@ -4451,6 +4499,24 @@ export class AppShell extends LitElement {
   }
 
   private async handleFetch(): Promise<void> {
+    if (!this.activeRepository) return;
+    // Coalesced like its pull and push siblings. keyboardService has no
+    // e.repeat guard, so HOLDING Ctrl+Shift+F fires many times a second and
+    // every repeat launched a fully concurrent fetch — each with its own
+    // progress row, and a stacked toast per repeat from the backend's
+    // remote-operation-completed. Fetch must NOT take the working-tree lock
+    // (it touches no working tree), so it gets its own key.
+    const fetchRepo = this.activeRepository.repository.path;
+    const fetchKey = `fetch:${fetchRepo}`;
+    if (!tryAcquirePush(fetchKey)) return;
+    try {
+      await this.fetchRepository();
+    } finally {
+      releasePush(fetchKey);
+    }
+  }
+
+  private async fetchRepository(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('fetch', 'Fetching from remote...');
     // gitService.fetch returns a CommandResult (invokeCommand never throws), so we

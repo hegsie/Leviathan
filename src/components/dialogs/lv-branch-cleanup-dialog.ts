@@ -642,7 +642,14 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private async handleDelete(): Promise<void> {
-    if (this.deleting || this.totalSelected === 0) return;
+    // The prune is a tail step of THIS handler, so returning here whenever
+    // nothing is selected made a ticked "Also prune remote tracking branches"
+    // unrunnable — and it is ticked by default. That is the exact state the
+    // dialog exists for: a repo whose upstreams were deleted server-side shows
+    // "No branches with deleted upstreams found" precisely because the prune
+    // that would reveal them has not run.
+    if (this.deleting) return;
+    if (this.totalSelected === 0 && !this.pruneRemotes) return;
     // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
     // before the native dialog opens and takes focus, and the button stays
     // enabled through that window — so a double-click stacked two prompts for
@@ -1081,11 +1088,16 @@ export class LvBranchCleanupDialog extends LitElement {
               <button
                 class="btn btn-danger"
                 @click=${this.handleDelete}
-                ?disabled=${this.totalSelected === 0 || this.deleting || this.loading || this.lock.busy}
+                ?disabled=${(this.totalSelected === 0 && !this.pruneRemotes) ||
+                this.deleting ||
+                this.loading ||
+                this.lock.busy}
               >
                 ${this.deleting
-                  ? 'Deleting...'
-                  : `Delete Selected (${this.totalSelected})`}
+                  ? 'Working...'
+                  : this.totalSelected === 0
+                    ? 'Prune Remotes'
+                    : `Delete Selected (${this.totalSelected})`}
               </button>
             </div>
           </div>

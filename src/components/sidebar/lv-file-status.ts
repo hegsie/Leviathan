@@ -733,7 +733,14 @@ export class LvFileStatus extends LitElement {
     // "permanently delete" prompts for one gesture and ran the discard twice.
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
-    if (this.discarding) return;
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     // discard_changes does its own forced checkout against the same working
     // tree every other destructive surface mutates, and the backend takes no
     // per-repo lock — so this must join the shared one rather than guard only
@@ -1455,7 +1462,14 @@ export class LvFileStatus extends LitElement {
     // "permanently delete" prompts for one gesture and ran the discard twice.
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
-    if (this.discarding) return;
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     // discard_changes does its own forced checkout against the same working
     // tree every other destructive surface mutates, and the backend takes no
     // per-repo lock — so this must join the shared one rather than guard only
@@ -1612,7 +1626,14 @@ export class LvFileStatus extends LitElement {
     // "permanently delete" prompts for one gesture and ran the discard twice.
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
-    if (this.discarding) return;
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     // discard_changes does its own forced checkout against the same working
     // tree every other destructive surface mutates, and the backend takes no
     // per-repo lock — so this must join the shared one rather than guard only
@@ -1759,7 +1780,14 @@ export class LvFileStatus extends LitElement {
     // "permanently delete" prompts for one gesture and ran the discard twice.
     // The context-menu surfaces elsewhere are exempt because they close their
     // menu synchronously; these controls do not.
-    if (this.discarding) return;
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
     // discard_changes does its own forced checkout against the same working
     // tree every other destructive surface mutates, and the backend takes no
     // per-repo lock — so this must join the shared one rather than guard only
@@ -2300,6 +2328,7 @@ export class LvFileStatus extends LitElement {
           class="context-menu-item danger"
           role="menuitem"
           @click=${this.handleContextDiscard}
+          ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
         >
           <svg
             viewBox="0 0 24 24"

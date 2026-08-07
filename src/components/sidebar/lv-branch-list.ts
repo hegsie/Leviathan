@@ -1213,6 +1213,10 @@ export class LvBranchList extends LitElement {
       });
 
       if (result.success) {
+        // Every other mutating handler in this file toasts. Rename did not, and
+        // the list is often filtered or scrolled, so the renamed row may not
+        // even be on screen — success was the only outcome that said nothing.
+        showToast(`Renamed ${branch.shorthand} to ${newName.trim()}`, 'success');
         await this.loadBranches();
         this.dispatchBranchesChanged(repoPath);
       } else {

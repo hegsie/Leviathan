@@ -874,18 +874,24 @@ pub async fn checkout_with_autostash(
         }
     };
 
+    // Routed through autostash_failure like every other exit past the stash.
+    //
+    // This was the ONE that abandoned the user's work silently: a bare
+    // "Could not find object" with the whole working tree gone and nothing
+    // saying it was in the stash list. The comment here claimed a borrow
+    // prevented the restore; `repo` is already &mut and autostash_failure
+    // takes &mut, so it does not. Resolved before the borrow below begins.
+    let find_error: Option<String> = match repo.find_object(target_oid, None) {
+        Ok(_) => None,
+        Err(e) => Some(format!("Could not find object: {}", e.message())),
+    };
+    if let Some(msg) = find_error {
+        return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
+    }
+
     // Perform checkout using the OID
     let checkout_error: Option<String> = {
-        let obj = match repo.find_object(target_oid, None) {
-            Ok(o) => o,
-            Err(e) => {
-                // Can't restore stash here due to borrow, signal error
-                return Err(LeviathanError::OperationFailed(format!(
-                    "Could not find object: {}",
-                    e.message()
-                )));
-            }
-        };
+        let obj = repo.find_object(target_oid, None)?;
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.safe();
 

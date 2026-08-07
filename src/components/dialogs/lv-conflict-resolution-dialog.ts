@@ -978,6 +978,13 @@ export class LvConflictResolutionDialog extends LitElement {
             'The develop merge was aborted, but the master merge and version tag from this finish are already committed',
             'warning',
           );
+        } else {
+          // The operation banner's Abort reaches these same backend commands
+          // and toasts `Aborted merge`. This one — behind an EXTRA in-dialog
+          // confirmation, so the more deliberate of the two — said nothing at
+          // all for merge/rebase/cherry-pick/revert. Only the stash arm above
+          // and the gitflow arm spoke.
+          showToast(`Aborted ${this.getOperationTitle().toLowerCase()}`, 'success');
         }
         this.dispatchEvent(
           new CustomEvent('operation-aborted', {
@@ -1301,6 +1308,12 @@ export class LvConflictResolutionDialog extends LitElement {
         }
       }
 
+      // The banner's Abort toasts; this dialog's Complete said nothing, so the
+      // full-screen dialog simply vanished with no statement that the merge
+      // commit was created — the same gesture that, had it failed, produces a
+      // red toast. (The paused-rebase branch above returns before this and
+      // carries its own, different message.)
+      showToast(`${this.getOperationTitle()} completed`, 'success');
       this.dispatchEvent(
         new CustomEvent('operation-completed', {
           bubbles: true,

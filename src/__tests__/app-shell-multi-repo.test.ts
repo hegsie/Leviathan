@@ -1588,3 +1588,45 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 });
+describe('closing the last repository closes its dialogs', () => {
+  // These dialogs render inside the `${this.activeRepository ? ... }` block, so
+  // closing the last tab destroys the ELEMENT while its show* flag stays true.
+  // Open the next repository and the element is reconstructed with ?open=true —
+  // a full-screen overlay springing up unbidden over a repo the user just
+  // opened. lv-repository-health-dialog carried that story already, and
+  // lv-bisect-dialog then reproduced it because it has no pinned path and so
+  // was in neither hand-written sweep. The fix is an EXCLUSION list, so a
+  // newly added dialog defaults to the safe behaviour.
+  it('clears every repo-scoped dialog flag when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as Record<string, unknown>;
+    internal.showBisect = true;
+    internal.showWorktrees = true;
+    internal.showLfs = true;
+    // Not repo-scoped — must survive.
+    internal.showSettings = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    expect(internal.showBisect, 'bisect must not outlive its repository').to.be.false;
+    expect(internal.showWorktrees, 'worktrees must not outlive its repository').to.be.false;
+    expect(internal.showLfs, 'LFS must not outlive its repository').to.be.false;
+    expect(internal.showSettings, 'settings is not repo-scoped').to.be.true;
+
+    el.remove();
+  });
+});
+

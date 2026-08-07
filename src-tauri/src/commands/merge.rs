@@ -207,12 +207,26 @@ pub async fn merge(
             Ok(())
         })();
 
-        // A genuine commit-phase failure (missing signature, disk error) still
-        // resets the half-merged state so the user isn't stuck.
-        if let Err(e) = result {
-            let _ = repo.cleanup_state();
-            return Err(e);
-        }
+        // Leave MERGE_HEAD/MERGE_MSG in place on a commit-phase failure.
+        //
+        // cleanup_state() only UNLINKS the state files — it does not touch the
+        // index or the working tree, both of which repo.merge() has already
+        // filled with the fully merged result. So calling it here removed the
+        // only marker that makes the merge resumable and abortable while
+        // leaving the merge itself applied: repo.state() went Clean, the
+        // operation banner vanished, abort_merge refused with "there is no
+        // merge to abort", and the whole inter-branch diff sat staged under a
+        // toast reading "Merge failed". Committing that by hand produces a
+        // single-parent commit, so the source branch is still not an ancestor
+        // of HEAD — and the later force-delete escalation then discards commits
+        // that only LOOK duplicated.
+        //
+        // Canonical git leaves MERGE_HEAD on any failure after the merge, which
+        // is why commit_merge_signed one function away goes to the trouble of
+        // snapshotting and restoring it. Reachable with no user.name/user.email
+        // configured (repo.signature() is called raw), or on index.lock
+        // contention from a terminal, or a disk-full write_tree.
+        result?;
 
         repo.cleanup_state()?;
     }
@@ -2288,6 +2302,59 @@ fn parse_merge_branch_from_msg(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A commit-phase failure must leave the merge RESUMABLE and ABORTABLE.
+    ///
+    /// repo.merge() has already written the merged result into the index and
+    /// working tree by then. cleanup_state() only unlinks MERGE_HEAD/MERGE_MSG,
+    /// so calling it there left the merge fully applied but unmarked: the
+    /// banner vanished, abort_merge refused, and the diff sat staged under a
+    /// "Merge failed" toast. Committing that by hand yields a single-parent
+    /// commit, so the source branch never becomes an ancestor of HEAD.
+    #[tokio::test]
+    async fn test_merge_commit_failure_keeps_the_merge_abortable() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("shared.txt", "base\n")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        test_repo.create_commit("feature work", &[("feature.txt", "f\n")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("main work", &[("main.txt", "m\n")]);
+
+        // No identity configured -> repo.signature() fails in the commit step,
+        // exactly as it does on a fresh install.
+        let repo = test_repo.repo();
+        let mut cfg = repo.config().unwrap();
+        let _ = cfg.remove("user.name");
+        let _ = cfg.remove("user.email");
+        drop(cfg);
+
+        let result = merge(
+            test_repo.path_str(),
+            "feature".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the commit step must fail without an identity"
+        );
+
+        let repo = test_repo.repo();
+        assert_eq!(
+            repo.state(),
+            git2::RepositoryState::Merge,
+            "the merge must remain in progress, not be silently cleaned up"
+        );
+
+        // And the user must be able to get out of it.
+        abort_merge(test_repo.path_str())
+            .await
+            .expect("a merge left in progress must be abortable");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+    }
     use super::*;
     use crate::test_utils::TestRepo;
 

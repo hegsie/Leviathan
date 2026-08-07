@@ -933,6 +933,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const result = await gitService.executeInteractiveRebase(repoPath, this.onto, todo);
 
       if (result.success) {
+        // Every plain-rebase route toasts this. The interactive one — the most
+        // consequential of the four, since it rewrites history wholesale — was
+        // the only one that closed without a word.
+        showToast(`Rebased onto ${this.onto}`, 'success');
         this.dispatchEvent(new CustomEvent('rebase-complete', {
           // Same pinning as the conflict sibling below: the refresh must
           // target the repo the rebase ran on, not whichever tab is active
