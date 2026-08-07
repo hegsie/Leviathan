@@ -532,6 +532,13 @@ describe('app-shell destructive guards', () => {
         invokeCallArgs.some((c) => c.command === 'delete_branch'),
         'an irreversible delete must not run beside a ref rewrite',
       ).to.equal(false);
+      // A toast action button has no ?disabled binding, and clicking it
+      // destroys the toast — so a silent refusal takes the affordance away
+      // with it and the user is left with no branch deleted and no message.
+      expect(
+        uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
+        'the refusal must be audible',
+      ).to.equal(true);
     });
   });
 

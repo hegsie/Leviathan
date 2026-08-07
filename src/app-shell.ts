@@ -2583,9 +2583,18 @@ export class AppShell extends LitElement {
       // still-running merge or rebase, and this flag is the only thing
       // serializing them. Keying it privately left the toast button live while
       // every menu was greyed out.
-      void this.runRefExclusive(repoPath, () =>
-        this.forceDeleteBranch(branchName, repoPath),
-      );
+      //
+      // Claimed directly rather than through runRefExclusive, whose silent
+      // return suits context-menu items carrying a ?disabled binding. A toast
+      // action button has none — and clicking it destroys the toast, so a
+      // silent refusal takes the affordance away with it.
+      if (!this.claimRefOperation(repoPath)) {
+        showToast('Another operation is already running in this repository.', 'warning');
+        return;
+      }
+      void this.forceDeleteBranch(branchName, repoPath).finally(() => {
+        this.releaseRefOperation(repoPath);
+      });
     }
   };
 

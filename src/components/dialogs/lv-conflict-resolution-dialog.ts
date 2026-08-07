@@ -14,6 +14,7 @@ import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -868,6 +869,17 @@ export class LvConflictResolutionDialog extends LitElement {
       return;
     }
 
+    // The banner's Abort claims the shared working-tree lock; this dialog
+    // reaches the identical abort_merge/abort_rebase commands and claimed
+    // nothing. The backdrop blocks the mouse, but keyboard shortcuts fire
+    // through it — Ctrl+Shift+S and Ctrl+Shift+P both claim a free lock and
+    // run beside an abort that is restoring the working tree.
+    const lockedRepo = this.repositoryPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
     this.aborting = true;
     this.showAbortConfirm = false;
 
@@ -989,6 +1001,8 @@ export class LvConflictResolutionDialog extends LitElement {
       console.error('Failed to abort:', err);
       showToast(`Failed to abort ${this.getOperationTitle()}`, 'error');
       this.aborting = false; // Allow retry
+    } finally {
+      releaseRefOp(lockedRepo);
     }
   }
 
@@ -1053,6 +1067,15 @@ export class LvConflictResolutionDialog extends LitElement {
     // The Complete AND Abort buttons' disabled bindings both reflect
     // `continuing`, so claiming here also inerts Abort for the confirm
     // window.
+    // Shared working-tree lock — see handleAbortConfirm. A gitflow-finish
+    // Complete is a multi-second, multi-command sequence during which every
+    // sidebar and graph control otherwise reads the lock as free.
+    const lockedContinueRepo = this.repositoryPath;
+    if (!tryAcquireRefOp(lockedContinueRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
     this.continuing = true;
     try {
       // The editor can hold visible rework that was never Mark-Resolved: a
@@ -1082,6 +1105,7 @@ export class LvConflictResolutionDialog extends LitElement {
       await this.runContinue();
     } finally {
       this.continuing = false;
+      releaseRefOp(lockedContinueRepo);
     }
   }
 

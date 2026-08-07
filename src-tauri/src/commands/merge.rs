@@ -872,6 +872,23 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
             .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
         if output.status.success() {
+            // Exit 0 does NOT mean "finished": `git rebase --continue` also
+            // exits 0 when it advances to the NEXT `edit` or `break` line. The
+            // sibling execute_interactive_rebase already tells the two apart
+            // this way; reporting a pause as completion closed the conflict
+            // dialog with no message and left the repo mid-rebase on a
+            // detached HEAD, where the most obvious remaining button was the
+            // one that throws the rebase away.
+            let git_dir = git2::Repository::open(Path::new(path))?
+                .path()
+                .to_path_buf();
+            if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+                return Err(LeviathanError::OperationFailed(
+                    "Rebase paused at the next step — amend the commit if you need to, \
+                     then choose Continue Rebase again."
+                        .to_string(),
+                ));
+            }
             return Ok(());
         }
 
@@ -2813,6 +2830,42 @@ mod tests {
                 1,
                 "a merge commit reached the plan: {}",
                 c.summary
+            );
+        }
+    }
+
+    /// `git rebase --continue` exits 0 when it merely advances to the NEXT
+    /// `edit`/`break` line. Reporting that as completion closed the conflict
+    /// dialog with no message and left the repo mid-rebase on a detached HEAD,
+    /// where the most obvious remaining button throws the rebase away.
+    #[tokio::test]
+    async fn test_continue_rebase_reports_a_pause_at_the_next_edit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("first", &[("a.txt", "a\n")]);
+        repo.create_commit("second", &[("b.txt", "b\n")]);
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let first = head.parent(0).unwrap();
+
+        // A CLI interactive rebase that stops at two `edit` lines.
+        let todo = format!("edit {}\nedit {}\n", first.id(), head.id());
+        let base = first.parent(0).unwrap().id().to_string();
+        let outcome = execute_interactive_rebase(repo.path_str(), base, todo).await;
+        let Ok(outcome) = outcome else {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        };
+        assert!(outcome.paused, "the rebase must stop at the first edit");
+
+        // Continuing advances to the SECOND edit — still paused, not finished.
+        let result = continue_rebase(repo.path_str()).await;
+        let git_dir = repo.repo().path().to_path_buf();
+        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+            let err = result.expect_err("a rebase still on disk has not completed");
+            assert!(
+                err.to_string().contains("paused"),
+                "the pause must be reported, not swallowed: {}",
+                err
             );
         }
     }

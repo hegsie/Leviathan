@@ -803,12 +803,34 @@ pub async fn checkout_with_autostash(
             // checkout-failure path below has always verified the oid; this one
             // did not. Best effort — a failure to restore must not mask the
             // resolution error the user actually needs to see.
-            if stashed {
-                if let Some(idx) = auto_stash_index(&mut repo, stash_oid) {
-                    let _ = repo.stash_pop(idx, None);
+            //
+            // A failure to restore must not MASK the resolution error the user
+            // needs to see — but not masking and not mentioning are different
+            // things. The sibling arm below concatenates both; this one
+            // discarded the restore's outcome, so the user was told only
+            // "could not find ref" while looking at an empty working tree with
+            // no hint that their changes were sitting in the stash list.
+            let restore_note = if stashed {
+                match auto_stash_index(&mut repo, stash_oid) {
+                    Some(idx) => match repo.stash_pop(idx, None) {
+                        Ok(()) => "",
+                        Err(_) => {
+                            " Your changes could not be restored — they are still in \
+                             the stash list, apply them manually."
+                        }
+                    },
+                    None => {
+                        " Your changes could not be found to restore — they are still \
+                         in the stash list, apply them manually."
+                    }
                 }
-            }
-            return Err(LeviathanError::OperationFailed(msg));
+            } else {
+                ""
+            };
+            return Err(LeviathanError::OperationFailed(format!(
+                "{}{}",
+                msg, restore_note
+            )));
         }
     };
 

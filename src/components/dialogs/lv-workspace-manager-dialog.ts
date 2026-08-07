@@ -15,6 +15,7 @@ import { workspaceStore } from '../../stores/workspace.store.ts';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 const WORKSPACE_COLORS = [
   '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
@@ -959,6 +960,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
     // Repos that are gone or no longer git repos were silently dropped, so a
     // summary that now reads as fully accounted-for (succeeded/failed/skipped)
     // still didn't add up to the workspace size.
+    // Repos skipped because another operation held their working-tree lock.
+    const busy: string[] = [];
     let unavailableCount = 0;
 
     for (const repo of ws.repositories) {
@@ -968,7 +971,22 @@ export class LvWorkspaceManagerDialog extends LitElement {
         continue;
       }
 
-      const result = await gitService.pull({ path: repo.path, silent: true });
+      // The fourth surface reaching pull. handlePull's own comment enumerates
+      // three (the shortcut, the palette, the Pull Now toast) and this batch
+      // was never in that list — it guarded only its own two buttons with
+      // batchRunning. A pull runs checkout_tree and moves the branch ref, so
+      // it must take the shared working-tree lock like every other caller.
+      // Per repo, since separate repos have separate trees.
+      if (!tryAcquireRefOp(repo.path)) {
+        busy.push(repo.name);
+        continue;
+      }
+      let result;
+      try {
+        result = await gitService.pull({ path: repo.path, silent: true });
+      } finally {
+        releaseRefOp(repo.path);
+      }
       if (result.success) {
         successCount++;
       } else if (gitService.isNetworkGateRefusal(result.error)) {
@@ -997,8 +1015,14 @@ export class LvWorkspaceManagerDialog extends LitElement {
           : '') +
         (failCount > 0 ? `, ${failCount} failed (${failed.join(', ')})` : '') +
         (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
+        // Named, not just counted: a repo skipped because something else was
+        // running in it did NOT pull, and a summary that stays silent about it
+        // reads as "everything is up to date".
+        (busy.length > 0
+          ? `, ${busy.length} busy with another operation (${busy.join(', ')})`
+          : '') +
         (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
-      failCount > 0 || conflicted.length > 0 || unavailableCount > 0
+      failCount > 0 || conflicted.length > 0 || unavailableCount > 0 || busy.length > 0
         ? 'warning'
         : skippedCount > 0
           ? 'info'
