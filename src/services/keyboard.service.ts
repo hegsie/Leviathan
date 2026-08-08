@@ -474,6 +474,14 @@ class KeyboardService {
         return (
           el.tagName === 'INPUT' ||
           el.tagName === 'TEXTAREA' ||
+          // SELECT too. Its native keyboard interaction IS arrow keys and
+          // type-ahead letters, and this handler preventDefault()s the ones it
+          // matches — so every <select> in the app was keyboard-inoperable and
+          // its type-ahead ran a global shortcut instead. On the interactive
+          // rebase action select the select IS the destructive control:
+          // pressing `s` for "squash" left the value on `pick` and silently
+          // ran stage-all behind the modal.
+          el.tagName === 'SELECT' ||
           el.isContentEditable
         );
       }

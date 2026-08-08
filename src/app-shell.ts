@@ -4943,7 +4943,16 @@ export class AppShell extends LitElement {
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
         @open-shortcuts=${() => { this.showShortcuts = true; }}
-        @open-command-palette=${() => { this.showCommandPalette = true; }}
+        @open-command-palette=${() => {
+            // Through openCommandPalette, like Ctrl+P. Setting the flag alone
+            // skipped the loader, so the toolbar button opened a palette with
+            // no branch or file entries at all on a cold start — and after a
+            // tab switch, with the PREVIOUS repo's branches. Selecting one ran
+            // a checkout against the active repo, stashing its whole working
+            // tree for a ref it does not have, and offered "Switch to <current
+            // branch>" — the no-op the palette excludes on purpose.
+            void this.openCommandPalette();
+          }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
         @repository-refresh=${() => this.handleRefresh()}

@@ -1787,19 +1787,10 @@ export class LvBranchList extends LitElement {
             detail: { repositoryPath: repoPath },
           }));
         } else {
-          // The checkout above ALREADY landed, so the list must be reloaded
-          // even though the follow-up failed — otherwise every isHead flag is
-          // stale: Delete branch stays offered on the branch that is now HEAD,
-          // and the old HEAD's row runs a no-op checkout that parks the whole
-          // working tree in a stash. Three of the four exits after that
-          // checkout refresh; this was the fourth.
-          await this.loadBranches();
-          this.dispatchBranchesChanged(repoPath);
-          showToast(
-            `Switched to ${targetBranch.shorthand}, but the merge failed: ` +
-              `${result.error?.message ?? 'Unknown error'}`,
-            'error'
-          );
+          // No checkout happens on this arm — the target IS HEAD, so
+          // saying "Switched to <branch>" would describe a switch that
+          // never occurred and send the user looking for a way back.
+          showToast(`Merge failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       } else {
         // Rebase current branch onto source
@@ -1830,19 +1821,10 @@ export class LvBranchList extends LitElement {
             detail: { operationType: 'rebase', repositoryPath: repoPath },
           }));
         } else {
-          // The checkout above ALREADY landed, so the list must be reloaded
-          // even though the follow-up failed — otherwise every isHead flag is
-          // stale: Delete branch stays offered on the branch that is now HEAD,
-          // and the old HEAD's row runs a no-op checkout that parks the whole
-          // working tree in a stash. Three of the four exits after that
-          // checkout refresh; this was the fourth.
-          await this.loadBranches();
-          this.dispatchBranchesChanged(repoPath);
-          showToast(
-            `Switched to ${targetBranch.shorthand}, but the rebase failed: ` +
-              `${result.error?.message ?? 'Unknown error'}`,
-            'error'
-          );
+          // No checkout happens on this arm — the target IS HEAD, so
+          // saying "Switched to <branch>" would describe a switch that
+          // never occurred and send the user looking for a way back.
+          showToast(`Rebase failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
         }
       }
     } else {

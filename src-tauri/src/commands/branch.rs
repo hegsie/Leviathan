@@ -361,7 +361,44 @@ pub async fn rename_branch(
 /// ("fatal: 'x' is already used by worktree at ..."), which is what this
 /// restores.
 fn branch_checked_out_elsewhere(repo: &git2::Repository, branch_name: &str) -> Option<String> {
-    let target = format!("refs/heads/{}", branch_name);
+    // The LOCAL branch this checkout will actually land on. Callers pass the
+    // raw ref name, which for a remote row is "origin/develop" — so the check
+    // tested refs/heads/origin/develop, matched nothing, and the remote arm
+    // then resolved the local `develop` and hit the very corruption this
+    // guards. Both checkout functions strip the same way.
+    let local_name = match branch_name.find('/') {
+        Some(pos)
+            if repo
+                .find_branch(branch_name, git2::BranchType::Local)
+                .is_err() =>
+        {
+            &branch_name[pos + 1..]
+        }
+        _ => branch_name,
+    };
+    let target = format!("refs/heads/{}", local_name);
+
+    // The MAIN worktree first. git_worktree_list enumerates only
+    // $GIT_COMMON_DIR/worktrees/, which the main worktree has no entry in — so
+    // when the app is opened ON a linked worktree (supported; isCurrentWorktree
+    // exists for it) this check saw nothing at all, while libgit2's own
+    // set_head refusal DOES cover the main worktree. The pre-check was strictly
+    // weaker than the refusal it front-runs.
+    if repo.is_worktree() {
+        let common = repo.commondir().to_path_buf();
+        if let Some(main_workdir) = common.parent() {
+            if let Ok(main_repo) = git2::Repository::open(main_workdir) {
+                let head_name = main_repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.name().ok().map(|n| n.to_string()));
+                if head_name.as_deref() == Some(target.as_str()) {
+                    return Some(main_workdir.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
     let worktrees = repo.worktrees().ok()?;
     let this_workdir: Option<std::path::PathBuf> =
         repo.workdir().and_then(|p| std::fs::canonicalize(p).ok());

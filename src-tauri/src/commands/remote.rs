@@ -460,6 +460,19 @@ pub async fn pull(
                         // copy is permanently stuck in MERGING.
                         repo.merge(&[&fetch_commit], None, None)?;
 
+                        // Hoisted ABOVE the guarded closure, like merge().
+                        // A veto must return with MERGE_HEAD intact so the
+                        // merge stays resumable — which is only true out here.
+                        crate::commands::hooks::run_hook_blocking(
+                            &repo,
+                            "pre-merge-commit",
+                            &[],
+                            None,
+                        )?;
+                        let default_message = format!("Merge {} into {}", remote_ref, branch_name);
+                        let commit_message =
+                            crate::commands::hooks::run_commit_msg_hook(&repo, &default_message)?;
+
                         let merge_commit_result = (|| -> Result<()> {
                             if repo.index()?.has_conflicts() {
                                 return Err(LeviathanError::MergeConflict);
@@ -474,18 +487,6 @@ pub async fn pull(
                             // intact, so the merge stays resumable, which is the
                             // contract merge() already documents. post-merge is
                             // already fired below for this same parity reason.
-                            crate::commands::hooks::run_hook_blocking(
-                                &repo,
-                                "pre-merge-commit",
-                                &[],
-                                None,
-                            )?;
-                            let default_message =
-                                format!("Merge {} into {}", remote_ref, branch_name);
-                            let commit_message = crate::commands::hooks::run_commit_msg_hook(
-                                &repo,
-                                &default_message,
-                            )?;
                             let signature = repo.signature()?;
                             let head = repo.head()?.peel_to_commit()?;
                             let remote_commit = repo.find_commit(fetch_commit.id())?;
@@ -506,16 +507,15 @@ pub async fn pull(
                         // path; the UI drives a conflict-resolution flow
                         // that needs MERGE_HEAD intact. Only cleanup_state
                         // for non-conflict errors.
-                        match merge_commit_result {
-                            Err(LeviathanError::MergeConflict) => {
-                                return Err(LeviathanError::MergeConflict);
-                            }
-                            Err(e) => {
-                                let _ = repo.cleanup_state();
-                                return Err(e);
-                            }
-                            Ok(()) => {}
-                        }
+                        // NO cleanup_state on failure — the same trap removed
+                        // from merge(). It only unlinks MERGE_HEAD/MERGE_MSG
+                        // while repo.merge() has already written the merged
+                        // result into the index and working tree, so it leaves
+                        // the merge fully applied but unmarked: banner gone,
+                        // abort_merge refusing, the whole diff staged under a
+                        // failure toast. Adding the pre-merge-commit and
+                        // commit-msg hooks above made a veto the ROUTINE way in.
+                        merge_commit_result?;
 
                         repo.cleanup_state()?;
                         // git runs post-merge after a merge commit (flag 0 =
@@ -640,13 +640,36 @@ pub async fn push(
                 let remote_for_task = match requested_remote.clone() {
                     Some(r) => r,
                     None => {
-                        let from_upstream = repo
+                        // git's documented precedence: branch.<n>.pushRemote,
+                        // then remote.pushDefault, then branch.<n>.remote, then
+                        // origin. Reading only branch_upstream_remote made this
+                        // a REGRESSION on the fork workflow it was meant to
+                        // help: with main tracking upstream/main and
+                        // remote.pushDefault=origin, a Force Push aimed at the
+                        // CANONICAL repo rather than the user's fork — and its
+                        // confirm names no remote at all.
+                        let head_branch = repo
                             .head()
                             .ok()
                             .filter(|h| h.is_branch())
-                            .and_then(|h| h.name().ok().map(|n| n.to_string()))
-                            .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
-                            .and_then(|b| b.as_str().ok().map(|s| s.to_string()));
+                            .and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
+                        let cfg = repo.config().ok();
+                        let from_push_config = cfg.as_ref().and_then(|c| {
+                            head_branch
+                                .as_ref()
+                                .and_then(|b| {
+                                    c.get_string(&format!("branch.{}.pushRemote", b)).ok()
+                                })
+                                .or_else(|| c.get_string("remote.pushDefault").ok())
+                        });
+                        let from_upstream = from_push_config.or_else(|| {
+                            repo.head()
+                                .ok()
+                                .filter(|h| h.is_branch())
+                                .and_then(|h| h.name().ok().map(|n| n.to_string()))
+                                .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+                                .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
+                        });
                         match from_upstream {
                             Some(r) => r,
                             None => {
