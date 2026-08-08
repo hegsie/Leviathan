@@ -5519,7 +5519,12 @@ export class AppShell extends LitElement {
           ?open=${this.showSubmodules}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showSubmodules = false; }}
-          @submodules-changed=${() => this.handleRefresh()}
+          @submodules-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-submodule-dialog>
       ` : ''}
 
@@ -5528,7 +5533,12 @@ export class AppShell extends LitElement {
           ?open=${this.showWorktrees}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showWorktrees = false; }}
-          @worktrees-changed=${() => this.handleRefresh()}
+          @worktrees-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-worktree-dialog>
       ` : ''}
 
@@ -5537,7 +5547,12 @@ export class AppShell extends LitElement {
           ?open=${this.showLfs}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showLfs = false; }}
-          @lfs-changed=${() => this.handleRefresh()}
+          @lfs-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-lfs-dialog>
       ` : ''}
 
@@ -5546,7 +5561,8 @@ export class AppShell extends LitElement {
           ?open=${this.showGpg}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGpg = false; }}
-          @gpg-changed=${() => this.handleRefresh()}
+          @gpg-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-gpg-dialog>
       ` : ''}
 

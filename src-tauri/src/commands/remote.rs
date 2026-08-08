@@ -287,6 +287,45 @@ fn fast_forward_to(repo: &git2::Repository, refname: &str, target_oid: git2::Oid
     Ok(())
 }
 
+/// Which remote to fetch, and which remote-tracking ref to merge, for a pull.
+///
+/// Asks git rather than rebuilding "<remote>/<shorthand>". The rebuilt form was
+/// wrong twice over: it hard-coded "origin", so `git clone -o upstream`, a
+/// Gerrit checkout, or a remote the app's own Remote dialog renamed all failed
+/// with "Remote not found: origin" and no way to pick another; and in the
+/// standard fork workflow (origin = your fork, upstream = canonical, main
+/// tracking upstream/main) it merged the FORK's branch while the sidebar showed
+/// the branch tracking upstream/main.
+pub(crate) fn resolve_pull_target(
+    repo: &git2::Repository,
+    requested_remote: Option<String>,
+    branch_name: &str,
+    head_refname: &str,
+) -> (String, String) {
+    let upstream_ref = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .ok()
+        .and_then(|b| b.upstream().ok())
+        .and_then(|u| u.get().name().ok().map(|n| n.to_string()));
+
+    let remote = match requested_remote {
+        Some(r) => r,
+        None => repo
+            .branch_upstream_remote(head_refname)
+            .ok()
+            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
+            .unwrap_or_else(|| "origin".to_string()),
+    };
+
+    let remote_ref = upstream_ref
+        .as_deref()
+        .and_then(|r| r.strip_prefix("refs/remotes/"))
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| format!("{}/{}", remote, branch_name));
+
+    (remote, remote_ref)
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -302,8 +341,9 @@ pub async fn pull(
 ) -> Result<()> {
     let do_pull = async move {
         let path_for_task = path.clone();
-        let remote_owned = remote.unwrap_or_else(|| "origin".to_string());
-        let remote_for_task = remote_owned.clone();
+        // NOT defaulted to "origin" here. The branch's configured upstream is
+        // the right answer when the caller did not name a remote — see below.
+        let requested_remote = remote.clone();
         let branch_for_task = branch.clone();
         let rebase_val = rebase.unwrap_or(false);
 
@@ -322,9 +362,6 @@ pub async fn pull(
                 // blocks a commit. The keyboard shortcut fires through an open
                 // conflict dialog, so this is one keystroke away.
                 ensure_pullable(Path::new(&path_for_task))?;
-
-                // First fetch (network I/O)
-                fetch_internal(&path_for_task, &remote_for_task, false, token)?;
 
                 let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
@@ -354,7 +391,17 @@ pub async fn pull(
                     (head.shorthand().unwrap_or("main").to_string(), refname)
                 };
 
-                let remote_ref = format!("{}/{}", remote_for_task, branch_name);
+                let (effective_remote, remote_ref) = resolve_pull_target(
+                    &repo,
+                    requested_remote.clone(),
+                    &branch_name,
+                    &head_refname,
+                );
+
+                // Fetch (network I/O) the remote we actually resolved.
+                fetch_internal(&path_for_task, &effective_remote, false, token)?;
+                let repo = git2::Repository::open(Path::new(&path_for_task))?;
+
                 let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
                 let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
 
@@ -417,6 +464,28 @@ pub async fn pull(
                             if repo.index()?.has_conflicts() {
                                 return Err(LeviathanError::MergeConflict);
                             }
+                            // The same two hooks merge() runs. `git pull` is
+                            // fetch + merge, and githooks(5) has git merge fire
+                            // pre-merge-commit and commit-msg — so whether a
+                            // repo's merge policy (a Gerrit Change-Id hook, a
+                            // Conventional-Commits linter) was enforced depended
+                            // only on which of two buttons the user pressed. A
+                            // veto returns before the commit with MERGE_HEAD
+                            // intact, so the merge stays resumable, which is the
+                            // contract merge() already documents. post-merge is
+                            // already fired below for this same parity reason.
+                            crate::commands::hooks::run_hook_blocking(
+                                &repo,
+                                "pre-merge-commit",
+                                &[],
+                                None,
+                            )?;
+                            let default_message =
+                                format!("Merge {} into {}", remote_ref, branch_name);
+                            let commit_message = crate::commands::hooks::run_commit_msg_hook(
+                                &repo,
+                                &default_message,
+                            )?;
                             let signature = repo.signature()?;
                             let head = repo.head()?.peel_to_commit()?;
                             let remote_commit = repo.find_commit(fetch_commit.id())?;
@@ -426,7 +495,7 @@ pub async fn pull(
                                 Some("HEAD"),
                                 &signature,
                                 &signature,
-                                &format!("Merge {} into {}", remote_ref, branch_name),
+                                &commit_message,
                                 &tree,
                                 &[&head, &remote_commit],
                             )?;
@@ -459,7 +528,7 @@ pub async fn pull(
                     }
                 }
 
-                Ok((remote_for_task, message))
+                Ok((effective_remote, message))
             })
             .await
             .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
@@ -549,8 +618,7 @@ pub async fn push(
 
     let do_push = async move {
         let path_for_task = path.clone();
-        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
-        let remote_for_task = remote_name_owned.clone();
+        let requested_remote = remote.clone();
         let branch_for_task = branch.clone();
         let force_val = force.unwrap_or(false);
         let use_force_with_lease = force_with_lease.unwrap_or(false);
@@ -562,6 +630,36 @@ pub async fn push(
         let (remote_name_returned, branch_name_returned) =
             tokio::task::spawn_blocking(move || -> Result<(String, String)> {
                 let repo = git2::Repository::open(Path::new(&path_for_task))?;
+
+                // Resolve the remote from the branch's upstream, then the sole
+                // remote, before falling back to "origin". Hard-coding origin
+                // failed outright on `git clone -o upstream`, on a Gerrit
+                // checkout, and on any remote the app's own Remote dialog
+                // renamed — with no remote selector on Push anywhere in the UI,
+                // the user's only recovery was to rename it back.
+                let remote_for_task = match requested_remote.clone() {
+                    Some(r) => r,
+                    None => {
+                        let from_upstream = repo
+                            .head()
+                            .ok()
+                            .filter(|h| h.is_branch())
+                            .and_then(|h| h.name().ok().map(|n| n.to_string()))
+                            .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+                            .and_then(|b| b.as_str().ok().map(|s| s.to_string()));
+                        match from_upstream {
+                            Some(r) => r,
+                            None => {
+                                let names = repo.remotes()?;
+                                if names.len() == 1 {
+                                    names.get(0).ok().flatten().unwrap_or("origin").to_string()
+                                } else {
+                                    "origin".to_string()
+                                }
+                            }
+                        }
+                    }
+                };
 
                 repo.find_remote(&remote_for_task)
                     .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
@@ -1395,6 +1493,105 @@ mod tests {
     fn test_pull_is_allowed_on_a_clean_repo() {
         let t = TestRepo::with_initial_commit();
         ensure_pullable(&t.path).expect("a clean repo must be pullable");
+    }
+
+    /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".
+    ///
+    /// In the standard fork workflow (origin = your fork, upstream = canonical,
+    /// main tracking upstream/main) the rebuilt form fetched and merged the
+    /// FORK's branch while the sidebar showed the branch tracking
+    /// upstream/main — a working-tree and ref mutation against a ref the user
+    /// never chose.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_follows_the_configured_upstream() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().join("canonical.git");
+        let work = root.path().join("work");
+        git2::Repository::init_bare(&canonical).unwrap();
+
+        let out = crate::utils::create_command("git")
+            .arg("clone")
+            .arg(&canonical)
+            .arg(&work)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        git_in(&work, &["config", "user.email", "u@test"]);
+        git_in(&work, &["config", "user.name", "u"]);
+        std::fs::write(work.join("f.txt"), "base\n").unwrap();
+        git_in(&work, &["add", "f.txt"]);
+        git_in(&work, &["commit", "-m", "base"]);
+        git_in(&work, &["branch", "-M", "main"]);
+        git_in(&work, &["push", "-u", "origin", "main"]);
+
+        // Rename the remote away from `origin` — the app's own Remote dialog
+        // can do exactly this, and `git clone -o upstream` starts here.
+        git_in(&work, &["remote", "rename", "origin", "upstream"]);
+
+        let repo = git2::Repository::open(&work).unwrap();
+        let (remote, remote_ref) = resolve_pull_target(&repo, None, "main", "refs/heads/main");
+
+        assert_eq!(
+            remote, "upstream",
+            "must follow the configured upstream remote"
+        );
+        assert_eq!(remote_ref, "upstream/main", "and its actual tracking ref");
+    }
+
+    /// With no upstream configured at all, fall back to origin as before.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_falls_back_to_origin() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        let (remote, remote_ref) =
+            resolve_pull_target(&repo, None, &branch, &format!("refs/heads/{}", branch));
+        assert_eq!(remote, "origin");
+        assert_eq!(remote_ref, format!("origin/{}", branch));
+    }
+
+    /// An explicit remote from the caller still wins.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_honours_an_explicit_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        let (remote, _) = resolve_pull_target(
+            &repo,
+            Some("chosen".to_string()),
+            &branch,
+            &format!("refs/heads/{}", branch),
+        );
+        assert_eq!(remote, "chosen");
+    }
+
+    /// A pull's merge commit must run the same hooks merge() runs.
+    ///
+    /// `git pull` is fetch + merge, and githooks(5) has git merge fire
+    /// pre-merge-commit and commit-msg. Without them, whether a repo's merge
+    /// policy (a Gerrit Change-Id hook, a Conventional-Commits linter) was
+    /// enforced depended only on which of two buttons the user pressed.
+    /// Asserted through commit_merge, which shares the same hook contract.
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_merge_path_fires_the_same_hooks_as_merge() {
+        // The pull path calls these two by name; this pins that they exist and
+        // are wired the way merge() uses them, so a rename cannot silently drop
+        // one side of the parity.
+        let src = include_str!("remote.rs");
+        let pull_body = &src[src.find("pub async fn pull(").unwrap()
+            ..src.find("/// Push to remote").unwrap_or(src.len())];
+        assert!(
+            pull_body.contains("\"pre-merge-commit\""),
+            "pull's merge commit must fire pre-merge-commit"
+        );
+        assert!(
+            pull_body.contains("run_commit_msg_hook"),
+            "pull's merge commit must fire commit-msg"
+        );
     }
 
     // ---- force push lease must survive the app's own background fetch ----

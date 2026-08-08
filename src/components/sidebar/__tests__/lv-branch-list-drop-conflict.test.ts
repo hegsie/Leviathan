@@ -181,6 +181,55 @@ describe('lv-branch-list drop stash-conflict (Fix 4)', () => {
 
     expect(invokeCalls.some((c) => c.command === 'merge'), 'merge ran on clean tree').to.be.true;
   });
+
+  // The checkout ALREADY landed by the time the merge fails, so the list must
+  // be reloaded even on the failure arm — otherwise every isHead flag is stale:
+  // Delete branch stays offered on the branch that is now HEAD, and the old
+  // HEAD's row runs a no-op checkout that parks the whole working tree in a
+  // stash. Three of the four exits after that checkout refreshed; this was the
+  // fourth.
+  it('reloads the branch list when the merge fails after a successful checkout', async () => {
+    const el = await createComponent();
+
+    const source = makeBranch('feature/source');
+    const target = makeBranch('feature/target', false);
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+
+    mockInvoke = (command: string) => {
+      if (command === 'checkout_with_autostash') {
+        return Promise.resolve({
+          success: true,
+          stashed: false,
+          stashApplied: false,
+          stashConflict: false,
+          message: 'ok',
+        });
+      }
+      if (command === 'merge') {
+        return Promise.reject({
+          code: 'COMMAND_ERROR',
+          message: 'refusing to merge unrelated histories',
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    uiStore.setState({ toasts: [] });
+    invokeCalls.length = 0;
+    await (el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }).handleDrop(
+      fakeDragEvent(false),
+      target
+    );
+
+    expect(
+      invokeCalls.some((c) => c.command === 'get_branches'),
+      'the list must be reloaded — the checkout happened'
+    ).to.be.true;
+    expect(
+      uiStore.getState().toasts.some((t) => /switched to/i.test(t.message)),
+      'and the message must name the half that succeeded'
+    ).to.be.true;
+  });
 });
 
 /**

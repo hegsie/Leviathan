@@ -500,7 +500,9 @@ export class LvSubmoduleDialog extends LitElement {
       this.addBranch = '';
       this.mode = 'list';
       await this.loadSubmodules();
-      this.dispatchEvent(new CustomEvent('submodules-changed'));
+      this.dispatchEvent(new CustomEvent('submodules-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       // The gate already announced a block, and a declined confirm is the
       // user's own decision — neither is a failure to report.
@@ -544,7 +546,9 @@ export class LvSubmoduleDialog extends LitElement {
         this.success = `Initialized ${submodule.path}`;
       }
       await this.loadSubmodules();
-      this.dispatchEvent(new CustomEvent('submodules-changed'));
+      this.dispatchEvent(new CustomEvent('submodules-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to initialize submodule';
       showToast(result.error?.message || 'Failed to initialize submodule', 'error');
@@ -577,7 +581,9 @@ export class LvSubmoduleDialog extends LitElement {
       // Same asymmetry as handleInit — see the note there.
       this.success = `Updated ${submodule.path}`;
       await this.loadSubmodules();
-      this.dispatchEvent(new CustomEvent('submodules-changed'));
+      this.dispatchEvent(new CustomEvent('submodules-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodule';
       showToast(result.error?.message || 'Failed to update submodule', 'error');
@@ -640,7 +646,9 @@ export class LvSubmoduleDialog extends LitElement {
         this.success = 'Submodule removed successfully';
         showToast('Submodule removed successfully', 'success');
         await this.loadSubmodules();
-        this.dispatchEvent(new CustomEvent('submodules-changed'));
+        this.dispatchEvent(new CustomEvent('submodules-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
       } else {
         this.error = result.error?.message || 'Failed to remove submodule';
         showToast(result.error?.message || 'Failed to remove submodule', 'error');
@@ -670,7 +678,9 @@ export class LvSubmoduleDialog extends LitElement {
       this.success = 'All submodules updated';
       showToast('All submodules updated', 'success');
       await this.loadSubmodules();
-      this.dispatchEvent(new CustomEvent('submodules-changed'));
+      this.dispatchEvent(new CustomEvent('submodules-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodules';
       showToast(result.error?.message || 'Failed to update submodules', 'error');

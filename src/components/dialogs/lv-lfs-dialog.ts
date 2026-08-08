@@ -527,7 +527,9 @@ export class LvLfsDialog extends LitElement {
       // but writes no .gitattributes, so nothing is tracked yet.
       this.success = 'Git LFS hooks installed — add a pattern below to start tracking files';
       await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to initialize LFS';
     }
@@ -566,7 +568,9 @@ export class LvLfsDialog extends LitElement {
       this.success = `Now tracking ${pattern}`;
       this.newPattern = '';
       await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to track pattern';
     }
@@ -600,7 +604,9 @@ export class LvLfsDialog extends LitElement {
       // Same asymmetry as handleTrack — see the note there.
       this.success = `No longer tracking ${pattern}`;
       await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to untrack pattern';
     }
@@ -633,7 +639,9 @@ export class LvLfsDialog extends LitElement {
     if (result.success) {
       this.success = 'LFS files pulled successfully';
       await this.loadFiles();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       // The gate already said why; a declined confirm needs no message at all.
       this.error = result.error?.message || 'Failed to pull LFS files';
@@ -700,7 +708,9 @@ export class LvLfsDialog extends LitElement {
       if (result.success) {
         this.success = result.data || 'LFS files pruned';
         await this.loadStatus();
-        this.dispatchEvent(new CustomEvent('lfs-changed'));
+        this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
       } else {
         this.error = result.error?.message || 'Failed to prune LFS files';
       }

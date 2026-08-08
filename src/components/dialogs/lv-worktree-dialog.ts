@@ -528,7 +528,9 @@ export class LvWorktreeDialog extends LitElement {
       // "already used by worktree at ..." — and a freed branch stayed missing
       // until the dialog was closed and reopened.
       await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('worktrees-changed'));
+      this.dispatchEvent(new CustomEvent('worktrees-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to add worktree';
     }
@@ -630,7 +632,9 @@ export class LvWorktreeDialog extends LitElement {
       this.error = '';
       await this.loadWorktrees();
       await this.loadBranches();
-      this.dispatchEvent(new CustomEvent('worktrees-changed'));
+      this.dispatchEvent(new CustomEvent('worktrees-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to remove worktree';
     }
@@ -666,7 +670,9 @@ export class LvWorktreeDialog extends LitElement {
       if (result.success) {
         this.success = 'Worktree locked successfully';
         await this.loadWorktrees();
-        this.dispatchEvent(new CustomEvent('worktrees-changed'));
+        this.dispatchEvent(new CustomEvent('worktrees-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
       } else {
         this.error = result.error?.message || 'Failed to lock worktree';
       }
@@ -695,7 +701,9 @@ export class LvWorktreeDialog extends LitElement {
       if (result.success) {
         this.success = 'Worktree unlocked successfully';
         await this.loadWorktrees();
-        this.dispatchEvent(new CustomEvent('worktrees-changed'));
+        this.dispatchEvent(new CustomEvent('worktrees-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
       } else {
         this.error = result.error?.message || 'Failed to unlock worktree';
       }

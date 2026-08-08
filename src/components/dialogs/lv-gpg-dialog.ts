@@ -788,7 +788,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.config = { ...this.config, signCommits: !this.config.signCommits };
       this.success = `Commit signing ${this.config.signCommits ? 'enabled' : 'disabled'}`;
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to update setting';
     }
@@ -811,7 +813,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.config = { ...this.config, signTags: !this.config.signTags };
       this.success = `Tag signing ${this.config.signTags ? 'enabled' : 'disabled'}`;
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to update setting';
     }
@@ -832,7 +836,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.selectedKey = keyId;
       this.success = 'Signing key updated';
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to set signing key';
     }
@@ -1431,7 +1437,9 @@ export class LvGpgDialog extends LitElement {
 
   private handleFinishSetup(): void {
     this.setupMode = false;
-    this.dispatchEvent(new CustomEvent('gpg-changed'));
+    this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
   }
 }
 
