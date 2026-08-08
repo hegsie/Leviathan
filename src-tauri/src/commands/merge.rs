@@ -551,9 +551,17 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     let head = repo.head()?;
     let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-    let mut rebase = repo.rebase(Some(&head_commit), Some(&onto_commit), None, None)?;
-
+    // Resolved BEFORE repo.rebase(). repo.rebase() is git_rebase_init, not a
+    // dry run: it creates .git/rebase-merge/, checks out `onto` and detaches
+    // HEAD. This binding sat AFTER it and OUTSIDE the closure whose Err arm
+    // aborts — so an unusable identity (no user.name/user.email, an empty
+    // email, a name containing angle brackets) left the repo wedged in
+    // RebaseMerge on a detached HEAD showing the other branch's content, with
+    // every later operation refused as "another operation is in progress" and
+    // nothing in the message saying Abort was the way out. pull --rebase in
+    // remote.rs already resolves it inside its guarded closure.
     let signature = repo.signature()?;
+    let mut rebase = repo.rebase(Some(&head_commit), Some(&onto_commit), None, None)?;
 
     // git2::Rebase does NOT call abort() on Drop. Without an explicit abort,
     // failures other than the expected RebaseConflict (e.g. missing

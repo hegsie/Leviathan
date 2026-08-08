@@ -331,6 +331,7 @@ pub async fn gitflow_finish_feature(
     // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
     // so post-checkout fires there. branch.rs fires it for every checkout.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
@@ -544,6 +545,7 @@ async fn finish_release_like(
     let master_obj = master_branch.get().peel(git2::ObjectType::Commit)?;
     // post-checkout — see gitflow_finish_feature.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &master)?;
     repo.checkout_tree(&master_obj, None)?;
     repo.set_head(master_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
@@ -612,6 +614,7 @@ async fn finish_release_like(
     // post-checkout for the develop-side switch too. The master switch above
     // got it and this one did not — the same sibling-missed pattern.
     let old_head_develop = crate::commands::hooks::head_oid_string(&repo);
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())

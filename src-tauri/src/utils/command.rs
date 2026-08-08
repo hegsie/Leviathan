@@ -24,6 +24,16 @@ pub fn create_command(program: &str) -> Command {
     if program == "git" {
         cmd.env("GIT_TERMINAL_PROMPT", "0");
 
+        // Every git subprocess in this app has its output PARSED, never shown
+        // raw. git translates its porcelain-adjacent strings, so on a localized
+        // machine a match like "[would prune]" simply never fires — and the
+        // caller concludes nothing happened while the command in fact did the
+        // work. bisect.rs, worktree.rs and merge.rs each pinned this locally
+        // with a comment saying why; maintenance.rs was missed, which is the
+        // hand-enumerated-list failure again. Set once, here, so the next
+        // shell-out inherits it.
+        cmd.env("LC_ALL", "C");
+
         // Under test, cut the child off from the developer's (or CI
         // container's) real git config.
         //

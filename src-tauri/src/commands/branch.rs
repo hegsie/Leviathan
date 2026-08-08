@@ -200,8 +200,24 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
     if force.unwrap_or(false) {
         branch.delete()?;
     } else {
-        // Check if branch is merged before deleting
-        let head = repo.head()?;
+        // Check if branch is merged before deleting.
+        //
+        // An UNBORN HEAD is not an error here. On an orphan branch with no
+        // commits (`git checkout --orphan gh-pages`, the standard way to start
+        // a docs branch) repo.head() fails, and propagating that reported
+        // "reference 'refs/heads/gh-pages' not found" — naming a branch the
+        // user had not selected. Worse, the frontend gates its Force Delete
+        // escalation on /not fully merged/i, so that message hid the one
+        // recovery the app offers, even though force delete works fine here.
+        // Canonical git says "not fully merged" in this state.
+        let head = match repo.head() {
+            Ok(h) => h,
+            Err(_) => {
+                return Err(LeviathanError::OperationFailed(
+                    "Branch is not fully merged. Use force to delete anyway.".to_string(),
+                ))
+            }
+        };
         if let (Some(head_oid), Some(branch_oid)) = (head.target(), branch.get().target()) {
             // A branch is fully merged into HEAD when HEAD is at or descends
             // from the branch tip. The equality case matters: `git branch -d`
@@ -332,6 +348,64 @@ pub async fn rename_branch(
 /// slot down — and the success toast still said the changes had been
 /// re-applied. The checkout-FAILURE path in this same function already
 /// verified the OID before popping; the success path, the common one, did not.
+/// The worktree path where `branch_name` is checked out, if it is checked out
+/// in a DIFFERENT worktree from the one we are operating on.
+///
+/// libgit2 enforces this rule in `git_repository_set_head`, not in
+/// `git_checkout_tree` — and every checkout path here rewrites the working tree
+/// first and moves HEAD second. So the refusal fired AFTER the damage: the tree
+/// and index held the other branch's content, HEAD still named the old branch,
+/// the whole inter-branch diff was left staged, and the auto-stash could not be
+/// popped back over it. A user who then committed recorded the other branch's
+/// entire tree onto their own. Canonical git refuses before touching anything
+/// ("fatal: 'x' is already used by worktree at ..."), which is what this
+/// restores.
+fn branch_checked_out_elsewhere(repo: &git2::Repository, branch_name: &str) -> Option<String> {
+    let target = format!("refs/heads/{}", branch_name);
+    let worktrees = repo.worktrees().ok()?;
+    let this_workdir: Option<std::path::PathBuf> =
+        repo.workdir().and_then(|p| std::fs::canonicalize(p).ok());
+    for entry in worktrees.iter() {
+        let Ok(Some(name)) = entry else {
+            continue;
+        };
+        let Ok(wt) = repo.find_worktree(name) else {
+            continue;
+        };
+        let wt_path = std::fs::canonicalize(wt.path()).ok();
+        // The worktree we are already standing in is not a conflict.
+        if wt_path.is_some() && wt_path == this_workdir {
+            continue;
+        }
+        let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) else {
+            continue;
+        };
+        let head_name = wt_repo
+            .head()
+            .ok()
+            .and_then(|h| h.name().ok().map(|n| n.to_string()));
+        if head_name.as_deref() == Some(target.as_str()) {
+            return Some(wt.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Refuse a checkout of a branch that another worktree holds, BEFORE any
+/// working-tree mutation. See branch_checked_out_elsewhere.
+pub(crate) fn ensure_not_checked_out_elsewhere(
+    repo: &git2::Repository,
+    branch_name: &str,
+) -> Result<()> {
+    if let Some(path) = branch_checked_out_elsewhere(repo, branch_name) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' is already checked out at {}",
+            branch_name, path
+        )));
+    }
+    Ok(())
+}
+
 /// The one way a HALF-COMPLETED auto-stash checkout is reported.
 ///
 /// `checkout_tree` rewrites the working tree before HEAD moves, so any failure
@@ -407,6 +481,8 @@ pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
     ensure_checkoutable(&repo)?;
+    // BEFORE checkout_tree — see branch_checked_out_elsewhere.
+    ensure_not_checked_out_elsewhere(&repo, &ref_name)?;
 
     // Capture HEAD before the switch so the post-checkout hook receives the
     // correct <old-ref> argument (githooks(5)).
@@ -739,6 +815,10 @@ pub async fn checkout_with_autostash(
 ) -> Result<CheckoutWithStashResult> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
     ensure_checkoutable(&repo)?;
+    // BEFORE the stash and BEFORE checkout_tree. Refusing later meant the tree
+    // was already rewritten and the auto-stash could not be popped back over
+    // the staged entries checkout_tree had left.
+    ensure_not_checked_out_elsewhere(&repo, &ref_name)?;
 
     // Capture HEAD before the switch for the post-checkout hook's <old-ref>.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
@@ -1745,6 +1825,80 @@ mod tests {
     }
 
     // ── checkout_with_autostash tests ──────────────────────────────────
+
+    /// A branch checked out in ANOTHER worktree must be refused BEFORE the
+    /// working tree is touched.
+    ///
+    /// libgit2 enforces this in set_head, not checkout_tree, and every checkout
+    /// path here rewrote the tree first. So the refusal fired after the damage:
+    /// tree and index held the other branch's content, HEAD still named the old
+    /// branch, the whole inter-branch diff was left STAGED, and the auto-stash
+    /// could not be popped back over it. Canonical git refuses up front.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_refuses_a_branch_held_by_another_worktree() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("a.txt", "MAIN\n")]);
+
+        // A linked worktree holding `feat`.
+        // Unique per run: `..` from the repo's TempDir is the SHARED system
+        // temp dir, so a fixed name collides with tests running in parallel.
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("linked-wt-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "feat"])
+            .arg(&wt_dir)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // An uncommitted edit that must survive untouched.
+        std::fs::write(test_repo.path.join("a.txt"), "MY PRECIOUS EDIT\n").unwrap();
+        let head_before = test_repo.head_oid();
+
+        let result =
+            checkout_with_autostash(test_repo.path_str(), "feat".to_string(), Some(true)).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse a branch held by another worktree"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("already checked out"),
+            "actionable message: {msg}"
+        );
+
+        // Nothing moved, nothing was stashed, the edit is still there.
+        assert_eq!(test_repo.head_oid(), head_before, "HEAD must not move");
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("a.txt")).unwrap(),
+            "MY PRECIOUS EDIT\n",
+            "the working tree must be untouched"
+        );
+        let mut repo = test_repo.repo();
+        let mut stash_count = 0;
+        let _ = repo.stash_foreach(|_, _, _| {
+            stash_count += 1;
+            true
+        });
+        assert_eq!(stash_count, 0, "nothing may be left in the stash");
+    }
 
     #[tokio::test]
     async fn test_checkout_with_autostash_local_branch() {

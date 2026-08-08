@@ -538,9 +538,28 @@ export class LvWorktreeDialog extends LitElement {
     }
   }
 
+  /** True when `worktree` is the one this dialog's repository points at. */
+  private isCurrentWorktree(worktree: { path: string }): boolean {
+    const strip = (p: string) => p.replace(/[\\/]+$/, '');
+    return strip(worktree.path) === strip(this.pinnedRepoPath || this.repositoryPath);
+  }
+
   private async handleRemove(worktree: Worktree): Promise<void> {
     if (worktree.isMain) {
       this.error = 'Cannot remove the main worktree';
+      return;
+    }
+    // `git worktree remove` deliberately allows removing the worktree you are
+    // standing IN — it refuses only the main one. This app has a second
+    // constraint git does not: repositoryPath must keep existing. Opening a
+    // linked worktree as the repository is supported, and `git worktree list`
+    // always prints the MAIN worktree first regardless of where it runs, so the
+    // open one gets isMain:false and its Remove button was live — with a
+    // confirm that never said this was the repository you have open. Removing
+    // it left every subsequent command failing on a directory that was gone.
+    if (this.isCurrentWorktree(worktree)) {
+      this.error =
+        'Cannot remove the worktree you currently have open. Open a different worktree first.';
       return;
     }
     // A DEDICATED flag, not `loading`: that one also tracks background list
@@ -756,6 +775,7 @@ export class LvWorktreeDialog extends LitElement {
                   this.repositoryBusy ||
                   this.removingPath === wt.path ||
                   wt.isMain ||
+                  this.isCurrentWorktree(wt) ||
                   wt.isLocked}
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

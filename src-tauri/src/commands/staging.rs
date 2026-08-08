@@ -471,6 +471,21 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     for full_path in untracked_paths {
         if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
             if meta.file_type().is_dir() {
+                // An untracked ENTRY can be an entire repository: libgit2 does
+                // not descend into a directory holding .git, so a nested repo
+                // surfaces in the file list as one ordinary row. Discarding it
+                // would remove its objects, refs and unpushed commits with
+                // nothing recoverable — and unlike Clean, which is a deliberate
+                // confirmed dialog, discarding a row in the sidebar reads as
+                // "throw away my edit". clean_files at least attempts this
+                // guard; the sibling one click away had none.
+                if crate::utils::contains_nested_repo(&full_path) {
+                    return Err(crate::error::LeviathanError::OperationFailed(format!(
+                        "'{}' contains a git repository — discarding it would destroy its history. \
+                         Remove it with git in a terminal if that is what you want.",
+                        full_path.display()
+                    )));
+                }
                 std::fs::remove_dir_all(&full_path)?;
             } else {
                 std::fs::remove_file(&full_path)?;
@@ -929,6 +944,35 @@ pub async fn stage_lines(
 
 #[cfg(test)]
 mod tests {
+
+    /// Discarding an untracked directory that IS (or holds) a repository must
+    /// be refused. libgit2 does not descend into a directory holding .git, so
+    /// a nested repo surfaces in the file list as one ordinary row — and
+    /// discarding a row reads as "throw away my edit", not "destroy a repo".
+    #[tokio::test]
+    async fn test_discard_refuses_an_untracked_nested_repo() {
+        let test_repo = TestRepo::with_initial_commit();
+        let nested = test_repo.path.join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        std::fs::write(nested.join("code.rs").as_path(), "fn main() {}").unwrap();
+
+        let result = discard_changes(test_repo.path_str(), vec!["vendor/lib/".to_string()]).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to discard a nested repository"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("git repository"),
+            "the message must say why: {msg}"
+        );
+        assert!(
+            nested.join(".git").exists(),
+            "the nested repository must survive"
+        );
+    }
     use super::*;
     use crate::test_utils::TestRepo;
 

@@ -380,6 +380,39 @@ describe('the LFS dialog is not a dead end before .gitattributes exists', () => 
   });
 });
 
+// `git worktree remove` refuses only the MAIN worktree — it happily removes the
+// one you are standing in. This app has a second constraint git does not: the
+// open repository's directory must keep existing. Opening a linked worktree is
+// supported, and `git worktree list` always prints the main worktree first, so
+// the open one got isMain:false and its Remove button was live.
+describe('the worktree dialog will not delete the repository it has open', () => {
+  beforeEach(() => {
+    resetMaintenanceLocks();
+    resetRefOpLocks();
+    invoked.length = 0;
+  });
+
+  it('disables Remove for the currently-open worktree and refuses the handler', async () => {
+    // The app is open ON the linked worktree, not the main one.
+    const el = await fixture<Updatable>(html`
+      <lv-worktree-dialog .repositoryPath=${'/test/worktree-1'} ?open=${true}></lv-worktree-dialog>
+    `);
+    await waitForRendered(el, '.action-btn');
+
+    // Row 0 is the main worktree (always listed first); row 1 is the open one.
+    const removes = el.shadowRoot!.querySelectorAll('.action-btn.danger');
+    expect((removes[1] as HTMLButtonElement).disabled, 'the open worktree must not be removable').to
+      .be.true;
+
+    invoked.length = 0;
+    await (
+      el as unknown as { handleRemove: (w: { path: string; isMain: boolean }) => Promise<void> }
+    ).handleRemove({ path: '/test/worktree-1', isMain: false });
+
+    expect(invoked, 'and the handler must refuse too').to.not.include('remove_worktree');
+  });
+});
+
 describe('destructive dialogs hold the shared locks', () => {
   beforeEach(() => {
     resetMaintenanceLocks();
