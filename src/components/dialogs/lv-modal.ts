@@ -7,7 +7,7 @@ import { LitElement, html, css, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
-import { containsDeepActiveElement } from '../../utils/focus.ts';
+import { containsDeepActiveElement, deepActiveElement } from '../../utils/focus.ts';
 
 @customElement('lv-modal')
 export class LvModal extends LitElement {
@@ -165,10 +165,18 @@ export class LvModal extends LitElement {
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
 
-      if (e.shiftKey && document.activeElement === first) {
+      // deepActiveElement, not document.activeElement: every element in
+      // `focusable` lives inside a shadow root (this one's, or a slotted
+      // component's), while document.activeElement only ever names the
+      // outermost custom element (<app-shell>). Comparing against it made
+      // both arms permanently false, so the trap never engaged and Tab
+      // walked out of the modal onto the live controls behind the backdrop.
+      const active = deepActiveElement();
+
+      if (e.shiftKey && active === first) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && active === last) {
         e.preventDefault();
         first.focus();
       }
@@ -207,8 +215,11 @@ export class LvModal extends LitElement {
     if (changedProperties.has('open')) {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
       if (this.open) {
-        // Save the currently focused element for restoration
-        this.previouslyFocused = document.activeElement as HTMLElement;
+        // Save the currently focused element for restoration. Same shadow-DOM
+        // hazard as the Tab trap: document.activeElement would store
+        // <app-shell>, which carries no tabindex, so the restore below was a
+        // no-op and focus dropped to <body> on close.
+        this.previouslyFocused = deepActiveElement() as HTMLElement | null;
         // Focus the dialog after render
         requestAnimationFrame(() => {
           // Do not override a host that already focused something of its own.
@@ -232,9 +243,10 @@ export class LvModal extends LitElement {
         });
       } else {
         // Restore focus when closing
-        if (this.previouslyFocused) {
-          this.previouslyFocused.focus();
-          this.previouslyFocused = null;
+        const restore = this.previouslyFocused;
+        this.previouslyFocused = null;
+        if (restore?.isConnected) {
+          restore.focus();
         }
       }
     }

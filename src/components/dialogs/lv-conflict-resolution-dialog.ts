@@ -14,6 +14,7 @@ import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 // DELIBERATELY claim-only: this dialog does NOT bind its buttons to
 // isRefOpRunning the way its siblings do. Abort and Continue are the only two
 // exits from a conflicted repository, and greying an exit out because an
@@ -87,6 +88,12 @@ export class LvConflictResolutionDialog extends LitElement {
         flex-direction: column;
         overflow: hidden;
         box-shadow: var(--shadow-xl);
+      }
+
+      /* Focused programmatically on open (see updated()); it is a focus
+         container, not a control, so it needs no ring of its own. */
+      .dialog:focus {
+        outline: none;
       }
 
       .header {
@@ -451,6 +458,36 @@ export class LvConflictResolutionDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
 
+    // Move focus into the dialog once it is on screen. It builds its own
+    // overlay instead of using <lv-modal> and had no focus() anywhere, so it
+    // opened with focus still on <body>: Tab started at the skip link and
+    // walked the entire app UNDERNEATH the backdrop. This dialog is the worst
+    // case because it also suppresses Escape by design — there was no keyboard
+    // way in and none out. The dialog element itself takes focus (its own
+    // controls are Abort and Complete; neither should be one Enter away).
+    if (changedProperties.has('open') && this.open) {
+      requestAnimationFrame(() => {
+        if (!this.open) return;
+        if (containsDeepActiveElement(this)) return;
+        const dialog = this.shadowRoot?.querySelector('.dialog') as HTMLElement | null;
+        dialog?.focus();
+      });
+    }
+
+    // The abort confirm renders LAST, over a dialog whose controls stay
+    // focusable, and opening it left focus on the Abort button underneath —
+    // so reaching Cancel meant Tabbing through every remaining control of the
+    // live dialog. Take focus to Cancel (never the danger button) instead.
+    if (changedProperties.has('showAbortConfirm') && this.showAbortConfirm) {
+      requestAnimationFrame(() => {
+        if (!this.showAbortConfirm) return;
+        const cancelBtn = this.shadowRoot?.querySelector(
+          '.confirm-actions .btn:not(.btn-danger)'
+        ) as HTMLElement | null;
+        cancelBtn?.focus();
+      });
+    }
+
     // When open changes to true, load conflicts
     if (changedProperties.has('open') && this.open) {
       this.resolvedFiles = new Set();
@@ -507,6 +544,14 @@ export class LvConflictResolutionDialog extends LitElement {
 
     if (e.key === 'Escape') {
       e.preventDefault();
+      // Escape dismisses the abort confirm. Without this arm the key was
+      // swallowed unconditionally, so a keyboard user who opened the
+      // "this cannot be undone" confirm had no way back except Tabbing
+      // through the whole dialog to reach Cancel.
+      if (this.showAbortConfirm) {
+        this.handleAbortCancel();
+        return;
+      }
       // Don't close on escape - require explicit abort/continue
     } else if (e.key === 'ArrowUp' && e.altKey) {
       e.preventDefault();
@@ -1072,7 +1117,12 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
-      this.editorResolveDepth > 0
+      this.editorResolveDepth > 0 ||
+      // The abort confirm is a plain overlay: its backdrop stops the mouse but
+      // nothing stopped Enter on a still-focusable "Complete Merge" from
+      // committing the merge out from under a confirm that says the resolved
+      // changes are about to be thrown away.
+      this.showAbortConfirm
     ) {
       return;
     }
@@ -1469,7 +1519,9 @@ export class LvConflictResolutionDialog extends LitElement {
 
     return html`
       <div class="backdrop"></div>
-      <div class="dialog">
+      <!-- tabindex="-1" so the open pass above can put focus inside the
+           dialog; it is not a tab stop of its own. -->
+      <div class="dialog" role="dialog" aria-modal="true" tabindex="-1">
         <div class="header">
           <div>
             <div class="header-title">
@@ -1609,7 +1661,8 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.aborting ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
-                this.editorResolveDepth > 0}
+                this.editorResolveDepth > 0 ||
+                this.showAbortConfirm}
             >
               Abort ${this.getOperationTitle()}
             </button>
@@ -1621,6 +1674,9 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
                 this.editorResolveDepth > 0 ||
+                // Matches handleContinue's guard so the button is not a dead
+                // control while the abort confirm is up.
+                this.showAbortConfirm ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}

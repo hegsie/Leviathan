@@ -814,6 +814,15 @@ export class LvFileStatus extends LitElement {
     const allFiles = this.getAllVisibleFiles();
     if (allFiles.length === 0) return;
 
+    // Single-character keys are bare shortcuts, never chords: the host row
+    // carries tabindex="0", so clicking a file and then hitting the save
+    // reflex Ctrl+S ran "stage selected" and Ctrl+U ran "unstage selected",
+    // both silently. Modifier-carrying presses belong to the app-level
+    // shortcuts, so let them through untouched. The multi-character arms
+    // (Arrow*, Enter, Home, End) are unaffected — same guard lv-diff-view
+    // already applies to its own `[` / `]` bindings.
+    if (e.key.length === 1 && (e.ctrlKey || e.metaKey || e.altKey)) return;
+
     switch (e.key) {
       case "ArrowDown":
       case "j":

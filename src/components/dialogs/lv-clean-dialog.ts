@@ -11,6 +11,7 @@ import type { CleanEntry } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 import {
   tryAcquireRefOp,
   releaseRefOp,
@@ -383,8 +384,34 @@ export class LvCleanDialog extends LitElement {
       // session on top of it.
       if (this.cleaning) return;
       this.pinnedRepoPath = this.repositoryPath;
+      this.focusInitialControl();
       await this.loadFiles();
     }
+  }
+
+  /**
+   * Move focus into the dialog once it is on screen.
+   *
+   * This dialog builds its own overlay instead of using <lv-modal>, and had no
+   * focus() anywhere: opening it from the command palette left focus on
+   * <body> (the palette restores focus to a host that carries no tabindex), so
+   * Tab started at the skip link and walked the entire app UNDERNEATH the
+   * backdrop — every Enter acting on a live control while a dialog listing
+   * files for permanent deletion was on screen.
+   *
+   * Cancel, not "Delete Selected": the first thing Enter can reach must not be
+   * the destructive one. Guarded like <lv-modal>'s own pass so it cannot yank
+   * focus off something the user already moved to.
+   */
+  private focusInitialControl(): void {
+    requestAnimationFrame(() => {
+      if (!this.open) return;
+      if (containsDeepActiveElement(this)) return;
+      const cancelBtn = this.shadowRoot?.querySelector(
+        '.footer-right .btn-secondary'
+      ) as HTMLElement | null;
+      cancelBtn?.focus();
+    });
   }
 
   private async loadFiles(): Promise<void> {

@@ -11,6 +11,7 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 import {
   tryAcquireRefOp,
   releaseRefOp,
@@ -393,8 +394,30 @@ export class LvReflogDialog extends LitElement {
       // session on top of it.
       if (this.resetting) return;
       this.pinnedRepoPath = this.repositoryPath;
+      this.focusInitialControl();
       await this.loadReflog();
     }
+  }
+
+  /**
+   * Move focus into the dialog once it is on screen.
+   *
+   * This dialog builds its own overlay instead of using <lv-modal>, and had no
+   * focus() anywhere: opening it from the command palette left focus on
+   * <body>, so Tab started at the skip link and walked the whole app
+   * UNDERNEATH the backdrop before ever reaching the reflog's own controls —
+   * every Enter on the way acting on a live control behind the dialog.
+   *
+   * The close button is the dialog's only non-destructive control (the entry
+   * rows carry Undo and Hard reset), so focus starts there.
+   */
+  private focusInitialControl(): void {
+    requestAnimationFrame(() => {
+      if (!this.open) return;
+      if (containsDeepActiveElement(this)) return;
+      const closeBtn = this.shadowRoot?.querySelector('.close-btn') as HTMLElement | null;
+      closeBtn?.focus();
+    });
   }
 
   private async loadReflog(): Promise<void> {
