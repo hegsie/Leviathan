@@ -395,3 +395,50 @@ describe('registerDefaultShortcuts', () => {
     });
   });
 });
+describe('keyboard shortcuts must not hijack a <select>', () => {
+  // A <select>'s native keyboard interaction IS arrow keys and type-ahead
+  // letters, and this handler preventDefault()s the ones it matches — so every
+  // select in the app was keyboard-inoperable and its type-ahead ran a global
+  // shortcut instead. On the interactive-rebase action select the select IS
+  // the destructive control: pressing `s` for "squash" left the value on
+  // `pick` and silently ran stage-all behind the modal.
+  it('ignores keys originating in a select', async () => {
+    const select = document.createElement('select');
+    for (const v of ['pick', 'squash']) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v;
+      select.appendChild(o);
+    }
+    document.body.appendChild(select);
+
+    let fired = 0;
+    keyboardService.register('test-select-guard', {
+      key: 's',
+      description: 'test',
+      category: 'General',
+      action: () => {
+        fired++;
+      },
+    });
+
+    try {
+      select.focus();
+      const ev = new KeyboardEvent('keydown', {
+        key: 's',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      select.dispatchEvent(ev);
+
+      expect(fired, 'a shortcut must not fire from inside a select').to.equal(0);
+      expect(ev.defaultPrevented, 'and the native type-ahead must not be cancelled').to.be
+        .false;
+    } finally {
+      keyboardService.unregister('test-select-guard');
+      select.remove();
+    }
+  });
+});
+

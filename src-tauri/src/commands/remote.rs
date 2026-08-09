@@ -326,6 +326,50 @@ pub(crate) fn resolve_pull_target(
     (remote, remote_ref)
 }
 
+/// Which remote a push should target when the caller named none.
+///
+/// git's documented precedence: branch.<n>.pushRemote, then remote.pushDefault,
+/// then branch.<n>.remote, then origin. Reading only branch_upstream_remote was
+/// a REGRESSION on the fork workflow it was meant to help: with main tracking
+/// upstream/main and remote.pushDefault=origin, a Force Push aimed at the
+/// CANONICAL repo rather than the user's fork — and its confirm names no remote.
+pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<String>) -> String {
+    if let Some(r) = requested {
+        return r;
+    }
+    let head_branch = repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
+    let cfg = repo.config().ok();
+    let from_push_config = cfg.as_ref().and_then(|c| {
+        head_branch
+            .as_ref()
+            .and_then(|b| c.get_string(&format!("branch.{}.pushRemote", b)).ok())
+            .or_else(|| c.get_string("remote.pushDefault").ok())
+    });
+    if let Some(r) = from_push_config {
+        return r;
+    }
+    let from_upstream = repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.name().ok().map(|n| n.to_string()))
+        .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+        .and_then(|b| b.as_str().ok().map(|s| s.to_string()));
+    if let Some(r) = from_upstream {
+        return r;
+    }
+    match repo.remotes() {
+        Ok(names) if names.len() == 1 => {
+            names.get(0).ok().flatten().unwrap_or("origin").to_string()
+        }
+        _ => "origin".to_string(),
+    }
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -637,52 +681,7 @@ pub async fn push(
                 // checkout, and on any remote the app's own Remote dialog
                 // renamed — with no remote selector on Push anywhere in the UI,
                 // the user's only recovery was to rename it back.
-                let remote_for_task = match requested_remote.clone() {
-                    Some(r) => r,
-                    None => {
-                        // git's documented precedence: branch.<n>.pushRemote,
-                        // then remote.pushDefault, then branch.<n>.remote, then
-                        // origin. Reading only branch_upstream_remote made this
-                        // a REGRESSION on the fork workflow it was meant to
-                        // help: with main tracking upstream/main and
-                        // remote.pushDefault=origin, a Force Push aimed at the
-                        // CANONICAL repo rather than the user's fork — and its
-                        // confirm names no remote at all.
-                        let head_branch = repo
-                            .head()
-                            .ok()
-                            .filter(|h| h.is_branch())
-                            .and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
-                        let cfg = repo.config().ok();
-                        let from_push_config = cfg.as_ref().and_then(|c| {
-                            head_branch
-                                .as_ref()
-                                .and_then(|b| {
-                                    c.get_string(&format!("branch.{}.pushRemote", b)).ok()
-                                })
-                                .or_else(|| c.get_string("remote.pushDefault").ok())
-                        });
-                        let from_upstream = from_push_config.or_else(|| {
-                            repo.head()
-                                .ok()
-                                .filter(|h| h.is_branch())
-                                .and_then(|h| h.name().ok().map(|n| n.to_string()))
-                                .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
-                                .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
-                        });
-                        match from_upstream {
-                            Some(r) => r,
-                            None => {
-                                let names = repo.remotes()?;
-                                if names.len() == 1 {
-                                    names.get(0).ok().flatten().unwrap_or("origin").to_string()
-                                } else {
-                                    "origin".to_string()
-                                }
-                            }
-                        }
-                    }
-                };
+                let remote_for_task = resolve_push_remote(&repo, requested_remote.clone());
 
                 repo.find_remote(&remote_for_task)
                     .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
@@ -1516,6 +1515,69 @@ mod tests {
     fn test_pull_is_allowed_on_a_clean_repo() {
         let t = TestRepo::with_initial_commit();
         ensure_pullable(&t.path).expect("a clean repo must be pullable");
+    }
+
+    /// Push must honour branch.<n>.pushRemote and remote.pushDefault.
+    ///
+    /// In the fork workflow (origin = your fork, upstream = canonical, main
+    /// tracking upstream/main, pushDefault=origin) reading only
+    /// branch.<n>.remote sent a FORCE PUSH at the canonical repository — with a
+    /// confirm that names no remote at all. The hard-coded "origin" this
+    /// replaced was correct there, so getting it half-right was a regression.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_push_remote_honours_push_default() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        repo_dir.add_remote("origin", "https://example.test/fork.git");
+        repo_dir.add_remote("upstream", "https://example.test/canonical.git");
+
+        // main tracks upstream/main ...
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str(&format!("branch.{}.remote", branch), "upstream")
+                .unwrap();
+            cfg.set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "upstream",
+            "with no push config, the tracking remote is right"
+        );
+
+        // ... but pushes go to the fork.
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("remote.pushDefault", "origin").unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "origin",
+            "remote.pushDefault must win over the tracking remote"
+        );
+
+        // The per-branch override wins over both.
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str(&format!("branch.{}.pushRemote", branch), "upstream")
+                .unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "upstream",
+            "branch.<n>.pushRemote must win over remote.pushDefault"
+        );
+
+        assert_eq!(
+            resolve_push_remote(&repo, Some("chosen".to_string())),
+            "chosen",
+            "an explicit remote still wins over everything"
+        );
     }
 
     /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".

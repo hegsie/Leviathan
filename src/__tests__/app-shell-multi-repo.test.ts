@@ -1629,4 +1629,47 @@ describe('closing the last repository closes its dialogs', () => {
     el.remove();
   });
 });
+describe('the toolbar command-palette button loads the active repo', () => {
+  // Setting showCommandPalette directly skipped openCommandPalette(), the only
+  // place branches and files are loaded. Cold start: a palette with no branch
+  // entries at all. After a tab switch: the PREVIOUS repo's branches, offering
+  // "Switch to <current branch>" and running a checkout against the wrong repo.
+  it('populates branches through openCommandPalette, not the bare flag', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as { branches: unknown[]; showCommandPalette: boolean };
+    internal.branches = [];
+    invokeCallArgs.length = 0;
+
+    const toolbar = el.shadowRoot!.querySelector('lv-toolbar');
+    expect(toolbar, 'the toolbar must be rendered').to.not.be.null;
+    toolbar!.dispatchEvent(
+      new CustomEvent('open-command-palette', { bubbles: true, composed: true })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(internal.showCommandPalette, 'the palette opens').to.be.true;
+    expect(
+      // list_tracked_files is loaded ONLY by openCommandPalette, so it is the
+      // unambiguous signal that the loader ran (get_branches is also issued by
+      // background refreshes).
+      invokeCallArgs.some((c) => c.command === 'list_tracked_files'),
+      'and it must have run the palette loader for the ACTIVE repo'
+    ).to.be.true;
+
+    el.remove();
+  });
+});
+
 

@@ -1871,6 +1871,97 @@ mod tests {
     /// tree and index held the other branch's content, HEAD still named the old
     /// branch, the whole inter-branch diff was left STAGED, and the auto-stash
     /// could not be popped back over it. Canonical git refuses up front.
+    /// The guard must strip a REMOTE row's name to the local branch the
+    /// checkout will actually land on. Testing the raw "origin/feat" matched
+    /// refs/heads/origin/feat — nothing — so the remote arm then resolved the
+    /// local `feat` and hit the very corruption the guard exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn test_elsewhere_guard_strips_a_remote_prefix() {
+        let test_repo = TestRepo::with_initial_commit();
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("remote-wt-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "feat"])
+            .arg(&wt_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let repo = test_repo.repo();
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "feat").is_err(),
+            "the local name must be refused"
+        );
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "origin/feat").is_err(),
+            "and so must the remote row that resolves to it"
+        );
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "origin/unrelated").is_ok(),
+            "an unrelated branch must still be allowed"
+        );
+    }
+
+    /// The guard must also see the MAIN worktree. git_worktree_list enumerates
+    /// only $GIT_COMMON_DIR/worktrees/, which the main worktree has no entry
+    /// in — so opened ON a linked worktree the check saw nothing at all, while
+    /// libgit2's own set_head refusal does cover it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_from_a_linked_worktree_refuses_the_main_worktrees_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("a.txt", "MAIN\n")]);
+        let main_branch = test_repo.current_branch();
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("linked-main-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "side"])
+            .arg(&wt_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        // Operate FROM the linked worktree, targeting the main worktree's branch.
+        let result = checkout_with_autostash(
+            wt_dir.to_string_lossy().to_string(),
+            main_branch,
+            Some(true),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the main worktree's branch must be refused from a linked worktree"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already checked out"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_checkout_refuses_a_branch_held_by_another_worktree() {
