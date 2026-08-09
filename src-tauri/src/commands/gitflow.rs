@@ -175,6 +175,14 @@ pub async fn gitflow_start_feature(path: String, name: String) -> Result<Branch>
     // error while the refs watcher makes the branch appear in the sidebar, and
     // a retry dead-ends on "already exists". create_branch does the same.
     //
+    // No ensure_not_checked_out_elsewhere here (unlike the finishes, which
+    // hoist one per branch they switch to): `repo.branch(.., false)` above
+    // already failed if the name existed, so a BRAND NEW branch cannot be held
+    // by another worktree. Calling it would in fact be wrong — the guard falls
+    // back to the segment after the first '/' when the full name has no local
+    // branch, so a fresh `feature/x` would be tested as `x` and a worktree
+    // holding an unrelated `x` would block the start.
+    //
     // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
     // so post-checkout fires there. branch.rs fires it for every checkout.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
@@ -315,6 +323,15 @@ pub async fn gitflow_finish_feature(
         .get_string("gitflow.prefix.feature")
         .unwrap_or_else(|_| "feature/".to_string());
 
+    // Every branch this finish will switch to is validated HERE, before any
+    // mutation — see finish_release_like, where the same check sat inline next
+    // to the second checkout and so fired only after master had already been
+    // merged and tagged. This finish switches once and happens to do it first,
+    // so it was safe by accident; the guard is hoisted anyway so the invariant
+    // ("worktree ownership is settled before we touch anything") is the same
+    // in all three finishes rather than a property of statement order.
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
+
     let branch_name = format!("{}{}", prefix, name);
 
     // Get feature branch commit
@@ -331,7 +348,6 @@ pub async fn gitflow_finish_feature(
     // libgit2 runs no hooks; canonical `git flow` shells out to git checkout,
     // so post-checkout fires there. branch.rs fires it for every checkout.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
-    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
@@ -530,6 +546,18 @@ async fn finish_release_like(
         .get_string("gitflow.prefix.versiontag")
         .unwrap_or_else(|_| "v".to_string());
 
+    // BOTH branches this finish will switch to are validated up front, before
+    // any mutation. The develop check used to sit inline next to the
+    // develop-side checkout, which is reached only AFTER master has been
+    // checked out, merged, committed and tagged — so on the standard setup of
+    // a dedicated `develop` worktree the finish half-applied itself and then
+    // refused, with the release branch still alive, HEAD parked on master and
+    // no in-app way forward (the obvious retry skips the up-to-date master
+    // merge and the existing tag and refuses at the same line, forever).
+    // Refusing here leaves the repository exactly as it was.
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &master)?;
+    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
+
     let branch_name = format!("{}{}", prefix, version);
     let tag_name = format!("{}{}", tag_prefix, version);
 
@@ -545,7 +573,6 @@ async fn finish_release_like(
     let master_obj = master_branch.get().peel(git2::ObjectType::Commit)?;
     // post-checkout — see gitflow_finish_feature.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
-    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &master)?;
     repo.checkout_tree(&master_obj, None)?;
     repo.set_head(master_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
@@ -614,7 +641,6 @@ async fn finish_release_like(
     // post-checkout for the develop-side switch too. The master switch above
     // got it and this one did not — the same sibling-missed pattern.
     let old_head_develop = crate::commands::hooks::head_oid_string(&repo);
-    crate::commands::branch::ensure_not_checked_out_elsewhere(&repo, &develop)?;
     repo.checkout_tree(&develop_obj, None)?;
     repo.set_head(develop_branch.get().name().map_err(|_| {
         LeviathanError::OperationFailed("Invalid UTF-8 in branch reference name".to_string())
@@ -1457,6 +1483,282 @@ mod tests {
         assert!(git_repo
             .find_branch("release/2.0.0", git2::BranchType::Local)
             .is_err());
+    }
+
+    /// Create a linked worktree holding `branch`, named uniquely per test repo.
+    ///
+    /// `..` from a TestRepo's TempDir is the SHARED system temp dir, so a fixed
+    /// directory name collides across parallel tests.
+    #[cfg(unix)]
+    fn add_worktree_for(repo: &TestRepo, branch: &str, label: &str) -> std::path::PathBuf {
+        let unique = repo.path.file_name().unwrap().to_string_lossy().to_string();
+        let wt_dir = repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("{}-{}", label, unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .args(["worktree", "add"])
+            .arg(&wt_dir)
+            .arg(branch)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        wt_dir
+    }
+
+    /// A dedicated `develop` worktree is the standard git-flow setup, and it is
+    /// the case the worktree guard was added for. The guard sat inline next to
+    /// the DEVELOP checkout, which finish only reaches after master has been
+    /// checked out, merged, committed and TAGGED — so the refusal fired on a
+    /// half-applied release: master carrying a merge commit and a version tag,
+    /// develop untouched, the release branch still alive, HEAD parked on
+    /// master, and a plain error toast mentioning none of it. Refusing up front
+    /// must leave the repository byte-for-byte as it was.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_finish_release_refuses_before_touching_master_when_develop_is_in_a_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(
+            repo.path_str(),
+            Some(master.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        gitflow_start_release(repo.path_str(), "4.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("release.txt", "release")]);
+        repo.checkout_branch(&master);
+
+        // develop lives in its own worktree, so this repo cannot check it out.
+        let _wt = add_worktree_for(&repo, "develop", "gitflow-develop");
+
+        let master_tip_before = repo
+            .repo()
+            .refname_to_id(&format!("refs/heads/{}", master))
+            .unwrap();
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "4.0.0".to_string(), None, Some(true)).await;
+
+        let err = result.expect_err("finish must refuse while develop is held elsewhere");
+        assert!(
+            err.to_string().contains("already checked out"),
+            "message must name the worktree conflict, got: {}",
+            err
+        );
+
+        let git_repo = repo.repo();
+        // NOTHING may have happened: no master merge, no tag, branch intact.
+        assert_eq!(
+            git_repo
+                .refname_to_id(&format!("refs/heads/{}", master))
+                .unwrap(),
+            master_tip_before,
+            "master must not be merged before the refusal"
+        );
+        assert!(
+            git_repo.find_reference("refs/tags/v4.0.0").is_err(),
+            "the release must not be tagged before the refusal"
+        );
+        assert!(
+            git_repo
+                .find_branch("release/4.0.0", git2::BranchType::Local)
+                .is_ok(),
+            "the release branch must survive"
+        );
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "no merge state may be left behind"
+        );
+    }
+
+    /// Same guard from the other side: MASTER held by another worktree must be
+    /// refused too, and equally before anything moves.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_finish_release_refuses_when_master_is_in_a_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(
+            repo.path_str(),
+            Some(master.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        gitflow_start_release(repo.path_str(), "5.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("release.txt", "release")]);
+        // Sit on develop so master is free to be claimed by the worktree.
+        repo.checkout_branch("develop");
+        let _wt = add_worktree_for(&repo, &master, "gitflow-master");
+
+        let head_before = repo.head_oid();
+        let result =
+            gitflow_finish_release(repo.path_str(), "5.0.0".to_string(), None, Some(true)).await;
+
+        let err = result.expect_err("finish must refuse while master is held elsewhere");
+        assert!(err.to_string().contains("already checked out"), "{}", err);
+        assert_eq!(repo.head_oid(), head_before, "HEAD must not move");
+        assert!(repo.repo().find_reference("refs/tags/v5.0.0").is_err());
+    }
+
+    /// The hotfix finish shares finish_release_like, so it inherits the same
+    /// up-front validation — pinned so a future split cannot regress one side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_finish_hotfix_refuses_before_touching_master_when_develop_is_in_a_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(
+            repo.path_str(),
+            Some(master.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Hotfix change", &[("hotfix.txt", "fix")]);
+        repo.checkout_branch(&master);
+        let _wt = add_worktree_for(&repo, "develop", "gitflow-hotfix-develop");
+
+        let master_tip_before = repo
+            .repo()
+            .refname_to_id(&format!("refs/heads/{}", master))
+            .unwrap();
+
+        let err = gitflow_finish_hotfix(repo.path_str(), "1.0.1".to_string(), None, Some(true))
+            .await
+            .expect_err("hotfix finish must refuse while develop is held elsewhere");
+        assert!(err.to_string().contains("already checked out"), "{}", err);
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo
+                .refname_to_id(&format!("refs/heads/{}", master))
+                .unwrap(),
+            master_tip_before,
+            "master must not be merged before the refusal"
+        );
+        assert!(git_repo.find_reference("refs/tags/v1.0.1").is_err());
+        assert!(git_repo
+            .find_branch("hotfix/1.0.1", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    /// The feature finish switches to develop too. It was safe only by accident
+    /// (its single checkout happened to be the first mutation); the guard is
+    /// hoisted there as well, and this pins that it still refuses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_finish_feature_refuses_when_develop_is_in_a_worktree() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(
+            repo.path_str(),
+            Some(master.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "widget".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature change", &[("widget.txt", "widget")]);
+        repo.checkout_branch(&master);
+        let _wt = add_worktree_for(&repo, "develop", "gitflow-feature-develop");
+
+        let develop_tip_before = repo.repo().refname_to_id("refs/heads/develop").unwrap();
+
+        let err = gitflow_finish_feature(repo.path_str(), "widget".to_string(), Some(true), None)
+            .await
+            .expect_err("feature finish must refuse while develop is held elsewhere");
+        assert!(err.to_string().contains("already checked out"), "{}", err);
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.refname_to_id("refs/heads/develop").unwrap(),
+            develop_tip_before,
+            "develop must not be merged"
+        );
+        assert!(
+            git_repo
+                .find_branch("feature/widget", git2::BranchType::Local)
+                .is_ok(),
+            "the feature branch must survive the refusal"
+        );
+    }
+
+    /// Starting a feature must NOT be blocked by an unrelated worktree branch
+    /// whose name matches the part after the prefix. The worktree guard falls
+    /// back to the segment after the first '/' when the full name has no local
+    /// branch, so hoisting one into the start commands "for symmetry" would
+    /// make `feature/x` refuse whenever some worktree held a plain `x`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_start_feature_is_not_blocked_by_a_worktree_holding_the_bare_name() {
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(
+            repo.path_str(),
+            Some(master.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // An unrelated branch literally named `widget`, held by a worktree.
+        repo.create_branch("widget");
+        let _wt = add_worktree_for(&repo, "widget", "gitflow-bare-name");
+
+        let branch = gitflow_start_feature(repo.path_str(), "widget".to_string())
+            .await
+            .expect("a new feature/widget must not collide with a worktree holding `widget`");
+        assert_eq!(branch.name, "feature/widget");
+        assert_eq!(repo.current_branch(), "feature/widget");
     }
 
     #[tokio::test]

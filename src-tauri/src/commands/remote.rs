@@ -370,6 +370,87 @@ pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<Str
     }
 }
 
+/// The merge-and-commit body of a non-fast-forward `pull`.
+///
+/// Extracted from `pull` so it can be TESTED. `pull` takes a Tauri
+/// `AppHandle`, so it cannot be driven from a unit test at all; two real bugs
+/// have already shipped in this arm — a `cleanup_state()` that destroyed a
+/// resumable merge, and missing `pre-merge-commit` / `commit-msg` hooks — and
+/// the only guard was an `include_str!` grep over this file, which can see
+/// that a hook is NAMED but not that it runs, in what order, or what it leaves
+/// on disk when it vetoes. This takes a plain `&Repository`, so all of that is
+/// assertable.
+///
+/// The contract, matching `merge()`:
+/// - `pre-merge-commit` and `commit-msg` run BEFORE the commit and OUTSIDE any
+///   cleanup, so a veto returns with `MERGE_HEAD` intact and the merge still
+///   resumable (and abortable).
+/// - Conflicts return `MergeConflict` with the merge state left in place for
+///   the conflict-resolution flow.
+/// - No `cleanup_state()` on failure. On success: cleanup, then `post-merge`.
+pub(crate) fn merge_fetched_commit(
+    repo: &git2::Repository,
+    fetch_commit: &git2::AnnotatedCommit<'_>,
+    remote_ref: &str,
+    branch_name: &str,
+) -> Result<()> {
+    // Anything that fails AFTER repo.merge() succeeds must leave the state
+    // coherent, otherwise the working copy is stuck in MERGING.
+    repo.merge(&[fetch_commit], None, None)?;
+
+    // Hoisted ABOVE the guarded closure, like merge(). A veto must return with
+    // MERGE_HEAD intact so the merge stays resumable — which is only true out
+    // here.
+    crate::commands::hooks::run_hook_blocking(repo, "pre-merge-commit", &[], None)?;
+    let default_message = format!("Merge {} into {}", remote_ref, branch_name);
+    let commit_message = crate::commands::hooks::run_commit_msg_hook(repo, &default_message)?;
+
+    let merge_commit_result = (|| -> Result<()> {
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+        // The same two hooks merge() runs. `git pull` is fetch + merge, and
+        // githooks(5) has git merge fire pre-merge-commit and commit-msg — so
+        // whether a repo's merge policy (a Gerrit Change-Id hook, a
+        // Conventional-Commits linter) was enforced depended only on which of
+        // two buttons the user pressed. A veto returns before the commit with
+        // MERGE_HEAD intact, so the merge stays resumable, which is the
+        // contract merge() already documents. post-merge is already fired
+        // below for this same parity reason.
+        let signature = repo.signature()?;
+        let head = repo.head()?.peel_to_commit()?;
+        let remote_commit = repo.find_commit(fetch_commit.id())?;
+        let tree_oid = repo.index()?.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &commit_message,
+            &tree,
+            &[&head, &remote_commit],
+        )?;
+        Ok(())
+    })();
+
+    // MergeConflict is the expected "user must resolve" path; the UI drives a
+    // conflict-resolution flow that needs MERGE_HEAD intact.
+    // NO cleanup_state on failure — the same trap removed from merge(). It
+    // only unlinks MERGE_HEAD/MERGE_MSG while repo.merge() has already written
+    // the merged result into the index and working tree, so it leaves the
+    // merge fully applied but unmarked: banner gone, abort_merge refusing, the
+    // whole diff staged under a failure toast. The pre-merge-commit and
+    // commit-msg hooks above made a veto the ROUTINE way in.
+    merge_commit_result?;
+
+    repo.cleanup_state()?;
+    // git runs post-merge after a merge commit (flag 0 = not a squash). The
+    // fast-forward arm of pull fires it; this one did not, so whether a repo's
+    // hooks ran depended only on whether the history happened to diverge.
+    crate::commands::hooks::run_hook_noblock(repo, "post-merge", &["0"]);
+    Ok(())
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -499,75 +580,9 @@ pub async fn pull(
                         fast_forward_to(&repo, &head_refname, fetch_commit.id())?;
                         message = "Fast-forward merge completed".to_string();
                     } else {
-                        // Normal merge. Anything that fails AFTER repo.merge()
-                        // succeeds must reset state, otherwise the working
-                        // copy is permanently stuck in MERGING.
-                        repo.merge(&[&fetch_commit], None, None)?;
-
-                        // Hoisted ABOVE the guarded closure, like merge().
-                        // A veto must return with MERGE_HEAD intact so the
-                        // merge stays resumable — which is only true out here.
-                        crate::commands::hooks::run_hook_blocking(
-                            &repo,
-                            "pre-merge-commit",
-                            &[],
-                            None,
-                        )?;
-                        let default_message = format!("Merge {} into {}", remote_ref, branch_name);
-                        let commit_message =
-                            crate::commands::hooks::run_commit_msg_hook(&repo, &default_message)?;
-
-                        let merge_commit_result = (|| -> Result<()> {
-                            if repo.index()?.has_conflicts() {
-                                return Err(LeviathanError::MergeConflict);
-                            }
-                            // The same two hooks merge() runs. `git pull` is
-                            // fetch + merge, and githooks(5) has git merge fire
-                            // pre-merge-commit and commit-msg — so whether a
-                            // repo's merge policy (a Gerrit Change-Id hook, a
-                            // Conventional-Commits linter) was enforced depended
-                            // only on which of two buttons the user pressed. A
-                            // veto returns before the commit with MERGE_HEAD
-                            // intact, so the merge stays resumable, which is the
-                            // contract merge() already documents. post-merge is
-                            // already fired below for this same parity reason.
-                            let signature = repo.signature()?;
-                            let head = repo.head()?.peel_to_commit()?;
-                            let remote_commit = repo.find_commit(fetch_commit.id())?;
-                            let tree_oid = repo.index()?.write_tree()?;
-                            let tree = repo.find_tree(tree_oid)?;
-                            repo.commit(
-                                Some("HEAD"),
-                                &signature,
-                                &signature,
-                                &commit_message,
-                                &tree,
-                                &[&head, &remote_commit],
-                            )?;
-                            Ok(())
-                        })();
-
-                        // MergeConflict is the expected "user must resolve"
-                        // path; the UI drives a conflict-resolution flow
-                        // that needs MERGE_HEAD intact. Only cleanup_state
-                        // for non-conflict errors.
-                        // NO cleanup_state on failure — the same trap removed
-                        // from merge(). It only unlinks MERGE_HEAD/MERGE_MSG
-                        // while repo.merge() has already written the merged
-                        // result into the index and working tree, so it leaves
-                        // the merge fully applied but unmarked: banner gone,
-                        // abort_merge refusing, the whole diff staged under a
-                        // failure toast. Adding the pre-merge-commit and
-                        // commit-msg hooks above made a veto the ROUTINE way in.
-                        merge_commit_result?;
-
-                        repo.cleanup_state()?;
-                        // git runs post-merge after a merge commit (flag 0 =
-                        // not a squash). The fast-forward arm of this same
-                        // function fires it; this one did not, so whether a
-                        // repo's hooks ran depended only on whether the history
-                        // happened to diverge.
-                        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+                        // Normal merge. Body extracted to merge_fetched_commit
+                        // so it can be tested — see the doc comment there.
+                        merge_fetched_commit(&repo, &fetch_commit, &remote_ref, &branch_name)?;
                         message = "Merge completed".to_string();
                     }
                 }
@@ -1653,30 +1668,239 @@ mod tests {
         assert_eq!(remote, "chosen");
     }
 
-    /// A pull's merge commit must run the same hooks merge() runs.
+    // ---- pull's normal-merge arm (merge_fetched_commit) ----
+
+    /// A repo whose checked-out branch and `refs/remotes/origin/<branch>` have
+    /// diverged with NON-conflicting changes — the shape that reaches pull's
+    /// normal-merge arm. Returns the repo, the branch name and the remote tip.
+    fn repo_diverged_from_origin() -> (TestRepo, String, git2::Oid) {
+        let test_repo = TestRepo::with_initial_commit();
+        let branch = test_repo.current_branch();
+        test_repo.create_commit("base", &[("base.txt", "base\n")]);
+        let base = test_repo.head_oid();
+
+        // The remote side: a commit touching a file the local side never has.
+        let remote_tip = test_repo.create_commit("remote change", &[("remote.txt", "remote\n")]);
+        test_repo.create_remote_branch(&branch, remote_tip);
+
+        // Rewind the branch (and the working tree) to `base`, then diverge
+        // locally on a different file.
+        {
+            let repo = test_repo.repo();
+            let refname = format!("refs/heads/{}", branch);
+            repo.find_reference(&refname)
+                .unwrap()
+                .set_target(base, "test")
+                .unwrap();
+            repo.set_head(&refname).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .unwrap();
+        }
+        let _ = std::fs::remove_file(test_repo.path.join("remote.txt"));
+        test_repo.create_commit("local change", &[("local.txt", "local\n")]);
+
+        (test_repo, branch, remote_tip)
+    }
+
+    fn merge_origin(test_repo: &TestRepo, branch: &str) -> Result<()> {
+        let repo = test_repo.repo();
+        let remote_ref = format!("origin/{}", branch);
+        let fetch_head = repo
+            .find_reference(&format!("refs/remotes/{}", remote_ref))
+            .unwrap();
+        let fetch_commit = repo.reference_to_annotated_commit(&fetch_head).unwrap();
+        merge_fetched_commit(&repo, &fetch_commit, &remote_ref, branch)
+    }
+
+    /// The happy path: a real two-parent merge commit, and the state cleaned up.
+    #[test]
+    fn test_pull_merge_creates_a_two_parent_commit() {
+        let (test_repo, branch, remote_tip) = repo_diverged_from_origin();
+        let local_tip = test_repo.head_oid();
+
+        merge_origin(&test_repo, &branch).expect("a non-conflicting merge must succeed");
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 2, "a merge commit has two parents");
+        assert_eq!(head.parent_id(0).unwrap(), local_tip);
+        assert_eq!(head.parent_id(1).unwrap(), remote_tip);
+        assert_eq!(
+            head.message().unwrap(),
+            format!("Merge origin/{} into {}", branch, branch)
+        );
+        assert_eq!(
+            repo.state(),
+            git2::RepositoryState::Clean,
+            "a completed merge must leave no merge state"
+        );
+        // Both sides' content is present.
+        assert!(test_repo.path.join("local.txt").exists());
+        assert!(test_repo.path.join("remote.txt").exists());
+    }
+
+    /// A `pre-merge-commit` veto must leave the merge RESUMABLE: MERGE_HEAD on
+    /// disk, state() == Merge, and abort_merge still able to undo it.
     ///
-    /// `git pull` is fetch + merge, and githooks(5) has git merge fire
-    /// pre-merge-commit and commit-msg. Without them, whether a repo's merge
-    /// policy (a Gerrit Change-Id hook, a Conventional-Commits linter) was
-    /// enforced depended only on which of two buttons the user pressed.
-    /// Asserted through commit_merge, which shares the same hook contract.
+    /// This is the bug a `cleanup_state()` on the failure path caused — it
+    /// unlinks MERGE_HEAD while repo.merge() has already written the merged
+    /// result into the index and tree, so the merge is fully applied but
+    /// unmarked: the banner disappears, abort_merge refuses "no merge to
+    /// abort", and the whole diff sits staged under a failure toast.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_veto_leaves_the_merge_resumable() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook(
+            "pre-merge-commit",
+            "#!/bin/sh\necho policy says no\nexit 1\n",
+        );
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the hook must veto the merge");
+        assert!(
+            err.to_string().contains("pre-merge-commit"),
+            "the error must name the hook that vetoed: {}",
+            err
+        );
+
+        assert_eq!(
+            test_repo.head_oid(),
+            head_before,
+            "a vetoed merge must not commit"
+        );
+        assert!(
+            test_repo.path.join(".git/MERGE_HEAD").exists(),
+            "MERGE_HEAD must survive so the merge stays resumable"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+
+        // The app's only recovery action must still work.
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must still be able to undo the vetoed merge");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// A `commit-msg` veto must behave the same way — resumable, uncommitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_commit_msg_veto_leaves_the_merge_resumable() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook("commit-msg", "#!/bin/sh\necho bad message\nexit 1\n");
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the hook must veto the merge");
+        assert!(
+            err.to_string().contains("commit-msg"),
+            "the error must name the hook that vetoed: {}",
+            err
+        );
+        assert_eq!(test_repo.head_oid(), head_before);
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must still work after a commit-msg veto");
+    }
+
+    /// `commit-msg` may REWRITE the message in place (a Gerrit Change-Id hook
+    /// is the canonical example). The rewritten message is the one that must be
+    /// committed — a hook that is merely invoked and then ignored enforces
+    /// nothing.
     #[cfg(unix)]
     #[test]
-    fn test_pull_merge_path_fires_the_same_hooks_as_merge() {
-        // The pull path calls these two by name; this pins that they exist and
-        // are wired the way merge() uses them, so a rename cannot silently drop
-        // one side of the parity.
-        let src = include_str!("remote.rs");
-        let pull_body = &src[src.find("pub async fn pull(").unwrap()
-            ..src.find("/// Push to remote").unwrap_or(src.len())];
+    fn test_pull_merge_commits_the_message_the_commit_msg_hook_rewrote() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook(
+            "commit-msg",
+            "#!/bin/sh\nprintf 'rewritten by the hook\\n\\nChange-Id: I1234\\n' > \"$1\"\n",
+        );
+
+        merge_origin(&test_repo, &branch).expect("the merge must succeed");
+
+        let repo = test_repo.repo();
+        let message = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap()
+            .to_string();
         assert!(
-            pull_body.contains("\"pre-merge-commit\""),
-            "pull's merge commit must fire pre-merge-commit"
+            message.contains("rewritten by the hook") && message.contains("Change-Id: I1234"),
+            "the hook's rewritten message must be the committed one, got: {:?}",
+            message
         );
         assert!(
-            pull_body.contains("run_commit_msg_hook"),
-            "pull's merge commit must fire commit-msg"
+            !message.starts_with("Merge origin/"),
+            "the default message must have been replaced, got: {:?}",
+            message
         );
+    }
+
+    /// The hooks must run in git's order: pre-merge-commit, then commit-msg.
+    /// A commit-msg hook that ran first would see a message the merge policy
+    /// had not yet approved.
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_merge_runs_the_hooks_in_gits_order() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        let log = test_repo.path.join("hook-order.log");
+        for name in ["pre-merge-commit", "commit-msg", "post-merge"] {
+            test_repo.install_hook(
+                name,
+                &format!("#!/bin/sh\necho {} >> {}\n", name, log.to_string_lossy()),
+            );
+        }
+
+        merge_origin(&test_repo, &branch).expect("the merge must succeed");
+
+        let order = std::fs::read_to_string(&log).expect("the hooks must have run");
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["pre-merge-commit", "commit-msg", "post-merge"],
+            "hooks must fire in git's documented order"
+        );
+    }
+
+    /// A conflicting merge returns MergeConflict with the merge state intact,
+    /// so the conflict-resolution flow (and abort_merge) can take over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_conflict_keeps_the_merge_state() {
+        let test_repo = TestRepo::with_initial_commit();
+        let branch = test_repo.current_branch();
+        test_repo.create_commit("base", &[("shared.txt", "base\n")]);
+        let base = test_repo.head_oid();
+        let remote_tip = test_repo.create_commit("remote change", &[("shared.txt", "remote\n")]);
+        test_repo.create_remote_branch(&branch, remote_tip);
+        {
+            let repo = test_repo.repo();
+            let refname = format!("refs/heads/{}", branch);
+            repo.find_reference(&refname)
+                .unwrap()
+                .set_target(base, "test")
+                .unwrap();
+            repo.set_head(&refname).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .unwrap();
+        }
+        test_repo.create_commit("local change", &[("shared.txt", "local\n")]);
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the merge must conflict");
+        assert!(matches!(err, LeviathanError::MergeConflict));
+        assert_eq!(
+            test_repo.head_oid(),
+            head_before,
+            "nothing may be committed"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must work after a conflicted pull merge");
     }
 
     // ---- force push lease must survive the app's own background fetch ----
