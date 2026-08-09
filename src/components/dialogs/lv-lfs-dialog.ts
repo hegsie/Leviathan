@@ -11,6 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { handleExternalLink } from '../../utils/index.ts';
 import type { LfsStatus, LfsFile } from '../../services/git.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireMaintenance,
+  releaseMaintenance,
+  isMaintenanceBlocked,
+} from '../../utils/maintenance-confirms.ts';
+import { warnRepositoryBusy, subscribeRefOps } from '../../utils/ref-lock.ts';
 
 @customElement('lv-lfs-dialog')
 export class LvLfsDialog extends LitElement {
@@ -383,6 +389,27 @@ export class LvLfsDialog extends LitElement {
   @state() private status: LfsStatus | null = null;
   @state() private files: LfsFile[] = [];
   @state() private loading = false;
+  /** Re-entrancy guard for Prune, kept separate from the load spinner. */
+  @state() private pruning = false;
+
+  /**
+   * The shared maintenance lock, which LFS prune alone was missing.
+   *
+   * gc, prune and fsck are reachable from both the Repository Health dialog and
+   * the command palette, so maintenance-confirms.ts hoisted their concurrency
+   * gate out of either surface. `git lfs prune` is the same class of
+   * irreversible object deletion against the same `.git` — its own confirm says
+   * objects that were never pushed cannot be recovered — but it was never
+   * routed through the helper, leaving it the one destructive maintenance
+   * command that could run concurrently with a `git gc`.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get maintenanceBlocked(): boolean {
+    void this.refOpsVersion;
+    return isMaintenanceBlocked(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private error = '';
   @state() private success = '';
   @state() private newPattern = '';
@@ -406,6 +433,9 @@ export class LvLfsDialog extends LitElement {
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     if (this.open) {
       await this.loadStatus();
     }
@@ -415,6 +445,8 @@ export class LvLfsDialog extends LitElement {
     super.disconnectedCallback();
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   /**
@@ -432,27 +464,62 @@ export class LvLfsDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while `git lfs prune` is running. The host's tab-close sweep must not
+   * hide it behind an "LFS closed" toast — the prune deletes local LFS objects
+   * and goes right on doing it.
+   */
+  public get operationInFlight(): boolean {
+    return this.pruning;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProperties.has('open')) {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProperties.has('open') && this.open) {
+      // A prune started against the previous pin may still be running (the
+      // host can clear ?open without going through handleClose). Re-pinning
+      // under it would point every post-await read and the `-changed` event at
+      // a repository the prune never touched, while the one whose local LFS
+      // objects were just deleted went unrefreshed.
+      if (this.operationInFlight) return;
       this.pinnedRepoPath = this.repositoryPath;
+      // Cleared on the OPEN transition, not just per handler. These dialogs
+      // stay mounted (app-shell only toggles ?open), so `success` survived
+      // close/reopen — and a Ctrl+Tab in between meant "Worktree removed" was
+      // replayed above a DIFFERENT repository's untouched list. `error` never
+      // leaked because every loader resets it; this is the third entry point
+      // in the same sweep, after the handlers and the mode-switch buttons.
+      this.success = '';
+      this.error = '';
       await this.loadStatus();
     }
   }
 
-  private async loadStatus(): Promise<void> {
+  /**
+   * @param repoPath The repo to read. Handlers pass the path they CAPTURED
+   * before their await: reading the live pin here refetched — and repainted —
+   * whichever repository the dialog had since been re-pinned to. A reload
+   * whose path no longer matches the pin is dropped rather than painted over
+   * the repository now on screen; its `lfs-changed` event still routes the
+   * refresh to the repo that actually changed.
+   */
+  private async loadStatus(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getLfsStatus(this.pinnedRepoPath);
+    const result = await gitService.getLfsStatus(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
 
     if (result.success && result.data) {
       this.status = result.data;
       if (result.data.enabled) {
-        await this.loadFiles();
+        await this.loadFiles(repoPath);
       }
     } else {
       this.error = result.error?.message || 'Failed to load LFS status';
@@ -461,87 +528,186 @@ export class LvLfsDialog extends LitElement {
     this.loading = false;
   }
 
-  private async loadFiles(): Promise<void> {
-    const result = await gitService.getLfsFiles(this.pinnedRepoPath);
+  /** @param repoPath See loadStatus. */
+  private async loadFiles(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
+    const result = await gitService.getLfsFiles(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
+
     if (result.success && result.data) {
       this.files = result.data;
     }
   }
 
   private async handleInit(): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
     this.loading = true;
     this.error = '';
+    this.success = '';
 
-    const result = await gitService.initLfs(this.pinnedRepoPath);
+    try {
+    const result = await gitService.initLfs(repoPath);
 
     if (result.success) {
-      this.success = 'Git LFS initialized';
-      await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
+      // Says what actually happened: `git lfs install` sets hooks and config
+      // but writes no .gitattributes, so nothing is tracked yet.
+      this.success = 'Git LFS hooks installed — add a pattern below to start tracking files';
+      await this.loadStatus(repoPath);
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: repoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to initialize LFS';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handleTrack(): Promise<void> {
     if (!this.newPattern) return;
 
-    this.loading = true;
-    this.error = '';
-
-    const result = await gitService.lfsTrack(this.pinnedRepoPath, this.newPattern);
-
-    if (result.success) {
-      this.newPattern = '';
-      await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to track pattern';
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes — see handlePull.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
     }
 
-    this.loading = false;
-  }
-
-  private async handleUntrack(pattern: string): Promise<void> {
-    this.loading = true;
-    this.error = '';
-
-    const result = await gitService.lfsUntrack(this.pinnedRepoPath, pattern);
-
-    if (result.success) {
-      await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to untrack pattern';
-    }
-
-    this.loading = false;
-  }
-
-  private async handlePull(): Promise<void> {
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPull(this.pinnedRepoPath);
+    try {
+
+    // Captured before the await: the input is cleared on success, and the
+    // message has to name what was actually tracked.
+    const pattern = this.newPattern;
+    const result = await gitService.lfsTrack(repoPath, pattern);
+
+    if (result.success) {
+      // Init, Pull and Prune in this same dialog all report success; Track and
+      // Untrack did not, and the pattern list is long enough that a row
+      // appearing or vanishing is not by itself a signal. The dialog stays
+      // open, so it gets the same inline message its siblings use.
+      this.success = `Now tracking ${pattern}`;
+      this.newPattern = '';
+      await this.loadStatus(repoPath);
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: repoPath || this.repositoryPath },
+      }));
+    } else {
+      this.error = result.error?.message || 'Failed to track pattern';
+    }
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
+  }
+
+  private async handleUntrack(pattern: string): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes. These write the superproject too — pull runs
+    // `git lfs fetch` + `git lfs checkout` into the working tree, track and
+    // untrack rewrite .gitattributes, init rewrites .git/config and the hooks
+    // — so a `git gc` from Repository Health, or this dialog's own prune
+    // through its confirm, could run straight over them.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
+    this.loading = true;
+    this.error = '';
+    this.success = '';
+
+    try {
+
+    const result = await gitService.lfsUntrack(repoPath, pattern);
+
+    if (result.success) {
+      // Same asymmetry as handleTrack — see the note there.
+      this.success = `No longer tracking ${pattern}`;
+      await this.loadStatus(repoPath);
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: repoPath || this.repositoryPath },
+      }));
+    } else {
+      this.error = result.error?.message || 'Failed to untrack pattern';
+    }
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
+  }
+
+  private async handlePull(): Promise<void> {
+    const repoPath = this.pinnedRepoPath;
+    // The same gate Prune takes. These write the superproject too — pull runs
+    // `git lfs fetch` + `git lfs checkout` into the working tree, track and
+    // untrack rewrite .gitattributes, init rewrites .git/config and the hooks
+    // — so a `git gc` from Repository Health, or this dialog's own prune
+    // through its confirm, could run straight over them.
+    if (!tryAcquireMaintenance(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
+    this.loading = true;
+    this.error = '';
+    this.success = '';
+
+    try {
+
+    const result = await gitService.lfsPull(repoPath);
 
     if (result.success) {
       this.success = 'LFS files pulled successfully';
-      await this.loadFiles();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
+      await this.loadFiles(repoPath);
+      this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: repoPath || this.repositoryPath },
+      }));
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
+      // The gate already said why; a declined confirm needs no message at all.
       this.error = result.error?.message || 'Failed to pull LFS files';
     }
-
-    this.loading = false;
+    } finally {
+      this.loading = false;
+      releaseMaintenance(repoPath);
+    }
   }
 
   private async handlePrune(): Promise<void> {
+    // A DEDICATED flag, not `loading`: that one also tracks background status
+    // reloads, and a refresh in flight must not swallow the user's click.
+    //
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click made the user read and
+    // dismiss the same irreversible-deletion warning twice for one gesture.
+    if (this.pruning) return;
+
     // Captured BEFORE the confirm await: this dialog is bound to the active
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
+
+    // Checked before the confirm, claimed after it — the same order gc and
+    // prune use in the Repository Health dialog, so the user is not walked
+    // through an irreversible-deletion warning only to be refused at the end.
+    if (isMaintenanceBlocked(repoPath)) {
+      warnRepositoryBusy();
+      return;
+    }
+
+    this.pruning = true;
 
     // `git lfs prune` deletes local LFS objects that recent commits don't
     // reference. Unless lfs.pruneverifyremotealways is configured it does not
@@ -554,23 +720,38 @@ export class LvLfsDialog extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.pruning = false;
+      return;
+    }
+
+    if (!tryAcquireMaintenance(repoPath)) {
+      this.pruning = false;
+      warnRepositoryBusy();
+      return;
+    }
 
     this.loading = true;
     this.error = '';
     this.success = '';
 
-    const result = await gitService.lfsPrune(repoPath);
+    try {
+      const result = await gitService.lfsPrune(repoPath);
 
-    if (result.success) {
-      this.success = result.data || 'LFS files pruned';
-      await this.loadStatus();
-      this.dispatchEvent(new CustomEvent('lfs-changed'));
-    } else {
-      this.error = result.error?.message || 'Failed to prune LFS files';
+      if (result.success) {
+        this.success = result.data || 'LFS files pruned';
+        await this.loadStatus(repoPath);
+        this.dispatchEvent(new CustomEvent('lfs-changed', {
+        detail: { repositoryPath: repoPath || this.repositoryPath },
+      }));
+      } else {
+        this.error = result.error?.message || 'Failed to prune LFS files';
+      }
+    } finally {
+      this.loading = false;
+      this.pruning = false;
+      releaseMaintenance(repoPath);
     }
-
-    this.loading = false;
   }
 
   private formatSize(bytes: number): string {
@@ -581,6 +762,12 @@ export class LvLfsDialog extends LitElement {
   }
 
   private handleClose(): void {
+    // Escape, the overlay and the x must honour the same rule the Prune button
+    // does: dismissing mid-prune left `git lfs prune` deleting local objects
+    // with no visible surface, and a Ctrl+Tab plus reopen then re-pinned the
+    // dialog at another repository which the prune's own completion proceeded
+    // to report against.
+    if (this.operationInFlight) return;
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -598,7 +785,11 @@ export class LvLfsDialog extends LitElement {
               </svg>
               Git LFS
             </span>
-            <button class="close-btn" @click=${this.handleClose}>
+            <button
+              class="close-btn"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -617,7 +808,11 @@ export class LvLfsDialog extends LitElement {
           </div>
 
           <div class="dialog-footer">
-            <button class="btn btn-secondary" @click=${this.handleClose}>
+            <button
+              class="btn btn-secondary"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               Close
             </button>
           </div>
@@ -667,14 +862,22 @@ export class LvLfsDialog extends LitElement {
             `
           : html`
               <div class="actions">
-                <button class="btn btn-primary" @click=${this.handleInit} ?disabled=${this.loading}>
+                <button class="btn btn-primary" @click=${this.handleInit} ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}>
                   Initialize LFS
                 </button>
               </div>
             `}
       </div>
 
-      ${this.status.enabled
+      <!-- Tracked Patterns is gated on INSTALLED, not enabled.
+           "enabled" means .gitattributes exists and contains filter=lfs, and
+           the only thing that writes that file is git lfs track — which lived
+           in here. git lfs install (the Initialize button) sets config and
+           hooks but never touches .gitattributes, so Initialize reported
+           success, the badge stayed "Not configured", and the one control that
+           could have changed it was unreachable. The dialog was a dead end on
+           every repo adopting LFS for the first time. -->
+      ${this.status.installed
         ? html`
             <div class="section">
               <div class="section-header">
@@ -691,7 +894,7 @@ export class LvLfsDialog extends LitElement {
                             class="btn-icon danger"
                             title="Remove"
                             @click=${() => this.handleUntrack(p.pattern)}
-                            ?disabled=${this.loading}
+                            ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}
                           >
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -718,12 +921,17 @@ export class LvLfsDialog extends LitElement {
                 <button
                   class="btn btn-primary btn-sm"
                   @click=${this.handleTrack}
-                  ?disabled=${this.loading || !this.newPattern}
+                  ?disabled=${this.loading || this.pruning || this.maintenanceBlocked || !this.newPattern}
                 >
                   Track
                 </button>
               </div>
             </div>
+          `
+        : ''}
+
+      ${this.status.enabled
+        ? html`
 
             <div class="section">
               <div class="section-header">
@@ -760,7 +968,7 @@ export class LvLfsDialog extends LitElement {
             </div>
 
             <div class="actions">
-              <button class="btn btn-secondary" @click=${this.handlePull} ?disabled=${this.loading}>
+              <button class="btn btn-secondary" @click=${this.handlePull} ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                   <polyline points="7 10 12 15 17 10"/>
@@ -768,7 +976,11 @@ export class LvLfsDialog extends LitElement {
                 </svg>
                 Pull Files
               </button>
-              <button class="btn btn-secondary" @click=${this.handlePrune} ?disabled=${this.loading}>
+              <button
+                class="btn btn-secondary"
+                @click=${this.handlePrune}
+                ?disabled=${this.loading || this.pruning || this.maintenanceBlocked}
+              >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="3 6 5 6 21 6"/>
                   <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>

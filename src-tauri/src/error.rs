@@ -60,6 +60,15 @@ pub enum LeviathanError {
     #[error("Rebase conflict")]
     RebaseConflict,
 
+    /// The rebase advanced but stopped again at the next `edit`/`break` line.
+    ///
+    /// Distinct from RebaseConflict: nothing needs resolving, and distinct
+    /// from a plain failure, because the remedy (amend the commit) lives
+    /// outside the conflict dialog — so the dialog must CLOSE rather than stay
+    /// open offering a retry it cannot help with.
+    #[error("Rebase paused")]
+    RebasePaused,
+
     #[error("Cherry-pick conflict")]
     CherryPickConflict,
 
@@ -116,6 +125,7 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::MergeConflict => "MERGE_CONFLICT",
             LeviathanError::RebaseInProgress => "REBASE_IN_PROGRESS",
             LeviathanError::RebaseConflict => "REBASE_CONFLICT",
+            LeviathanError::RebasePaused => "REBASE_PAUSED",
             LeviathanError::CherryPickConflict => "CHERRY_PICK_CONFLICT",
             LeviathanError::CherryPickInProgress => "CHERRY_PICK_IN_PROGRESS",
             LeviathanError::RevertConflict => "REVERT_CONFLICT",
@@ -160,6 +170,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::MergeConflict => "MERGE_CONFLICT",
                 LeviathanError::RebaseInProgress => "REBASE_IN_PROGRESS",
                 LeviathanError::RebaseConflict => "REBASE_CONFLICT",
+                LeviathanError::RebasePaused => "REBASE_PAUSED",
                 LeviathanError::CherryPickConflict => "CHERRY_PICK_CONFLICT",
                 LeviathanError::CherryPickInProgress => "CHERRY_PICK_IN_PROGRESS",
                 LeviathanError::RevertConflict => "REVERT_CONFLICT",

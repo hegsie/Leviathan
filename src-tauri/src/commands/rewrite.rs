@@ -24,6 +24,28 @@ const CHERRY_PICK_SEQUENCE: &str = "CHERRY_PICK_SEQUENCE";
 /// picks on the branch.
 const CHERRY_PICK_SEQUENCE_HEAD: &str = "CHERRY_PICK_SEQUENCE_HEAD";
 
+/// Interpret a git path (raw bytes) as a filesystem path.
+///
+/// git stores paths as bytes, and on unix a name that is not valid UTF-8 is
+/// still a perfectly ordinary filename. Routing it through
+/// `str::from_utf8(..).unwrap_or("")` turned such a path into the empty string,
+/// so `workdir.join(rel)` became the workdir itself and the removal below
+/// silently did nothing — a file the aborted operation had ADDED was left
+/// behind in the working tree. Returns None only where the platform genuinely
+/// cannot represent the bytes.
+#[cfg(unix)]
+fn git_path_to_pathbuf(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+fn git_path_to_pathbuf(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .map(std::path::PathBuf::from)
+}
+
 /// Restore the working tree and index to HEAD when aborting a cherry-pick or
 /// revert, while preserving uncommitted changes to files the operation did not
 /// touch. This mirrors `git cherry-pick --abort` / `git revert --abort`, which
@@ -73,9 +95,11 @@ fn restore_after_abort(repo: &git2::Repository) -> Result<()> {
     // unrelated untracked files are untouched).
     if let Some(workdir) = repo.workdir() {
         for path in &affected {
-            let rel = Path::new(std::str::from_utf8(path).unwrap_or(""));
-            if head_tree.get_path(rel).is_err() {
-                let _ = std::fs::remove_file(workdir.join(rel));
+            let Some(rel) = git_path_to_pathbuf(path) else {
+                continue;
+            };
+            if head_tree.get_path(&rel).is_err() {
+                let _ = std::fs::remove_file(workdir.join(&rel));
             }
         }
     }
@@ -1017,12 +1041,14 @@ pub async fn skip_rebase_commit(path: String) -> Result<()> {
 pub async fn reset(path: String, target_ref: String, mode: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Check for existing operations in progress
-    if repo.state() != git2::RepositoryState::Clean {
-        return Err(LeviathanError::OperationFailed(
-            "Another operation is in progress".to_string(),
-        ));
-    }
+    // Shared with the reflog dialog's reset, which was written later with the
+    // researched rule and refuses only the states where libgit2's state cleanup
+    // would silently destroy an in-progress operation. A blanket
+    // `state() != Clean` also refused a plain merge, cherry-pick or revert —
+    // where `git reset` is the documented way to back out — so the same reset
+    // succeeded from Undo and failed from the graph with "Another operation is
+    // in progress", a message naming no way forward.
+    super::reflog::ensure_resettable(&repo)?;
 
     // Find the target commit
     let obj = repo
@@ -1551,6 +1577,58 @@ pub async fn cherry_pick_from_branch(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[tokio::test]
+    async fn test_reset_is_allowed_mid_merge() {
+        // `git reset` is the documented way to back out of a conflicted merge.
+        // A blanket `state() != Clean` refused it here while the reflog
+        // dialog's reset — same operation, same confirm copy — allowed it.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        let main_branch = repo.current_branch();
+        repo.create_branch("feature");
+        repo.create_commit("on main", &[("f.txt", "main side")]);
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("f.txt", "feature side")]);
+        repo.checkout_branch(&main_branch);
+
+        // Leave a conflicted merge in progress.
+        let _ =
+            crate::commands::merge::merge(repo.path_str(), "feature".to_string(), None, None, None)
+                .await;
+        assert_ne!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "the merge must actually be in progress for this to mean anything"
+        );
+
+        reset(repo.path_str(), base, "hard".to_string())
+            .await
+            .expect("reset must back out of a conflicted merge");
+    }
+
+    #[tokio::test]
+    async fn test_reset_is_still_refused_mid_rebase() {
+        // The states ensure_resettable does refuse are the ones where libgit2's
+        // state cleanup would silently destroy the in-progress operation.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        std::fs::write(
+            repo.path.join(".git").join("REBASE_HEAD"),
+            format!("{}\n", base),
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.path.join(".git").join("rebase-merge")).unwrap();
+
+        let err = reset(repo.path_str(), base, "hard".to_string())
+            .await
+            .expect_err("a rebase in progress must still refuse");
+        assert!(
+            format!("{}", err).contains("rebase"),
+            "and say which one: {}",
+            err
+        );
+    }
 
     // ==================== Cherry-Pick Tests ====================
 
@@ -3112,6 +3190,63 @@ mod tests {
         assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
         let unrelated = std::fs::read_to_string(test_repo.path.join("unrelated.txt")).unwrap();
         assert_eq!(unrelated, "PRECIOUS WORK");
+    }
+
+    /// A cherry-pick that ADDS a file whose name is not valid UTF-8 must still
+    /// have that file removed on abort.
+    ///
+    /// git paths are bytes; on unix a non-UTF-8 filename is ordinary. Decoding
+    /// it with `from_utf8(..).unwrap_or("")` collapsed the path to the workdir
+    /// root, so the explicit removal — the step that handles files ADDED by the
+    /// operation, which a path-scoped checkout_head cannot restore because they
+    /// are absent from HEAD — silently did nothing and left the file behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_abort_cherry_pick_removes_added_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+
+        let odd_name = std::ffi::OsStr::from_bytes(b"added-\xff.txt");
+        let odd_rel = std::path::Path::new(odd_name);
+
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        // Commit the odd-named file alongside a conflicting edit, so the pick
+        // both adds it and fails.
+        std::fs::write(test_repo.path.join(odd_rel), "picked").unwrap();
+        std::fs::write(test_repo.path.join("shared.txt"), "feature").unwrap();
+        let feature_oid = {
+            let repo = test_repo.repo();
+            let mut index = repo.index().unwrap();
+            index.add_path(odd_rel).unwrap();
+            index.add_path(std::path::Path::new("shared.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = repo.signature().unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "Feature", &tree, &[&parent])
+                .unwrap()
+        };
+
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main edits shared", &[("shared.txt", "main")]);
+
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+        assert!(
+            test_repo.path.join(odd_rel).exists(),
+            "the conflicting pick writes the added file into the working tree"
+        );
+
+        abort_cherry_pick(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert!(
+            !test_repo.path.join(odd_rel).exists(),
+            "abort must remove a file the pick added, whatever its name encodes to"
+        );
     }
 
     // ---- Finding 44: multi-commit sequencer abort rewinds & continue resumes ----

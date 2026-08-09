@@ -11,6 +11,12 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { Stash } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface ContextMenuState {
   visible: boolean;
@@ -75,6 +81,52 @@ export class LvStashList extends LitElement {
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
         text-align: center;
+      }
+
+      /* A failed load renders THIS, never the previous repository's rows. */
+      .error {
+        padding: 4px 8px;
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+        text-align: center;
+        overflow-wrap: anywhere;
+      }
+
+      .stash-actions {
+        display: flex;
+        justify-content: center;
+        padding: 4px 12px 6px;
+      }
+
+      .stash-btn {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        padding: 4px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-secondary);
+        font-family: inherit;
+        font-size: var(--font-size-sm);
+        cursor: pointer;
+      }
+
+      .stash-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .stash-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .stash-btn svg {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
       }
 
       .loading {
@@ -148,11 +200,52 @@ export class LvStashList extends LitElement {
   @state() private stashes: Stash[] = [];
   @state() private loading = true;
   @state() private isStashing = false;
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell and the other sidebar lists.
+   *
+   * This was a component-local boolean, so a hard reset started from the graph
+   * and a checkout started here ran concurrently against the same working
+   * tree. See utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /**
+   * Claim the lock for `repoPath`; false when it is already held.
+   *
+   * The path is passed explicitly rather than read from `this.repositoryPath`
+   * at release time: the prop rebinds when the user switches repo tabs
+   * mid-operation, so a release that re-read it would free the WRONG repo's
+   * lock and wedge the one that is actually running.
+   */
+  private claimOperation(repoPath: string): boolean {
+    // Reports the refusal: these components hold the same lock app-shell does,
+    // and a gesture with no disabled binding — the double-clicked branch row —
+    // otherwise looked like a hung app for the whole other operation.
+    return tryAcquireRefOpOrWarn(repoPath);
+  }
+
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, stash: null };
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // isRefOpRunning is plain module state Lit cannot observe, so without this
+    // the ?disabled bindings never re-render on a lock transition: a context
+    // menu opened before an operation started stayed fully enabled through it,
+    // and one opened during an operation stayed disabled after it finished —
+    // a dead control with no explanation until the menu is reopened.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     // Conflicted applies/pops complete inside the shared conflict dialog
     // (which drops the stash there), so reload when the app-level refresh
     // fires — otherwise the dropped entry stays listed.
@@ -164,6 +257,8 @@ export class LvStashList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
@@ -235,14 +330,46 @@ export class LvStashList extends LitElement {
     await this.loadStashes();
   }
 
+  /**
+   * Per-path load generation. lv-left-panel keeps ONE instance of this element
+   * across tabs and only rebinds `.repositoryPath`, and Lit does not await an
+   * async `updated()` — so Ctrl+Tab twice quickly (A→B→A) starts overlapping
+   * loads with nothing sequencing them, and whichever resolved last won.
+   * Repo B's stashes rendering under repo A's tab is not cosmetic: the rows
+   * are what Apply/Pop/Drop act on. Same shape as
+   * lv-branch-list.branchesLoadSeq and lv-file-status.statusLoadSeq.
+   */
+  private stashesLoadSeq = new Map<string, number>();
+
+  /**
+   * The load for the CURRENT repo failed. Rendered, because the alternative —
+   * leaving the previous repo's rows on screen — is indistinguishable from
+   * real data and invites a Drop against a stash the user is not looking at.
+   */
+  @state() private error: string | null = null;
+
   private async loadStashes(): Promise<void> {
     if (!this.repositoryPath) return;
+
+    // Captured before the await so a mid-flight tab switch still resolves this
+    // result against the repo it was loaded FROM.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.stashesLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.stashesLoadSeq.set(loadedPath, seq);
+    /** Latest load for this path AND this path is still the bound one. */
+    const isFresh = (): boolean =>
+      this.stashesLoadSeq.get(loadedPath) === seq && this.repositoryPath === loadedPath;
 
     this.loading = true;
 
     try {
-      const result = await gitService.getStashes(this.repositoryPath);
+      const result = await gitService.getStashes(loadedPath);
+      // A superseded load must touch NOTHING: not the rows, not the count
+      // badge, not the loading flag the live load owns.
+      if (!isFresh()) return;
+
       if (result.success) {
+        this.error = null;
         this.stashes = result.data!;
         // Emit count changed event
         this.dispatchEvent(new CustomEvent('stash-count-changed', {
@@ -251,22 +378,47 @@ export class LvStashList extends LitElement {
           composed: true,
         }));
       } else {
-        showToast(result.error?.message || 'Failed to load stashes', 'error');
+        this.error = result.error?.message || 'Failed to load stashes';
+        this.stashes = [];
+        this.dispatchEvent(new CustomEvent('stash-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast(this.error, 'error');
       }
     } catch (err) {
       console.error('Failed to load stashes:', err);
-      showToast('Failed to load stashes', 'error');
+      if (isFresh()) {
+        this.error = err instanceof Error ? err.message : 'Failed to load stashes';
+        this.stashes = [];
+        this.dispatchEvent(new CustomEvent('stash-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast('Failed to load stashes', 'error');
+      }
     } finally {
-      this.loading = false;
+      if (isFresh()) {
+        this.loading = false;
+      }
     }
   }
 
   private async handleCreateStash(): Promise<void> {
     if (this.isStashing || !this.repositoryPath) return;
 
+    const repoPath = this.repositoryPath;
+    // The SHARED lock, like every sibling handler here. `git stash push` resets
+    // the working tree to HEAD and prepends to the stash list, renumbering
+    // every entry — the same mutation app-shell wraps in runRefExclusive for
+    // the keyboard shortcut. `isStashing` alone only ever guarded this one
+    // component.
+    if (!this.claimOperation(repoPath)) return;
+
     this.isStashing = true;
 
-    const repoPath = this.repositoryPath;
     try {
       const result = await gitService.createStash({
         path: repoPath,
@@ -280,6 +432,10 @@ export class LvStashList extends LitElement {
           showToast('No local changes to save', 'info');
           return;
         }
+        // The shortcut and the palette both toast "Stash created"; this
+        // surface reloaded the list and said nothing, so the same operation
+        // reported differently depending on where it was started.
+        showToast('Stash created', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-created', {
           detail: { repositoryPath: repoPath },
@@ -295,6 +451,7 @@ export class LvStashList extends LitElement {
       showToast('Failed to create stash', 'error');
     } finally {
       this.isStashing = false;
+      this.releaseOperation(repoPath);
     }
   }
 
@@ -360,10 +517,11 @@ export class LvStashList extends LitElement {
 
   private async handleApplyStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
 
     // Captured BEFORE the await: the conflict event must carry the repo the
     // apply actually ran on, even if the prop is rebound mid-flight.
@@ -379,6 +537,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash applied', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
           detail: { repositoryPath: repoPath },
@@ -387,7 +548,15 @@ export class LvStashList extends LitElement {
         }));
       } else {
         console.error('Failed to apply stash:', result.error);
-        showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        // A conflict is not a failure: the stash content DID land in the
+        // working tree and the resolution dialog is about to open. A red
+        // "Merge conflict" beside it reads as "nothing happened" — the same
+        // reason pull, the dashboard and every auto-stash path warn instead.
+        if (this.isConflictError(result.error)) {
+          showToast('Stash applied — conflicts need resolution', 'warning');
+        } else {
+          showToast(result.error?.message ?? 'Failed to apply stash', 'error');
+        }
         // A conflicting apply left the changes in the working tree; open the
         // conflict resolution dialog. The stash was NOT dropped (apply, not pop),
         // so completion must keep it.
@@ -397,6 +566,12 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
+              // The oid, not just the position: the dialog's identity capture
+              // is an async round trip, and a stash pushed in the meantime —
+              // from a terminal, or Ctrl+Shift+S — prepends and renumbers the
+              // list, so Complete would drop the wrong entry. Same threading
+              // the auto-stash dispatchers already do.
+              stashOid: stash.oid,
               stashIndex: index,
               dropStashOnComplete: false,
               repositoryPath: repoPath,
@@ -405,7 +580,7 @@ export class LvStashList extends LitElement {
         }
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -419,7 +594,9 @@ export class LvStashList extends LitElement {
 
   private async handlePopStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -433,9 +610,11 @@ export class LvStashList extends LitElement {
       `This will apply the stash "${stash.message}" and remove it from the stash list. Any conflicts will need to be resolved manually. Continue?`,
       'warning'
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const index = await this.resolveStashIndex(repoPath, stash, 'popped');
@@ -447,6 +626,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash popped', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-applied', {
           detail: { repositoryPath: repoPath },
@@ -455,7 +637,15 @@ export class LvStashList extends LitElement {
         }));
       } else {
         console.error('Failed to pop stash:', result.error);
-        showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        // A conflict is not a failure: the stash content DID land in the
+        // working tree and the resolution dialog is about to open. A red
+        // "Merge conflict" beside it reads as "nothing happened" — the same
+        // reason pull, the dashboard and every auto-stash path warn instead.
+        if (this.isConflictError(result.error)) {
+          showToast('Stash popped — conflicts need resolution', 'warning');
+        } else {
+          showToast(result.error?.message ?? 'Failed to pop stash', 'error');
+        }
         // A conflicting pop left the changes in the working tree AND left the
         // stash entry in place. Open the conflict resolution dialog; completion
         // must drop the stash (pop semantics) once conflicts are resolved.
@@ -465,6 +655,12 @@ export class LvStashList extends LitElement {
             composed: true,
             detail: {
               operationType: 'stash',
+              // The oid, not just the position: the dialog's identity capture
+              // is an async round trip, and a stash pushed in the meantime —
+              // from a terminal, or Ctrl+Shift+S — prepends and renumbers the
+              // list, so Complete would drop the wrong entry. Same threading
+              // the auto-stash dispatchers already do.
+              stashOid: stash.oid,
               stashIndex: index,
               dropStashOnComplete: true,
               repositoryPath: repoPath,
@@ -473,13 +669,15 @@ export class LvStashList extends LitElement {
         }
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleDropStash(): Promise<void> {
     const stash = this.contextMenu.stash;
-    if (!stash || this.operationInProgress) return;
+    if (!stash) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -494,9 +692,11 @@ export class LvStashList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const index = await this.resolveStashIndex(repoPath, stash, 'dropped');
@@ -508,6 +708,9 @@ export class LvStashList extends LitElement {
       });
 
       if (result.success) {
+        // Reports itself, like Create and like branch/tag delete. The only
+        // signal these ran at all was a row changing or vanishing.
+        showToast('Stash dropped', 'success');
         await this.loadStashes();
         this.dispatchEvent(new CustomEvent('stash-dropped', {
           detail: { stash, repositoryPath: repoPath },
@@ -519,7 +722,7 @@ export class LvStashList extends LitElement {
         showToast(result.error?.message ?? 'Failed to drop stash', 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -564,7 +767,9 @@ export class LvStashList extends LitElement {
     return html`
       ${this.loading
         ? html`<div class="loading">Loading stashes...</div>`
-        : this.stashes.length === 0
+        : this.error
+          ? html`<div class="error" role="alert">${this.error}</div>`
+          : this.stashes.length === 0
           ? html`<div class="empty">No stashes</div>`
           : html`
               <ul class="stash-list" role="list">
@@ -589,6 +794,25 @@ export class LvStashList extends LitElement {
                 `)}
               </ul>
             `}
+
+      ${this.loading
+        ? nothing
+        : html`
+            <div class="stash-actions">
+              <button
+                class="stash-btn"
+                title="Save your uncommitted changes to a new stash"
+                ?disabled=${this.isStashing || this.operationInProgress}
+                @click=${this.handleCreateStash}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                  <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"></path>
+                </svg>
+                ${this.isStashing ? 'Stashing...' : 'Stash Changes'}
+              </button>
+            </div>
+          `}
 
       ${this.renderContextMenu()}
     `;

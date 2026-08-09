@@ -186,6 +186,14 @@ export class LvChangelogDialog extends LitElement {
     return this.modal?.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * The shared name the host's tab-close sweep reads. Aliases
+   * `generationInFlight` so this dialog participates in the one sweep.
+   */
+  public get operationInFlight(): boolean {
+    return this.isGenerating;
+  }
+
   public async open(): Promise<void> {
     // A generation already running owns this component; reset() would clear
     // isGenerating and re-enable Generate for a second concurrent run.

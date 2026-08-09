@@ -25,11 +25,10 @@ export async function saveWorkspace(workspace: Workspace): Promise<CommandResult
 }
 
 export async function deleteWorkspace(workspaceId: string): Promise<CommandResult<void>> {
-  const result = await invokeCommand<void>('delete_workspace', { workspaceId });
-  if (result.success) {
-    showToast('Workspace deleted', 'success');
-  }
-  return result;
+  // Deliberately silent: the sole caller (lv-workspace-manager-dialog) names
+  // which workspace went, and toasting here too stacked two success messages
+  // for one click.
+  return invokeCommand<void>('delete_workspace', { workspaceId });
 }
 
 export async function addRepositoryToWorkspace(

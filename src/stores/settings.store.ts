@@ -105,7 +105,10 @@ const defaultSettings = {
   fetchOnFocus: false,
   confirmBeforeDiscard: true,
   openLastRepository: true,
-  autoStashOnCheckout: false,
+  // Defaults ON: until the setting was wired up it was never read and every
+  // checkout auto-stashed, so `false` here would silently change behaviour for
+  // every existing user — turning a seamless branch switch into a refusal.
+  autoStashOnCheckout: true,
   staleBranchDays: 90,
   networkOperationTimeout: 300,
   offlineMode: false,
@@ -192,7 +195,22 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 1,
+      version: 2,
+      // Changing a default only affects installs with no persisted state.
+      // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
+      // the whole settings object is persisted the moment the user changes
+      // anything at all — so every existing user carried the old
+      // `autoStashOnCheckout: false` over the new default and still got a
+      // refused checkout. That `false` was never a user choice: the setting was
+      // not read by anything until it was wired up, so every one of those users
+      // has only ever experienced auto-stashing.
+      migrate: (persisted: unknown, fromVersion: number) => {
+        const state = (persisted ?? {}) as Partial<SettingsState>;
+        if (fromVersion < 2) {
+          return { ...state, autoStashOnCheckout: true } as SettingsState;
+        }
+        return state as SettingsState;
+      },
       onRehydrateStorage: () => (state) => {
         if (state) {
           applyTheme(state.theme);

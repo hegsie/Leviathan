@@ -5,6 +5,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
+use crate::utils::cli_safety::reject_flag_like;
 use crate::utils::create_command;
 
 /// Information about a submodule
@@ -159,6 +160,12 @@ pub async fn add_submodule(
 ) -> Result<Submodule> {
     let repo_path = Path::new(&path);
 
+    reject_flag_like(&url, "Submodule URL")?;
+    reject_flag_like(&submodule_path, "Submodule path")?;
+    if let Some(ref b) = branch {
+        reject_flag_like(b, "Submodule branch")?;
+    }
+
     let mut args = vec!["submodule", "add"];
 
     if let Some(ref b) = branch {
@@ -166,6 +173,7 @@ pub async fn add_submodule(
         args.push(b);
     }
 
+    args.push("--");
     args.push(&url);
     args.push(&submodule_path);
 
@@ -196,6 +204,10 @@ pub async fn init_submodules(path: String, submodule_paths: Option<Vec<String>>)
     let paths_owned: Vec<String>;
     if let Some(ref paths) = submodule_paths {
         paths_owned = paths.clone();
+        for p in &paths_owned {
+            reject_flag_like(p, "Submodule path")?;
+        }
+        args.push("--");
         for p in &paths_owned {
             args.push(p);
         }
@@ -250,6 +262,9 @@ pub async fn update_submodules(
     let paths_owned: Vec<String>;
     if let Some(ref paths) = submodule_paths {
         paths_owned = paths.clone();
+        for p in &paths_owned {
+            reject_flag_like(p, "Submodule path")?;
+        }
         args.push("--");
         for p in &paths_owned {
             args.push(p);
@@ -271,6 +286,10 @@ pub async fn sync_submodules(path: String, submodule_paths: Option<Vec<String>>)
     if let Some(ref paths) = submodule_paths {
         paths_owned = paths.clone();
         for p in &paths_owned {
+            reject_flag_like(p, "Submodule path")?;
+        }
+        args.push("--");
+        for p in &paths_owned {
             args.push(p);
         }
     }
@@ -288,12 +307,15 @@ pub async fn deinit_submodule(
 ) -> Result<()> {
     let repo_path = Path::new(&path);
 
+    reject_flag_like(&submodule_path, "Submodule path")?;
+
     let mut args = vec!["submodule", "deinit"];
 
     if force.unwrap_or(false) {
         args.push("-f");
     }
 
+    args.push("--");
     args.push(&submodule_path);
 
     run_git_command(repo_path, &args)?;
@@ -314,11 +336,22 @@ pub async fn remove_submodule(path: String, submodule_path: String) -> Result<()
     // did) permanently destroyed those commits with no reflog and no recovery
     // path — a data-loss bug that canonical git never inflicts.
 
+    // The path comes from .gitmodules, which is repository content — a clone
+    // from an untrusted source can declare `path = --all`, and
+    // `git submodule deinit -f --all` clears and unregisters EVERY submodule,
+    // discarding uncommitted work in each, while the confirm named only one.
+    // `--` (plus the rejection) is what every other CLI-shelling command in
+    // this codebase does; update_submodules one function away already did.
+    reject_flag_like(&submodule_path, "Submodule path")?;
+
     // Step 1: Deinit the submodule
-    run_git_command(repo_path, &["submodule", "deinit", "-f", &submodule_path])?;
+    run_git_command(
+        repo_path,
+        &["submodule", "deinit", "-f", "--", &submodule_path],
+    )?;
 
     // Step 2: Remove from working tree and index (keeps .git/modules for recovery)
-    run_git_command(repo_path, &["rm", "-f", &submodule_path])?;
+    run_git_command(repo_path, &["rm", "-f", "--", &submodule_path])?;
 
     Ok(())
 }
@@ -328,7 +361,9 @@ pub async fn remove_submodule(path: String, submodule_path: String) -> Result<()
 pub async fn get_submodule_status(path: String, submodule_path: String) -> Result<String> {
     let repo_path = Path::new(&path);
 
-    let output = run_git_command(repo_path, &["submodule", "status", &submodule_path])?;
+    reject_flag_like(&submodule_path, "Submodule path")?;
+
+    let output = run_git_command(repo_path, &["submodule", "status", "--", &submodule_path])?;
 
     Ok(output)
 }
@@ -611,6 +646,93 @@ mod tests {
         assert_eq!(
             obj_type, "commit",
             "unpushed submodule commit should remain recoverable after removal"
+        );
+    }
+
+    /// A submodule path comes from .gitmodules, which is repository content.
+    /// A clone from an untrusted source can declare `path = --all`, and
+    /// `git submodule deinit -f --all` clears and unregisters EVERY submodule
+    /// — discarding uncommitted work in each — while the confirm the user saw
+    /// named exactly one.
+    #[tokio::test]
+    async fn test_remove_submodule_rejects_a_flag_like_path() {
+        let source = TestRepo::with_initial_commit();
+        let super_repo = TestRepo::with_initial_commit();
+        let super_path = super_repo.path.clone();
+        let source_url = source.path.to_string_lossy().to_string();
+
+        git_in(&super_path, &["submodule", "add", &source_url, "keep/one"]);
+        git_in(&super_path, &["submodule", "add", &source_url, "keep/two"]);
+        git_in(&super_path, &["commit", "-m", "add submodules"]);
+
+        // Uncommitted work inside one of them, which --all would discard.
+        let one = super_path.join("keep").join("one");
+        std::fs::write(one.join("scratch.txt"), "unsaved work").unwrap();
+
+        let err = remove_submodule(super_repo.path_str(), "--all".to_string())
+            .await
+            .expect_err("a flag-like path must never reach git as a positional");
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Both submodules survive, with the uncommitted work intact.
+        assert!(
+            one.join("scratch.txt").exists(),
+            "uncommitted work discarded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(one.join("scratch.txt")).unwrap(),
+            "unsaved work"
+        );
+        assert!(
+            super_path
+                .join("keep")
+                .join("two")
+                .join("README.md")
+                .exists(),
+            "the other submodule's working tree was cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deinit_and_status_reject_a_flag_like_path() {
+        let repo = TestRepo::with_initial_commit();
+
+        for err in [
+            deinit_submodule(repo.path_str(), "--all".to_string(), Some(true))
+                .await
+                .expect_err("deinit must reject a flag-like path"),
+            get_submodule_status(repo.path_str(), "--all".to_string())
+                .await
+                .expect_err("status must reject a flag-like path"),
+        ] {
+            assert!(
+                err.to_string().contains("must not start with '-'"),
+                "unexpected error: {}",
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_submodule_rejects_a_flag_like_url() {
+        let repo = TestRepo::with_initial_commit();
+
+        let err = add_submodule(
+            repo.path_str(),
+            "--upload-pack=touch /tmp/pwned".to_string(),
+            "deps/lib".to_string(),
+            None,
+        )
+        .await
+        .expect_err("a flag-like URL is the classic RCE vector");
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "unexpected error: {}",
+            err
         );
     }
 }

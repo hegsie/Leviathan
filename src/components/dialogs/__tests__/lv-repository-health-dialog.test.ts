@@ -120,6 +120,18 @@ describe('lv-repository-health-dialog destructive actions', () => {
 });
 
 describe('lv-repository-health-dialog deferred close', () => {
+  beforeEach(() => {
+    resetMaintenanceLocks();
+    invokeHistory.length = 0;
+    confirmResult = true;
+    mockInvoke = defaultMockInvoke;
+  });
+
+  afterEach(() => {
+    resetMaintenanceLocks();
+    mockInvoke = defaultMockInvoke;
+  });
+
   // Closing this dialog DESTROYS the element, so the host refuses while gc is
   // in flight. Refusing alone left it open and pinned to a repo whose tab was
   // gone — and its own guard (!pinnedRepoPath || runningAction) then allowed a
@@ -165,6 +177,76 @@ describe('lv-repository-health-dialog deferred close', () => {
     await el.updateComplete;
 
     expect(closed, 'closed once the gc landed').to.equal(1);
+  });
+
+  // gc and prune claim `runningAction` BEFORE the confirm, so a double-click
+  // cannot stack two "permanently deletes unreachable objects" warnings. That
+  // makes the declined confirm — and a lost claim race — two more ways out of
+  // "running", and settleClosePending was wired only into the `finally`. A tab
+  // closed during the confirm therefore left closePending stuck true with
+  // nothing running: the dialog stayed open pinned to a repo with no tab,
+  // having just promised in a toast that it would close.
+  it('closes when the confirm that was up during the tab close is declined', async () => {
+    let answerConfirm!: (v: unknown) => void;
+    mockInvoke = async (command: string) => {
+      if (command === 'plugin:dialog|message') {
+        return new Promise((r) => { answerConfirm = r; });
+      }
+      return null;
+    };
+
+    const el = await render();
+    let closed = 0;
+    el.addEventListener('close', () => { closed++; });
+
+    const gc = internalOf(el).runGc(false);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(el.isRunning, 'claimed before the confirm').to.be.true;
+
+    // The pinned repo's tab closes while the confirm is still up.
+    el.closeWhenIdle();
+    await el.updateComplete;
+    expect(closed, 'cannot close with an action claimed').to.equal(0);
+
+    answerConfirm('Cancel');
+    await gc;
+    await el.updateComplete;
+
+    expect(findCommands('run_gc'), 'declined, so nothing ran').to.have.length(0);
+    expect(closed, 'the deferred close must still be honoured').to.equal(1);
+  });
+
+  it('closes when prune loses the maintenance claim after the tab closed', async () => {
+    let answerConfirm!: (v: unknown) => void;
+    mockInvoke = async (command: string) => {
+      if (command === 'plugin:dialog|message') {
+        return new Promise((r) => { answerConfirm = r; });
+      }
+      return null;
+    };
+
+    const el = await render();
+    let closed = 0;
+    el.addEventListener('close', () => { closed++; });
+
+    const prune = internalOf(el).runPrune();
+    await new Promise((r) => setTimeout(r, 0));
+
+    el.closeWhenIdle();
+    await el.updateComplete;
+    expect(closed, 'cannot close with an action claimed').to.equal(0);
+
+    // Another surface takes the maintenance slot while the confirm is up.
+    expect(tryAcquireMaintenance(REPO_PATH), 'other surface wins the slot').to.be.true;
+
+    answerConfirm('Ok');
+    await prune;
+    await el.updateComplete;
+
+    expect(findCommands('run_prune'), 'refused, so nothing ran').to.have.length(0);
+    expect(closed, 'the deferred close must still be honoured').to.equal(1);
+
+    releaseMaintenance(REPO_PATH);
   });
 });
 

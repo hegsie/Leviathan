@@ -383,6 +383,8 @@ export class LvRemoteDialog extends LitElement {
   @state() private saving = false;
   @state() private fetchingRemote: string | null = null;
   @state() private pruningRemote: string | null = null;
+  /** Keyed like its Fetch/Prune siblings in the same row. */
+  @state() private removingRemote: string | null = null;
 
   /**
    * Repo captured when the dialog opened. `repositoryPath` is live-bound to
@@ -397,6 +399,20 @@ export class LvRemoteDialog extends LitElement {
   /** The repo this dialog is pinned to while open, or null when closed. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.open ? this.pinnedRepoPath : null;
+  }
+
+  /**
+   * True while a remote is being added/renamed/removed/pruned/fetched. The
+   * host's tab-close sweep must not report "remote management closed" over a
+   * write that is still landing in the closed repo's config.
+   */
+  public get operationInFlight(): boolean {
+    return (
+      this.saving ||
+      this.pruningRemote !== null ||
+      this.removingRemote !== null ||
+      this.fetchingRemote !== null
+    );
   }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
@@ -614,7 +630,9 @@ export class LvRemoteDialog extends LitElement {
       if (result.success) {
         showToast(`Fetched from ${remote.name}`, 'success');
         this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A gate refusal already announced itself, and a declined confirm is
+        // the user's own decision — reporting either back is a lie.
         showToast(`Fetch failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
@@ -640,7 +658,7 @@ export class LvRemoteDialog extends LitElement {
           await this.loadRemotes();
           this.dispatchEvent(new CustomEvent('remotes-changed', { bubbles: true, composed: true }));
         }
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         showToast(`Prune failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
@@ -651,6 +669,15 @@ export class LvRemoteDialog extends LitElement {
   }
 
   private async handleRemove(remote: Remote): Promise<void> {
+    // Claimed BEFORE the confirm, not after — and this button had no in-flight
+    // state at all, unlike the Fetch and Prune buttons beside it. showConfirm
+    // is an IPC round trip before the native dialog takes focus, so a
+    // double-click stacked two prompts for the same remote and the second
+    // removal then failed against a reference that was already gone,
+    // contradicting the success the user just read.
+    if (this.removingRemote === remote.name) return;
+    this.removingRemote = remote.name;
+
     // The repo the listed remotes were read from — NOT the live prop, which
     // rebinds on a tab switch and would remove "origin" from the repo the
     // user switched to while this list still showed the old one's.
@@ -662,7 +689,10 @@ export class LvRemoteDialog extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.removingRemote = null;
+      return;
+    }
 
     // Clear any inline error left over from a previous form action (add /
     // edit / rename) — the template still renders this.error and a stale
@@ -689,6 +719,8 @@ export class LvRemoteDialog extends LitElement {
         `Failed to remove remote: ${err instanceof Error ? err.message : 'Unknown error'}`,
         'error',
       );
+    } finally {
+      this.removingRemote = null;
     }
   }
 
@@ -791,6 +823,7 @@ export class LvRemoteDialog extends LitElement {
               <button
                 class="action-btn danger"
                 title="Remove"
+                ?disabled=${this.removingRemote === remote.name}
                 @click=${() => this.handleRemove(remote)}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -392,6 +392,8 @@ export class CanvasRenderer {
     label: string;
     fullName: string;
     refType: string;
+    /** For local branches: whether this is the checked-out branch. */
+    isHead?: boolean;
     /** For tags: whether the tag is annotated */
     isAnnotated?: boolean;
     /** For tags: the tag message */
@@ -1497,6 +1499,11 @@ export class CanvasRenderer {
               label: ref.shorthand,
               fullName: ref.name,
               refType: ref.refType,
+              // Carried so the context menu can hide Delete on the checked-out
+              // branch: delete_branch can never succeed there (libgit2 refuses
+              // the current HEAD), so offering it only ever produced a confirm
+              // followed by an error.
+              isHead: ref.isHead,
               isAnnotated: ref.isAnnotated,
               tagMessage: ref.tagMessage,
             });
@@ -2083,6 +2090,7 @@ export class CanvasRenderer {
     label: string;
     fullName: string;
     refType: string;
+    isHead?: boolean;
     isAnnotated?: boolean;
     tagMessage?: string;
   } | null {
@@ -2093,6 +2101,7 @@ export class CanvasRenderer {
           label: hitbox.label,
           fullName: hitbox.fullName,
           refType: hitbox.refType,
+          isHead: hitbox.isHead,
           isAnnotated: hitbox.isAnnotated,
           tagMessage: hitbox.tagMessage,
         };

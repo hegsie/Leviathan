@@ -12,6 +12,12 @@ import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { RebaseCommit, RebaseAction } from '../../types/git.types.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
+import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 
 interface EditableRebaseCommit extends RebaseCommit {
   action: RebaseAction;
@@ -473,12 +479,24 @@ export class LvInteractiveRebaseDialog extends LitElement {
 
   @property({ type: String }) repositoryPath = '';
 
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
+
   @state() private onto = '';
   @state() private commits: EditableRebaseCommit[] = [];
   @state() private loading = false;
   @state() private executing = false;
   @state() private error = '';
   @state() private warning = '';
+  /** Set when open() was given a reword target the loaded plan does not contain. */
+  @state() private rewordTargetMissing = false;
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
@@ -516,18 +534,51 @@ export class LvInteractiveRebaseDialog extends LitElement {
     // `executing` and re-enable Start Rebase, allowing a second concurrent
     // execute_interactive_rebase against the same repository.
     if (this.executing) return;
+
+    // Already open: re-entering must NOT reset. reset() discards the whole
+    // rebase plan — every reorder, squash and reword the user has built. Its
+    // create-tag/create-branch siblings had the same shape and the same fix;
+    // this one has fewer entry points today, but the cost of hitting it is far
+    // higher than a cleared text field.
+    if (this.modal?.open) {
+      return;
+    }
+
     this.reset();
     this.onto = onto;
     this.pinnedRepoPath = this.repositoryPath;
     this.modal.open = true;
     await this.loadCommits();
 
-    // Pre-select a commit for rewording if requested
+    // Pre-select a commit for rewording if requested.
+    //
+    // Reassigned, not mutated in place: `commits` is @state, so mutating an
+    // element triggers no re-render — the action <select> and the reword
+    // textarea kept showing `pick`, giving no sign the request had landed.
+    //
+    // `newMessage` is seeded here too. handleExecute only emits a reword when
+    // `newMessage` is set AND differs from the summary; without it the entry
+    // fell through to a plain `pick`, so "Reword" rewrote history and changed
+    // no message at all. Seeding with the current summary means an untouched
+    // textarea is a no-op, and any edit takes effect.
     if (options?.rewordCommitOid) {
-      const target = this.commits.find(c => c.oid === options.rewordCommitOid);
-      if (target) {
-        target.action = 'reword';
+      // A .map() that matches nothing is a silent no-op, and the plan it leaves
+      // behind still rebases every OTHER commit in range — so an unmatched
+      // target (a merge commit, which get_rebase_commits skips) armed a rebase
+      // that would destroy the very commit the user asked to reword. Refuse
+      // instead: say so, and keep Start Rebase disabled.
+      if (!this.commits.some((c) => c.oid === options.rewordCommitOid)) {
+        this.rewordTargetMissing = true;
+        this.warning =
+          'This commit is not part of the rebase plan, so its message cannot be ' +
+          'rewritten here. Merge commits cannot be reworded by rebase.';
+        return;
       }
+      this.commits = this.commits.map((c) =>
+        c.oid === options.rewordCommitOid
+          ? { ...c, action: 'reword' as RebaseAction, newMessage: this.fullMessage(c) }
+          : c
+      );
     }
   }
 
@@ -541,6 +592,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
     return this.modal?.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the rebase is running. `handleModalClose()` re-asserts the modal
+   * open on this; the host's tab-close sweep must consult it too, because
+   * `close()` is a bare `modal.open = false` that bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.executing;
+  }
+
   private reset(): void {
     this.onto = '';
     this.commits = [];
@@ -548,6 +608,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.executing = false;
     this.error = '';
     this.warning = '';
+    this.rewordTargetMissing = false;
     this.draggedIndex = null;
     this.dropTargetIndex = null;
     this.showPreview = true;
@@ -673,11 +734,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
       hasBaseCommit = true;
 
       // Check if following commits are squash/fixup
+      // `drop` lines are skipped, not treated as a boundary. git squashes into
+      // the last PICKED commit, and a dropped line is not a pick — so with
+      // pick/drop/squash the squash lands in the first commit. Stopping here
+      // instead emitted it as its own surviving commit, which contradicted both
+      // git and the "Resulting: N" stat rendered directly underneath (getStats
+      // counts only pick/edit/reword as kept).
       const squashedFrom: string[] = [];
       let j = i + 1;
-      while (j < this.commits.length &&
-             (this.commits[j].action === 'squash' || this.commits[j].action === 'fixup')) {
-        squashedFrom.push(this.commits[j].shortId);
+      while (
+        j < this.commits.length &&
+        (this.commits[j].action === 'drop' ||
+          this.commits[j].action === 'squash' ||
+          this.commits[j].action === 'fixup')
+      ) {
+        if (this.commits[j].action !== 'drop') {
+          squashedFrom.push(this.commits[j].shortId);
+        }
         j++;
       }
 
@@ -755,8 +828,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
       return {
         ...c,
         action: newAction,
-        // Initialize newMessage for reword, clear it for other actions
-        newMessage: newAction === 'reword' ? (c.newMessage ?? c.summary) : undefined,
+        // Seeded with the FULL message, not the subject. The textarea's own
+        // `?? this.fullMessage(c)` fallback never fires once this is defined,
+        // so seeding from the subject both hid the body from the user and made
+        // the execute-time "did anything change?" comparison read true for an
+        // untouched reword — emitting an amend that replaced the whole message
+        // with just its first line.
+        newMessage: newAction === 'reword' ? (c.newMessage ?? this.fullMessage(c)) : undefined,
       };
     });
   }
@@ -810,6 +888,16 @@ export class LvInteractiveRebaseDialog extends LitElement {
   private async handleExecute(): Promise<void> {
     if (this.executing || this.commits.length === 0) return;
 
+    // `executing` only stops a second click on THIS button. The working-tree
+    // lock is what the sidebar lists and the graph menu read, so without
+    // claiming it a sidebar checkout stayed enabled and ran concurrently
+    // against the tree this rebase is rewriting.
+    const lockedRepo = this.pinnedRepoPath ?? this.repositoryPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
     this.executing = true;
     this.error = '';
 
@@ -823,7 +911,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
         // Sanitize summary for todo file format (line-based, no newlines allowed)
         const sanitizedSummary = c.summary.replace(/[\r\n]+/g, ' ').trim();
 
-        if (c.action === 'reword' && c.newMessage && c.newMessage !== c.summary) {
+        if (c.action === 'reword' && c.newMessage && c.newMessage !== this.fullMessage(c)) {
           // Use pick + exec to amend with new message
           // This is more reliable than reword which opens an editor
           todoLines.push(`pick ${c.shortId} ${sanitizedSummary}`);
@@ -854,6 +942,10 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const result = await gitService.executeInteractiveRebase(repoPath, this.onto, todo);
 
       if (result.success) {
+        // Every plain-rebase route toasts this. The interactive one — the most
+        // consequential of the four, since it rewrites history wholesale — was
+        // the only one that closed without a word.
+        showToast(`Rebased onto ${this.onto}`, 'success');
         this.dispatchEvent(new CustomEvent('rebase-complete', {
           // Same pinning as the conflict sibling below: the refresh must
           // target the repo the rebase ran on, not whichever tab is active
@@ -863,6 +955,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
           composed: true,
         }));
         this.close();
+        // An `edit`/`break` line stops the rebase and still exits 0. Closing
+        // silently left the user on a detached HEAD mid-rebase, with the
+        // operation banner's Abort ("all resolved changes will be lost") as
+        // the most obvious thing to click — throwing away the rebase they
+        // paused on purpose.
+        if (result.data?.paused) {
+          showToast(
+            // Names the control that actually exists. The banner renders only
+            // Resolve Conflicts / Abort / Manage Bisect — there is no
+            // "Continue" — so following the old text literally left Abort as
+            // the most obvious button, which discards the rebase this message
+            // exists to protect.
+            REBASE_PAUSED_MESSAGE,
+            'warning',
+            8000,
+          );
+        }
       } else {
         if (result.error?.code === 'REBASE_CONFLICT') {
           this.close();
@@ -880,6 +989,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.executing = false;
+      releaseRefOp(lockedRepo);
     }
   }
 
@@ -898,7 +1008,12 @@ export class LvInteractiveRebaseDialog extends LitElement {
   }
 
   private get canExecute(): boolean {
-    return this.commits.length > 0 && !this.executing && !this.hasValidationErrors();
+    return (
+      this.commits.length > 0 &&
+      !this.rewordTargetMissing &&
+      !this.executing &&
+      !this.hasValidationErrors()
+    );
   }
 
   private renderCommitRow(commit: EditableRebaseCommit, index: number) {
@@ -949,7 +1064,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
               rows="2"
               placeholder="Enter new commit message..."
               aria-label="New commit message for ${commit.shortId}"
-              .value=${commit.newMessage ?? commit.summary}
+              .value=${commit.newMessage ?? this.fullMessage(commit)}
               @input=${(e: Event) => this.handleRewordChange(index, e)}
               ?disabled=${this.executing}
             ></textarea>
@@ -957,6 +1072,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * The commit's full existing message.
+   *
+   * The reword route amends with `-m`, which REPLACES the whole message — so
+   * seeding this from the subject alone silently deleted the body: trailers,
+   * issue references, rationale. The commit panel's amend has always seeded
+   * from summary + body, so the same operation preserved the body from one
+   * surface and destroyed it from the other.
+   *
+   * Every place that seeds or compares a reword message must use this — the
+   * textarea's fallback alone is not enough, because both seed sites define
+   * `newMessage` before it ever renders.
+   */
+  private fullMessage(commit: EditableRebaseCommit): string {
+    return commit.body ? `${commit.summary}\n\n${commit.body}` : commit.summary;
   }
 
   private renderPreview() {
@@ -1110,7 +1242,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleExecute}
-            ?disabled=${!this.canExecute}
+            ?disabled=${!this.canExecute || this.lock.busy}
           >
             ${this.executing ? 'Rebasing...' : 'Start Rebase'}
           </button>

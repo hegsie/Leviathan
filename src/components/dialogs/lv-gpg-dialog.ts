@@ -702,6 +702,15 @@ export class LvGpgDialog extends LitElement {
     }
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;
+      // Cleared on the OPEN transition, not in loadData(): the loaders run
+      // AFTER a handler has set its message (handleRefreshAndCheck calls one
+      // directly), so clearing there would blank the result the user just
+      // asked for. This dialog stays mounted (app-shell only toggles ?open),
+      // so without this `success` survived close/reopen — and a Ctrl+Tab in
+      // between replayed "Commit signing enabled" over a DIFFERENT
+      // repository's settings.
+      this.success = '';
+      this.error = '';
       await this.loadData();
     }
   }
@@ -778,6 +787,10 @@ export class LvGpgDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    // Cleared with `error`, not left behind: without this a failing tag-signing
+    // toggle rendered its red banner directly under the stale green
+    // "Commit signing enabled" from the previous click.
+    this.success = '';
 
     const result = await gitService.setCommitSigning(
       this.pinnedRepoPath,
@@ -788,7 +801,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.config = { ...this.config, signCommits: !this.config.signCommits };
       this.success = `Commit signing ${this.config.signCommits ? 'enabled' : 'disabled'}`;
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to update setting';
     }
@@ -801,6 +816,7 @@ export class LvGpgDialog extends LitElement {
 
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     const result = await gitService.setTagSigning(
       this.pinnedRepoPath,
@@ -811,7 +827,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.config = { ...this.config, signTags: !this.config.signTags };
       this.success = `Tag signing ${this.config.signTags ? 'enabled' : 'disabled'}`;
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to update setting';
     }
@@ -822,6 +840,7 @@ export class LvGpgDialog extends LitElement {
   private async handleSelectKey(keyId: string): Promise<void> {
     this.loading = true;
     this.error = '';
+    this.success = '';
 
     const result = await gitService.setSigningKey(
       this.pinnedRepoPath,
@@ -832,7 +851,9 @@ export class LvGpgDialog extends LitElement {
     if (result.success) {
       this.selectedKey = keyId;
       this.success = 'Signing key updated';
-      this.dispatchEvent(new CustomEvent('gpg-changed'));
+      this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
     } else {
       this.error = result.error?.message || 'Failed to set signing key';
     }
@@ -1431,7 +1452,9 @@ export class LvGpgDialog extends LitElement {
 
   private handleFinishSetup(): void {
     this.setupMode = false;
-    this.dispatchEvent(new CustomEvent('gpg-changed'));
+    this.dispatchEvent(new CustomEvent('gpg-changed', {
+        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+      }));
   }
 }
 

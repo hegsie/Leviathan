@@ -36,6 +36,11 @@ import '../lv-file-status.ts';
 import type { LvFileStatus } from '../lv-file-status.ts';
 import type { StatusEntry } from '../../../types/git.types.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
+import {
+  tryAcquireRefOp,
+  isRefOpRunning,
+  resetRefOpLocks,
+} from '../../../utils/ref-lock.ts';
 
 const REPO_PATH = '/test/repo';
 
@@ -53,6 +58,7 @@ interface Internal {
   unstagedFiles: StatusEntry[];
   stagedFiles: StatusEntry[];
   selectedFiles: Set<string>;
+  contextMenu: { visible: boolean; x: number; y: number; file: StatusEntry | null; isStaged: boolean };
   handleDiscardFile: (file: StatusEntry, e: Event) => Promise<void>;
   handleDiscardSelected: () => Promise<void>;
 }
@@ -79,6 +85,7 @@ async function render(entries: StatusEntry[]): Promise<LvFileStatus> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-file-status discard confirm copy', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeHistory.length = 0;
     lastConfirm = null;
     settingsStore.setState({ confirmBeforeDiscard: true });
@@ -86,6 +93,45 @@ describe('lv-file-status discard confirm copy', () => {
 
   afterEach(() => {
     settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  it('is inert while another surface holds the working-tree lock', async () => {
+    // discard_changes does its own forced checkout against the same tree a
+    // checkout, reset or rebase is mutating, and the backend takes no per-repo
+    // lock — so a discard started during one of those raced it.
+    const tracked = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([tracked]);
+    tryAcquireRefOp(REPO_PATH);
+    invokeHistory.length = 0;
+
+    await internalOf(el).handleDiscardFile(tracked, new Event('click'));
+
+    expect(
+      invokeHistory.some((h) => h.command === 'discard_changes'),
+      'nothing reaches the backend while another operation runs',
+    ).to.equal(false);
+  });
+
+  it('claims and releases the lock around its own work', async () => {
+    const tracked = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([tracked]);
+
+    let heldDuringDiscard = false;
+    mockInvoke = async (command: string) => {
+      if (command === 'discard_changes') {
+        heldDuringDiscard = isRefOpRunning(REPO_PATH);
+        return null;
+      }
+      return command === 'get_status' ? [tracked] : null;
+    };
+
+    await internalOf(el).handleDiscardFile(tracked, new Event('click'));
+
+    expect(heldDuringDiscard, 'other surfaces would have seen a free lock').to.equal(true);
+    expect(
+      isRefOpRunning(REPO_PATH),
+      'a stuck claim would freeze every ref operation for the session',
+    ).to.equal(false);
   });
 
   it('skips the confirm for a tracked file when the setting is off', async () => {
@@ -174,5 +220,45 @@ describe('lv-file-status discard confirm copy', () => {
     expect(lastConfirm, 'confirm shown').to.not.be.null;
     expect(lastConfirm!.message!.toLowerCase()).to.include('permanently delete 2 untracked file');
     expect(lastConfirm!.message!.toLowerCase()).to.not.include('discard changes');
+  });
+});
+
+describe('the context menu does not offer a discard that cannot do anything', () => {
+  beforeEach(() => {
+    invokeHistory.length = 0;
+    lastConfirm = null;
+    settingsStore.setState({ confirmBeforeDiscard: true });
+  });
+
+  it('hides Discard on a staged row', async () => {
+    // discard_changes mirrors `git checkout -- <path>`: for a path present in
+    // the index it restores the worktree FROM the index, so on a purely-staged
+    // file it is a byte-identical rewrite that reports nothing. The row-level
+    // buttons already hide it; only the context menu still offered it, behind a
+    // confirm claiming the change could not be undone.
+    const staged = makeEntry({ path: 'src/staged.ts', status: 'new', isStaged: true });
+    const el = await render([staged]);
+    internalOf(el).contextMenu = { visible: true, x: 0, y: 0, file: staged, isStaged: true };
+    await el.updateComplete;
+
+    const items = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (b) => b.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Discard changes'))).to.equal(false);
+    expect(items.some((t) => t.includes('Unstage')), 'the useful action is still there').to.equal(
+      true,
+    );
+  });
+
+  it('still offers Discard on an unstaged row', async () => {
+    const unstaged = makeEntry({ path: 'src/main.ts', status: 'modified' });
+    const el = await render([unstaged]);
+    internalOf(el).contextMenu = { visible: true, x: 0, y: 0, file: unstaged, isStaged: false };
+    await el.updateComplete;
+
+    const items = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (b) => b.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Discard changes'))).to.equal(true);
   });
 });

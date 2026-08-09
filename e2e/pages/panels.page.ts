@@ -345,11 +345,32 @@ export class RightPanelPage {
   }
 
   /**
+   * Wait for lv-file-status to finish loading before reading its counts.
+   *
+   * The count readers below cannot distinguish "genuinely zero" from "the
+   * section has not rendered yet" — both look like an absent section — so they
+   * return 0 for either. That turned a slow load into a hard assertion failure
+   * rather than a retry: `expect(await getStagedCount()).toBe(2)` reads once,
+   * gets 0 because the panel is still on its "Loading changes..." branch, and
+   * fails permanently. Under a full-suite parallel run that is exactly what
+   * happened, on a different spec each time. Settling here fixes every call
+   * site at once instead of adding a wait to each of the ~57 of them.
+   */
+  private async waitForFileStatusSettled(): Promise<void> {
+    const panel = this.page.locator('lv-file-status');
+    if ((await panel.count()) === 0) return;
+    await panel.locator('.loading').waitFor({ state: 'detached', timeout: 10000 }).catch(() => {
+      // Never rendered a loading state at all — nothing to wait for.
+    });
+  }
+
+  /**
    * Get count of staged files
    */
   async getStagedCount(): Promise<number> {
     // The staged section has a .section-count showing the number of staged files
     // The section structure is: .section-header > .section-title "Staged" + .section-count "N"
+    await this.waitForFileStatusSettled();
     try {
       const stagedSection = this.page.locator('lv-file-status .section-header:has-text("Staged")');
       const isVisible = await stagedSection.isVisible({ timeout: 1000 });
@@ -369,6 +390,7 @@ export class RightPanelPage {
   async getUnstagedCount(): Promise<number> {
     // The unstaged section shows "Changes" with a .section-count
     // When there are no files, the section might not exist
+    await this.waitForFileStatusSettled();
     try {
       const changesSection = this.page.locator('lv-file-status .section-header:has-text("Changes")');
       const isVisible = await changesSection.isVisible({ timeout: 1000 });

@@ -104,6 +104,11 @@ function findCommands(name: string): Array<{ command: string; args?: unknown }> 
   return invokeHistory.filter((h) => h.command === name);
 }
 
+/**
+ * Answer for the confirm dialog. showConfirm() resolves to
+ * (plugin:dialog|message result === okLabel), and the default ok label is 'Ok'.
+ */
+let confirmAnswer = 'Ok';
 /** Result to return from the next plugin:dialog|open invoke (repo picker / file picker). */
 let dialogOpenResult: string | null = null;
 /** Result to return from the next plugin:dialog|save invoke (save dialog). */
@@ -164,6 +169,8 @@ function setupDefaultMocks(opts: {
       // ── Tauri plugins ─────────────────────────────────────────────
       case 'plugin:notification|is_permission_granted':
         return false;
+      case 'plugin:dialog|message':
+        return confirmAnswer;
       case 'plugin:dialog|open':
         return dialogOpenResult;
       case 'plugin:dialog|save':
@@ -202,6 +209,7 @@ describe('lv-workspace-manager-dialog', () => {
     dialogOpenResult = null;
     dialogSaveResult = null;
     setupDefaultMocks();
+    confirmAnswer = 'Ok';
   });
 
   // ── Rendering ──────────────────────────────────────────────────────────
@@ -378,6 +386,20 @@ describe('lv-workspace-manager-dialog', () => {
 
   // ── Delete Workspace ──────────────────────────────────────────────────
   describe('Delete Workspace', () => {
+    it('asks before dropping a saved workspace, and declining blocks it', async () => {
+      // One click used to permanently drop a named multi-repo configuration
+      // with no undo, while the sibling profile manager confirmed first.
+      const el = await renderDialog();
+      clearHistory();
+      confirmAnswer = 'Cancel';
+
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      deleteBtn.click();
+      await tick(el, 100);
+
+      expect(findCommands('delete_workspace').length).to.equal(0);
+    });
+
     it('calls delete_workspace when Delete button is clicked', async () => {
       const el = await renderDialog();
       clearHistory();

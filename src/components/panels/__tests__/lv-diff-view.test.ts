@@ -27,6 +27,7 @@ import type { LvDiffView } from '../lv-diff-view.ts';
 
 // Import the actual component — registers <lv-diff-view> custom element
 import '../lv-diff-view.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -103,10 +104,14 @@ function findCommands(name: string): Array<{ command: string; args?: unknown }> 
   return invokeHistory.filter((h) => h.command === name);
 }
 
+/** Answer for the next confirm dialog. 'Ok' confirms, anything else declines. */
+let confirmAnswer = 'Ok';
+
 function setupDefaultMocks(opts: {
   diff?: DiffFile;
   fileContent?: string;
   diffToolConfig?: { tool: string | null };
+  readFails?: { code?: string; message: string };
 } = {}): void {
   const diff = opts.diff ?? makeDiffFile();
   mockInvoke = async (command: string) => {
@@ -116,11 +121,15 @@ function setupDefaultMocks(opts: {
       case 'get_commit_file_diff':
         return diff;
       case 'read_file_content':
+        if (opts.readFails) throw opts.readFails;
         return opts.fileContent ?? 'file content here';
       case 'write_file_content':
         return undefined;
       case 'get_diff_tool':
         return opts.diffToolConfig ?? { tool: null };
+      // showConfirm() resolves to (this result === okLabel); default ok is 'Ok'.
+      case 'plugin:dialog|message':
+        return confirmAnswer;
       default:
         return null;
     }
@@ -165,6 +174,7 @@ describe('lv-diff-view', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
+    confirmAnswer = 'Ok';
   });
 
   // ── Rendering ──────────────────────────────────────────────────────────
@@ -379,6 +389,41 @@ describe('lv-diff-view', () => {
       expect(saveBtn!.textContent).to.include('Save');
     });
 
+    it('says why when the file cannot be opened for editing', async () => {
+      // Two reachable failures: the file was deleted or renamed on disk since
+      // the last status refresh, or it is not valid UTF-8 despite passing the
+      // diff's binary heuristic. Both left the Edit button doing nothing at
+      // all — and read_file_content is excluded from the Output panel by its
+      // `read_` prefix, so the failure was recorded nowhere.
+      setupDefaultMocks({ readFails: { code: 'COMMAND_ERROR', message: 'stream did not contain valid UTF-8' } });
+      const el = await renderDiffView();
+      uiStore.setState({ toasts: [] });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.editor-textarea'), 'edit mode is not entered').to.be
+        .null;
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the click is not silent').to.equal(1);
+      expect(errors[0].message).to.contain('UTF-8');
+    });
+
+    it('a file that vanished from disk is named, not reported as a decode error', async () => {
+      setupDefaultMocks({ readFails: { code: 'FILE_NOT_FOUND', message: 'src/main.ts' } });
+      const el = await renderDiffView();
+      uiStore.setState({ toasts: [] });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length).to.equal(1);
+      expect(errors[0].message).to.contain('no longer on disk');
+    });
+
     it('shows textarea in edit mode', async () => {
       setupDefaultMocks({ fileContent: 'file content here' });
       const el = await renderDiffView();
@@ -432,6 +477,56 @@ describe('lv-diff-view', () => {
       expect(indicator).to.be.null;
     });
 
+    it('cancel asks before throwing away typed text', async () => {
+      // Every other editing surface in the app (lv-hooks-dialog,
+      // lv-merge-editor) confirms this; Escape reaches the same handler, and
+      // Escape is bound app-wide to "close diff", so it gets pressed
+      // reflexively.
+      setupDefaultMocks({ fileContent: 'original content' });
+      const el = await renderDiffView();
+
+      const editBtn = el.shadowRoot!.querySelector('.edit-btn') as HTMLElement;
+      editBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement;
+      textarea.value = 'modified content';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      confirmAnswer = 'Cancel';
+      (el.shadowRoot!.querySelector('.cancel-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const stillEditing = el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement;
+      expect(stillEditing, 'declining keeps the editor open').to.not.be.null;
+      expect(stillEditing.value).to.equal('modified content');
+    });
+
+    it('cancel with no edits does not nag', async () => {
+      setupDefaultMocks({ fileContent: 'original content' });
+      const el = await renderDiffView();
+
+      const editBtn = el.shadowRoot!.querySelector('.edit-btn') as HTMLElement;
+      editBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      confirmAnswer = 'Cancel';
+      (el.shadowRoot!.querySelector('.cancel-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.some((c) => c.command === 'plugin:dialog|message'),
+        'nothing is at stake, so nothing is asked',
+      ).to.equal(false);
+      expect(el.shadowRoot!.querySelector('.editor-textarea')).to.be.null;
+    });
+
     it('cancel restores to diff view and discards edits', async () => {
       setupDefaultMocks({ fileContent: 'original content' });
       const el = await renderDiffView();
@@ -448,9 +543,10 @@ describe('lv-diff-view', () => {
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
       await el.updateComplete;
 
-      // Click Cancel
+      // Click Cancel — now confirm-gated, so let the dialog round-trip settle.
       const cancelBtn = el.shadowRoot!.querySelector('.cancel-btn') as HTMLElement;
       cancelBtn.click();
+      await new Promise((r) => setTimeout(r, 50));
       await el.updateComplete;
 
       // Should be back in diff view
@@ -460,6 +556,55 @@ describe('lv-diff-view', () => {
       // Editor should be gone
       const editorTextarea = el.shadowRoot!.querySelector('.editor-textarea');
       expect(editorTextarea).to.be.null;
+    });
+
+    it('selecting another file closes the editor instead of retargeting it', async () => {
+      // This pane is ONE reused element. With the editor open on A and B then
+      // selected, the header named B while the textarea still held A's text —
+      // and Save writes editContent to this.file.path, i.e. A's content over B,
+      // destroying B's uncommitted changes with no git object to recover from.
+      setupDefaultMocks({ fileContent: 'contents of A' });
+      const el = await renderDiffView({ file: makeStatusEntry({ path: 'A.ts' }) });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.editor-textarea')).to.not.be.null;
+
+      el.file = makeStatusEntry({ path: 'B.ts' });
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(
+        el.shadowRoot!.querySelector('.editor-textarea'),
+        'the editor does not follow the selection',
+      ).to.be.null;
+    });
+
+    it("a stale buffer can never be written to the newly selected file", async () => {
+      setupDefaultMocks({ fileContent: 'contents of A' });
+      const el = await renderDiffView({ file: makeStatusEntry({ path: 'A.ts' }) });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement;
+      textarea.value = 'edits meant for A';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      el.file = makeStatusEntry({ path: 'B.ts' });
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      invokeHistory.length = 0;
+      // Reach past the UI: even if a save were somehow triggered, the buffer no
+      // longer belongs to the displayed file.
+      await (el as unknown as { saveEdit: () => Promise<void> }).saveEdit();
+
+      const writes = invokeHistory.filter((c) => c.command === 'write_file_content');
+      expect(writes.length, "B.ts is never written with A's content").to.equal(0);
     });
   });
 

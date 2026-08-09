@@ -448,49 +448,6 @@ struct FileDiff {
     content: String,
 }
 
-/// Deduplicate near-identical summaries and cap the total.
-///
-/// Two bullets are considered duplicates if one contains the other
-/// (case-insensitive), or if they share >60% of their words.
-#[cfg(test)]
-fn dedup_summaries(summaries: Vec<String>, max: usize) -> Vec<String> {
-    let mut result: Vec<String> = Vec::new();
-
-    for bullet in summaries {
-        let text = bullet.strip_prefix("- ").unwrap_or(&bullet).to_lowercase();
-        let is_dup = result.iter().any(|existing| {
-            let existing_text = existing
-                .strip_prefix("- ")
-                .unwrap_or(existing)
-                .to_lowercase();
-            // Substring containment
-            if existing_text.contains(&text) || text.contains(&existing_text) {
-                return true;
-            }
-            // Word overlap
-            let words_a: Vec<&str> = text.split_whitespace().collect();
-            let words_b: Vec<&str> = existing_text.split_whitespace().collect();
-            if words_a.is_empty() || words_b.is_empty() {
-                return false;
-            }
-            let common = words_a.iter().filter(|w| words_b.contains(w)).count();
-            let min_len = words_a.len().min(words_b.len());
-            // Use 75% threshold — 60% was too aggressive for short model summaries
-            // that share common words like "add", "update", "to"
-            common * 100 / min_len > 75
-        });
-
-        if !is_dup {
-            result.push(bullet);
-            if result.len() >= max {
-                break;
-            }
-        }
-    }
-
-    result
-}
-
 /// Clean a model response into a single bullet description.
 ///
 /// Strips preamble like "Here is the description:", bullet markers, quotes,

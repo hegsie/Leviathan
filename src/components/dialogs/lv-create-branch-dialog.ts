@@ -7,8 +7,14 @@ import { LitElement, html, css } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { createBranch } from '../../services/git.service.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-create-branch-dialog')
 export class LvCreateBranchDialog extends LitElement {
@@ -124,6 +130,16 @@ export class LvCreateBranchDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
   @property({ type: String }) startPoint = '';
 
   /** The repo this dialog was opened for, captured at open(). The
@@ -140,6 +156,15 @@ export class LvCreateBranchDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the branch is being created (and possibly checked out). The
+   * host's tab-close sweep must not report "branch creation cancelled" over a
+   * create that still lands — checkout even moves HEAD.
+   */
+  public get operationInFlight(): boolean {
+    return this.isCreating;
+  }
+
   @state() private branchName = '';
   @state() private checkoutAfterCreate = true;
   @state() private isCreating = false;
@@ -153,15 +178,46 @@ export class LvCreateBranchDialog extends LitElement {
     // clear `isCreating` and re-enable the button for a second concurrent run,
     // and the first run's close() would then yank shut the reopened session.
     if (this.isCreating) return;
+
+    // Already open: re-entering must NOT reset. Several entry points converge
+    // on this one instance (context menu, panel header button, command
+    // palette), and ctrl-shortcuts fire even while typing in an input — so
+    // Ctrl+P then "Create..." while the dialog was open silently wiped the
+    // branch name the user had entered. Re-aim at the new target if one was
+    // given, refocus, and keep their text.
+    if (this.isOpen) {
+      if (startPoint) {
+        this.startPoint = startPoint;
+      }
+      this.inputEl?.focus();
+      return;
+    }
+
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
     if (startPoint) {
       this.startPoint = startPoint;
     }
-    this.modal.open = true;
-    // Focus input after modal opens
-    setTimeout(() => this.inputEl?.focus(), 100);
+    // Reveal only AFTER the reset above has rendered — same ordering hazard
+    // the tag dialog had: opening synchronously left a render carrying the
+    // cleared field pending, so anything typed in that window was overwritten
+    // when it committed. Guarded on isOpen so a close() that lands while this
+    // is pending cannot be undone by it.
+    void this.updateComplete.then(() => {
+      if (!this.isOpen) return;
+      this.modal.open = true;
+      // Focus the name field once the modal has painted — but only while focus
+      // is still nobody's. The unguarded 100ms timer this replaces fired long
+      // after the user could click or Tab into another control and yanked the
+      // caret back into the name box mid-keystroke. A rAF also lands before
+      // lv-modal's own focus pass, which then sees focus inside and backs off.
+      requestAnimationFrame(() => {
+        if (!this.isOpen) return;
+        if (containsDeepActiveElement(this)) return;
+        this.inputEl?.focus();
+      });
+    });
   }
 
   public close(): void {
@@ -171,6 +227,12 @@ export class LvCreateBranchDialog extends LitElement {
 
   private reset(): void {
     this.branchName = '';
+    // Cleared like every other field — open() re-applies the argument straight
+    // after. Leaving it set made a start point picked once from "Create branch
+    // from here" stick to the single shared dialog for the rest of the session:
+    // every later Ctrl+Shift+N cut from that ref instead of HEAD, shown only in
+    // a disabled "Based on" field with no way to clear it.
+    this.startPoint = '';
     this.checkoutAfterCreate = true;
     this.isCreating = false;
     this.error = '';
@@ -201,11 +263,22 @@ export class LvCreateBranchDialog extends LitElement {
       return;
     }
 
+    const repoPath = this.pinnedRepoPath;
+    // "Checkout new branch after creation" is this dialog's default, and that
+    // path runs checkout_tree + set_head — the same working-tree mutation every
+    // other surface serializes on the shared lock. Creating a ref WITHOUT
+    // checking it out touches no working tree, so it stays unguarded rather
+    // than blocking on an unrelated operation.
+    const needsLock = this.checkoutAfterCreate;
+    if (needsLock && !tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
     this.isCreating = true;
     this.error = '';
 
     try {
-      const repoPath = this.pinnedRepoPath;
       const result = await createBranch(repoPath, {
         name,
         startPoint: this.startPoint || undefined,
@@ -230,6 +303,7 @@ export class LvCreateBranchDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.isCreating = false;
+      if (needsLock) releaseRefOp(repoPath);
     }
   }
 
@@ -316,7 +390,12 @@ export class LvCreateBranchDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleCreate}
-            ?disabled=${!this.canCreate}
+            ?disabled=${!this.canCreate ||
+              // ONLY when it will also check out. handleCreate claims the lock
+              // only for that case — creating a ref without checking it out
+              // touches no working tree — so gating unconditionally made the
+              // binding and the handler describe different contracts.
+              (this.checkoutAfterCreate && this.lock.busy)}
           >
             ${this.isCreating ? 'Creating...' : 'Create Branch'}
           </button>

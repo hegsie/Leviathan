@@ -85,7 +85,9 @@ pub async fn get_cleanable_files(
         // nested repository; deleting it destroys its history. Flag it so the
         // UI can require an explicit confirmation (mirroring `git clean`'s
         // second `-f`).
-        let is_nested_repo = is_directory && full_path.join(".git").exists();
+        // At ANY depth, not just the selected directory — see
+        // utils::contains_nested_repo.
+        let is_nested_repo = is_directory && crate::utils::contains_nested_repo(&full_path);
 
         // Get file size
         let size = if is_directory {
@@ -171,7 +173,7 @@ pub async fn clean_files(
         if full_path.is_dir() {
             // Refuse to destroy an untracked nested repository unless the caller
             // explicitly opted in (git clean needs a second `-f`).
-            if full_path.join(".git").exists() && !force_nested {
+            if crate::utils::contains_nested_repo(full_path) && !force_nested {
                 tracing::warn!(
                     "Refusing to remove nested git repository without force: {}",
                     file_path
@@ -231,6 +233,43 @@ pub async fn clean_all(
 
 #[cfg(test)]
 mod tests {
+
+    /// A nested repo BELOW the top level must be flagged and refused.
+    ///
+    /// git clean -fd skips a nested repository at any depth. Checking only
+    /// `dir/.git` matched the selected directory alone, so an untracked
+    /// `build/` holding `build/vendor/lib/.git` was reported as an ordinary
+    /// directory, included in Select-all, and remove_dir_all'd — destroying a
+    /// repository with no confirmation naming it.
+    #[tokio::test]
+    async fn test_clean_refuses_a_repo_nested_below_the_selected_dir() {
+        let test_repo = TestRepo::with_initial_commit();
+        let nested = test_repo.path.join("build/vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        std::fs::write(test_repo.path.join("build/plain.txt"), "x").unwrap();
+
+        let listed = get_cleanable_files(test_repo.path_str(), None, Some(true))
+            .await
+            .unwrap();
+        let build = listed
+            .iter()
+            .find(|e| e.path.starts_with("build"))
+            .expect("build/ must be listed");
+        assert!(
+            build.is_nested_repo,
+            "a repo nested below the selected directory must still flag it"
+        );
+
+        clean_files(test_repo.path_str(), vec![build.path.clone()], None)
+            .await
+            .unwrap();
+
+        assert!(
+            nested.join(".git").exists(),
+            "the nested repository must survive a clean that did not force it"
+        );
+    }
     use super::*;
     use crate::test_utils::TestRepo;
 

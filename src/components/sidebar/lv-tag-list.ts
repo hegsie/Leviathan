@@ -9,11 +9,21 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
-import '../dialogs/lv-create-tag-dialog.ts';
-import type { LvCreateTagDialog } from '../dialogs/lv-create-tag-dialog.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+  pushTagKey,
+  tryAcquirePush,
+  releasePush,
+  warnRepositoryBusy,
+  isPushRunning,
+} from '../../utils/ref-lock.ts';
 
 type TagSortMode = 'name' | 'date' | 'date-asc';
 
@@ -85,6 +95,15 @@ export class LvTagList extends LitElement {
         color: var(--color-text-muted);
         font-size: var(--font-size-sm);
         text-align: center;
+      }
+
+      /* A failed load renders THIS, never the previous repository's rows. */
+      .error {
+        padding: 4px 8px;
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+        text-align: center;
+        overflow-wrap: anywhere;
       }
 
       .loading {
@@ -320,29 +339,72 @@ export class LvTagList extends LitElement {
   @state() private showFilter = false;
   @state() private showSortMenu = false;
   @state() private collapsedGroups = new Set<string>();
-  @state() private operationInProgress = false;
+  /**
+   * The working-tree lock, shared with app-shell and the other sidebar lists.
+   *
+   * This was a component-local boolean, so a hard reset started from the graph
+   * and a checkout started here ran concurrently against the same working
+   * tree. See utils/ref-lock.ts.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
 
-  @query('lv-create-tag-dialog') private createTagDialog!: LvCreateTagDialog;
+  /**
+   * True when the right-clicked tag already has a push in flight.
+   *
+   * The tag-push slot is separate from the working-tree lock, so
+   * operationInProgress cannot see it: Force Push Tag — from the rejected-push
+   * suggestion toast — holds only the push slot, and holds it across its
+   * confirm. Without this the Push item stayed lit through that window and the
+   * click did nothing but raise a refusal toast. subscribeRefOps already fires
+   * on push-slot transitions (both share notify()), so the binding re-renders.
+   */
+  private get tagPushInFlight(): boolean {
+    void this.refOpsVersion;
+    const name = this.contextMenu.tag?.name;
+    return name !== undefined && isPushRunning(pushTagKey(this.repositoryPath, name));
+  }
 
-  private storeUnsubscribe?: () => void;
+  private get operationInProgress(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.repositoryPath);
+  }
+
+  /**
+   * Claim the lock for `repoPath`; false when it is already held.
+   *
+   * The path is passed explicitly rather than read from `this.repositoryPath`
+   * at release time: the prop rebinds when the user switches repo tabs
+   * mid-operation, so a release that re-read it would free the WRONG repo's
+   * lock and wedge the one that is actually running.
+   */
+  private claimOperation(repoPath: string): boolean {
+    // Reports the refusal: these components hold the same lock app-shell does,
+    // and a gesture with no disabled binding — the double-clicked branch row —
+    // otherwise looked like a hung app for the whole other operation.
+    return tryAcquireRefOpOrWarn(repoPath);
+  }
+
+  private releaseOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
+
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // isRefOpRunning is plain module state Lit cannot observe, so without this
+    // the ?disabled bindings never re-render on a lock transition: a context
+    // menu opened before an operation started stayed fully enabled through it,
+    // and one opened during an operation stayed disabled after it finished —
+    // a dead control with no explanation until the menu is reopened.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     // Keep in sync with app-level refreshes (e.g. a gitflow release finish
     // creating a tag completes inside the shared conflict dialog) — same
     // subscription as the sibling branch/stash/gitflow lists.
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
-    // Close our OWN embedded create-tag dialog when its pinned repo's tab is
-    // closed — app-shell's guard only reaches app-shell's instance, not this
-    // one in the sidebar's shadow root. A create on a closed repo would be a
-    // silent mutation of a repo no longer in the tab bar.
-    this.storeUnsubscribe = repositoryStore.subscribe((state) => {
-      const pinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (pinned && !state.openRepositories.some((r) => r.repository.path === pinned)) {
-        this.createTagDialog.close();
-        showToast('The repository tab was closed — tag creation cancelled', 'warning');
-      }
-    });
     await this.loadTags();
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('keydown', this.handleKeydown);
@@ -350,10 +412,11 @@ export class LvTagList extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('keydown', this.handleKeydown);
-    this.storeUnsubscribe?.();
   }
 
   private handleRepositoryRefresh = (): void => {
@@ -422,14 +485,50 @@ export class LvTagList extends LitElement {
     await this.loadTags();
   }
 
+  /**
+   * Per-path load generation. lv-left-panel keeps ONE instance of this element
+   * across tabs and only rebinds `.repositoryPath`, and Lit does not await an
+   * async `updated()` — so Ctrl+Tab twice quickly (A→B→A) starts overlapping
+   * loads with nothing sequencing them, and whichever resolved last won.
+   *
+   * This is the worst case in the sidebar: handleDeleteTag / handleCheckoutTag
+   * pass the clicked row's `tag.name` straight to the ACTIVE repo, and tag
+   * names collide across repositories routinely (`v1.0.0`) — so a stale row
+   * meant the confirm quoted a tag the user was not looking at and the delete
+   * landed on a different commit. Same shape as
+   * lv-branch-list.branchesLoadSeq and lv-file-status.statusLoadSeq.
+   */
+  private tagsLoadSeq = new Map<string, number>();
+
+  /**
+   * The load for the CURRENT repo failed. Rendered, because the alternative —
+   * leaving the previous repo's rows on screen — is indistinguishable from
+   * real data and every one of those rows is a live delete/checkout target.
+   */
+  @state() private error: string | null = null;
+
   private async loadTags(): Promise<void> {
     if (!this.repositoryPath) return;
+
+    // Captured before the await so a mid-flight tab switch still resolves this
+    // result against the repo it was loaded FROM.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.tagsLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.tagsLoadSeq.set(loadedPath, seq);
+    /** Latest load for this path AND this path is still the bound one. */
+    const isFresh = (): boolean =>
+      this.tagsLoadSeq.get(loadedPath) === seq && this.repositoryPath === loadedPath;
 
     this.loading = true;
 
     try {
-      const result = await gitService.getTags(this.repositoryPath);
+      const result = await gitService.getTags(loadedPath);
+      // A superseded load must touch NOTHING: not the rows, not the count
+      // badge, not the loading flag the live load owns.
+      if (!isFresh()) return;
+
       if (result.success) {
+        this.error = null;
         this.tags = result.data!;
         // Emit count changed event
         this.dispatchEvent(new CustomEvent('tag-count-changed', {
@@ -438,13 +537,31 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        showToast(result.error?.message || 'Failed to load tags', 'error');
+        this.error = result.error?.message || 'Failed to load tags';
+        this.tags = [];
+        this.dispatchEvent(new CustomEvent('tag-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast(this.error, 'error');
       }
     } catch (err) {
       console.error('Failed to load tags:', err);
-      showToast('Failed to load tags', 'error');
+      if (isFresh()) {
+        this.error = err instanceof Error ? err.message : 'Failed to load tags';
+        this.tags = [];
+        this.dispatchEvent(new CustomEvent('tag-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast('Failed to load tags', 'error');
+      }
     } finally {
-      this.loading = false;
+      if (isFresh()) {
+        this.loading = false;
+      }
     }
   }
 
@@ -528,7 +645,9 @@ export class LvTagList extends LitElement {
 
   private async handleCheckoutTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -541,9 +660,11 @@ export class LvTagList extends LitElement {
       `Checking out tag "${tag.name}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
       'warning'
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
@@ -553,12 +674,15 @@ export class LvTagList extends LitElement {
         if (data.stashed && data.stashConflict) {
           showToast(`Switched to ${tag.name} — stash conflicts need resolution`, 'warning');
           // Open the conflict resolution dialog so the user can resolve the failed
-          // auto-stash pop (pop semantics: entry at index 0, drop it once resolved).
+          // auto-stash pop (pop semantics: drop it once resolved). Identified by
+          // oid, not position — another surface or a terminal can push a stash
+          // in between and renumber the list.
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
             bubbles: true,
             composed: true,
             detail: {
               operationType: 'stash',
+              stashOid: data.stashOid ?? null,
               stashIndex: 0,
               dropStashOnComplete: true,
               repositoryPath: repoPath,
@@ -575,18 +699,21 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        const errorMsg = result.data?.message || result.error?.message || 'Unknown error';
+        const errorMsg = result.data?.message || result.error?.message || '';
         console.error('Failed to checkout tag:', errorMsg);
-        showToast(`Failed to checkout tag: ${errorMsg}`, 'error');
+        // Same translation the branch and graph checkout paths get.
+        showErrorWithSuggestion(errorMsg, 'Failed to checkout tag');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
   private async handleDeleteTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
@@ -600,9 +727,11 @@ export class LvTagList extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseOperation(lockedRepo);
+      return;
+    }
 
-    this.operationInProgress = true;
 
     try {
       const result = await gitService.deleteTag({
@@ -612,6 +741,11 @@ export class LvTagList extends LitElement {
 
       if (result.success) {
         await this.loadTags();
+        // The same delete from the graph's ref menu toasts (app-shell
+        // handleDeleteTag). Here the row just vanished from a list that is
+        // often filtered or scrolled away from the deleted row, so the only
+        // signal the destructive operation ran at all was absence.
+        showToast(`Deleted tag ${tag.name}`, 'success');
         this.dispatchEvent(new CustomEvent('tags-changed', {
           detail: { repositoryPath: repoPath },
           bubbles: true,
@@ -622,7 +756,7 @@ export class LvTagList extends LitElement {
         showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } finally {
-      this.operationInProgress = false;
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -634,39 +768,39 @@ export class LvTagList extends LitElement {
     }));
   }
 
-  public openCreateTagDialog(targetRef?: string): void {
-    this.createTagDialog.open(targetRef);
-  }
-
   private handleCreateTagFromContext(): void {
     const tag = this.contextMenu.tag;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    // Open create tag dialog with the selected tag's target as the starting point
-    this.createTagDialog.open(tag?.targetOid);
-  }
-
-  private async handleTagCreated(e?: CustomEvent<{ repositoryPath?: string }>): Promise<void> {
-    // The dialog pins to the repo it was opened for and reports it here. The
-    // user may have switched tabs while the dialog was open (rebinding our live
-    // repositoryPath), so trust the event's repo — not our current prop — and
-    // only reload OUR view when it matches the repo we're showing.
-    const repoPath = e?.detail?.repositoryPath ?? this.repositoryPath;
-    if (repoPath === this.repositoryPath) {
-      await this.loadTags();
-    }
-    this.dispatchEvent(new CustomEvent('tags-changed', {
-      detail: { repositoryPath: repoPath },
+    // Ask app-shell to open THE create-tag dialog, aimed at the selected tag's
+    // target. This list used to mount a second instance of its own: with two
+    // copies alive, each `open()`'s "already open, don't wipe the input" guard
+    // only knew about itself, so opening from here and then from the palette
+    // stacked two dialogs with different pinned targets over each other.
+    this.dispatchEvent(new CustomEvent('create-tag', {
       bubbles: true,
       composed: true,
+      detail: { targetRef: tag?.targetOid },
     }));
   }
 
   private async handlePushTag(): Promise<void> {
     const tag = this.contextMenu.tag;
-    if (!tag || this.operationInProgress) return;
+    if (!tag) return;
+    const lockedRepo = this.repositoryPath;
+    if (!this.claimOperation(lockedRepo)) return;
+
+    // Also the shared tag-push key. Force Push Tag — reachable from the
+    // rejected-push suggestion toast — holds this across its "moves the remote
+    // tag" confirm and takes no working-tree claim, so without it a click here
+    // pushed the same tag out from under the force push being authorised.
+    const tagKey = pushTagKey(lockedRepo, tag.name);
+    if (!tryAcquirePush(tagKey)) {
+      this.releaseOperation(lockedRepo);
+      warnRepositoryBusy();
+      return;
+    }
 
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.operationInProgress = true;
 
     // Captured BEFORE the push await: the push and its refresh must pin to the
     // repo it was invoked on, even if the user switches tabs during the (often
@@ -686,12 +820,21 @@ export class LvTagList extends LitElement {
           bubbles: true,
           composed: true,
         }));
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         console.error('Failed to push tag:', result.error);
-        showToast(`Failed to push tag: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        // Same routing the graph's push-tag gesture gets — this was the last
+        // push surface still building a raw toast.
+        showErrorWithSuggestion(result.error?.message ?? '', 'Failed to push tag', {
+          operation: 'push-tag',
+          // The Force Push Tag action needs the tag name; without it the
+          // suggestion renders a button that dispatches an undefined target.
+          branchName: tag.name,
+          repoPath,
+        });
       }
     } finally {
-      this.operationInProgress = false;
+      releasePush(tagKey);
+      this.releaseOperation(lockedRepo);
     }
   }
 
@@ -756,7 +899,7 @@ export class LvTagList extends LitElement {
           </svg>
           Create Tag Here
         </button>
-        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handlePushTag}>
+        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress || this.tagPushInFlight} @click=${this.handlePushTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <line x1="12" y1="19" x2="12" y2="5"></line>
             <polyline points="5 12 12 5 19 12"></polyline>
@@ -890,16 +1033,18 @@ export class LvTagList extends LitElement {
     return html`
       ${this.renderBody()}
       ${this.renderContextMenu()}
-      <lv-create-tag-dialog
-        .repositoryPath=${this.repositoryPath}
-        @tag-created=${this.handleTagCreated}
-      ></lv-create-tag-dialog>
     `;
   }
 
   private renderBody() {
     if (this.loading) {
       return html`<div class="loading">Loading tags...</div>`;
+    }
+
+    // Before the empty check: "No tags" over a repo whose tag load failed is a
+    // lie the user would act on (and the previous repo's rows would be worse).
+    if (this.error) {
+      return html`<div class="error" role="alert">${this.error}</div>`;
     }
 
     if (this.tags.length === 0) {

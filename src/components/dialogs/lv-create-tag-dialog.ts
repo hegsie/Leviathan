@@ -7,6 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { createTag } from '../../services/git.service.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -195,6 +196,14 @@ export class LvCreateTagDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the tag is being created. The host's tab-close sweep must not
+   * report "tag creation cancelled" over a create that still lands.
+   */
+  public get operationInFlight(): boolean {
+    return this.isCreating;
+  }
+
   @state() private name = '';
   @state() private targetRef = '';
   @state() private message = '';
@@ -210,15 +219,52 @@ export class LvCreateTagDialog extends LitElement {
     // clear `isCreating` and re-enable the button for a second concurrent run,
     // and the first run's close() would then yank shut the reopened session.
     if (this.isCreating) return;
+
+    // Already open: re-entering must NOT reset. Several entry points converge
+    // on this one instance (context menu, panel header button, command
+    // palette), and ctrl-shortcuts fire even while typing in an input — so
+    // Ctrl+P then "Create..." while the dialog was open silently wiped the
+    // tag name and message the user had entered. Re-aim at the new target if one was
+    // given, refocus, and keep their text.
+    if (this.isOpen) {
+      if (targetRef) {
+        this.targetRef = targetRef;
+      }
+      this.inputEl?.focus();
+      return;
+    }
+
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
     if (targetRef) {
       this.targetRef = targetRef;
     }
-    this.modal.open = true;
-    // Focus input after modal opens
-    setTimeout(() => this.inputEl?.focus(), 100);
+    // Reveal the modal only AFTER the reset above has rendered. Setting
+    // modal.open synchronously made the dialog visible while a render carrying
+    // the cleared `name` was still pending, so anything typed in that window
+    // was overwritten by `.value=${this.name}` when it committed — the field
+    // silently emptied itself and Create Tag stayed disabled.
+    void this.updateComplete.then(() => {
+      // close() may have run while this was pending — for instance the host's
+      // tab-close sweep dismissing the dialog. Re-revealing here would leave
+      // modal.open true with isOpen false: a visible dialog the app believes
+      // is shut.
+      if (!this.isOpen) return;
+      this.modal.open = true;
+      // Focus the name field once the modal has painted — but only while focus
+      // is still nobody's. This used to be an unguarded 100ms timer, which
+      // fired long after the user could click or Tab into Target or Message and
+      // yanked the caret back into the name box mid-keystroke: the rest of the
+      // message landed in the tag name, and Create Tag stayed disabled because
+      // Message was still empty. A rAF also lands before lv-modal's own focus
+      // pass, which then sees focus inside and backs off.
+      requestAnimationFrame(() => {
+        if (!this.isOpen) return;
+        if (containsDeepActiveElement(this)) return;
+        this.inputEl?.focus();
+      });
+    });
   }
 
   public close(): void {

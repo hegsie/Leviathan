@@ -456,13 +456,8 @@ mod tests {
 
     #[test]
     fn test_is_binary_data_with_nulls() {
-        let mut data = vec![0u8; 100];
-        data[0] = b'H';
-        data[1] = 0x00;
-        data[2] = b'e';
-        data[3] = 0x00;
-        // This looks like UTF-16LE pattern, should not be binary
-        // But let's test with random nulls
+        // The UTF-16LE-looking buffer this used to build was never asserted
+        // on; the case under test is interspersed nulls.
         let binary_data = b"Some text\x00\x00\x00more binary\x00data";
         assert!(is_binary_data(binary_data));
     }

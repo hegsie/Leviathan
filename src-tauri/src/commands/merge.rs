@@ -11,12 +11,32 @@ use crate::models::{
 use crate::utils::create_command;
 
 /// Represents a commit in the interactive rebase todo list
+/// Outcome of an interactive rebase run.
+///
+/// `git rebase -i` exits 0 both when the plan ran to completion and when it
+/// stopped at an `edit`/`break` line, so the exit code alone cannot tell the
+/// caller whether the repository is still mid-rebase.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractiveRebaseOutcome {
+    /// True when the rebase stopped at a breakpoint and the repo is still in a
+    /// rebase state awaiting `git rebase --continue`.
+    pub paused: bool,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RebaseCommit {
     pub oid: String,
     pub short_id: String,
     pub summary: String,
+    /// Everything after the subject line, empty when there is none.
+    ///
+    /// The reword route amends with `-m`, which REPLACES the whole message —
+    /// so seeding the editor from `summary` alone silently deleted trailers,
+    /// issue references and rationale. The commit panel's amend has always
+    /// carried the body; this is what lets the rebase route match it.
+    pub body: String,
     pub action: String,
 }
 
@@ -187,12 +207,26 @@ pub async fn merge(
             Ok(())
         })();
 
-        // A genuine commit-phase failure (missing signature, disk error) still
-        // resets the half-merged state so the user isn't stuck.
-        if let Err(e) = result {
-            let _ = repo.cleanup_state();
-            return Err(e);
-        }
+        // Leave MERGE_HEAD/MERGE_MSG in place on a commit-phase failure.
+        //
+        // cleanup_state() only UNLINKS the state files — it does not touch the
+        // index or the working tree, both of which repo.merge() has already
+        // filled with the fully merged result. So calling it here removed the
+        // only marker that makes the merge resumable and abortable while
+        // leaving the merge itself applied: repo.state() went Clean, the
+        // operation banner vanished, abort_merge refused with "there is no
+        // merge to abort", and the whole inter-branch diff sat staged under a
+        // toast reading "Merge failed". Committing that by hand produces a
+        // single-parent commit, so the source branch is still not an ancestor
+        // of HEAD — and the later force-delete escalation then discards commits
+        // that only LOOK duplicated.
+        //
+        // Canonical git leaves MERGE_HEAD on any failure after the merge, which
+        // is why commit_merge_signed one function away goes to the trouble of
+        // snapshotting and restoring it. Reachable with no user.name/user.email
+        // configured (repo.signature() is called raw), or on index.lock
+        // contention from a terminal, or a disk-full write_tree.
+        result?;
 
         repo.cleanup_state()?;
     }
@@ -496,6 +530,17 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
         ));
     }
 
+    // The Hooks dialog advertises pre-rebase as "Run before rebase. Can prevent
+    // the rebase", and it does fire for Interactive rebase / Reword / non-HEAD
+    // Amend, because those shell out to `git rebase -i` and git runs it. This
+    // libgit2 path ran no hooks at all — libgit2 never does — so one repo with
+    // one enabled hook had two Rebase buttons, one honouring the veto and one
+    // silently ignoring it. Placed after the dirty-tree checks and before any
+    // repository state is created, so a refusal leaves nothing behind. git
+    // passes <upstream> [<branch>]; the single-argument form is the
+    // current-branch invocation.
+    crate::commands::hooks::run_hook_blocking(&repo, "pre-rebase", &[&onto], None)?;
+
     // Find the onto commit
     let onto_ref = repo
         .find_reference(&format!("refs/heads/{}", onto))
@@ -506,9 +551,17 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     let head = repo.head()?;
     let head_commit = repo.reference_to_annotated_commit(&head)?;
 
-    let mut rebase = repo.rebase(Some(&head_commit), Some(&onto_commit), None, None)?;
-
+    // Resolved BEFORE repo.rebase(). repo.rebase() is git_rebase_init, not a
+    // dry run: it creates .git/rebase-merge/, checks out `onto` and detaches
+    // HEAD. This binding sat AFTER it and OUTSIDE the closure whose Err arm
+    // aborts — so an unusable identity (no user.name/user.email, an empty
+    // email, a name containing angle brackets) left the repo wedged in
+    // RebaseMerge on a detached HEAD showing the other branch's content, with
+    // every later operation refused as "another operation is in progress" and
+    // nothing in the message saying Abort was the way out. pull --rebase in
+    // remote.rs already resolves it inside its guarded closure.
     let signature = repo.signature()?;
+    let mut rebase = repo.rebase(Some(&head_commit), Some(&onto_commit), None, None)?;
 
     // git2::Rebase does NOT call abort() on Drop. Without an explicit abort,
     // failures other than the expected RebaseConflict (e.g. missing
@@ -516,20 +569,42 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     // permanently stuck in REBASE state. We do NOT abort on RebaseConflict
     // because the UI surfaces a "resolve conflicts" flow that needs the
     // rebase state intact; the user can call abort_rebase explicitly.
+    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit.
+    let mut rewritten: Vec<String> = Vec::new();
     let result = (|| -> Result<()> {
         while let Some(op) = rebase.next() {
-            let _op = op?;
+            let op = op?;
+            let old_oid = op.id();
 
             if repo.index()?.has_conflicts() {
                 return Err(LeviathanError::RebaseConflict);
             }
 
-            rebase.commit(None, &signature, None)?;
+            let new_oid = rebase.commit(None, &signature, None)?;
+            rewritten.push(format!("{} {}", old_oid, new_oid));
         }
 
         rebase.finish(Some(&signature))?;
         Ok(())
     })();
+
+    if result.is_ok() {
+        if !rewritten.is_empty() {
+            // Same hook the CLI rebase path gets for free — see the pre-rebase
+            // note above. Advertised by the Hooks dialog for "rebase, amend".
+            crate::commands::hooks::run_hook_noblock_with_stdin(
+                &repo,
+                "post-rewrite",
+                &["rebase"],
+                Some(&format!("{}\n", rewritten.join("\n"))),
+            );
+        }
+    } else if matches!(result, Err(LeviathanError::RebaseConflict)) {
+        // Paused, not finished. Hand the pairs replayed so far to whichever
+        // continue_rebase eventually completes this rebase, so the hook
+        // describes the whole thing rather than only the last leg.
+        append_rewritten(&repo, &rewritten);
+    }
 
     match result {
         Err(LeviathanError::RebaseConflict) => Err(LeviathanError::RebaseConflict),
@@ -539,6 +614,49 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
         }
         Ok(()) => Ok(()),
     }
+}
+
+/// Where the `<old> <new>` pairs of a paused rebase are kept.
+///
+/// libgit2's rebase state lives in `<gitdir>/rebase-merge/`, which git removes
+/// when the rebase finishes or is aborted — so a file there is scoped to
+/// exactly one rebase and needs no separate cleanup.
+fn rewritten_list_path(repo: &git2::Repository) -> std::path::PathBuf {
+    repo.path().join("rebase-merge").join("leviathan-rewritten")
+}
+
+/// Append pairs replayed so far, so a conflict pause does not lose them.
+///
+/// post-rewrite must describe the WHOLE rebase. Both `rebase` and
+/// `continue_rebase` accumulated pairs in a local Vec and fired the hook only
+/// if that one invocation ran to completion, so every commit replayed before a
+/// conflict was dropped: rebase A-B-C where B conflicts reported only B and C.
+fn append_rewritten(repo: &git2::Repository, pairs: &[String]) {
+    if pairs.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    let path = rewritten_list_path(repo);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{}", pairs.join("\n"));
+    }
+}
+
+/// Read and clear the pairs persisted by earlier passes of this rebase.
+fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
+    let path = rewritten_list_path(repo);
+    let contents = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    contents
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
 }
 
 /// Preview a rebase by running it in a temporary worktree (ghost rebase)
@@ -686,32 +804,73 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     let signature = repo.signature()?;
     let mut rebase = repo.open_rebase(None)?;
 
+    // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit,
+    // and must describe the WHOLE rebase. rebase() fires it when it completes
+    // in one go; a rebase that PAUSED finishes here instead, and this path
+    // never fired it at all — so the hook ran or not depending only on whether
+    // the user hit a conflict. Seeded from the pairs earlier passes persisted,
+    // so commits replayed before each pause are not dropped.
+    let mut rewritten: Vec<String> = Vec::new();
+
     // Commit the current (just-resolved) operation; a patch that became
     // empty after resolution is skipped like `git rebase --skip` would.
-    commit_or_skip_empty(&mut rebase, &signature)?;
+    // The operation being resolved is the rebase's current one.
+    let resumed_old = rebase
+        .operation_current()
+        .and_then(|i| rebase.nth(i).map(|op| op.id()));
+    if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+        if let Some(old_oid) = resumed_old {
+            rewritten.push(format!("{} {}", old_oid, new_oid));
+        }
+    }
 
     // Continue with remaining operations
     while let Some(op) = rebase.next() {
-        let _op = op?;
+        let old_oid = op?.id();
 
         if repo.index()?.has_conflicts() {
+            // Paused again. Persist this leg so the eventual completion still
+            // sees every commit replayed across all of them.
+            append_rewritten(&repo, &rewritten);
             return Err(LeviathanError::RebaseConflict);
         }
 
-        commit_or_skip_empty(&mut rebase, &signature)?;
+        if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+            rewritten.push(format!("{} {}", old_oid, new_oid));
+        }
     }
 
+    // Read BEFORE finish(): it removes the rebase-merge directory the list
+    // lives in.
+    let mut all_rewritten = take_rewritten(&repo);
+    all_rewritten.extend(rewritten);
+
     rebase.finish(Some(&signature))?;
+
+    if !all_rewritten.is_empty() {
+        crate::commands::hooks::run_hook_noblock_with_stdin(
+            &repo,
+            "post-rewrite",
+            &["rebase"],
+            Some(&format!("{}\n", all_rewritten.join("\n"))),
+        );
+    }
 
     Ok(())
 }
 
 /// Commit the current rebase operation, treating an empty patch
 /// (GIT_EAPPLIED) as a skip rather than a failure.
-fn commit_or_skip_empty(rebase: &mut git2::Rebase, signature: &git2::Signature) -> Result<()> {
+///
+/// Returns the new commit's oid, or None when the patch was skipped — the
+/// caller pairs it with the original oid for the post-rewrite hook.
+fn commit_or_skip_empty(
+    rebase: &mut git2::Rebase,
+    signature: &git2::Signature,
+) -> Result<Option<git2::Oid>> {
     match rebase.commit(None, signature, None) {
-        Ok(_) => Ok(()),
-        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(()),
+        Ok(oid) => Ok(Some(oid)),
+        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -735,6 +894,19 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
             .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
         if output.status.success() {
+            // Exit 0 does NOT mean "finished": `git rebase --continue` also
+            // exits 0 when it advances to the NEXT `edit` or `break` line. The
+            // sibling execute_interactive_rebase already tells the two apart
+            // this way; reporting a pause as completion closed the conflict
+            // dialog with no message and left the repo mid-rebase on a
+            // detached HEAD, where the most obvious remaining button was the
+            // one that throws the rebase away.
+            let git_dir = git2::Repository::open(Path::new(path))?
+                .path()
+                .to_path_buf();
+            if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+                return Err(LeviathanError::RebasePaused);
+            }
             return Ok(());
         }
 
@@ -768,9 +940,65 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
 #[command]
 pub async fn abort_rebase(path: String) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+
+    // Same CLI branch continue_rebase has. libgit2 refuses to open an
+    // interactive rebase at all — rebase.c returns "interactive rebase is not
+    // supported" — so `open_rebase` failed for every rebase started through
+    // execute_interactive_rebase. That made Abort impossible from the banner,
+    // from the trigger-abort toast action, and from the conflict dialog, which
+    // renders no × and suppresses Escape: its only other control is Continue,
+    // disabled until every conflict is resolved. A user who opened it on an
+    // interactive-rebase conflict and did not want to finish was trapped in a
+    // modal with no working exit, and reset is refused mid-rebase too.
+    if repo.path().join("rebase-merge/git-rebase-todo").exists() {
+        let output = create_command("git")
+            .current_dir(&path)
+            // As continue_rebase_cli: no editor is reachable from a GUI child
+            // process, and the C locale keeps any error matching meaningful.
+            .env("GIT_EDITOR", "true")
+            .env("LC_ALL", "C")
+            .args(["rebase", "--abort"])
+            .output()
+            .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(LeviathanError::OperationFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
     let mut rebase = repo.open_rebase(None)?;
     rebase.abort()?;
     Ok(())
+}
+
+/// Is `oid` reachable from HEAD (or HEAD itself)?
+///
+/// The graph is loaded with every branch, so Reword and Amend are offered on
+/// commits that live only on OTHER branches. Both route non-HEAD commits to the
+/// interactive-rebase dialog as `<oid>^`, and `get_rebase_commits` then walks
+/// HEAD while hiding that parent — which for an off-branch commit yields the
+/// current branch's own history and never contains the target. The dialog
+/// opened with no reword row but an enabled Start Rebase, one click from
+/// replaying the current branch onto an unrelated branch's commit.
+///
+/// A plain rebase onto another branch is legitimate and stays available from
+/// the branch list; it is only the reword/amend route that requires the target
+/// to be in the history being rewritten, so the check lives here rather than in
+/// get_rebase_commits.
+#[command]
+pub async fn is_ancestor_of_head(path: String, oid: String) -> Result<bool> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let target = repo.revparse_single(&oid)?.peel_to_commit()?.id();
+    let head = repo
+        .head()?
+        .target()
+        .ok_or(LeviathanError::InvalidReference)?;
+    if head == target {
+        return Ok(true);
+    }
+    Ok(repo.graph_descendant_of(head, target)?)
 }
 
 /// Get commits between HEAD and a target ref for interactive rebase
@@ -778,15 +1006,25 @@ pub async fn abort_rebase(path: String) -> Result<()> {
 pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<RebaseCommit>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Find the onto commit
-    let onto_ref = repo
+    // Find the onto commit.
+    //
+    // `find_reference` is an EXACT refname lookup and validates the name, so it
+    // rejects any revspec. The graph's Reword and Amend entries route non-HEAD
+    // commits here as `<oid>^`, where `^` is illegal in a refname — all three
+    // lookups failed and the dialog opened showing "the given reference name
+    // '<oid>^' is not valid", an empty plan and a disabled Start Rebase, with
+    // no way to proceed. `execute_interactive_rebase` shells out to
+    // `git rebase -i <onto>` and has always accepted the revspec; only the
+    // listing could not resolve it. revparse_single closes that gap and is what
+    // git itself would do.
+    let onto_oid = match repo
         .find_reference(&format!("refs/heads/{}", onto))
         .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", onto)))
-        .or_else(|_| repo.find_reference(&onto))?;
-
-    let onto_oid = onto_ref
-        .target()
-        .ok_or_else(|| LeviathanError::InvalidReference)?;
+        .or_else(|_| repo.find_reference(&onto))
+    {
+        Ok(r) => r.target().ok_or(LeviathanError::InvalidReference)?,
+        Err(_) => repo.revparse_single(&onto)?.peel_to_commit()?.id(),
+    };
 
     let head_oid = repo
         .head()?
@@ -803,10 +1041,21 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
 
+        // Canonical `git rebase -i` omits merge commits from its todo, and a
+        // `pick` of one fails mid-run with "is a merge but no -m option was
+        // given" — after earlier commits have already been replayed, leaving a
+        // detached HEAD and a live rebase the user has to find the banner to
+        // abort. The plain revwalk also emitted commits from the merged-in
+        // side, which the user never touched and did not expect to see.
+        if commit.parent_count() > 1 {
+            continue;
+        }
+
         commits.push(RebaseCommit {
             oid: oid.to_string(),
             short_id: oid.to_string()[..7].to_string(),
             summary: commit.summary().ok().flatten().unwrap_or("").to_string(),
+            body: commit.body().ok().flatten().unwrap_or("").to_string(),
             action: "pick".to_string(),
         });
     }
@@ -819,13 +1068,41 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
 
 /// Execute an interactive rebase using git CLI
 #[command]
-pub async fn execute_interactive_rebase(path: String, onto: String, todo: String) -> Result<()> {
-    // Write the todo to a temp file
-    let todo_path = std::env::temp_dir().join("leviathan-rebase-todo");
+pub async fn execute_interactive_rebase(
+    path: String,
+    onto: String,
+    todo: String,
+) -> Result<InteractiveRebaseOutcome> {
+    // `onto` is forwarded to `git rebase -i` as a bare positional argument, so
+    // a ref named `--exec=<command>` would become a flag. cli_safety states the
+    // rule and 24 call sites apply it by hand; this was the destructive
+    // CLI-invoking command never added to that list.
+    crate::utils::reject_flag_like(&onto, "Rebase target")?;
+
+    // Unique names per call, like apply_patch_to_index. The fixed
+    // /tmp/leviathan-rebase-todo these replace meant two rebases running at
+    // once would read each other's plan — one repo silently rewritten with the
+    // other's drops — and the predictable path in a world-writable directory
+    // was a symlink target for anyone on the machine.
+    //
+    // into_temp_path() closes the file handle while keeping the path (and its
+    // delete-on-drop). The script MUST be closed before git execs it: on Linux
+    // exec of a file that any process still holds open for writing fails with
+    // ETXTBSY, and NamedTempFile holds exactly such a handle for its whole
+    // scope. Since git runs GIT_SEQUENCE_EDITOR for every `rebase -i`, that
+    // made every interactive rebase fail with "cannot exec ...: Text file busy"
+    // — not just the squash path this was found through.
+    let todo_path = tempfile::Builder::new()
+        .prefix("leviathan-rebase-todo-")
+        .tempfile()?
+        .into_temp_path();
     std::fs::write(&todo_path, &todo)?;
 
     // Create a script that outputs the todo file content
-    let script_path = std::env::temp_dir().join("leviathan-rebase-editor");
+    let script_path = tempfile::Builder::new()
+        .prefix("leviathan-rebase-editor-")
+        .tempfile()?
+        .into_temp_path();
 
     #[cfg(target_os = "windows")]
     {
@@ -846,13 +1123,30 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
     let output = create_command("git")
         .current_dir(&path)
         .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
+        // GIT_SEQUENCE_EDITOR only supplies the todo list. A `squash` (or
+        // `reword`) line then opens GIT_EDITOR for the combined message, and
+        // this is the one rebase in the app whose todo the USER composes, so it
+        // is the one that can contain them. Without this, git fell through to
+        // core.editor/VISUAL/EDITOR/vi: a terminal editor died instantly on the
+        // null stdin Command::output() gives it, and a GUI editor
+        // (`code --wait`) blocked forever on a window nobody asked for — either
+        // way leaving a paused rebase and a detached HEAD whose only exit was
+        // the banner's Abort. `true` accepts the message git already composed,
+        // which is exactly what the dialog's preview promises. Its sibling
+        // continue_rebase_cli has always set this.
+        .env("GIT_EDITOR", "true")
+        // Same reason as continue_rebase_cli: the conflict classification below
+        // matches English stderr, so a localized git would report a conflict as
+        // a generic failure and skip the conflict-resolution route entirely.
+        .env("LC_ALL", "C")
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
-    // Clean up temp files
-    let _ = std::fs::remove_file(&todo_path);
-    let _ = std::fs::remove_file(&script_path);
+    // TempPath removes the file on drop; dropping here keeps the cleanup
+    // adjacent to the run it belongs to.
+    drop(todo_path);
+    drop(script_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -862,7 +1156,22 @@ pub async fn execute_interactive_rebase(path: String, onto: String, todo: String
         return Err(LeviathanError::OperationFailed(stderr.to_string()));
     }
 
-    Ok(())
+    // Exit 0 does NOT mean "finished": `git rebase -i` also exits 0 when it
+    // stops at an `edit` or `break` line. Reporting that as success closed the
+    // dialog with no message and left the repo mid-rebase on a detached HEAD,
+    // where the only visible affordance was an Abort button that would throw
+    // the rebase away. The rebase directory is still on disk while it is
+    // paused, so use that to tell the two apart.
+    // Resolve via repo.path() so per-worktree rebase state is found in linked
+    // worktrees: there `<wt>/.git` is a gitdir-POINTER FILE and the rebase
+    // state lives under `<main>/.git/worktrees/<name>/`, so joining ".git/..."
+    // onto the working-tree root can never match and `paused` was always false.
+    let git_dir = git2::Repository::open(Path::new(&path))?
+        .path()
+        .to_path_buf();
+    let paused = git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists();
+
+    Ok(InteractiveRebaseOutcome { paused })
 }
 
 /// Get list of conflicted files
@@ -2001,6 +2310,59 @@ fn parse_merge_branch_from_msg(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A commit-phase failure must leave the merge RESUMABLE and ABORTABLE.
+    ///
+    /// repo.merge() has already written the merged result into the index and
+    /// working tree by then. cleanup_state() only unlinks MERGE_HEAD/MERGE_MSG,
+    /// so calling it there left the merge fully applied but unmarked: the
+    /// banner vanished, abort_merge refused, and the diff sat staged under a
+    /// "Merge failed" toast. Committing that by hand yields a single-parent
+    /// commit, so the source branch never becomes an ancestor of HEAD.
+    #[tokio::test]
+    async fn test_merge_commit_failure_keeps_the_merge_abortable() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("shared.txt", "base\n")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        test_repo.create_commit("feature work", &[("feature.txt", "f\n")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("main work", &[("main.txt", "m\n")]);
+
+        // No identity configured -> repo.signature() fails in the commit step,
+        // exactly as it does on a fresh install.
+        let repo = test_repo.repo();
+        let mut cfg = repo.config().unwrap();
+        let _ = cfg.remove("user.name");
+        let _ = cfg.remove("user.email");
+        drop(cfg);
+
+        let result = merge(
+            test_repo.path_str(),
+            "feature".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the commit step must fail without an identity"
+        );
+
+        let repo = test_repo.repo();
+        assert_eq!(
+            repo.state(),
+            git2::RepositoryState::Merge,
+            "the merge must remain in progress, not be silently cleaned up"
+        );
+
+        // And the user must be able to get out of it.
+        abort_merge(test_repo.path_str())
+            .await
+            .expect("a merge left in progress must be abortable");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+    }
     use super::*;
     use crate::test_utils::TestRepo;
 
@@ -2334,6 +2696,529 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_squash_without_an_editor() {
+        // GIT_SEQUENCE_EDITOR only supplies the todo; a `squash` line then opens
+        // GIT_EDITOR for the combined message. This is the one rebase whose todo
+        // the user composes, so it is the one that can contain a squash — and
+        // without GIT_EDITOR git fell through to core.editor/VISUAL/EDITOR/vi,
+        // which dies on the null stdin Command::output() gives it, leaving a
+        // paused rebase and a detached HEAD.
+        //
+        // The env is scrubbed deliberately: a machine with EDITOR set would mask
+        // the bug this covers.
+        std::env::remove_var("EDITOR");
+        std::env::remove_var("VISUAL");
+        std::env::remove_var("GIT_EDITOR");
+
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 2);
+
+        // Oldest-first from get_rebase_commits, which is git's todo order.
+        let todo = format!("pick {}\nsquash {}\n", commits[0].oid, commits[1].oid);
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("a squash must complete without opening an editor");
+        assert!(!outcome.paused, "and must not leave the rebase paused");
+
+        // One commit above the base instead of two.
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 1, "the two commits became one");
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "and the repository is not left mid-rebase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interactive_rebase_rejects_a_flag_like_target() {
+        // `onto` is forwarded to `git rebase -i` as a bare positional, so a ref
+        // named `--exec=<command>` would become a flag that runs it after every
+        // replayed commit. cli_safety states the rule; this command was the one
+        // never added to the 24 sites applying it.
+        let repo = TestRepo::with_initial_commit();
+        let err = execute_interactive_rebase(
+            repo.path_str(),
+            "--exec=touch /tmp/leviathan-should-not-exist".to_string(),
+            "pick abc123\n".to_string(),
+        )
+        .await
+        .expect_err("a flag-like rebase target must be refused");
+        assert!(
+            format!("{}", err).contains("must not start with '-'"),
+            "and say why: {}",
+            err
+        );
+        assert!(
+            !std::path::Path::new("/tmp/leviathan-should-not-exist").exists(),
+            "and refuse BEFORE spawning anything"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_reword_preserves_the_commit_body() {
+        // The reword route amends with `-m`, which replaces the whole message.
+        // Seeding the editor from the subject alone deleted trailers, issue
+        // references and rationale — silently, since the dialog only ever
+        // showed the subject.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit(
+            "Add retry to the uploader\n\nBackoff is exponential.\nFixes #4412",
+            &[("a.txt", "a")],
+        );
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].summary, "Add retry to the uploader");
+        assert!(
+            commits[0].body.contains("Fixes #4412"),
+            "the body must cross the boundary, or the editor cannot show it"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_be_aborted() {
+        // libgit2 refuses to OPEN an interactive rebase ("interactive rebase is
+        // not supported"), so open_rebase failed for every rebase started
+        // through execute_interactive_rebase — making Abort impossible from the
+        // banner, the toast action, and the conflict dialog, which renders no ×
+        // and suppresses Escape. continue_rebase has had the CLI branch since it
+        // was written; abort never got it.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        let branch_before = repo.current_branch();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+        let head_before = repo.head_oid();
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        // An `edit` line pauses the rebase, which is the state Abort exists for.
+        let todo = format!("edit {}\npick {}\n", commits[0].oid, commits[1].oid);
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base, todo)
+            .await
+            .expect("the rebase itself runs");
+        assert!(outcome.paused, "paused at the edit line");
+
+        abort_rebase(repo.path_str())
+            .await
+            .expect("an interactive rebase must be abortable");
+
+        let after = repo.repo();
+        assert_eq!(
+            after.state(),
+            git2::RepositoryState::Clean,
+            "the repository is no longer mid-rebase"
+        );
+        assert_eq!(
+            after.head().unwrap().target().unwrap(),
+            head_before,
+            "and HEAD is back where it started"
+        );
+        assert_eq!(
+            repo.current_branch(),
+            branch_before,
+            "on the original branch"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_rebase_pre_rebase_hook_can_refuse() {
+        // The Hooks dialog advertises pre-rebase as "Can prevent the rebase",
+        // and it does fire for Interactive rebase (git runs it). This libgit2
+        // path ran no hooks, so the same enabled hook vetoed one Rebase button
+        // and was silently ignored by the other.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("a.txt", "a")]);
+        let head_before = repo.head_oid();
+
+        repo.install_hook("pre-rebase", "#!/bin/sh\nexit 1\n");
+
+        let err = rebase(repo.path_str(), main_branch)
+            .await
+            .expect_err("the hook must be able to refuse");
+        assert!(
+            format!("{}", err).to_lowercase().contains("pre-rebase"),
+            "and say which hook: {}",
+            err
+        );
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "a refusal leaves no rebase state behind"
+        );
+        assert_eq!(repo.head_oid(), head_before, "and HEAD unmoved");
+    }
+
+    #[tokio::test]
+    async fn test_rebase_plan_omits_merge_commits() {
+        // `git rebase -i` omits merges from its todo, and a `pick` of one dies
+        // with "is a merge but no -m option was given" — after earlier commits
+        // have already been replayed, leaving a detached HEAD and a live
+        // rebase. The plain revwalk also emitted commits from the merged-in
+        // side that the user never touched.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        let main_branch = repo.current_branch();
+        repo.create_commit("m1", &[("m.txt", "m")]);
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        repo.create_commit("s1", &[("s.txt", "s")]);
+        repo.checkout_branch(&main_branch);
+
+        merge(repo.path_str(), "side".to_string(), None, None, None)
+            .await
+            .expect("a clean merge");
+        repo.create_commit("after", &[("a.txt", "a")]);
+
+        let plan = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let git_repo = repo.repo();
+        for c in &plan {
+            let commit = git_repo.find_commit(c.oid.parse().unwrap()).unwrap();
+            assert_eq!(
+                commit.parent_count(),
+                1,
+                "a merge commit reached the plan: {}",
+                c.summary
+            );
+        }
+    }
+
+    /// `git rebase --continue` exits 0 when it merely advances to the NEXT
+    /// `edit`/`break` line. Reporting that as completion closed the conflict
+    /// dialog with no message and left the repo mid-rebase on a detached HEAD,
+    /// where the most obvious remaining button throws the rebase away.
+    #[tokio::test]
+    async fn test_continue_rebase_reports_a_pause_at_the_next_edit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("first", &[("a.txt", "a\n")]);
+        repo.create_commit("second", &[("b.txt", "b\n")]);
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let first = head.parent(0).unwrap();
+
+        // A CLI interactive rebase that stops at two `edit` lines.
+        let todo = format!("edit {}\nedit {}\n", first.id(), head.id());
+        let base = first.parent(0).unwrap().id().to_string();
+        let outcome = execute_interactive_rebase(repo.path_str(), base, todo).await;
+        let Ok(outcome) = outcome else {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        };
+        assert!(outcome.paused, "the rebase must stop at the first edit");
+
+        // Continuing advances to the SECOND edit — still paused, not finished.
+        let result = continue_rebase(repo.path_str()).await;
+        let git_dir = repo.repo().path().to_path_buf();
+        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+            let err = result.expect_err("a rebase still on disk has not completed");
+            assert!(
+                err.to_string().contains("paused"),
+                "the pause must be reported, not swallowed: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewritten_list_survives_a_conflict_pause() {
+        // post-rewrite must describe the WHOLE rebase. Both rebase() and
+        // continue_rebase() accumulate pairs in a local Vec and fire the hook
+        // only if that one invocation runs to completion, so every commit
+        // replayed BEFORE a conflict was dropped: rebasing A-B-C where B
+        // conflicts reported only B and C.
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        std::fs::create_dir_all(test_repo.path.join(".git/rebase-merge")).unwrap();
+
+        append_rewritten(&repo, &["oldA newA".to_string()]);
+        append_rewritten(&repo, &["oldB newB".to_string(), "oldC newC".to_string()]);
+
+        let taken = take_rewritten(&repo);
+        assert_eq!(
+            taken,
+            vec!["oldA newA", "oldB newB", "oldC newC"],
+            "every leg of the rebase must reach the hook, in order"
+        );
+
+        assert!(
+            take_rewritten(&repo).is_empty(),
+            "the list must be consumed, or the next rebase inherits it"
+        );
+    }
+
+    #[test]
+    fn test_rewritten_list_ignores_an_empty_append() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        std::fs::create_dir_all(test_repo.path.join(".git/rebase-merge")).unwrap();
+
+        append_rewritten(&repo, &[]);
+
+        assert!(
+            take_rewritten(&repo).is_empty(),
+            "a pause with nothing replayed must leave no blank lines behind"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_continue_rebase_runs_post_rewrite() {
+        // rebase() fires post-rewrite when it completes in one go. A rebase
+        // that PAUSED on a conflict finishes in continue_rebase instead, which
+        // fired nothing — so whether the hook ran depended only on whether the
+        // user happened to hit a conflict.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_commit("on main", &[("shared.txt", "main side\n")]);
+        // A feature branch that conflicts with main on the same file.
+        repo.repo()
+            .reference(
+                "refs/heads/feature",
+                repo.repo()
+                    .find_reference(&format!("refs/heads/{}", main_branch))
+                    .unwrap()
+                    .target()
+                    .unwrap(),
+                true,
+                "test",
+            )
+            .unwrap();
+        repo.checkout_branch("feature");
+        // Rewind feature to before the main commit so the rebase has work.
+        repo.create_commit("on feature", &[("shared.txt", "feature side\n")]);
+
+        let marker = repo.path.join("post-rewrite-ran");
+        repo.install_hook(
+            "post-rewrite",
+            &format!("#!/bin/sh\ncat > \"{}\"\n", marker.display()),
+        );
+
+        // Drive a libgit2 rebase to a paused state, resolve, then continue.
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap();
+        let head_commit = git_repo.reference_to_annotated_commit(&head).unwrap();
+        let onto = git_repo
+            .find_reference(&format!("refs/heads/{}", main_branch))
+            .unwrap();
+        let onto_commit = git_repo.reference_to_annotated_commit(&onto).unwrap();
+        let mut rb = git_repo
+            .rebase(Some(&head_commit), Some(&onto_commit), None, None)
+            .unwrap();
+        let sig = git_repo.signature().unwrap();
+        let mut paused = false;
+        while let Some(op) = rb.next() {
+            op.unwrap();
+            if git_repo.index().unwrap().has_conflicts() {
+                paused = true;
+                break;
+            }
+            let _ = rb.commit(None, &sig, None);
+        }
+        drop(rb);
+
+        if !paused {
+            // No conflict arose; nothing for continue_rebase to finish.
+            return;
+        }
+
+        // Resolve the conflict the way the conflict dialog does.
+        repo.create_file("shared.txt", "resolved\n");
+        repo.stage_file("shared.txt");
+
+        continue_rebase(repo.path_str()).await.expect("continue");
+
+        assert!(
+            marker.exists(),
+            "post-rewrite must run when a paused rebase is continued"
+        );
+        let payload = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            payload.split_whitespace().count() >= 2,
+            "post-rewrite stdin must carry <old> <new> pairs, got: {:?}",
+            payload
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_rebase_runs_post_rewrite() {
+        // The Hooks dialog advertises post-rewrite for "rebase, amend"; the
+        // libgit2 path ran no hooks, so the same Rebase fired it only when it
+        // happened to go through the CLI.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        repo.create_commit("on main", &[("m.txt", "m")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("f.txt", "f")]);
+
+        let marker = repo.path.join("post-rewrite-ran");
+        repo.install_hook(
+            "post-rewrite",
+            &format!("#!/bin/sh\ncat > \"{}\"\n", marker.display()),
+        );
+
+        rebase(repo.path_str(), main_branch).await.expect("rebase");
+
+        assert!(marker.exists(), "post-rewrite must run after a rebase");
+        let recorded = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            recorded.split_whitespace().count(),
+            2,
+            "one `<old> <new>` pair for the replayed commit: {:?}",
+            recorded
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_ancestor_of_head() {
+        // The graph offers Reword and Amend on every branch's commits. Routing
+        // an off-branch commit to `<oid>^` produced a plan holding the CURRENT
+        // branch's history with the target absent, and an enabled Start Rebase
+        // one click from replaying this branch onto an unrelated one.
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+        let on_main = repo.create_commit("on main", &[("a.txt", "a")]).to_string();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let on_feature = repo
+            .create_commit("on feature", &[("b.txt", "b")])
+            .to_string();
+        repo.checkout_branch(&main_branch);
+
+        assert!(
+            is_ancestor_of_head(repo.path_str(), on_main.clone())
+                .await
+                .unwrap(),
+            "a commit on the current branch can be rewritten in place"
+        );
+        assert!(
+            !is_ancestor_of_head(repo.path_str(), on_feature)
+                .await
+                .unwrap(),
+            "one that lives only on another branch cannot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_head_is_its_own_ancestor_for_this_check() {
+        // graph_descendant_of is false for equal oids, but HEAD is obviously
+        // rewritable in place.
+        let repo = TestRepo::with_initial_commit();
+        let head = repo.head_oid().to_string();
+        assert!(is_ancestor_of_head(repo.path_str(), head).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_runs_at_all() {
+        // The plainest possible plan: reorder nothing, drop nothing, squash
+        // nothing. It failed too — git runs GIT_SEQUENCE_EDITOR for every
+        // `rebase -i`, and the script was still held open for writing by the
+        // NamedTempFile that created it, so exec'ing it returned ETXTBSY. This
+        // test exists so the general case is pinned, not just the squash that
+        // led here.
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("first", &[("a.txt", "a")]);
+        repo.create_commit("second", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        let todo = commits
+            .iter()
+            .map(|c| format!("pick {}", c.oid))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let outcome = execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("an all-pick interactive rebase must run");
+        assert!(!outcome.paused);
+
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 2, "both commits survive an all-pick plan");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_interactive_rebase_can_drop() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid().to_string();
+        repo.create_commit("keep", &[("a.txt", "a")]);
+        repo.create_commit("remove", &[("b.txt", "b")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base.clone())
+            .await
+            .unwrap();
+        let todo = format!("pick {}\ndrop {}\n", commits[0].oid, commits[1].oid);
+
+        execute_interactive_rebase(repo.path_str(), base.clone(), todo)
+            .await
+            .expect("a drop plan must run");
+
+        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].summary.contains("keep"));
+    }
+
+    #[tokio::test]
+    async fn test_get_rebase_commits_accepts_a_revspec() {
+        // The graph's Reword and Amend entries route non-HEAD commits here as
+        // `<oid>^`. find_reference is an exact refname lookup and `^` is
+        // illegal in a refname, so the dialog opened empty and disabled with a
+        // raw libgit2 message and no way forward.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("second", &[("a.txt", "a")]);
+        repo.create_commit("third", &[("b.txt", "b")]);
+
+        let head_oid = repo.head_oid().to_string();
+
+        let commits = get_rebase_commits(repo.path_str(), format!("{}^", head_oid))
+            .await
+            .expect("a revspec must resolve, not error");
+
+        assert_eq!(commits.len(), 1, "just the tip, whose parent we asked for");
+        assert_eq!(commits[0].oid, head_oid);
+    }
+
+    #[tokio::test]
+    async fn test_get_rebase_commits_still_accepts_a_branch_name() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("on feature", &[("a.txt", "a")]);
+
+        let commits = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        assert_eq!(commits.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_get_rebase_commits_no_divergence() {
         let repo = TestRepo::with_initial_commit();
 
@@ -2423,6 +3308,7 @@ mod tests {
             oid: "abc123def456".to_string(),
             short_id: "abc123d".to_string(),
             summary: "Test commit".to_string(),
+            body: "Explains why.\n\nFixes #1".to_string(),
             action: "pick".to_string(),
         };
 
@@ -2432,6 +3318,10 @@ mod tests {
         assert!(json_str.contains("\"oid\":\"abc123def456\""));
         assert!(json_str.contains("\"shortId\":\"abc123d\""));
         assert!(json_str.contains("\"action\":\"pick\""));
+        // The body has to cross the boundary, or the reword editor cannot show
+        // it and `--amend -m` silently drops it.
+        assert!(json_str.contains("\"body\""));
+        assert!(json_str.contains("Fixes #1"));
     }
 
     #[tokio::test]

@@ -528,12 +528,17 @@ describe('lv-command-palette', () => {
       expect(selected).to.exist;
     });
 
-    it('updates selection on mouse enter', async () => {
+    // A mouseenter alone no longer moves the selection: Chromium fires one at
+    // rows that appear under a STATIONARY cursor, which retargeted what Enter
+    // ran. Hover selection now waits for a real pointer movement — see
+    // lv-command-palette-hover.test.ts.
+    it('updates selection on a hover that follows real pointer movement', async () => {
       el.open = true;
       await el.updateComplete;
 
       const commands = el.shadowRoot!.querySelectorAll('.command');
       if (commands.length > 1) {
+        (commands[0] as HTMLElement).dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
         (commands[1] as HTMLElement).dispatchEvent(new MouseEvent('mouseenter'));
         await el.updateComplete;
 

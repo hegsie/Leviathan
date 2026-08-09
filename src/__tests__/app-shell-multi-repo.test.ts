@@ -49,6 +49,38 @@ function mockRepo(path: string, name: string): Repository {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * Make a REAL dialog element in app-shell's shadow root look open and pinned
+ * to `pinnedTo`, optionally with work in flight, and report whether the sweep
+ * dismissed it.
+ *
+ * Stubbing the @query field with a plain object instead would be vacuous: the
+ * sweep discovers dialogs from the DOM via `pinnedRepositoryPathIfOpen`.
+ */
+function stubPinnedDialog(
+  el: AppShell,
+  tag: string,
+  pinnedTo: string | null,
+  operationInFlight = false
+): { closed: () => boolean } {
+  const dialog = el.shadowRoot!.querySelector(tag);
+  expect(dialog, `${tag} is rendered`).to.exist;
+  let closed = false;
+  Object.defineProperty(dialog!, 'pinnedRepositoryPathIfOpen', {
+    configurable: true,
+    get: () => pinnedTo,
+  });
+  Object.defineProperty(dialog!, 'operationInFlight', {
+    configurable: true,
+    get: () => operationInFlight,
+  });
+  (dialog as unknown as { close: () => void }).close = () => {
+    closed = true;
+  };
+  return { closed: () => closed };
+}
+
+
 describe('app-shell multi-repo behavior', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
@@ -136,6 +168,17 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  /** start_auto_fetch now resolves a credential token first, so the invoke
+   * lands a microtask later than a bare `setTimeout(0)` observes. */
+  const waitForCommand = async (command: string): Promise<{ command: string; args: any } | undefined> => {
+    for (let i = 0; i < 50; i++) {
+      const call = invokeCallArgs.find((c) => c.command === command);
+      if (call) return call;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return undefined;
+  };
+
   describe('auto-fetch lifecycle across open repos', () => {
     it('starts auto-fetch for newly opened repos when an interval is set', async () => {
       settingsStore.setState({ autoFetchInterval: 5 });
@@ -143,9 +186,8 @@ describe('app-shell multi-repo behavior', () => {
       document.body.appendChild(el);
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
-        await new Promise((r) => setTimeout(r, 0));
 
-        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        const startCall = await waitForCommand('start_auto_fetch');
         expect(startCall).to.not.be.undefined;
         expect(startCall!.args.path).to.equal('/repo/one');
       } finally {
@@ -177,7 +219,9 @@ describe('app-shell multi-repo behavior', () => {
       document.body.appendChild(el);
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
-        await new Promise((r) => setTimeout(r, 0));
+        // Let the initial start land before clearing, or its late arrival reads
+        // as a restart triggered by the settings write below.
+        await waitForCommand('start_auto_fetch');
         invokeCallArgs.length = 0;
 
         settingsStore.setState({ minimizeToTray: true });
@@ -186,13 +230,57 @@ describe('app-shell multi-repo behavior', () => {
 
         // An ACTUAL interval change does restart
         settingsStore.setState({ autoFetchInterval: 10 });
-        await new Promise((r) => setTimeout(r, 0));
-        const startCall = invokeCallArgs.find((c) => c.command === 'start_auto_fetch');
+        const startCall = await waitForCommand('start_auto_fetch');
         expect(startCall).to.not.be.undefined;
         expect(startCall!.args.intervalMinutes).to.equal(10);
       } finally {
         el.remove();
         settingsStore.setState({ autoFetchInterval: 0, minimizeToTray: false });
+      }
+    });
+
+    it('turning offline mode on stops the running loops', async () => {
+      // The gate only guarded the START call; the loop it started is a Tokio
+      // task with no re-check, so it kept fetching every N minutes after the
+      // user went offline.
+      settingsStore.setState({ autoFetchInterval: 5, offlineMode: false });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await waitForCommand('start_auto_fetch');
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ offlineMode: true });
+        const stopCall = await waitForCommand('stop_auto_fetch');
+
+        expect(stopCall, 'the running loop is stopped').to.not.be.undefined;
+        expect(stopCall!.args.path).to.equal('/repo/one');
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+      }
+    });
+
+    it('turning offline mode back off restarts auto-fetch', async () => {
+      // Without this the repo stayed dead until the interval changed or the app
+      // restarted, with no indication.
+      settingsStore.setState({ autoFetchInterval: 5, offlineMode: true });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await new Promise((r) => setTimeout(r, 20));
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ offlineMode: false });
+        const startCall = await waitForCommand('start_auto_fetch');
+
+        expect(startCall, 'auto-fetch resumes').to.not.be.undefined;
+        expect(startCall!.args.intervalMinutes).to.equal(5);
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
       }
     });
 
@@ -1076,6 +1164,40 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('does not mark a repository stale once its tab is closed', async () => {
+      // A slow operation started on A can land after the user closed A's tab.
+      // teardownRepoServices() has already dropped the path; adding it back
+      // here left an entry nothing ever removes — it survived the rest of the
+      // session, made a later reopen of the same path do a spurious extra
+      // refresh, and grew without bound across close/reopen cycles.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        // Control: while A is merely backgrounded it does get marked.
+        (el as any).refreshConflictDialogRepo('/repo/a');
+        expect((el as any).staleRepoPaths.has('/repo/a'), 'open background repo marked').to.be
+          .true;
+        (el as any).staleRepoPaths.delete('/repo/a');
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        (el as any).refreshConflictDialogRepo('/repo/a');
+
+        expect(
+          (el as any).staleRepoPaths.has('/repo/a'),
+          'a closed repo has no tab to refresh and no one to clear the entry',
+        ).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('cherry-pick-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);
@@ -1231,31 +1353,198 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().setActiveByPath('/repo/b');
         await el.updateComplete;
 
-        // Fake the two dialogs as open and pinned to repo A. The @query
-        // fields are read-only getters, so shadow them on the instance.
-        let cpClosed = false;
-        let rbClosed = false;
-        Object.defineProperty(el, 'cherryPickDialog', {
-          configurable: true,
-          value: {
-            pinnedRepositoryPathIfOpen: '/repo/a',
-            close: () => { cpClosed = true; },
-          },
-        });
-        Object.defineProperty(el, 'interactiveRebaseDialog', {
-          configurable: true,
-          value: {
-            pinnedRepositoryPathIfOpen: '/repo/a',
-            close: () => { rbClosed = true; },
-          },
-        });
+        // Fake the two REAL elements as open and pinned to repo A. The sweep
+        // discovers dialogs from the DOM, so a plain object hung off the @query
+        // field would never be seen — and the test would pass whatever the
+        // sweep did.
+        const cp = stubPinnedDialog(el, 'lv-cherry-pick-dialog', '/repo/a');
+        const rb = stubPinnedDialog(el, 'lv-interactive-rebase-dialog', '/repo/a');
 
         // Close repo A's tab — the store subscription must dismiss both.
         repositoryStore.getState().removeRepository('/repo/a');
         await el.updateComplete;
 
-        expect(cpClosed, 'cherry-pick dialog closed').to.be.true;
-        expect(rbClosed, 'rebase dialog closed').to.be.true;
+        expect(cp.closed(), 'cherry-pick dialog closed').to.be.true;
+        expect(rb.closed(), 'rebase dialog closed').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does NOT dismiss — or claim to cancel — a clean that is mid-delete', async () => {
+      // The repro: select thousands of untracked files, Delete, confirm, then
+      // close the tab while clean_files runs. The sweep used to set
+      // `showClean = false` directly, bypassing the dialog's own `cleaning`
+      // guard, and toast "clean cancelled" — seconds before "Deleted 4,913
+      // items" landed. Untracked files have no trash and no recovery path.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(clean.closed(), 'an in-flight clean is not force-dismissed').to.be.false;
+        expect(
+          (el as any).showClean,
+          'the host flag stays set — clearing it unmounts the dialog and orphans the delete',
+        ).to.be.true;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `no toast may announce a cancellation that did not happen: ${JSON.stringify(messages)}`,
+        ).to.be.false;
+        expect(
+          messages.some((m) => /the clean is still running against the closed repository/i.test(m)),
+          `the truth is toasted instead: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does dismiss an IDLE clean dialog and says so', async () => {
+      // The other half of the same guard: when nothing is running the sweep
+      // must still close the dialog, or it floats over another repo.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', false);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(clean.closed(), 'an idle clean dialog is dismissed').to.be.true;
+        expect((el as any).showClean, 'and its host flag cleared').to.be.false;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `and the dismissal is announced: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does NOT dismiss an interactive rebase that is mid-execute', async () => {
+      // close() on this dialog is a bare `modal.open = false`; the `executing`
+      // re-assert lives only in handleModalClose(), which the sweep never
+      // reached — so "interactive rebase cancelled" was followed by "Rebased
+      // onto main".
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        const rb = stubPinnedDialog(el, 'lv-interactive-rebase-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(rb.closed(), 'an in-flight rebase is not force-dismissed').to.be.false;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /interactive rebase cancelled/i.test(m)),
+          `no cancellation may be announced: ${JSON.stringify(messages)}`,
+        ).to.be.false;
+        expect(
+          messages.some((m) => /still running against the closed repository/i.test(m)),
+          `the truth is toasted instead: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('keeps every flag-gated destructive dialog mounted while its operation runs', async () => {
+      // Each of these was its own hand-written arm (or table row) that cleared
+      // the host flag unconditionally: worktree remove --force, submodule
+      // deinit -f, git lfs prune, and the reflog hard reset all kept running
+      // behind a toast saying they had been closed.
+      const cases: Array<[string, string, string]> = [
+        ['lv-worktree-dialog', 'showWorktrees', 'worktree removal'],
+        ['lv-submodule-dialog', 'showSubmodules', 'submodule removal'],
+        ['lv-lfs-dialog', 'showLfs', 'LFS prune'],
+        ['lv-reflog-dialog', 'showReflog', 'reset'],
+      ];
+      for (const [tag, flag, running] of cases) {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          repositoryStore.getState().reset();
+          repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+          repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+          repositoryStore.getState().setActiveByPath('/repo/b');
+          await el.updateComplete;
+
+          (el as any)[flag] = true;
+          await el.updateComplete;
+          stubPinnedDialog(el, tag, '/repo/a', true);
+          uiStore.setState({ toasts: [] });
+
+          repositoryStore.getState().removeRepository('/repo/a');
+          await el.updateComplete;
+
+          expect((el as any)[flag], `${tag}: host flag survives an in-flight operation`).to.be.true;
+          const messages = uiStore.getState().toasts.map((t) => t.message);
+          expect(
+            messages.some((m) => m.includes(`the ${running} is still running`)),
+            `${tag}: names the running work: ${JSON.stringify(messages)}`,
+          ).to.be.true;
+        } finally {
+          el.remove();
+        }
+      }
+    });
+
+    it('tells the truth on the LAST tab: the operation finishes in the background', async () => {
+      // With no tabs left the host unmounts every repo-scoped dialog on the
+      // next render regardless, so promising a later dismissal would describe
+      // something that did not happen.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /the clean will finish in the background/i.test(m)),
+          `background wording on the last tab: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `still no false cancellation: ${JSON.stringify(messages)}`,
+        ).to.be.false;
       } finally {
         el.remove();
       }
@@ -1438,6 +1727,9 @@ describe('app-shell multi-repo behavior', () => {
         new Promise((res) => {
           resolveHistory = res;
         });
+      // Reword now refuses a commit that is not in HEAD's history — this test
+      // is about the repo-switch pinning, so the commit is on this branch.
+      mockResponses['is_ancestor_of_head'] = () => true;
 
       const promise = (el as any).handleRewordCommit();
       await new Promise((r) => setTimeout(r, 0));
@@ -1476,6 +1768,9 @@ describe('app-shell multi-repo behavior', () => {
       });
 
       mockResponses['get_commit_history'] = () => [{ oid: 'headOfA' }];
+      // On this branch — the off-branch refusal is covered in
+      // app-shell-destructive-guards.test.ts.
+      mockResponses['is_ancestor_of_head'] = () => true;
 
       await (el as any).handleRewordCommit();
 
@@ -1526,3 +1821,88 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 });
+describe('closing the last repository closes its dialogs', () => {
+  // These dialogs render inside the `${this.activeRepository ? ... }` block, so
+  // closing the last tab destroys the ELEMENT while its show* flag stays true.
+  // Open the next repository and the element is reconstructed with ?open=true —
+  // a full-screen overlay springing up unbidden over a repo the user just
+  // opened. lv-repository-health-dialog carried that story already, and
+  // lv-bisect-dialog then reproduced it because it has no pinned path and so
+  // was in neither hand-written sweep. The fix is an EXCLUSION list, so a
+  // newly added dialog defaults to the safe behaviour.
+  it('clears every repo-scoped dialog flag when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as Record<string, unknown>;
+    internal.showBisect = true;
+    internal.showWorktrees = true;
+    internal.showLfs = true;
+    // Not repo-scoped — must survive.
+    internal.showSettings = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    expect(internal.showBisect, 'bisect must not outlive its repository').to.be.false;
+    expect(internal.showWorktrees, 'worktrees must not outlive its repository').to.be.false;
+    expect(internal.showLfs, 'LFS must not outlive its repository').to.be.false;
+    expect(internal.showSettings, 'settings is not repo-scoped').to.be.true;
+
+    el.remove();
+  });
+});
+describe('the toolbar command-palette button loads the active repo', () => {
+  // Setting showCommandPalette directly skipped openCommandPalette(), the only
+  // place branches and files are loaded. Cold start: a palette with no branch
+  // entries at all. After a tab switch: the PREVIOUS repo's branches, offering
+  // "Switch to <current branch>" and running a checkout against the wrong repo.
+  it('populates branches through openCommandPalette, not the bare flag', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as { branches: unknown[]; showCommandPalette: boolean };
+    internal.branches = [];
+    invokeCallArgs.length = 0;
+
+    const toolbar = el.shadowRoot!.querySelector('lv-toolbar');
+    expect(toolbar, 'the toolbar must be rendered').to.not.be.null;
+    toolbar!.dispatchEvent(
+      new CustomEvent('open-command-palette', { bubbles: true, composed: true })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(internal.showCommandPalette, 'the palette opens').to.be.true;
+    expect(
+      // list_tracked_files is loaded ONLY by openCommandPalette, so it is the
+      // unambiguous signal that the loader ran (get_branches is also issued by
+      // background refreshes).
+      invokeCallArgs.some((c) => c.command === 'list_tracked_files'),
+      'and it must have run the palette loader for the ACTIVE repo'
+    ).to.be.true;
+
+    el.remove();
+  });
+});
+
+

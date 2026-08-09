@@ -289,7 +289,7 @@ mod tests {
     fn test_build_index() {
         let repo = TestRepo::with_initial_commit();
         let index = CommitIndex::build(&repo.path_str()).unwrap();
-        assert!(index.len() >= 1);
+        assert!(!index.is_empty());
     }
 
     #[test]

@@ -27,6 +27,8 @@ import type { LvStashList } from '../lv-stash-list.ts';
 
 // Import the actual component
 import '../lv-stash-list.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -70,6 +72,7 @@ async function createComponent(): Promise<LvStashList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-stash-list operationInProgress guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCalls.length = 0;
   });
 
@@ -85,7 +88,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -102,7 +105,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -119,7 +122,7 @@ describe('lv-stash-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; stash: typeof stash | null } }).contextMenu = {
       visible: true, x: 0, y: 0, stash,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -355,4 +358,144 @@ describe('lv-stash-list operationInProgress guards', () => {
     const createCalls = invokeCalls.filter(c => c.command === 'create_stash');
     expect(createCalls).to.have.length(0);
   });
+
+  // handleCreateStash existed but nothing rendered called it, so stashing was
+  // a keyboard-only action and the panel that lists stashes offered no way to
+  // make one. Being unreachable is also why it was the ONE stash handler that
+  // never claimed the shared lock: `git stash push` resets the working tree to
+  // HEAD and renumbers every entry, exactly what its siblings serialize for.
+  it('renders a Stash Changes button that creates a stash', async () => {
+    const el = await createComponent();
+
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /Stash Changes/i.test(b.textContent ?? '')
+    );
+    expect(btn, 'the stash panel must offer a way to create a stash').to.not.be.undefined;
+
+    invokeCalls.length = 0;
+    (btn as HTMLButtonElement).click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(
+      invokeCalls.filter((c) => c.command === 'create_stash'),
+      'the button must reach the backend'
+    ).to.have.length(1);
+  });
+
+  // The shortcut and the palette both toast "Stash created"; this surface
+  // reloaded the list and said nothing, so the same operation reported
+  // differently depending on where it was started.
+  it('toasts on a successful stash, like the other stash surfaces', async () => {
+    const el = await createComponent();
+    mockStashes = [makeStash({ index: 0, message: 'WIP', oid: 'new-oid' })];
+    mockInvoke = (command: string) =>
+      command === 'create_stash'
+        ? Promise.resolve({ index: 0, message: 'WIP', oid: 'new-oid' })
+        : defaultMockInvoke(command);
+
+    uiStore.setState({ toasts: [] });
+    await (el as unknown as { handleCreateStash: () => Promise<void> }).handleCreateStash();
+
+    expect(
+      uiStore.getState().toasts.some((t) => /stash created/i.test(t.message)),
+      'a successful stash must report itself'
+    ).to.be.true;
+  });
+
+  // Create toasts, and so do branch delete and tag delete — for the same
+  // reason: the only signal these ran at all was a row changing or vanishing.
+  // The three siblings in this component were left out.
+  for (const { handler, command, word } of [
+    { handler: 'handleApplyStash', command: 'apply_stash', word: 'applied' },
+    { handler: 'handlePopStash', command: 'pop_stash', word: 'popped' },
+    { handler: 'handleDropStash', command: 'drop_stash', word: 'dropped' },
+  ]) {
+    it(`${handler} reports success`, async () => {
+      const el = await createComponent();
+      const target = makeStash({ index: 0, message: 'WIP', oid: 'abc123' });
+      mockStashes = [target];
+      (
+        el as unknown as {
+          contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+        }
+      ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+      mockInvoke = (c: string) =>
+        c === 'plugin:dialog|message' ? Promise.resolve('Ok') : defaultMockInvoke(c);
+
+      uiStore.setState({ toasts: [] });
+      await (el as unknown as Record<string, () => Promise<void>>)[handler]();
+
+      expect(
+        invokeCalls.some((c) => c.command === command),
+        `${command} ran`
+      ).to.be.true;
+      expect(
+        uiStore.getState().toasts.some((t) => new RegExp(word, 'i').test(t.message)),
+        `a successful ${word} stash must report itself`
+      ).to.be.true;
+    });
+  }
+
+  it('the Stash Changes button is refused and disabled while the repo is busy', async () => {
+    const el = await createComponent();
+    const btn = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      /Stash Changes/i.test(b.textContent ?? '')
+    ) as HTMLButtonElement;
+
+    expect(btn.disabled, 'enabled while idle').to.equal(false);
+
+    // Another surface — the graph's hard reset, say — takes the working tree.
+    tryAcquireRefOp(REPO_PATH);
+    await el.updateComplete;
+    expect(btn.disabled, 'a claim elsewhere must disable it').to.equal(true);
+
+    invokeCalls.length = 0;
+    await (el as unknown as { handleCreateStash: () => Promise<void> }).handleCreateStash();
+    expect(
+      invokeCalls.filter((c) => c.command === 'create_stash'),
+      'and the handler must refuse, not just the button'
+    ).to.have.length(0);
+  });
+
+  // A conflict is not a failure: the stash content DID land in the working
+  // tree and the resolution dialog is about to open. A red "Merge conflict"
+  // beside it reads as "nothing happened".
+  for (const { handler, command, word } of [
+    { handler: 'handleApplyStash', command: 'apply_stash', word: 'applied' },
+    { handler: 'handlePopStash', command: 'pop_stash', word: 'popped' },
+  ]) {
+    it(`${handler} warns rather than erroring on a conflict`, async () => {
+      const el = await createComponent();
+      const target = makeStash({ index: 0, message: 'WIP', oid: 'abc123' });
+      mockStashes = [target];
+      (
+        el as unknown as {
+          contextMenu: { visible: boolean; x: number; y: number; stash: typeof target | null };
+        }
+      ).contextMenu = { visible: true, x: 0, y: 0, stash: target };
+
+      mockInvoke = (c: string) => {
+        if (c === 'plugin:dialog|message') return Promise.resolve('Ok');
+        if (c === command) {
+          return Promise.reject({ code: 'MERGE_CONFLICT', message: 'Merge conflict' });
+        }
+        return defaultMockInvoke(c);
+      };
+
+      uiStore.setState({ toasts: [] });
+      await (el as unknown as Record<string, () => Promise<void>>)[handler]();
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'error'),
+        'a conflict must not be reported as a failure'
+      ).to.be.false;
+      expect(
+        toasts.some((t) => t.type === 'warning' && new RegExp(word, 'i').test(t.message)),
+        'it must say the stash landed and needs resolving'
+      ).to.be.true;
+    });
+  }
 });

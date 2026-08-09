@@ -12,7 +12,8 @@ import { sharedStyles, animationStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus } from '../../services/git.service.ts';
+import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus, isNetworkGateRefusal } from '../../services/git.service.ts';
+import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
 import { loggers } from '../../utils/index.ts';
@@ -20,6 +21,15 @@ import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssign
 import './lv-profile-card.ts';
 import './lv-integration-card.ts';
 import './lv-repository-card.ts';
+import {
+  tryAcquireRefOpOrWarn,
+  releaseRefOp,
+  RefLockController,
+  releasePush,
+  isPushRunning,
+  tryAcquirePush,
+  warnRepositoryBusy,
+} from '../../utils/ref-lock.ts';
 
 const STORAGE_KEY = 'lv-context-dashboard-expanded';
 
@@ -675,29 +685,77 @@ export class LvContextDashboard extends LitElement {
     }
   }
 
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * Pull claims it (see handlePull) but the button was bound to
+   * isRemoteOperationInProgress alone, which only ever tracked this component
+   * — so during a sidebar checkout the dashboard's Pull stayed lit and did
+   * nothing but raise a refusal toast. Fetch and Push do not touch the working
+   * tree, so they keep the local gate only.
+   */
+  private lock = new RefLockController(this, () => this.activeRepository?.repository.path);
+
   private get isRemoteOperationInProgress(): boolean {
     return this.isFetching || this.isPulling || this.isPushing;
   }
 
+  /**
+   * Failure reporting shared by the dashboard's three remote buttons.
+   *
+   * These used to lean on git.service's own toast and additionally write
+   * `repositoryStore.setError(...)`, which has no render sink anywhere in the
+   * app — so the store write was dead and the toast was a raw message with no
+   * recovery action. The toolbar and command-palette copies of these same three
+   * operations run silent and route through the suggestion service, which is
+   * what turns "non-fast-forward" into a Pull Now button and an auth failure
+   * into Open Settings. Reaching the same operation from the dashboard must not
+   * mean losing that.
+   */
+  private reportRemoteFailure(
+    result: { error?: { code?: string; message?: string } },
+    operation: 'fetch' | 'pull' | 'push',
+    fallback: string,
+    repoPath: string,
+  ): void {
+    // A security-gate block or a declined confirm already spoke for itself; a
+    // red error on top tells the user their own settings failed.
+    if (isNetworkGateRefusal(result.error)) return;
+    showErrorWithSuggestion(result.error?.message ?? '', fallback, {
+      operation,
+      repoPath,
+    });
+  }
+
+  // No success toasts in these three: the backend emits
+  // remote-operation-completed and setupRemoteOperationListeners toasts it,
+  // naming the remote. Adding our own stacked two messages on one click — the
+  // rule the toolbar handlers already follow.
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository || this.isFetching) return;
 
+    // Captured before the await: a fetch is slow, and the refresh and any
+    // error must name the repo the button was clicked in, not whichever tab
+    // is active when the network call returns.
+    const repoPath = this.activeRepository.repository.path;
     this.isFetching = true;
     try {
-      const result = await gitFetch({ path: this.activeRepository.repository.path });
+      const result = await gitFetch({ path: repoPath, silent: true });
       if (!result.success) {
-        // git.service already shows a failure toast; just record store state.
-        repositoryStore.getState().setError(result.error?.message ?? 'Fetch failed');
+        this.reportRemoteFailure(result, 'fetch', 'Fetch failed', repoPath);
       } else {
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
       }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Fetch failed');
     } finally {
       this.isFetching = false;
     }
@@ -706,46 +764,97 @@ export class LvContextDashboard extends LitElement {
   private async handlePull(): Promise<void> {
     if (!this.activeRepository || this.isPulling) return;
 
+    const repoPath = this.activeRepository.repository.path;
+    // The fifth surface reaching pull. The other four claim the shared
+    // working-tree lock; this one lives in src/components/dashboard/, a
+    // directory no sweep had touched, and gated only on its own isPulling —
+    // so a dashboard Pull ran beside a sidebar checkout, and every destructive
+    // control stayed enabled for the duration of the pull. The backend's
+    // ensure_pullable only refuses on a non-Clean state, which a checkout or a
+    // discard does not produce.
+    if (!tryAcquireRefOpOrWarn(repoPath)) return;
     this.isPulling = true;
     try {
-      const result = await gitPull({ path: this.activeRepository.repository.path });
-      if (!result.success) {
-        // git.service already shows a failure toast; just record store state.
-        repositoryStore.getState().setError(result.error?.message ?? 'Pull failed');
-      } else {
+      const result = await gitPull({ path: repoPath, silent: true });
+      if (result.success) {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
+      } else if (
+        result.error?.code === 'MERGE_CONFLICT' ||
+        result.error?.code === 'REBASE_CONFLICT'
+      ) {
+        // The pull LANDED and left a conflicted index and MERGE_HEAD behind.
+        // Reporting it as a red "Pull failed" and stopping — which is all this
+        // surface did — reads as "nothing happened" and leaves the user in a
+        // mid-merge repository with no route to the resolution dialog. Every
+        // other pull surface opens it; this one is a descendant of app-shell,
+        // so the bubbling composed event it already listens for reaches it.
+        const isRebase = result.error.code === 'REBASE_CONFLICT';
+        showToast(
+          `Pull produced conflicts — resolve them to finish the ${isRebase ? 'rebase' : 'merge'}`,
+          'warning',
+        );
+        this.dispatchEvent(new CustomEvent('merge-conflict', {
+          bubbles: true,
+          composed: true,
+          detail: {
+            repositoryPath: repoPath,
+            operationType: isRebase ? 'rebase' : 'merge',
+          },
+        }));
+      } else {
+        this.reportRemoteFailure(result, 'pull', 'Pull failed', repoPath);
       }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Pull failed');
     } finally {
       this.isPulling = false;
+      releaseRefOp(repoPath);
     }
+  }
+
+  /** Claim the shared push slot, reporting the refusal like its siblings. */
+  private tryAcquirePushOrWarn(repoPath: string): boolean {
+    if (tryAcquirePush(repoPath)) return true;
+    warnRepositoryBusy();
+    return false;
   }
 
   private async handlePush(): Promise<void> {
     if (!this.activeRepository || this.isPushing) return;
 
+    const repoPath = this.activeRepository.repository.path;
+    // The shared push slot, not just isPushing. A rejected push raises a Force
+    // Push suggestion toast; app-shell holds this slot across that confirm
+    // precisely so a second, plain push cannot race the force push the user is
+    // authorising — and this button could not see a flag private to app-shell.
+    if (!this.tryAcquirePushOrWarn(repoPath)) return;
     this.isPushing = true;
     try {
-      const result = await gitPush({ path: this.activeRepository.repository.path });
+      const result = await gitPush({ path: repoPath, silent: true });
       if (!result.success) {
-        // git.service already shows a failure toast; just record store state.
-        repositoryStore.getState().setError(result.error?.message ?? 'Push failed');
+        this.reportRemoteFailure(result, 'push', 'Push failed', repoPath);
       } else {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
           composed: true,
+          // Names the repo the operation ran ON. Without it app-shell falls
+          // back to handleRefresh(), which targets whichever tab is active —
+          // so a fetch/pull/push the user started and then tabbed away from
+          // refreshed the wrong repository and left the right one stale.
+          detail: { repoPath },
         }));
         await this.loadRemoteStatus();
       }
-    } catch (err) {
-      repositoryStore.getState().setError(err instanceof Error ? err.message : 'Push failed');
     } finally {
       this.isPushing = false;
+      releasePush(repoPath);
     }
   }
 
@@ -1127,7 +1236,7 @@ export class LvContextDashboard extends LitElement {
               class="remote-btn ${this.isPulling ? 'loading' : ''}"
               title="Pull from remote${this.behind > 0 ? ` (${this.behind} commits behind)` : ''}"
               @click=${this.handlePull}
-              ?disabled=${this.isRemoteOperationInProgress}
+              ?disabled=${this.isRemoteOperationInProgress || this.lock.busy}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 3v18"></path>
@@ -1142,7 +1251,7 @@ export class LvContextDashboard extends LitElement {
               class="remote-btn ${this.isPushing ? 'loading' : ''}"
               title="Push to remote${this.ahead > 0 ? ` (${this.ahead} commits ahead)` : ''}"
               @click=${this.handlePush}
-              ?disabled=${this.isRemoteOperationInProgress}
+              ?disabled=${this.isRemoteOperationInProgress || isPushRunning(this.activeRepository?.repository.path)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 3v18"></path>

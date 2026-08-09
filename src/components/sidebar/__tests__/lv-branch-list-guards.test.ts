@@ -24,11 +24,12 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvBranchList } from '../lv-branch-list.ts';
-import { repositoryStore } from '../../../stores/index.ts';
+import { repositoryStore, uiStore } from '../../../stores/index.ts';
 import type { Repository } from '../../../types/git.types.ts';
 
 // Import the actual component
 import '../lv-branch-list.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 function mockRepo(path: string, name: string): Repository {
   return {
@@ -72,7 +73,13 @@ function neverResolve(): Promise<never> {
   return new Promise(() => {});
 }
 
+/** plugin-dialog's confirm() treats the OK button label as "confirmed". */
+let confirmResult = true;
+
 function defaultMockInvoke(command: string): Promise<unknown> {
+  if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+    return Promise.resolve(confirmResult ? 'Ok' : 'Cancel');
+  }
   if (command === 'get_branches') {
     return Promise.resolve([]);
   }
@@ -100,6 +107,7 @@ async function createComponent(): Promise<LvBranchList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-branch-list operationInProgress guards', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     invokeCalls.length = 0;
   });
 
@@ -109,36 +117,148 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
   });
 
-  it('preserves the interactive-rebase dialog ELEMENT across a loading toggle', async () => {
+  it('preserves the branch-cleanup dialog ELEMENT across a loading toggle', async () => {
     // A background refresh flips loading true→false. With a single stable
     // outer template the dialog element instance must survive the toggle —
     // recreating it (as three distinct top-level templates did) would reset
-    // its state and silently discard an in-progress rebase plan.
+    // its state and silently discard what the user had built there.
     const el = await createComponent();
     const internal = el as unknown as { loading: boolean };
-    const dialogBefore = el.shadowRoot!.querySelector('lv-interactive-rebase-dialog');
+    const dialogBefore = el.shadowRoot!.querySelector('lv-branch-cleanup-dialog');
     expect(dialogBefore, 'dialog present when loaded').to.not.be.null;
 
     internal.loading = true;
     await el.updateComplete;
     expect(
-      el.shadowRoot!.querySelector('lv-interactive-rebase-dialog'),
+      el.shadowRoot!.querySelector('lv-branch-cleanup-dialog'),
       'same element instance while loading',
     ).to.equal(dialogBefore);
 
     internal.loading = false;
     await el.updateComplete;
     expect(
-      el.shadowRoot!.querySelector('lv-interactive-rebase-dialog'),
+      el.shadowRoot!.querySelector('lv-branch-cleanup-dialog'),
       'same element instance after loading clears',
     ).to.equal(dialogBefore);
+  });
+
+  it('mounts no create-branch or interactive-rebase dialog of its own', async () => {
+    // Two live copies of a dialog meant two independent `isOpen` guards, so
+    // opening from the sidebar and then from the command palette stacked two
+    // dialogs holding different pinned targets. app-shell owns the only
+    // instance; this list asks it to open one.
+    const el = await createComponent();
+    expect(el.shadowRoot!.querySelector('lv-create-branch-dialog')).to.be.null;
+    expect(el.shadowRoot!.querySelector('lv-interactive-rebase-dialog')).to.be.null;
+  });
+
+  it('asks the host to open the create-branch dialog instead of opening its own', async () => {
+    const el = await createComponent();
+    let fired = 0;
+    el.addEventListener('create-branch', () => { fired++; });
+
+    (el as unknown as { handleCreateBranch: () => void }).handleCreateBranch();
+
+    expect(fired, 'create-branch dispatched to the host').to.equal(1);
+    expect(
+      invokeCalls.filter((c) => c.command === 'create_branch'),
+      'nothing created directly',
+    ).to.have.length(0);
+  });
+
+  it('asks the host to open interactive rebase, carrying the target branch', async () => {
+    const el = await createComponent();
+    let onto: string | undefined;
+    el.addEventListener('interactive-rebase', (e) => {
+      onto = (e as CustomEvent<{ onto?: string }>).detail?.onto;
+    });
+
+    (el as unknown as { contextMenu: unknown }).contextMenu = {
+      visible: true,
+      x: 0,
+      y: 0,
+      branch: makeBranch({ name: 'feature/x', shorthand: 'feature/x' }),
+    };
+    (el as unknown as { handleInteractiveRebase: () => void }).handleInteractiveRebase();
+
+    expect(onto).to.equal('feature/x');
+  });
+
+  it('does not ask for interactive rebase while an operation is in flight', async () => {
+    // The only context-menu item that was still live during an in-flight
+    // operation while its five neighbours were greyed out.
+    const el = await createComponent();
+    tryAcquireRefOp(REPO_PATH);
+    let fired = 0;
+    el.addEventListener('interactive-rebase', () => { fired++; });
+
+    (el as unknown as { contextMenu: unknown }).contextMenu = {
+      visible: true,
+      x: 0,
+      y: 0,
+      branch: makeBranch({ name: 'feature/x', shorthand: 'feature/x' }),
+    };
+    (el as unknown as { handleInteractiveRebase: () => void }).handleInteractiveRebase();
+
+    expect(fired).to.equal(0);
+  });
+
+  it('drag-drop merge is inert while another operation is in flight', async () => {
+    // Every context-menu handler took operationInProgress before starting;
+    // drop did not, so a drag-merge could land on top of an in-flight merge or
+    // checkout from the menu — two git operations mutating one worktree.
+    const el = await createComponent();
+    const internal = el as unknown as {
+      operationInProgress: boolean;
+      draggingBranch: unknown;
+      handleDrop: (e: DragEvent, target: ReturnType<typeof makeBranch>) => Promise<void>;
+    };
+
+    internal.draggingBranch = makeBranch({ name: 'feature-b', shorthand: 'feature-b' });
+    tryAcquireRefOp(REPO_PATH);
+    invokeCalls.length = 0;
+
+    await internal.handleDrop(
+      new DragEvent('drop'),
+      makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+    );
+
+    expect(invokeCalls.filter((c) => c.command === 'merge'), 'no concurrent merge').to.have.length(0);
+    expect(
+      invokeCalls.filter((c) => c.command === 'checkout_with_autostash'),
+      'no concurrent checkout',
+    ).to.have.length(0);
+  });
+
+  it('drag-drop takes and releases the operation lock around its own work', async () => {
+    const el = await createComponent();
+    const internal = el as unknown as {
+      operationInProgress: boolean;
+      draggingBranch: unknown;
+      handleDrop: (e: DragEvent, target: ReturnType<typeof makeBranch>) => Promise<void>;
+    };
+
+    internal.draggingBranch = makeBranch({ name: 'feature-b', shorthand: 'feature-b' });
+    // Decline the confirm: the drop returns early, and the lock must still be
+    // released — a stuck lock would freeze every branch operation afterwards.
+    confirmResult = false;
+    try {
+      await internal.handleDrop(
+        new DragEvent('drop'),
+        makeBranch({ name: 'main', shorthand: 'main', isHead: true }),
+      );
+    } finally {
+      confirmResult = true;
+    }
+
+    expect(internal.operationInProgress, 'lock released').to.equal(false);
   });
 
   it('handleCheckout should skip when operationInProgress is true', async () => {
     const el = await createComponent();
 
     // Set operationInProgress = true to simulate an in-flight operation
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     // Reset call tracking
     invokeCalls.length = 0;
@@ -188,7 +308,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -205,7 +325,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -222,7 +342,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -239,7 +359,7 @@ describe('lv-branch-list operationInProgress guards', () => {
     (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
       visible: true, x: 0, y: 0, branch,
     };
-    (el as unknown as { operationInProgress: boolean }).operationInProgress = true;
+    tryAcquireRefOp(REPO_PATH);
 
     invokeCalls.length = 0;
 
@@ -249,76 +369,38 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect(rebaseCalls).to.have.length(0);
   });
 
-  it('closes its embedded interactive-rebase dialog when the pinned repo tab is removed', async () => {
-    // The dialog is kept alive across background refreshes by the single stable
-    // template. If the user closes the repo tab the rebase was started on, the
-    // dialog must self-close — otherwise Execute would rewrite a repo with no
-    // tab observing it. The store subscription in connectedCallback owns this.
-    repositoryStore.getState().reset();
-    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
-    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
-
-    const el = await createComponent();
-    // connectedCallback subscribes only AFTER an async loadBranches(); wait
-    // until the store subscription is actually registered.
+  /**
+   * Stub the REAL embedded dialog element in the shadow root — the sweep
+   * discovers dialogs from the DOM, so a plain object hung off the @query field
+   * would never be seen (and a test that stubbed one would pass no matter what
+   * the sweep did).
+   */
+  async function stubCleanupDialog(
+    el: LvBranchList,
+    pinnedTo: string | null,
+    operationInFlight = false
+  ): Promise<{ closed: () => boolean }> {
+    const dialog = el.shadowRoot!.querySelector('lv-branch-cleanup-dialog')!;
+    expect(dialog, 'branch list embeds a real cleanup dialog').to.exist;
+    let closed = false;
+    Object.defineProperty(dialog, 'pinnedRepositoryPathIfOpen', {
+      configurable: true,
+      get: () => pinnedTo,
+    });
+    Object.defineProperty(dialog, 'operationInFlight', {
+      configurable: true,
+      get: () => operationInFlight,
+    });
+    (dialog as unknown as { close: () => void }).close = () => {
+      closed = true;
+    };
+    // The subscription is registered after loadBranches() resolves.
     for (let i = 0; i < 50; i++) {
       if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-
-    // Shadow the @query getter with a fake dialog pinned to repo A.
-    let closed = false;
-    Object.defineProperty(el, 'interactiveRebaseDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
-
-    // Closing A's tab must trigger the subscription to close the dialog.
-    repositoryStore.getState().removeRepository('/repo/a');
-    await el.updateComplete;
-
-    expect(closed, 'dialog closed when its pinned repo tab was removed').to.be.true;
-
-    repositoryStore.getState().reset();
-  });
-
-  it('closes its embedded create-branch dialog when the pinned repo tab is removed', async () => {
-    // The sidebar's own create-branch dialog persists across tab switches;
-    // app-shell's self-close guard only reaches app-shell's instance. Closing
-    // the pinned tab must dismiss this one too, or Create + checkout would run
-    // on a repo no longer in the tab bar.
-    repositoryStore.getState().reset();
-    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
-    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
-
-    const el = await createComponent();
-    for (let i = 0; i < 50; i++) {
-      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    let closed = false;
-    Object.defineProperty(el, 'createBranchDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
-
-    repositoryStore.getState().removeRepository('/repo/a');
-    await el.updateComplete;
-
-    expect(closed, 'create-branch dialog closed when its pinned tab was removed').to.be.true;
-    repositoryStore.getState().reset();
-  });
+    return { closed: () => closed };
+  }
 
   it('closes its embedded branch-cleanup dialog when the pinned repo tab is removed', async () => {
     // Branch cleanup force-deletes branches + prunes remotes on the pinned repo;
@@ -329,53 +411,59 @@ describe('lv-branch-list operationInProgress guards', () => {
     repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
 
     const el = await createComponent();
-    for (let i = 0; i < 50; i++) {
-      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    let closed = false;
-    Object.defineProperty(el, 'branchCleanupDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
+    const spy = await stubCleanupDialog(el, '/repo/a');
 
     repositoryStore.getState().removeRepository('/repo/a');
     await el.updateComplete;
 
-    expect(closed, 'branch-cleanup dialog closed when its pinned tab was removed').to.be.true;
+    expect(spy.closed(), 'branch-cleanup dialog closed when its pinned tab was removed').to.be.true;
     repositoryStore.getState().reset();
   });
 
   it('leaves the dialog open when a DIFFERENT repo tab is removed', async () => {
-    // Only the pinned repo's removal cancels the rebase; unrelated tab churn
+    // Only the pinned repo's removal cancels the cleanup; unrelated tab churn
     // must not disrupt an in-progress plan.
     repositoryStore.getState().reset();
     repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
     repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
 
     const el = await createComponent();
-
-    let closed = false;
-    Object.defineProperty(el, 'interactiveRebaseDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
+    const spy = await stubCleanupDialog(el, '/repo/a');
 
     repositoryStore.getState().removeRepository('/repo/b');
     await el.updateComplete;
 
-    expect(closed, 'dialog stays open when an unrelated tab is removed').to.be.false;
+    expect(spy.closed(), 'dialog stays open when an unrelated tab is removed').to.be.false;
+
+    repositoryStore.getState().reset();
+  });
+
+  it('does NOT close (or claim to cancel) a branch cleanup that is mid force-delete', async () => {
+    // The force-delete + prune loop keeps running whatever the sweep does:
+    // close() here is a bare `isOpen = false` that bypasses handleModalClose's
+    // `deleting` guard. Reporting "branch cleanup cancelled" over a loop still
+    // deleting branches is the exact lie this guard exists to stop.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    const spy = await stubCleanupDialog(el, '/repo/a', true);
+    uiStore.setState({ toasts: [] });
+
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(spy.closed(), 'an in-flight cleanup is not force-dismissed').to.be.false;
+    const messages = uiStore.getState().toasts.map((t) => t.message);
+    expect(
+      messages.some((m) => /cleanup cancelled/i.test(m)),
+      `no toast may claim a cancellation that did not happen: ${JSON.stringify(messages)}`
+    ).to.be.false;
+    expect(
+      messages.some((m) => /still running/i.test(m)),
+      `the truth is toasted instead: ${JSON.stringify(messages)}`
+    ).to.be.true;
 
     repositoryStore.getState().reset();
   });
@@ -486,77 +574,6 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect((renameCall!.args as { newName: string }).newName).to.equal('feature/new');
   });
 
-  it('handleBranchCreated refreshes the origin repo, not the tab switched to during the reload', async () => {
-    const el = await createComponent();
-
-    // The initial load already ran (via defaultMockInvoke) during
-    // createComponent; make the NEXT get_branches — the one inside
-    // handleBranchCreated — hang so we can switch tabs mid-reload.
-    let resolveLoad!: (v: unknown) => void;
-    mockInvoke = (command: string) => {
-      if (command === 'get_branches') {
-        return new Promise((resolve) => {
-          resolveLoad = resolve;
-        });
-      }
-      return defaultMockInvoke(command);
-    };
-
-    let detail: { repositoryPath?: string } | null = null;
-    el.addEventListener('branches-changed', (e) => {
-      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
-    });
-
-    const promise = (
-      el as unknown as { handleBranchCreated: () => Promise<void> }
-    ).handleBranchCreated();
-
-    await new Promise((r) => setTimeout(r, 10));
-    (el as unknown as { repositoryPath: string }).repositoryPath = '/other/repo';
-
-    resolveLoad([]);
-    await promise;
-
-    expect(detail, 'branches-changed dispatched').to.not.be.null;
-    expect(detail!.repositoryPath).to.equal(REPO_PATH);
-  });
-
-  it('handleBranchCreated pins to the event repo when the tab switched before the event fired', async () => {
-    // The create-branch dialog captures its repo at open() and reports it in
-    // branch-created.detail. If the user switched tabs while the dialog was
-    // open, our live repositoryPath is now the OTHER repo — the refresh must
-    // follow the event's repo, and we must NOT reload our (mismatched) view.
-    const el = await createComponent();
-
-    let branchesCalls = 0;
-    mockInvoke = (command: string) => {
-      if (command === 'get_branches') {
-        branchesCalls++;
-        return Promise.resolve([]);
-      }
-      return defaultMockInvoke(command);
-    };
-
-    let detail: { repositoryPath?: string } | null = null;
-    el.addEventListener('branches-changed', (e) => {
-      detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
-    });
-
-    branchesCalls = 0;
-    // The tag/branch was created on /origin/repo, but we're now showing REPO_PATH.
-    await (
-      el as unknown as {
-        handleBranchCreated: (e: CustomEvent<{ repositoryPath?: string }>) => Promise<void>;
-      }
-    ).handleBranchCreated(
-      new CustomEvent('branch-created', { detail: { repositoryPath: '/origin/repo' } }),
-    );
-
-    expect(detail, 'branches-changed dispatched').to.not.be.null;
-    expect(detail!.repositoryPath, 'refresh pinned to the event repo').to.equal('/origin/repo');
-    expect(branchesCalls, 'no reload of the mismatched active view').to.equal(0);
-  });
-
   it('handleMergeBranch merges the origin repo, not the tab switched to during the confirm', async () => {
     // showConfirm's await yields; a tab switch during it rebinds
     // this.repositoryPath. The merge must run on the repo it was invoked on.
@@ -659,5 +676,55 @@ describe('lv-branch-list operationInProgress guards', () => {
     }
 
     expect((el as unknown as { operationInProgress: boolean }).operationInProgress).to.equal(false);
+  });
+});
+
+/**
+ * Deleting a branch from the sidebar was the last delete surface reporting
+ * nothing on success. The graph's ref menu toasts, the force escalation
+ * toasts, and Branch Cleanup toasts; here the only signal was a row vanishing
+ * from a list that is often filtered or scrolled away from the deleted row —
+ * the same gap already fixed on the sibling tag list.
+ */
+describe('lv-branch-list delete feedback', () => {
+  beforeEach(() => {
+    invokeCalls.length = 0;
+    confirmResult = true;
+    uiStore.setState({ toasts: [] });
+  });
+
+  it('confirms the branch is gone', async () => {
+    const el = await createComponent();
+    const branch = makeBranch({ name: 'feature/gone', shorthand: 'feature/gone' });
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, branch,
+    };
+    uiStore.setState({ toasts: [] });
+
+    await (el as unknown as { handleDeleteBranch: () => Promise<void> }).handleDeleteBranch();
+
+    const success = uiStore.getState().toasts.find((t) => t.type === 'success');
+    expect(success, 'the delete is acknowledged').to.not.be.undefined;
+    expect(success!.message).to.equal('Deleted branch feature/gone');
+  });
+
+  it('says nothing on success when the delete failed', async () => {
+    const el = await createComponent();
+    mockInvoke = (command: string) => {
+      if (command === 'delete_branch') {
+        return Promise.reject({ code: 'COMMAND_ERROR', message: 'branch is checked out' });
+      }
+      return defaultMockInvoke(command);
+    };
+    const branch = makeBranch({ name: 'feature/busy', shorthand: 'feature/busy' });
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; branch: typeof branch | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, branch,
+    };
+    uiStore.setState({ toasts: [] });
+
+    await (el as unknown as { handleDeleteBranch: () => Promise<void> }).handleDeleteBranch();
+
+    expect(uiStore.getState().toasts.some((t) => t.type === 'success')).to.equal(false);
+    expect(uiStore.getState().toasts.some((t) => t.type === 'error')).to.equal(true);
   });
 });

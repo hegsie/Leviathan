@@ -30,6 +30,7 @@ import {
   showMessage,
   showConfirm,
   showAsk,
+  showPrompt,
 } from '../dialog.service.ts';
 
 describe('dialog.service', () => {
@@ -37,6 +38,56 @@ describe('dialog.service', () => {
     invokeLog.length = 0;
     invokeResult = null;
     invokeShouldThrow = false;
+  });
+
+  describe('showConfirm', () => {
+    it('returns false when the dialog IPC rejects, rather than throwing', async () => {
+      // Every destructive handler claims the shared working-tree lock BEFORE
+      // this confirm — showConfirm is an IPC round trip, so a claim taken after
+      // it does not serialize a double-click — and most claim outside the
+      // try/finally that releases. A throw from here would unwind past the
+      // release and leave the repo's lock held for the rest of the session,
+      // disabling every ref control in every surface. Not being able to ask
+      // also means the only safe answer is "no".
+      invokeShouldThrow = true;
+
+      const result = await showConfirm('Delete Branch', 'Are you sure?', 'warning');
+
+      expect(result, 'an unaskable confirm must read as declined').to.equal(false);
+    });
+
+    it('still returns the answer on the happy path', async () => {
+      invokeResult = 'Ok';
+      expect(await showConfirm('Title', 'Message')).to.equal(true);
+      invokeResult = 'Cancel';
+      expect(await showConfirm('Title', 'Message')).to.equal(false);
+    });
+  });
+
+  describe('showPrompt', () => {
+    it('returns null instead of rejecting when the prompt cannot be shown', async () => {
+      // Several callers claim the shared working-tree lock BEFORE this prompt
+      // and do so outside the try/finally that releases it, so a throw would
+      // unwind past the release and hold that repo's lock for the session —
+      // disabling every ref control in every surface. Being unable to ask is
+      // the same as a cancel.
+      const el = document.querySelector('lv-prompt-dialog');
+      el?.remove();
+      const original = document.createElement.bind(document);
+      (document as unknown as { createElement: unknown }).createElement = ((
+        tag: string,
+      ) => {
+        if (tag === 'lv-prompt-dialog') throw new Error('chunk load failed');
+        return original(tag);
+      }) as typeof document.createElement;
+
+      try {
+        const result = await showPrompt('Rename Branch', 'New name:');
+        expect(result, 'an unaskable prompt must read as cancelled').to.equal(null);
+      } finally {
+        (document as unknown as { createElement: unknown }).createElement = original;
+      }
+    });
   });
 
   describe('openDialog', () => {

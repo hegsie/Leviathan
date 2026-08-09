@@ -14,6 +14,9 @@ export interface ErrorSuggestion {
 export interface ErrorContext {
   operation?: string;
   branchName?: string;
+  /** Repo the failing operation ran against. Pinned into any suggested
+   *  action, because a toast outlives a repository switch. */
+  repoPath?: string;
 }
 
 /**
@@ -28,13 +31,68 @@ export function getErrorSuggestion(
 
   const msg = errorMessage.toLowerCase();
 
-  // Push rejected (non-fast-forward)
-  if (msg.includes('non-fast-forward') || (msg.includes('rejected') && context?.operation === 'push')) {
+  // A push the remote refused. libgit2 emits TWO different messages here
+  // (push.c:345 and :356) that share no substring, and they mean opposite
+  // things:
+  //
+  //   "…contains commits that are not present locally"  -> someone else pushed
+  //   "cannot push non-fastforwardable reference"        -> YOU rewrote history
+  //
+  // Only the first is a "pull before pushing" situation. Offering Pull Now for
+  // the second is worse than saying nothing: pulling merges the pre-amend
+  // commits back in, duplicating them and undoing the amend the user just made.
+  // Checked FIRST, and on libgit2's exact spelling: "non-fastforwardable" is
+  // specifically "the remote tip IS in your object database but is not an
+  // ancestor", i.e. you amended or rebased. The git CLI's hyphenated
+  // "non-fast-forward" means the opposite (you are behind) and is handled
+  // below — the two differ only by those hyphens, so order matters.
+  if (msg.includes('fastforwardable')) {
+    // A tag that already exists on the remote at another commit fails the same
+    // refspec-generic pre-check, and neither pulling nor "newer changes"
+    // describes it.
+    if (context?.operation === 'push-tag') {
+      // "Delete the remote tag first" named something Leviathan cannot do —
+      // there is no remote-tag deletion anywhere in the app. push_tag already
+      // implements the force refspec, so offer that instead of advice the user
+      // cannot follow.
+      return {
+        message: 'The remote already has this tag at a different commit.',
+        action: {
+          label: 'Force Push Tag',
+          callback: () => window.dispatchEvent(new CustomEvent('force-push-tag', {
+            detail: { tagName: context?.branchName, repoPath: context?.repoPath },
+          })),
+        },
+      };
+    }
+    // Deliberately does NOT suggest pulling: that merges the pre-amend commits
+    // back in, duplicating them and undoing the amend. Force-with-lease is the
+    // safe recovery, and it refuses if the remote moved since the last fetch.
+    return {
+      message:
+        'Your local history has diverged from the remote (an amend or rebase). Force-push to replace the remote commits with yours.',
+      action: {
+        label: 'Force Push',
+        callback: () => window.dispatchEvent(new CustomEvent('force-push', {
+          detail: { repoPath: context?.repoPath },
+        })),
+      },
+    };
+  }
+
+  if (
+    msg.includes('not present locally') ||
+    /non-fast-?forward/.test(msg) ||
+    (msg.includes('rejected') && context?.operation === 'push')
+  ) {
     return {
       message: 'Remote has newer changes. Pull before pushing.',
       action: {
         label: 'Pull Now',
-        callback: () => window.dispatchEvent(new CustomEvent('trigger-pull')),
+        callback: () => window.dispatchEvent(new CustomEvent('trigger-pull', {
+          // Pinned like force-delete below: the toast outlives a repo switch.
+          detail: { repoPath: context?.repoPath },
+        })),
       },
     };
   }
@@ -45,16 +103,43 @@ export function getErrorSuggestion(
       message: `Branch is not fully merged. Force delete if you're sure.`,
       action: {
         label: 'Force Delete',
+        // repoPath travels with the branch name. The toast outlives a repo
+        // switch (8s, and nothing clears toasts on switch), so resolving the
+        // repo when the button is clicked force-deleted from whichever tab
+        // happened to be active then — discarding unmerged commits in a repo
+        // the user never aimed at.
         callback: () => window.dispatchEvent(new CustomEvent('force-delete-branch', {
-          detail: { branchName: context?.branchName },
+          detail: { branchName: context?.branchName, repoPath: context?.repoPath },
         })),
       },
     };
   }
 
-  // Authentication errors
-  if (msg.includes('authentication') || msg.includes('auth') ||
-      msg.includes('credentials') || msg.includes('permission denied')) {
+  // Authentication errors.
+  //
+  // "permission denied" alone is NOT enough: it is also what the OS says when a
+  // file is read-only or held by another process, so a checkout or merge that
+  // failed on a locked file was reported as an auth problem — replacing the
+  // real filesystem error with "check your SSH keys" and an Open Settings
+  // button. Match it only for operations that actually talk to a remote, or
+  // alongside wording only an auth failure produces.
+  const isNetworkOp =
+    context?.operation === 'push' ||
+    context?.operation === 'pull' ||
+    context?.operation === 'fetch' ||
+    context?.operation === 'clone' ||
+    context?.operation === 'push-tag';
+  if (
+    // `authenticat` covers BOTH "authentication failed" and libssh2's verb form
+    // ("Failed to authenticate SSH session: ..."). Scoping the permission-denied
+    // axis accidentally dropped a bare `auth` match that was catching the verb;
+    // restoring `auth` wholesale would also match "Author identity unknown",
+    // git's message when user.name is unset.
+    msg.includes('authenticat') ||
+    msg.includes('credentials') ||
+    msg.includes('publickey') ||
+    (msg.includes('permission denied') && isNetworkOp)
+  ) {
     return {
       message: 'Authentication failed. Check your credentials or SSH keys.',
       action: {
@@ -70,7 +155,12 @@ export function getErrorSuggestion(
       message: 'A rebase is already in progress. Resolve or abort it first.',
       action: {
         label: 'Abort Rebase',
-        callback: () => window.dispatchEvent(new CustomEvent('trigger-abort')),
+        callback: () => window.dispatchEvent(new CustomEvent('trigger-abort', {
+          // Pinned: aborting discards the in-progress rebase AND any conflict
+          // resolution — doing that to whichever tab happens to be active when
+          // an 8-second toast is clicked is exactly the bug force-delete had.
+          detail: { repoPath: context?.repoPath },
+        })),
       },
     };
   }
@@ -102,8 +192,21 @@ export function getErrorSuggestion(
     };
   }
 
-  // Repository lock
-  if (msg.includes('lock') || msg.includes('locked')) {
+  // git refuses a checkout that would overwrite local changes. libgit2's own
+  // wording ("1 conflict prevents checkout") names neither the files nor a way
+  // forward, and this path is reachable whenever Auto-Stash on Checkout is off.
+  if (/conflicts? prevent(s)? checkout|would be overwritten by checkout/.test(msg)) {
+    return {
+      message:
+        'Your local changes would be overwritten by this checkout. Stash or commit them first, or turn on Auto-Stash on Checkout in Settings > Behavior.',
+    };
+  }
+
+  // Repository lock. Matched on a word boundary: plain `includes('lock')` also
+  // matches "blocked", so a security-gate refusal ("Operation blocked by
+  // security settings") was diagnosed as a stuck index.lock and sent the user
+  // hunting for a file that does not exist.
+  if (/\block\b|\blocked\b|index\.lock/.test(msg)) {
     return {
       message: 'Repository is locked by another process. Wait or remove the lock file.',
     };

@@ -17,7 +17,15 @@ async function openCreateTagDialog(page: import('@playwright/test').Page) {
   const modal = page.locator('lv-create-tag-dialog lv-modal[open]');
   await modal.waitFor({ state: 'visible' });
   // Scope to the lv-create-tag-dialog that has the open modal
-  return page.locator('lv-create-tag-dialog').filter({ has: page.locator('lv-modal[open]') });
+  const dialog = page.locator('lv-create-tag-dialog').filter({ has: page.locator('lv-modal[open]') });
+  // Wait for the dialog to be INTERACTIVE, not merely visible. The modal
+  // becomes visible as soon as its `open` property is set, which can precede
+  // the component settling; filling in that window produced an intermittent
+  // "Create Tag stays disabled" failure across several tests in this file.
+  // Waiting here fixes all of them at the source rather than one at a time.
+  await dialog.locator('#tag-name-input').waitFor({ state: 'visible' });
+  await expect(dialog.locator('#tag-name-input')).toBeEditable();
+  return dialog;
 }
 
 /**

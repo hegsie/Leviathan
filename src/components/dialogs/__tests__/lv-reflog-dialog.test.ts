@@ -22,6 +22,7 @@ import { uiStore } from '../../../stores/ui.store.ts';
 import type { ReflogEntry } from '../../../types/git.types.ts';
 import type { LvReflogDialog } from '../lv-reflog-dialog.ts';
 import '../lv-reflog-dialog.ts';
+import { tryAcquireRefOp, releaseRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 const mockEntry: ReflogEntry = {
   oid: 'deadbeef1234',
@@ -113,5 +114,53 @@ describe('lv-reflog-dialog', () => {
     expect((el as any).contextMenu.visible).to.be.false;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((el as any).contextMenu.entry).to.be.null;
+  });
+
+  // handleReset already CLAIMED the shared lock and refused when another
+  // surface held it — but the buttons were bound to `resetting` alone, a flag
+  // that only ever tracked this dialog. So while a checkout ran elsewhere,
+  // "Hard reset (discard all changes)" stayed fully clickable and did nothing
+  // but raise a refusal toast. Asserted on rendered DOM: the getter calls
+  // isRefOpRunning on every access and so reports the truth even with the
+  // subscription deleted.
+  it('greys out Undo and Hard while another surface holds the working tree', async () => {
+    const REPO = '/test/repo';
+    resetRefOpLocks();
+    mockInvoke = async (command: string) =>
+      command === 'get_reflog'
+        ? [mockEntry, { ...mockEntry, oid: 'cafe5678', shortId: 'cafe567', index: 1 }]
+        : null;
+
+    const el = await fixture<LvReflogDialog>(
+      html`<lv-reflog-dialog ?open=${true} .repositoryPath=${REPO}></lv-reflog-dialog>`
+    );
+
+    let buttons: HTMLButtonElement[] = [];
+    for (let i = 0; i < 100 && buttons.length === 0; i++) {
+      await el.updateComplete;
+      buttons = Array.from(el.shadowRoot!.querySelectorAll('.reset-btn'));
+      if (buttons.length === 0) await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(buttons.length, 'reset buttons must be rendered').to.be.greaterThan(0);
+    expect(
+      buttons.every((b) => !b.disabled),
+      'clickable while the repo is idle'
+    ).to.be.true;
+
+    tryAcquireRefOp(REPO);
+    await el.updateComplete;
+    expect(
+      buttons.every((b) => b.disabled),
+      'a claim from another surface must grey them out'
+    ).to.be.true;
+
+    releaseRefOp(REPO);
+    await el.updateComplete;
+    expect(
+      buttons.every((b) => !b.disabled),
+      'and the release must revive them'
+    ).to.be.true;
+
+    resetRefOpLocks();
   });
 });

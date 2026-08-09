@@ -217,6 +217,24 @@ export class LvCommandPalette extends LitElement {
   private recentCommands: string[] = [];
 
   /**
+   * False until a real pointer movement lands on the result list after the
+   * palette opens.
+   *
+   * Chromium dispatches boundary events (mouseover/mouseenter, with no
+   * mousemove) at elements that APPEAR under a STATIONARY cursor — verified
+   * against Chromium: inserting an element under a parked cursor fires
+   * mouseover+mouseenter on the next frame. Opening the palette with the
+   * pointer already over where the list lands therefore retargeted the
+   * selection, and with no query typed the default list is "Recent", which can
+   * hold `Clean working directory` or `Prune Unreachable Objects` — so the very
+   * next Enter ran a destructive command the user never pointed at.
+   *
+   * Hover-to-select stays fully live; it just waits for a movement that
+   * actually came from the user.
+   */
+  private pointerMovedSinceOpen = false;
+
+  /**
    * Escape at the document level, gated on being the topmost overlay.
    *
    * The palette's other key handling hangs off @keydown on the search input,
@@ -263,6 +281,7 @@ export class LvCommandPalette extends LitElement {
       // keyboard.service's in-input bail swallowed EVERY single-key shortcut
       // app-wide until the user happened to click something.
       this.previouslyFocused = document.activeElement as HTMLElement | null;
+      this.pointerMovedSinceOpen = false;
       this.searchQuery = '';
       this.selectedIndex = 0;
       this.updateFilteredCommands();
@@ -304,7 +323,12 @@ export class LvCommandPalette extends LitElement {
   }
 
   private getAllCommands(): PaletteCommand[] {
-    const branchCommands: PaletteCommand[] = this.branches.map(branch => ({
+    // The branch you are already on is excluded: "Switch to <current>" is a
+    // no-op that still stashes the whole working tree and re-applies it. The
+    // sidebar hides it for the same reason.
+    const branchCommands: PaletteCommand[] = this.branches
+      .filter(branch => !branch.isHead)
+      .map(branch => ({
       id: `branch:${branch.name}`,
       label: `Switch to ${branch.name}`,
       category: 'branch' as const,
@@ -316,7 +340,7 @@ export class LvCommandPalette extends LitElement {
           composed: true,
         }));
       },
-    }));
+      }));
 
     // Graph navigation: reveal a branch/tag tip in the commit graph
     const revealBranchCommands: PaletteCommand[] = this.branches
@@ -468,6 +492,24 @@ export class LvCommandPalette extends LitElement {
       command.action();
       this.close();
     }
+  }
+
+  /**
+   * Hover selection. Ignored until the pointer has actually moved over the
+   * list since the palette opened — see `pointerMovedSinceOpen`.
+   */
+  private handleCommandHover(index: number): void {
+    if (!this.pointerMovedSinceOpen) return;
+    this.selectedIndex = index;
+  }
+
+  private handleCommandMove(index: number): void {
+    // A mousemove is only ever produced by a real pointer movement, so it both
+    // arms hover selection and applies it — the cursor may have been parked on
+    // this row since before the palette opened, in which case no further
+    // mouseenter is coming.
+    this.pointerMovedSinceOpen = true;
+    this.selectedIndex = index;
   }
 
   private handleCommandClick(index: number): void {
@@ -637,7 +679,8 @@ export class LvCommandPalette extends LitElement {
             role="option"
             aria-selected=${index === this.selectedIndex}
             @click=${() => this.handleCommandClick(index)}
-            @mouseenter=${() => { this.selectedIndex = index; }}
+            @mouseenter=${() => this.handleCommandHover(index)}
+            @mousemove=${() => this.handleCommandMove(index)}
           >
             ${this.getCommandIcon(cmd.icon)}
             <span class="command-label" .innerHTML=${highlighted}></span>

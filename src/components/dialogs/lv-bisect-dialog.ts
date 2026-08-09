@@ -10,6 +10,12 @@ import * as gitService from '../../services/git.service.ts';
 import type { BisectStatus, CulpritCommit } from '../../services/git.service.ts';
 import type { Commit } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 type BisectStep = 'setup' | 'in-progress' | 'complete';
 
@@ -424,6 +430,16 @@ export class LvBisectDialog extends LitElement {
   @property({ type: Boolean }) open = false;
   @property({ type: String }) repositoryPath = '';
 
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.repositoryPath);
+
   @state() private step: BisectStep = 'setup';
   @state() private status: BisectStatus | null = null;
   @state() private culprit: CulpritCommit | null = null;
@@ -545,6 +561,14 @@ export class LvBisectDialog extends LitElement {
     }
 
     const repoPath = this.repositoryPath;
+    // Every bisect step moves HEAD and rewrites the working tree. `loading`
+    // only guards THIS dialog; the sidebar lists and the graph menu gate on
+    // the shared working-tree lock, so without claiming it a checkout stayed
+    // clickable while bisect was mid-step.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
@@ -553,6 +577,8 @@ export class LvBisectDialog extends LitElement {
       this.badCommitInput,
       this.goodCommitInput
     );
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -589,10 +615,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleBad(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectBad(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -621,10 +654,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleGood(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectGood(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -653,10 +693,17 @@ export class LvBisectDialog extends LitElement {
 
   private async handleSkip(): Promise<void> {
     const repoPath = this.repositoryPath;
+    // Shared working-tree lock — see handleStart.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
     const result = await gitService.bisectSkip(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success && result.data) {
@@ -681,11 +728,48 @@ export class LvBisectDialog extends LitElement {
   }
 
   private async handleReset(): Promise<void> {
+    if (this.loading) return;
     const repoPath = this.repositoryPath;
+    // Claimed before the confirm, like every other destructive gate here: the
+    // confirm is an IPC round trip before the native dialog takes focus, and
+    // this button stays live through it. `git bisect reset` checks the original
+    // HEAD back out, so it takes the shared working-tree lock too.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
     this.loading = true;
     this.error = '';
 
+    // Only the ABORT reaches a confirm. This handler backs both footer buttons:
+    // "Abort Bisect" while the search is in progress, and "Finish" once the
+    // culprit is found. Aborting throws away many deliberate good/bad decisions
+    // that git records nowhere, so the only way back is to repeat the whole
+    // search — every other destructive button in the app asks first, and this
+    // one, styled danger and sitting next to Good and Bad, did not. Finishing
+    // discards nothing: the answer is already on screen, and prompting there
+    // would be friction with nothing behind it.
+    if (this.step === 'in-progress') {
+      const stepsTaken = this.status?.currentStep ?? 0;
+      const confirmed = await showConfirm(
+        'Abort Bisect',
+        stepsTaken > 0
+          ? `End this bisect and discard the ${stepsTaken} step${stepsTaken === 1 ? '' : 's'} ` +
+            `already narrowed down? The original HEAD is checked back out; the search itself ` +
+            `is not recorded anywhere and would have to be repeated.`
+          : `End this bisect? The original HEAD is checked back out.`,
+        'warning'
+      );
+      if (!confirmed) {
+        this.loading = false;
+        releaseRefOp(repoPath);
+        return;
+      }
+    }
+
     const result = await gitService.bisectReset(repoPath);
+
+    releaseRefOp(repoPath);
 
     if (this.repositoryPath === repoPath) {
       if (result.success) {
@@ -784,7 +868,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn good"
           @click=${this.handleGood}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#10003;</div>
           <div class="action-btn-label">Good</div>
@@ -792,7 +876,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn bad"
           @click=${this.handleBad}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#10007;</div>
           <div class="action-btn-label">Bad</div>
@@ -800,7 +884,7 @@ export class LvBisectDialog extends LitElement {
         <button
           class="action-btn skip"
           @click=${this.handleSkip}
-          ?disabled=${this.loading}
+          ?disabled=${this.loading || this.lock.busy}
         >
           <div class="action-btn-icon">&#8594;</div>
           <div class="action-btn-label">Skip</div>
@@ -910,7 +994,7 @@ export class LvBisectDialog extends LitElement {
                   <button
                     class="btn btn-primary"
                     @click=${this.handleStart}
-                    ?disabled=${this.loading || !this.badCommitInput || !this.goodCommitInput}
+                    ?disabled=${this.loading || this.lock.busy || !this.badCommitInput || !this.goodCommitInput}
                   >
                     Start Bisect
                   </button>
@@ -920,7 +1004,7 @@ export class LvBisectDialog extends LitElement {
                     <button
                       class="btn btn-danger"
                       @click=${this.handleReset}
-                      ?disabled=${this.loading}
+                      ?disabled=${this.loading || this.lock.busy}
                     >
                       Abort Bisect
                     </button>
@@ -929,7 +1013,7 @@ export class LvBisectDialog extends LitElement {
                     <button
                       class="btn btn-primary"
                       @click=${this.handleReset}
-                      ?disabled=${this.loading}
+                      ?disabled=${this.loading || this.lock.busy}
                     >
                       Finish
                     </button>

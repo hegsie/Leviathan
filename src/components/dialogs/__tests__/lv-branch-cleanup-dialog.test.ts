@@ -605,13 +605,30 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(deleteBtn.textContent!.trim()).to.include('Delete Selected (1)');
     });
 
-    it('delete button disabled when nothing selected', async () => {
+    it('delete button disabled when nothing selected and no prune requested', async () => {
       // Stale branches are never auto-selected.
       const el = await renderAndOpen([staleWarning]);
+      // "Also prune remote tracking branches" defaults to ticked, and the
+      // prune is a tail step of this same button — so with it ticked the
+      // button must stay live (as "Prune Remotes"), or the checkbox promises
+      // something nothing can run. Only with BOTH empty is there nothing to do.
+      (el as unknown as { pruneRemotes: boolean }).pruneRemotes = false;
+      await el.updateComplete;
 
       const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
       expect(deleteBtn).to.not.be.null;
       expect(deleteBtn.disabled).to.be.true;
+    });
+
+    it('stays runnable for a prune alone when nothing is selected', async () => {
+      const el = await renderAndOpen([staleWarning]);
+      const internal = el as unknown as { pruneRemotes: boolean; totalSelected: number };
+      expect(internal.pruneRemotes, 'prune is ticked by default').to.be.true;
+      expect(internal.totalSelected, 'and nothing is selected').to.equal(0);
+
+      const deleteBtn = el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement;
+      expect(deleteBtn.disabled, 'a ticked prune must be runnable on its own').to.be.false;
+      expect(deleteBtn.textContent).to.match(/prune/i);
     });
 
     it('never issues a force delete without a confirm', async () => {

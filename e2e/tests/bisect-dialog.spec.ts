@@ -7,6 +7,7 @@ import {
   injectCommandError,
   injectCommandMock,
   openViaCommandPalette,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -293,6 +294,9 @@ test.describe('Bisect Dialog - In-Progress State', () => {
 
     const abortBtn = page.locator('lv-bisect-dialog .btn-danger', { hasText: 'Abort Bisect' });
     await expect(abortBtn).toBeVisible();
+    // Aborting now asks first — a bisect session is many deliberate good/bad
+    // decisions and nothing in git records them.
+    await autoConfirmDialogs(page);
     await abortBtn.click();
 
     await waitForCommand(page, 'bisect_reset');

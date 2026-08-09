@@ -54,17 +54,24 @@ test.describe('Keyboard Shortcuts', () => {
     await page.keyboard.press('Enter');
     await expect(page.locator('lv-create-tag-dialog lv-modal[open]')).toBeVisible();
 
-    const focusPath = await page.evaluate(() => {
-      const path: string[] = [];
-      let el: Element | null = document.activeElement;
-      while (el) {
-        path.push(el.tagName);
-        el = (el as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot?.activeElement ?? null;
-      }
-      return path.join(' > ');
-    });
-
-    expect(focusPath, 'focus must stay inside the dialog the command opened')
+    // POLLED, not read once. The dialog moves focus asynchronously after it
+    // renders, so a single `evaluate` right after the modal becomes visible can
+    // land before focus arrives — which is exactly what failed under a loaded
+    // full-suite run while passing in isolation.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const path: string[] = [];
+            let el: Element | null = document.activeElement;
+            while (el) {
+              path.push(el.tagName);
+              el = (el as HTMLElement & { shadowRoot?: ShadowRoot }).shadowRoot?.activeElement ?? null;
+            }
+            return path.join(' > ');
+          }),
+        { message: 'focus must stay inside the dialog the command opened', timeout: 5000 }
+      )
       .toContain('LV-CREATE-TAG-DIALOG');
   });
 

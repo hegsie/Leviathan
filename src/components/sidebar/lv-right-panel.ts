@@ -276,7 +276,15 @@ export class LvRightPanel extends LitElement {
     }));
   }
 
-  /** Public method to switch to changes tab from outside */
+  /**
+   * Public method to switch to changes tab from outside.
+   *
+   * `lv-commit-panel` lives in that tab and is the sole listener for
+   * `trigger-amend`. Right-clicking a commit in the graph selects it first,
+   * which auto-switches this panel to Details — so amend mode was being turned
+   * on inside a `.tab-panel` with `display: none` and the gesture looked like
+   * it did nothing.
+   */
   public showChanges(): void {
     this.switchTab('changes');
   }

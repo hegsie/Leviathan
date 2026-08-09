@@ -25,6 +25,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect, fixture, html } from '@open-wc/testing';
 import type { LvStashList } from '../sidebar/lv-stash-list.ts';
 import '../sidebar/lv-stash-list.ts';
+import { tryAcquireRefOp, resetRefOpLocks } from '../../utils/ref-lock.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -81,6 +82,7 @@ async function renderStashList(): Promise<LvStashList> {
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-stash-list', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     clearHistory();
     setupDefaultMocks();
   });

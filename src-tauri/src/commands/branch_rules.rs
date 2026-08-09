@@ -80,6 +80,19 @@ pub(crate) fn is_deletion_prevented(rules: &[BranchRule], branch_name: &str) -> 
         .any(|rule| rule.prevent_deletion && pattern_matches(&rule.pattern, branch_name))
 }
 
+/// True when `branch_name` matches a rule that prevents force-pushing.
+///
+/// Same reasoning as `is_deletion_prevented`: enforcing a rule only where the
+/// UI happens to list it leaves it inert everywhere else. Force push is the one
+/// operation here that can discard commits belonging to other people, and it
+/// has a one-click affordance on the push-rejection toast — so a rule the file
+/// format has always accepted must actually stop it, not merely be stored.
+pub(crate) fn is_force_push_prevented(rules: &[BranchRule], branch_name: &str) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule.prevent_force_push && pattern_matches(&rule.pattern, branch_name))
+}
+
 /// Save branch rules to the repository config
 fn save_rules(repo_path: &Path, rules: &[BranchRule]) -> Result<()> {
     let rules_path = get_rules_path(repo_path)?;
@@ -165,6 +178,30 @@ mod tests {
             require_pull_request: false,
             prevent_direct_push: false,
         }
+    }
+
+    #[test]
+    fn force_push_prevention_matches_the_same_patterns_as_deletion() {
+        // The field was stored and read by nothing: only prevent_deletion was
+        // ever enforced, so a rule protecting `main` still allowed the
+        // one-click Force Push on the push-rejection toast to rewrite it.
+        let rules = vec![sample_rule("main"), sample_rule("release/*")];
+        assert!(is_force_push_prevented(&rules, "main"));
+        assert!(is_force_push_prevented(&rules, "release/1.2"));
+        assert!(!is_force_push_prevented(&rules, "feature/x"));
+    }
+
+    #[test]
+    fn a_rule_that_only_prevents_deletion_does_not_block_force_push() {
+        let rules = vec![BranchRule {
+            pattern: "main".to_string(),
+            prevent_deletion: true,
+            prevent_force_push: false,
+            require_pull_request: false,
+            prevent_direct_push: false,
+        }];
+        assert!(is_deletion_prevented(&rules, "main"));
+        assert!(!is_force_push_prevented(&rules, "main"));
     }
 
     // --- Unit tests for serialization ---

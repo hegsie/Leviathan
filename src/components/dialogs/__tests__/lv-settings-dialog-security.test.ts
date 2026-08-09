@@ -1,0 +1,148 @@
+/**
+ * The Security section of Settings.
+ *
+ * `offlineMode`, `confirmNetworkOps` and `remoteAllowlist` shipped as a complete
+ * store slice with setters that had zero callers and no UI anywhere — the gate
+ * they drive could never be switched on. Worse, the gate's own block message
+ * told the user to "Disable in Settings > Security", a screen that did not
+ * exist. These tests hold the section in place.
+ */
+
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+
+const mockInvoke: MockInvoke = async (command: string) => {
+  switch (command) {
+    case 'plugin:notification|is_permission_granted':
+      return false;
+    case 'get_ai_providers':
+    case 'get_downloaded_models':
+    case 'get_available_models':
+    case 'get_available_diff_tools':
+    case 'get_graph_color_schemes':
+      return [];
+    case 'get_app_version':
+      return '0.1.0';
+    case 'get_settings':
+      return {};
+    case 'get_system_capabilities':
+      return { hasGpu: false, gpuName: null, totalRam: 8 };
+    case 'get_local_model_status':
+      return { loaded: false, modelId: null };
+    case 'get_mcp_status':
+      return { servers: [], totalTools: 0 };
+    case 'get_merge_tool_config':
+      return { toolName: null, toolCmd: null };
+    case 'get_diff_tool':
+      return { tool: null, cmd: null, prompt: false };
+    case 'get_available_merge_tools':
+      return [{ name: 'meld', displayName: 'Meld' }];
+    case 'list_diff_tools':
+      return [{ name: 'meld', command: 'meld', available: true }];
+    default:
+      return null;
+  }
+};
+
+(globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
+  invoke: mockInvoke,
+};
+
+import { expect, fixture, html } from '@open-wc/testing';
+import '../lv-settings-dialog.ts';
+import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
+
+function toggleEvent(checked: boolean): Event {
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  const event = new Event('change', { bubbles: true });
+  Object.defineProperty(event, 'target', { value: input, writable: false });
+  return event;
+}
+
+function textEvent(value: string): Event {
+  const input = document.createElement('input');
+  input.value = value;
+  const event = new Event('change', { bubbles: true });
+  Object.defineProperty(event, 'target', { value: input, writable: false });
+  return event;
+}
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+describe('lv-settings-dialog Security section', () => {
+  let el: LvSettingsDialog;
+
+  beforeEach(async () => {
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+    el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+  });
+
+  it('renders a Security section', () => {
+    const titles = Array.from(el.shadowRoot!.querySelectorAll('.section-title')).map(
+      (n) => n.textContent?.trim(),
+    );
+    expect(titles).to.include('Security');
+  });
+
+  it('the offline-mode toggle writes to the store', () => {
+    (el as any).handleToggle('offlineMode', toggleEvent(true));
+    expect(settingsStore.getState().offlineMode).to.equal(true);
+
+    (el as any).handleToggle('offlineMode', toggleEvent(false));
+    expect(settingsStore.getState().offlineMode).to.equal(false);
+  });
+
+  it('the confirm-network-operations toggle writes to the store', () => {
+    (el as any).handleToggle('confirmNetworkOps', toggleEvent(true));
+    expect(settingsStore.getState().confirmNetworkOps).to.equal(true);
+  });
+
+  it('the allowlist field parses a comma-separated list', () => {
+    (el as any).handleRemoteAllowlistChange(textEvent('github.com, gitlab.com'));
+    expect(settingsStore.getState().remoteAllowlist).to.deep.equal(['github.com', 'gitlab.com']);
+  });
+
+  it('an empty allowlist field means "allow all", not "allow nothing named blank"', () => {
+    (el as any).handleRemoteAllowlistChange(textEvent('github.com'));
+    (el as any).handleRemoteAllowlistChange(textEvent('   ,  '));
+    expect(settingsStore.getState().remoteAllowlist).to.deep.equal([]);
+  });
+
+  it('each Security control dispatches settings-changed', () => {
+    let fired = 0;
+    const onChange = (): void => { fired++; };
+    window.addEventListener('settings-changed', onChange);
+    try {
+      (el as any).handleToggle('offlineMode', toggleEvent(true));
+      (el as any).handleToggle('confirmNetworkOps', toggleEvent(true));
+      (el as any).handleRemoteAllowlistChange(textEvent('github.com'));
+    } finally {
+      window.removeEventListener('settings-changed', onChange);
+    }
+    expect(fired).to.equal(3);
+  });
+
+  it('loads the persisted values so the toggles reflect reality when reopened', async () => {
+    settingsStore.setState({
+      offlineMode: true,
+      confirmNetworkOps: true,
+      remoteAllowlist: ['example.com'],
+    });
+
+    const reopened = await fixture<LvSettingsDialog>(
+      html`<lv-settings-dialog></lv-settings-dialog>`,
+    );
+    await reopened.updateComplete;
+
+    expect((reopened as any).offlineMode).to.equal(true);
+    expect((reopened as any).confirmNetworkOps).to.equal(true);
+    expect((reopened as any).remoteAllowlist).to.deep.equal(['example.com']);
+  });
+});

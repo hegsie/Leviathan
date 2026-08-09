@@ -125,6 +125,13 @@ describe('lv-stash-list conflict handling', () => {
     expect(captured.detail!.operationType).to.equal('stash');
     expect(captured.detail!.stashIndex).to.equal(1);
     expect(captured.detail!.dropStashOnComplete).to.be.true;
+    // The oid, not just the position: the dialog's identity capture is an
+    // async round trip, and a stash pushed in the meantime prepends and
+    // renumbers the list, so Complete would drop the wrong entry.
+    expect(
+      (captured.detail as unknown as { stashOid?: string }).stashOid,
+      'the pop must name the stash it is dropping',
+    ).to.equal('oid1');
   });
 
   it('opens the dialog off the MERGE_CONFLICT error code even when the message lacks "conflict"', async () => {

@@ -429,10 +429,15 @@ test.describe('Toolbar Error Scenarios', () => {
     const pushButton = page.getByRole('button', { name: /Push/i });
     await pushButton.click();
 
-    // Error toast should appear with informative message
+    // Error toast should appear with informative message. A non-fast-forward
+    // rejection is routed through the suggestion service, which replaces the
+    // raw message with the recovery action — that, not the server's wording,
+    // is what the user needs here.
     const toast = page.locator('.toast').first();
     await expect(toast).toBeVisible({ timeout: 5000 });
-    await expect(toast).toContainText(/error|rejected|fast-forward/i);
+    await expect(toast).toHaveClass(/error/);
+    await expect(toast).toContainText(/pull before pushing/i);
+    await expect(toast.getByRole('button', { name: 'Pull Now' })).toBeVisible();
 
     // Push button should be re-enabled for retry
     await expect(pushButton).toBeEnabled();

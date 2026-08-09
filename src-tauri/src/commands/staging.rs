@@ -443,6 +443,36 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
         // in_head && !in_index: staged deletion, nothing to discard.
     }
 
+    // An untracked ENTRY can be an entire repository: libgit2 does not descend
+    // into a directory holding .git, so a nested repo surfaces in the file list
+    // as one ordinary row. Discarding it would remove its objects, refs and
+    // unpushed commits with nothing recoverable — and unlike Clean, which is a
+    // deliberate confirmed dialog, discarding a row in the sidebar reads as
+    // "throw away my edit".
+    //
+    // Scanned for ALL selected paths BEFORE anything is deleted, the same
+    // all-or-nothing shape clean_files uses for its containment validation.
+    // The check used to live inside the deletion loop, so a ten-file
+    // "Discard all selected" whose fifth entry was a nested repo deleted the
+    // first four — untracked, so no object, no reflog, no trash — and then
+    // returned the error, while the user read "would destroy its history" and
+    // reasonably concluded nothing had happened.
+    for full_path in &untracked_paths {
+        // symlink_metadata, not is_dir(): a symlink to a directory must never
+        // be descended into, only unlinked.
+        let is_dir = std::fs::symlink_metadata(full_path)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if is_dir && crate::utils::contains_nested_repo(full_path) {
+            return Err(crate::error::LeviathanError::OperationFailed(format!(
+                "'{}' contains a git repository — discarding it would destroy its history. \
+                 Nothing was discarded. Use the Clean Working Directory dialog, which asks \
+                 for confirmation before removing a nested repository.",
+                full_path.display()
+            )));
+        }
+    }
+
     // Restore tracked files from the index (matches `git checkout -- <path>`).
     if !index_paths.is_empty() {
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
@@ -467,7 +497,8 @@ pub async fn discard_changes(path: String, paths: Vec<String>) -> Result<()> {
     // FOLLOW symlinks, so a dangling link would be skipped (left on disk)
     // and a link to a directory would be reported as a directory. The
     // symlink itself is what must go — never its target.
-    // Paths were containment-checked during classification above.
+    // Paths were containment-checked during classification above, and
+    // nested-repo-checked immediately above.
     for full_path in untracked_paths {
         if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
             if meta.file_type().is_dir() {
@@ -929,6 +960,130 @@ pub async fn stage_lines(
 
 #[cfg(test)]
 mod tests {
+
+    /// Discarding an untracked directory that IS (or holds) a repository must
+    /// be refused. libgit2 does not descend into a directory holding .git, so
+    /// a nested repo surfaces in the file list as one ordinary row — and
+    /// discarding a row reads as "throw away my edit", not "destroy a repo".
+    #[tokio::test]
+    async fn test_discard_refuses_an_untracked_nested_repo() {
+        let test_repo = TestRepo::with_initial_commit();
+        let nested = test_repo.path.join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        std::fs::write(nested.join("code.rs").as_path(), "fn main() {}").unwrap();
+
+        let result = discard_changes(test_repo.path_str(), vec!["vendor/lib/".to_string()]).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to discard a nested repository"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("git repository"),
+            "the message must say why: {msg}"
+        );
+        assert!(
+            nested.join(".git").exists(),
+            "the nested repository must survive"
+        );
+    }
+    /// The nested-repo refusal must be ALL-OR-NOTHING.
+    ///
+    /// The guard used to sit inside the deletion loop, so "Discard all
+    /// selected" over ten rows deleted every entry up to the nested repo and
+    /// then returned the error. Those entries were untracked — no object, no
+    /// reflog, no trash — while the message the user read ("would destroy its
+    /// history") says nothing happened, and the frontend's error branch does
+    /// not reload the list, so rows for deleted files stayed on screen.
+    #[tokio::test]
+    async fn test_discard_refusing_a_nested_repo_deletes_nothing_at_all() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // A tracked file with an unstaged edit, selected FIRST — the tracked
+        // restore also runs before the deletion loop, and it is just as
+        // destructive (the edit exists in no git object).
+        test_repo.create_file("README.md", "my unsaved edit");
+
+        // Untracked entries, one of them before the nested repo and one after.
+        test_repo.create_file("first.txt", "first");
+        test_repo.create_file("second.txt", "second");
+        let nested = test_repo.path.join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        git2::Repository::init(&nested).unwrap();
+        test_repo.create_file("last.txt", "last");
+
+        let result = discard_changes(
+            test_repo.path_str(),
+            vec![
+                "README.md".to_string(),
+                "first.txt".to_string(),
+                "second.txt".to_string(),
+                "vendor/lib".to_string(),
+                "last.txt".to_string(),
+            ],
+        )
+        .await;
+
+        let err = result.expect_err("must refuse the whole batch");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("git repository"),
+            "the message must say why: {msg}"
+        );
+        assert!(
+            msg.contains("Nothing was discarded"),
+            "the message must state that the batch was refused whole: {msg}"
+        );
+        assert!(
+            msg.contains("Clean Working Directory"),
+            "the message must point at the in-app dialog that can do this, \
+             not at a terminal: {msg}"
+        );
+
+        // Every selected entry survives, in its pre-call state.
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("README.md")).unwrap(),
+            "my unsaved edit",
+            "the tracked file must not be restored either"
+        );
+        for name in ["first.txt", "second.txt", "last.txt"] {
+            assert!(
+                test_repo.path.join(name).exists(),
+                "{name} was deleted before the refusal — untracked, so unrecoverable"
+            );
+        }
+        assert!(
+            nested.join(".git").exists(),
+            "the nested repository must survive"
+        );
+    }
+
+    /// A nested repo anywhere in the selection blocks it, even when every
+    /// entry before it is a plain file the loop would have removed happily.
+    #[tokio::test]
+    async fn test_discard_refuses_when_the_nested_repo_is_nested_deeper() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_file("a.txt", "a");
+        let deep = test_repo.path.join("build/vendor/lib");
+        std::fs::create_dir_all(&deep).unwrap();
+        git2::Repository::init(&deep).unwrap();
+
+        let err = discard_changes(
+            test_repo.path_str(),
+            vec!["a.txt".to_string(), "build".to_string()],
+        )
+        .await
+        .expect_err("a repo at any depth must block the batch");
+        assert!(err.to_string().contains("git repository"));
+        assert!(
+            test_repo.path.join("a.txt").exists(),
+            "the earlier entry must not have been deleted"
+        );
+        assert!(deep.join(".git").exists());
+    }
+
     use super::*;
     use crate::test_utils::TestRepo;
 

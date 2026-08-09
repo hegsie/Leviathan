@@ -9,6 +9,12 @@
  */
 
 import { showConfirm } from '../services/dialog.service.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  notifyRefOpListeners,
+} from './ref-lock.ts';
 
 /**
  * Confirm a `git gc` run.
@@ -82,16 +88,58 @@ export function summariseFsck(message: string | undefined): string {
  */
 const maintenanceInFlight = new Set<string>();
 
-/** Claim the maintenance slot for a repo. False when one is already running. */
+/**
+ * Claim the maintenance slot for a repo. False when one is already running,
+ * OR when a working-tree operation holds that repo's ref lock.
+ *
+ * The two used to be disjoint sets that never consulted each other, so
+ * "maintenance" and "working tree" were each serialized only against
+ * themselves. `git prune` runs with no `--expire`, deleting every unreachable
+ * loose object immediately — and libgit2 writes an object before the ref that
+ * makes it reachable, so a stash, commit or rebase running beside a prune had
+ * a window in which its fresh objects were unreachable and got collected. It
+ * is done here rather than at each call site because that enumeration has gone
+ * stale in this codebase every time it has been attempted.
+ */
 export function tryAcquireMaintenance(repoPath: string): boolean {
   if (maintenanceInFlight.has(repoPath)) return false;
+  if (!tryAcquireRefOp(repoPath)) return false;
   maintenanceInFlight.add(repoPath);
   return true;
 }
 
-/** Release the slot. Safe to call for a repo that never held one. */
+/**
+ * Claim the maintenance slot WITHOUT the working-tree lock, for a read-only
+ * command.
+ *
+ * `git fsck --full` writes nothing and can run for minutes on a large repo.
+ * Routing it through the same helper as gc/prune swept it into the exclusive
+ * lock, so for its whole run every branch row, every discard button and — the
+ * one that matters — the operation banner's Abort were greyed out, with no
+ * progress indicator to explain why. The prune argument (objects collected out
+ * from under a concurrent write) does not apply to a command that only reads.
+ */
+export function tryAcquireMaintenanceReadOnly(repoPath: string): boolean {
+  if (maintenanceInFlight.has(repoPath)) return false;
+  maintenanceInFlight.add(repoPath);
+  readOnlyMaintenance.add(repoPath);
+  // This claim takes no ref lock, so nothing else would tell the components
+  // bound to it that the maintenance buttons must re-render.
+  notifyRefOpListeners();
+  return true;
+}
+
+/** Slots claimed read-only, so release knows not to free a lock it never took. */
+const readOnlyMaintenance = new Set<string>();
+
+/** Release the slot, and the working-tree lock if this claim took one. */
 export function releaseMaintenance(repoPath: string): void {
-  maintenanceInFlight.delete(repoPath);
+  if (!maintenanceInFlight.delete(repoPath)) return;
+  if (readOnlyMaintenance.delete(repoPath)) {
+    notifyRefOpListeners();
+  } else {
+    releaseRefOp(repoPath);
+  }
 }
 
 /** True while a maintenance command is running against `repoPath`. */
@@ -99,7 +147,26 @@ export function isMaintenanceRunning(repoPath: string): boolean {
   return maintenanceInFlight.has(repoPath);
 }
 
+/**
+ * True when `tryAcquireMaintenance` would refuse — for ANY reason.
+ *
+ * Callers check this BEFORE showing their confirm, so a destructive prompt is
+ * never raised for a run the claim was always going to refuse. That check used
+ * to read isMaintenanceRunning alone, which stopped being the whole answer the
+ * moment maintenance also began claiming the working-tree lock: a checkout in
+ * flight let the confirm through and only then produced "a maintenance
+ * operation is already running", which was not true. Kept beside the claim so
+ * the two cannot describe different conditions.
+ */
+export function isMaintenanceBlocked(repoPath: string): boolean {
+  return maintenanceInFlight.has(repoPath) || isRefOpRunning(repoPath);
+}
+
 /** Test seam: drop all claims. */
 export function resetMaintenanceLocks(): void {
+  for (const repoPath of maintenanceInFlight) {
+    if (!readOnlyMaintenance.has(repoPath)) releaseRefOp(repoPath);
+  }
   maintenanceInFlight.clear();
+  readOnlyMaintenance.clear();
 }

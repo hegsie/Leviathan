@@ -40,6 +40,24 @@ export default tseslint.config(
     },
   },
   {
+    // e2e specs, fixtures and page objects. Same base rules; these are test
+    // code, so the assertion-style and any-typing rules are relaxed the same
+    // way they are for unit tests.
+    files: ['e2e/**/*.ts'],
+    extends: [...tseslint.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.browser, ...globals.es2022, ...globals.node },
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-expressions': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
     files: ['src/**/__tests__/**/*.ts', 'src/**/*.test.ts'],
     rules: {
       '@typescript-eslint/no-unused-expressions': 'off',

@@ -10,6 +10,11 @@ import { cherryPick } from '../../services/git.service.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 import type { Commit } from '../../types/git.types.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-cherry-pick-dialog')
 export class LvCherryPickDialog extends LitElement {
@@ -198,6 +203,16 @@ export class LvCherryPickDialog extends LitElement {
   ];
 
   @property({ type: String }) repositoryPath = '';
+
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
   @property({ type: String }) currentBranch = '';
 
   @query('lv-modal') private modal!: LvModal;
@@ -241,6 +256,15 @@ export class LvCherryPickDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the cherry-pick is running. `handleModalClose()` re-asserts the
+   * modal open on this; the host's tab-close sweep must consult it too, because
+   * `close()` is a bare `isOpen = false` that bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.isExecuting;
+  }
+
   private reset(): void {
     this.commit = null;
     this.noCommit = false;
@@ -267,12 +291,20 @@ export class LvCherryPickDialog extends LitElement {
   private async handleCherryPick(): Promise<void> {
     if (!this.commit) return;
 
-    this.isExecuting = true;
-    this.error = '';
-
     // The repo pinned at open — NOT the live prop, which rebinds on a
     // tab switch while this dialog sits open.
     const repoPath = this.pinnedRepoPath;
+    // `isExecuting` only stops a second click on THIS button. The sidebar
+    // lists and the graph menu gate on the shared working-tree lock, so
+    // without claiming it a concurrent checkout stayed enabled.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.error = 'Another operation is already running in this repository.';
+      return;
+    }
+
+    this.isExecuting = true;
+    this.error = '';
+
     try {
       const result = await cherryPick({
         path: repoPath,
@@ -323,6 +355,7 @@ export class LvCherryPickDialog extends LitElement {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
     } finally {
       this.isExecuting = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -450,7 +483,7 @@ export class LvCherryPickDialog extends LitElement {
           <button
             class="btn btn-primary"
             @click=${this.handleCherryPick}
-            ?disabled=${this.isExecuting}
+            ?disabled=${this.isExecuting || this.lock.busy}
           >
             ${this.isExecuting ? 'Cherry-picking...' : 'Cherry-Pick'}
           </button>

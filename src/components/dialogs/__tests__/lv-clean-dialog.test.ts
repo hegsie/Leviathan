@@ -16,6 +16,9 @@ let lastCleanFilesArgs: Record<string, unknown> | null = null;
 let confirmResult = true;
 /** When set, clean_files reports this many removed instead of all requested. */
 let partialCleanCount: number | null = null;
+/** When set, the confirm dialog hangs until this is resolved. */
+let holdConfirm: (() => void) | null = null;
+let confirmCount = 0;
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
@@ -27,6 +30,13 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
     command === 'plugin:dialog|confirm' ||
     command === 'plugin:dialog|ask'
   ) {
+    confirmCount++;
+    if (holdConfirm) {
+      const gate = new Promise<void>((resolve) => {
+        holdConfirm = resolve;
+      });
+      await gate;
+    }
     // plugin-dialog's confirm() resolves true only when the command returns the
     // OK button label ('Ok'); anything else is treated as declined.
     return confirmResult ? 'Ok' : 'Cancel';
@@ -59,14 +69,22 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 import '../lv-clean-dialog.ts';
 import type { LvCleanDialog } from '../lv-clean-dialog.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import {
+  tryAcquireRefOp,
+  isRefOpRunning,
+  resetRefOpLocks,
+} from '../../../utils/ref-lock.ts';
 
 describe('lv-clean-dialog', () => {
   beforeEach(() => {
+    resetRefOpLocks();
     failingCommands = new Set();
     cleanableEntries = [];
     lastCleanFilesArgs = null;
     confirmResult = true;
     partialCleanCount = null;
+    holdConfirm = null;
+    confirmCount = 0;
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -78,6 +96,39 @@ describe('lv-clean-dialog', () => {
 
     const dialog = el.shadowRoot!.querySelector('.dialog, .dialog-overlay');
     expect(dialog).to.not.be.null;
+  });
+
+  it('is inert while another surface holds the working-tree lock', async () => {
+    // Clean deletes files from the same working tree a checkout, reset, merge
+    // or rebase is mutating, and the backend takes no per-repo lock.
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+    tryAcquireRefOp('/test/repo');
+    lastCleanFilesArgs = null;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(lastCleanFilesArgs, 'nothing reaches the backend').to.be.null;
+  });
+
+  it('releases the lock so a later operation works', async () => {
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(
+      isRefOpRunning('/test/repo'),
+      'a stuck claim would freeze every ref operation for the session',
+    ).to.equal(false);
   });
 
   it('dispatches files-cleaned on success', async () => {
@@ -316,5 +367,74 @@ describe('lv-clean-dialog', () => {
 
     expect(lastCleanFilesArgs).to.not.be.null;
     expect(lastCleanFilesArgs!.forceNested).to.be.false;
+  });
+});
+
+describe('lv-clean-dialog re-entrancy', () => {
+  beforeEach(() => {
+    failingCommands = new Set();
+    cleanableEntries = [];
+    lastCleanFilesArgs = null;
+    confirmResult = true;
+    partialCleanCount = null;
+    holdConfirm = null;
+    confirmCount = 0;
+    const state = uiStore.getState();
+    state.toasts.forEach((t) => state.removeToast(t.id));
+  });
+
+  it('a double-click raises one confirm and deletes once', async () => {
+    // showConfirm is an IPC round trip before the native dialog opens and takes
+    // focus. The in-flight flag used to be claimed after both confirms, so the
+    // second click landed inside that window: two delete prompts over the same
+    // selection, and confirming both ran the clean twice — the second on paths
+    // that no longer existed, producing a "0 of N items" warning contradicting
+    // the success toast the user had just read.
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+
+    // Hold the first confirm open so the second click lands while it is up.
+    holdConfirm = () => {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const first = (el as any).handleClean();
+    await new Promise((r) => setTimeout(r, 10));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const second = (el as any).handleClean();
+    const release = holdConfirm;
+    holdConfirm = null;
+    release?.();
+    await Promise.all([first, second]);
+
+    expect(confirmCount, 'one prompt, not two').to.equal(1);
+    expect(lastCleanFilesArgs, 'the clean ran').to.not.be.null;
+    const warnings = uiStore.getState().toasts.filter((t) => t.type === 'warning');
+    expect(
+      warnings.some((t) => /0 of/.test(t.message)),
+      'no contradictory second result',
+    ).to.equal(false);
+  });
+
+  it('declining releases the guard so the button still works', async () => {
+    const el = await fixture<LvCleanDialog>(
+      html`<lv-clean-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-clean-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+
+    confirmResult = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+    expect(lastCleanFilesArgs, 'declining blocks the delete').to.be.null;
+
+    confirmResult = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).selectedPaths = new Set(['untracked.txt']);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleClean();
+
+    expect(lastCleanFilesArgs, 'a declined clean must not wedge the button').to.not.be.null;
   });
 });

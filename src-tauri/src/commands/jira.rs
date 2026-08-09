@@ -62,11 +62,18 @@ fn build_jira_api_url(base_url: &str, path: &str) -> String {
 }
 
 /// Load JIRA config from the repository's .git/leviathan/jira.json
+/// Repo-level config lives beside the git dir. Resolved via `commondir` rather
+/// than joining ".git" onto the working tree: in a linked worktree `<wt>/.git`
+/// is a pointer FILE, so the join produced a path that could never be created
+/// or read. `commondir` also keeps one config shared across every worktree of
+/// the same repository, which is what repo-level settings should do.
+fn leviathan_config_dir(repo_path: &str) -> Result<std::path::PathBuf> {
+    let repo = git2::Repository::open(Path::new(repo_path))?;
+    Ok(repo.commondir().join("leviathan"))
+}
+
 fn load_jira_config(repo_path: &str) -> Result<JiraConfig> {
-    let config_path = Path::new(repo_path)
-        .join(".git")
-        .join("leviathan")
-        .join("jira.json");
+    let config_path = leviathan_config_dir(repo_path)?.join("jira.json");
 
     if !config_path.exists() {
         return Err(LeviathanError::OperationFailed(
@@ -162,7 +169,7 @@ pub async fn get_jira_config(path: String) -> Result<Option<JiraConfig>> {
 pub async fn save_jira_config(path: String, config: JiraConfig) -> Result<()> {
     debug!("Saving JIRA config for: {}", path);
 
-    let leviathan_dir = Path::new(&path).join(".git").join("leviathan");
+    let leviathan_dir = leviathan_config_dir(&path)?;
 
     // Create the leviathan directory if it doesn't exist
     if !leviathan_dir.exists() {
@@ -632,6 +639,7 @@ pub async fn create_branch_from_jira(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestRepo;
 
     #[test]
     fn test_get_jira_auth_header() {
@@ -835,10 +843,14 @@ mod tests {
 
     #[test]
     fn test_save_and_load_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo_path = dir.path();
+        // A REAL repository: leviathan_config_dir resolves the config location
+        // through git2::Repository::open, so a hand-made `.git/leviathan`
+        // directory with no HEAD, objects or refs is not a repository and the
+        // open fails. The test asserted a round trip it never performed.
+        let repo = TestRepo::with_initial_commit();
+        let repo_path = repo.path.clone();
+        let repo_path = repo_path.as_path();
 
-        // Create .git directory structure
         std::fs::create_dir_all(repo_path.join(".git").join("leviathan")).unwrap();
 
         let config = JiraConfig {

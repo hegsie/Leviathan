@@ -312,6 +312,53 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       expect(previewCommits.length).to.equal(2);
     });
 
+    it('a squash after a drop still lands in the previous pick', async () => {
+      // git squashes into the last PICKED commit, and a dropped line is not a
+      // pick — so pick/drop/squash yields ONE commit. The grouping loop treated
+      // `drop` as a boundary and emitted the squash as its own surviving
+      // commit, contradicting both git and the "Resulting: N" stat rendered
+      // directly underneath it.
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const selects = el.shadowRoot!.querySelectorAll(
+        '.action-select',
+      ) as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'drop';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+      selects[2].value = 'squash';
+      selects[2].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const previewCommits = el.shadowRoot!.querySelectorAll('.preview-commit');
+      expect(previewCommits.length, 'one surviving commit, as git would produce').to.equal(1);
+      expect(
+        previewCommits[0].querySelector('.squash-badge'),
+        'and it is marked as having absorbed the squash',
+      ).to.not.be.null;
+    });
+
+    it('the preview agrees with the stat rendered under it', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const selects = el.shadowRoot!.querySelectorAll(
+        '.action-select',
+      ) as NodeListOf<HTMLSelectElement>;
+      selects[1].value = 'drop';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+      selects[2].value = 'squash';
+      selects[2].dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const previewCount = el.shadowRoot!.querySelectorAll('.preview-commit').length;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kept = (el as any).getStats().kept;
+      expect(previewCount, 'the two numbers on screen must not disagree').to.equal(kept);
+    });
+
     it('squash commits show .squash-badge on the parent preview commit', async () => {
       const el = await createDialog();
       await openAndWait(el);
@@ -806,6 +853,162 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       // Commits should be cleared after close handler runs
       rows = el.shadowRoot!.querySelectorAll('.commit-row');
       expect(rows.length).to.equal(0);
+    });
+  });
+
+  describe('rewording preserves the message body', () => {
+    it('seeds the editor with subject AND body', async () => {
+      // The reword route amends with `-m`, which REPLACES the whole message —
+      // so seeding from the subject alone silently deleted trailers, issue
+      // references and rationale. The commit panel's amend has always carried
+      // the body, so the same operation preserved it from one surface and
+      // destroyed it from the other.
+      const el = await createDialog();
+      await openAndWait(el);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).commits = [
+        {
+          oid: 'aaa111',
+          shortId: 'aaa111',
+          summary: 'Add retry to the uploader',
+          body: 'Backoff is exponential.\n\nFixes #4412',
+          action: 'reword',
+        },
+      ];
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea, 'the reword editor is shown').to.not.be.null;
+      expect(textarea.value).to.contain('Add retry to the uploader');
+      expect(textarea.value, 'and the body the amend would otherwise drop').to.contain(
+        'Fixes #4412',
+      );
+    });
+
+    it('an untouched full message is treated as no change', async () => {
+      // Otherwise every reword row would emit an amend that rewrites the commit
+      // with exactly what it already said.
+      const el = await createDialog();
+      await openAndWait(el);
+      const commit = {
+        oid: 'aaa111',
+        shortId: 'aaa111',
+        summary: 'Subject',
+        body: 'Body line',
+        action: 'reword',
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).commits = [{ ...commit, newMessage: 'Subject\n\nBody line' }];
+      await el.updateComplete;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isNoop = (el as any).fullMessage(commit) === 'Subject\n\nBody line';
+      expect(isNoop, 'summary + body is the message to compare against').to.equal(true);
+    });
+
+    it('the reword-from-graph route shows the body, and leaving it alone is a no-op', async () => {
+      // The two seed sites define `newMessage` BEFORE the textarea renders, so
+      // the render-time `?? fullMessage(c)` fallback never fires for them. Seeded
+      // from the subject, the box hid the body from the user AND made the
+      // execute-time "did anything change?" comparison read true for an
+      // untouched reword — emitting an amend that replaced the whole message
+      // with its first line. This drives the real path rather than the
+      // fallback in isolation.
+      const withBody = [
+        {
+          oid: 'aaa111bbb222',
+          shortId: 'aaa111b',
+          summary: 'Add retry to the uploader',
+          body: 'Backoff is exponential.\n\nFixes #4412',
+          action: 'pick',
+        },
+      ];
+      setupDefaultMocks(withBody);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'aaa111bbb222' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea, 'the reword editor is shown').to.not.be.null;
+      expect(textarea.value, 'the body is visible to the user').to.contain('Fixes #4412');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const commits = (el as any).commits;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(commits[0].newMessage).to.equal((el as any).fullMessage(commits[0]));
+    });
+
+    it('refuses to arm a rebase when the reword target is not in the plan', async () => {
+      // get_rebase_commits skips merge commits, so a reword of one loads a plan
+      // that contains every OTHER commit in range. The seeding .map() matched
+      // nothing and silently no-opped, leaving Start Rebase enabled on a plan
+      // that would linearize the range and destroy the merge.
+      setupDefaultMocks(mockCommits);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'not-in-the-plan' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start, 'the Start Rebase button is rendered').to.not.be.undefined;
+      expect(start.disabled, 'one click here would rewrite history the user never chose')
+        .to.equal(true);
+
+      const warning = el.shadowRoot!.querySelector('.warning-message');
+      expect(warning, 'the user is told why').to.not.be.null;
+      expect(warning!.textContent).to.contain('cannot be reworded by rebase');
+    });
+
+    it('arms the rebase normally when the reword target IS in the plan', async () => {
+      setupDefaultMocks(mockCommits);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'aaa1111111111' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start.disabled).to.equal(false);
+      expect(el.shadowRoot!.querySelector('.warning-message')).to.be.null;
+    });
+
+    it('switching the dropdown to reword also seeds the full message', async () => {
+      const withBody = [
+        {
+          oid: 'aaa111bbb222',
+          shortId: 'aaa111b',
+          summary: 'Subject',
+          body: 'Body line',
+          action: 'pick',
+        },
+      ];
+      setupDefaultMocks(withBody);
+      const el = await createDialog();
+      await openAndWait(el);
+
+      const select = el.shadowRoot!.querySelector('.action-select') as HTMLSelectElement;
+      select.value = 'reword';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.reword-input') as HTMLTextAreaElement;
+      expect(textarea.value, 'the second seed site too').to.contain('Body line');
+    });
+
+    it('a commit with no body seeds just the subject', async () => {
+      const el = await createDialog();
+      await openAndWait(el);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).fullMessage({ summary: 'Only a subject', body: '' })).to.equal(
+        'Only a subject',
+      );
     });
   });
 });

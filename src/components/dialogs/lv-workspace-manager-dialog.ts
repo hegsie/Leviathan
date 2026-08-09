@@ -8,13 +8,14 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as workspaceService from '../../services/workspace.service.ts';
 import * as gitService from '../../services/git.service.ts';
-import { openRepositoryDialog, openDialog, saveDialog } from '../../services/dialog.service.ts';
+import { openRepositoryDialog, openDialog, saveDialog, showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
 
 const WORKSPACE_COLORS = [
   '#4fc3f7', '#81c784', '#ef5350', '#ffb74d',
@@ -680,7 +681,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
   @state() private workspaces: Workspace[] = [];
   @state() private selectedWorkspaceId: string | null = null;
   @state() private repoStatuses: Map<string, WorkspaceRepoStatus> = new Map();
-  @state() private batchRunning = false;
+  /** Which batch is running, so the button the user pressed reports it —
+   *  a shared boolean made Fetch All read "Running..." during a Pull All. */
+  @state() private batchRunning: 'fetch' | 'pull' | null = null;
+  @state() private deletingWorkspace = false;
+  @state() private removingRepoPath: string | null = null;
   @state() private statusLoading = false;
 
   // Search
@@ -780,15 +785,45 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
   private async handleDelete(): Promise<void> {
     const ws = this.selectedWorkspace;
-    if (!ws) return;
+    if (!ws || this.deletingWorkspace) return;
+    // Claimed BEFORE the confirm — this button had no in-flight state at all.
+    // showConfirm is an IPC round trip before the native dialog takes focus, so
+    // a double-click stacked two prompts for the same workspace and the second
+    // delete then failed against a record that was already gone, contradicting
+    // the success the user just read.
+    this.deletingWorkspace = true;
 
-    const result = await workspaceService.deleteWorkspace(ws.id);
-    if (result.success) {
-      workspaceStore.getState().removeWorkspace(ws.id);
-      this.selectedWorkspaceId = null;
-      await this.loadWorkspaces();
-    } else {
-      showToast(result.error?.message || 'Failed to delete workspace', 'error');
+    // The footer's single Delete button permanently drops a named, saved
+    // multi-repo configuration with no undo. Its direct sibling — the profile
+    // manager, which manages the same kind of object — confirms first; this
+    // dialog was the one that didn't. The count matters: a user with several
+    // workspaces selected the wrong row often enough that the confirm has to
+    // name which one and how much is in it.
+    const count = ws.repositories.length;
+    const confirmed = await showConfirm(
+      'Delete Workspace',
+      `Delete workspace "${ws.name}"? This removes the workspace and its ` +
+        `${count} tracked ${count === 1 ? 'repository' : 'repositories'}. ` +
+        `The repositories themselves are not touched.`,
+      'warning'
+    );
+    if (!confirmed) {
+      this.deletingWorkspace = false;
+      return;
+    }
+
+    try {
+      const result = await workspaceService.deleteWorkspace(ws.id);
+      if (result.success) {
+        workspaceStore.getState().removeWorkspace(ws.id);
+        this.selectedWorkspaceId = null;
+        await this.loadWorkspaces();
+        showToast(`Deleted workspace ${ws.name}`, 'success');
+      } else {
+        showToast(result.error?.message || 'Failed to delete workspace', 'error');
+      }
+    } finally {
+      this.deletingWorkspace = false;
     }
   }
 
@@ -811,14 +846,34 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
   private async handleRemoveRepo(path: string): Promise<void> {
     const ws = this.selectedWorkspace;
-    if (!ws) return;
+    if (!ws || this.removingRepoPath === path) return;
+    // Claimed before the confirm, like every other destructive button here.
+    this.removingRepoPath = path;
+
+    // The × sits at the end of a dense row next to other controls. Nothing on
+    // disk is touched, but the workspace entry — including the path — is gone,
+    // and putting it back means knowing where that repo lives and re-browsing
+    // to it. A confirm naming the row is cheap next to that.
+    const name = ws.repositories.find((r) => r.path === path)?.name ?? path;
+    const confirmed = await showConfirm(
+      'Remove Repository',
+      `Remove "${name}" from the workspace "${ws.name}"? ` +
+        `The repository itself is not deleted — only its entry here.`,
+      'warning'
+    );
+    if (!confirmed) {
+      this.removingRepoPath = null;
+      return;
+    }
 
     const result = await workspaceService.removeRepositoryFromWorkspace(ws.id, path);
+    this.removingRepoPath = null;
     if (result.success) {
       const newStatuses = new Map(this.repoStatuses);
       newStatuses.delete(path);
       this.repoStatuses = newStatuses;
       await this.loadWorkspaces();
+      showToast(`Removed ${name} from ${ws.name}`, 'success');
     } else {
       showToast(result.error?.message || 'Failed to remove repository', 'error');
     }
@@ -844,26 +899,46 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws) return;
 
-    this.batchRunning = true;
+    this.batchRunning = 'fetch';
     let successCount = 0;
     let failCount = 0;
+    // A security-gate refusal is not a failure: with offline mode on, every
+    // repo in the workspace used to count as "failed" and the summary read
+    // "0 succeeded, 8 failed" for eight operations that were never attempted.
+    let skippedCount = 0;
+    // Repos that are gone or no longer git repos were silently dropped, so a
+    // summary that now reads as fully accounted-for (succeeded/failed/skipped)
+    // still didn't add up to the workspace size.
+    let unavailableCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
-      if (status && (!status.exists || !status.isValidRepo)) continue;
+      if (status && (!status.exists || !status.isValidRepo)) {
+        unavailableCount++;
+        continue;
+      }
 
       const result = await gitService.fetch({ path: repo.path, silent: true });
       if (result.success) {
         successCount++;
+      } else if (gitService.isNetworkGateRefusal(result.error)) {
+        skippedCount++;
       } else {
         failCount++;
       }
     }
 
-    this.batchRunning = false;
+    this.batchRunning = null;
     showToast(
-      `Fetch all: ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}`,
-      failCount > 0 ? 'warning' : 'success',
+      `Fetch all: ${successCount} succeeded` +
+        (failCount > 0 ? `, ${failCount} failed` : '') +
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
+        (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
+      failCount > 0 || unavailableCount > 0
+        ? 'warning'
+        : skippedCount > 0
+          ? 'info'
+          : 'success',
     );
     await this.refreshStatus();
   }
@@ -872,26 +947,86 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws) return;
 
-    this.batchRunning = true;
+    this.batchRunning = 'pull';
     let successCount = 0;
-    let failCount = 0;
+    // Named, not just counted: "2 failed" across a 10-repo workspace gave the
+    // user nothing to act on.
+    const failed: string[] = [];
+    const conflicted: string[] = [];
+    // A security-gate refusal is not a failure: with offline mode on, every
+    // repo in the workspace used to count as "failed" and the summary read
+    // "0 succeeded, 8 failed" for eight operations that were never attempted.
+    let skippedCount = 0;
+    // Repos that are gone or no longer git repos were silently dropped, so a
+    // summary that now reads as fully accounted-for (succeeded/failed/skipped)
+    // still didn't add up to the workspace size.
+    // Repos skipped because another operation held their working-tree lock.
+    const busy: string[] = [];
+    let unavailableCount = 0;
 
     for (const repo of ws.repositories) {
       const status = this.repoStatuses.get(repo.path);
-      if (status && (!status.exists || !status.isValidRepo)) continue;
+      if (status && (!status.exists || !status.isValidRepo)) {
+        unavailableCount++;
+        continue;
+      }
 
-      const result = await gitService.pull({ path: repo.path, silent: true });
+      // The fourth surface reaching pull. handlePull's own comment enumerates
+      // three (the shortcut, the palette, the Pull Now toast) and this batch
+      // was never in that list — it guarded only its own two buttons with
+      // batchRunning. A pull runs checkout_tree and moves the branch ref, so
+      // it must take the shared working-tree lock like every other caller.
+      // Per repo, since separate repos have separate trees.
+      if (!tryAcquireRefOp(repo.path)) {
+        busy.push(repo.name);
+        continue;
+      }
+      let result;
+      try {
+        result = await gitService.pull({ path: repo.path, silent: true });
+      } finally {
+        releaseRefOp(repo.path);
+      }
       if (result.success) {
         successCount++;
+      } else if (gitService.isNetworkGateRefusal(result.error)) {
+        skippedCount++;
+      } else if (
+        result.error?.code === 'MERGE_CONFLICT' ||
+        result.error?.code === 'REBASE_CONFLICT'
+      ) {
+        // Counting this as "failed" is wrong in the direction that matters: the
+        // pull LANDED and left a conflicted index behind. A summary reading
+        // "6 succeeded, 2 failed" told the user nothing happened in two repos
+        // that are in fact sitting mid-merge, and named neither of them — so
+        // there was no way to find them short of opening all eight.
+        conflicted.push(repo.name);
       } else {
-        failCount++;
+        failed.push(repo.name);
       }
     }
 
-    this.batchRunning = false;
+    const failCount = failed.length;
+    this.batchRunning = null;
     showToast(
-      `Pull all: ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}`,
-      failCount > 0 ? 'warning' : 'success',
+      `Pull all: ${successCount} succeeded` +
+        (conflicted.length > 0
+          ? `, ${conflicted.length} need conflict resolution (${conflicted.join(', ')})`
+          : '') +
+        (failCount > 0 ? `, ${failCount} failed (${failed.join(', ')})` : '') +
+        (skippedCount > 0 ? `, ${skippedCount} skipped by security settings` : '') +
+        // Named, not just counted: a repo skipped because something else was
+        // running in it did NOT pull, and a summary that stays silent about it
+        // reads as "everything is up to date".
+        (busy.length > 0
+          ? `, ${busy.length} busy with another operation (${busy.join(', ')})`
+          : '') +
+        (unavailableCount > 0 ? `, ${unavailableCount} unavailable` : ''),
+      failCount > 0 || conflicted.length > 0 || unavailableCount > 0 || busy.length > 0
+        ? 'warning'
+        : skippedCount > 0
+          ? 'info'
+          : 'success',
     );
     await this.refreshStatus();
   }
@@ -1031,7 +1166,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
         await this.loadWorkspaces();
         this.selectWorkspace(result.data.id);
       } else {
-        showToast(`Import failed: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Import failed: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to import workspace:', err);
@@ -1297,6 +1432,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
                                 <button
                                   class="repo-remove"
                                   title="Remove from workspace"
+                                  ?disabled=${this.removingRepoPath === repo.path}
                                   @click=${() => this.handleRemoveRepo(repo.path)}
                                 >
                                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1312,17 +1448,17 @@ export class LvWorkspaceManagerDialog extends LitElement {
                         <div class="batch-ops">
                           <button
                             class="batch-btn"
-                            ?disabled=${this.batchRunning}
+                            ?disabled=${this.batchRunning !== null}
                             @click=${this.handleFetchAll}
                           >
-                            ${this.batchRunning ? 'Running...' : 'Fetch All'}
+                            ${this.batchRunning === 'fetch' ? 'Running...' : 'Fetch All'}
                           </button>
                           <button
                             class="batch-btn"
-                            ?disabled=${this.batchRunning}
+                            ?disabled=${this.batchRunning !== null}
                             @click=${this.handlePullAll}
                           >
-                            Pull All
+                            ${this.batchRunning === 'pull' ? 'Running...' : 'Pull All'}
                           </button>
                           <button
                             class="batch-btn"
@@ -1353,7 +1489,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
           <div class="footer-left">
             ${ws
               ? html`
-                  <button class="btn btn-danger" @click=${this.handleDelete}>
+                  <button
+                    class="btn btn-danger"
+                    ?disabled=${this.deletingWorkspace}
+                    @click=${this.handleDelete}
+                  >
                     Delete
                   </button>
                 `

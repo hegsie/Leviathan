@@ -262,7 +262,12 @@ test.describe('Stash Context Menu - Error Handling', () => {
   });
 
   test('should show error toast when apply_stash fails', async ({ page }) => {
-    await injectCommandError(page, 'apply_stash', 'Apply failed: conflicts detected');
+    // A GENUINE failure, not a conflict. A conflicting apply is classified
+    // separately now (the stash content lands in the working tree, so it warns
+    // rather than erroring) — see the conflict test below. The old message here
+    // contained the word "conflicts" and so exercised that path instead of this
+    // one, which is what the test name claims to cover.
+    await injectCommandError(page, 'apply_stash', 'Apply failed: could not read stash entry');
 
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
@@ -359,7 +364,7 @@ test.describe('Stash Context Menu - Error Handling', () => {
 test.describe('Stash Context Menu - Extended Tests', () => {
   let leftPanel: LeftPanelPage;
 
-  test('apply with CONFLICT error should show error toast', async ({ page }) => {
+  test('apply with CONFLICT reports that the stash landed and needs resolving', async ({ page }) => {
     leftPanel = new LeftPanelPage(page);
 
     await setupOpenRepository(page, {
@@ -370,6 +375,12 @@ test.describe('Stash Context Menu - Extended Tests', () => {
     });
 
     await injectCommandError(page, 'apply_stash', 'CONFLICT (content): Merge conflict in src/main.ts');
+    // The conflicting apply opens the resolution dialog, which loads the
+    // conflict list. Unmocked, that load fails and raises its OWN error toast —
+    // a fixture gap that would mask the assertion below.
+    await injectCommandMock(page, {
+      get_conflicts: [{ path: 'src/main.ts', ours: 'a', theirs: 'b', ancestor: null }],
+    });
 
     await leftPanel.expandStashes();
     const stash = leftPanel.getStash(0);
@@ -379,11 +390,16 @@ test.describe('Stash Context Menu - Extended Tests', () => {
     await expect(applyOption).toBeVisible();
     await applyOption.click();
 
-    const errorToast = page.locator('lv-toast-container .toast.error').first();
-    await expect(errorToast).toBeVisible({ timeout: 5000 });
-    await expect(errorToast).toContainText('CONFLICT');
+    // A conflict is not a failure: the stash content DID land in the working
+    // tree and the resolution dialog is about to open. A red toast beside it
+    // reads as "nothing happened" — the same reason pull, the dashboard and
+    // every auto-stash path warn instead.
+    const warnToast = page.locator('lv-toast-container .toast.warning').first();
+    await expect(warnToast).toBeVisible({ timeout: 5000 });
+    await expect(warnToast).toContainText(/applied/i);
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
 
-    // Stash list should remain unchanged after a failed apply
+    // Apply (unlike pop) keeps the entry, so the list is unchanged.
     const stashCount = await leftPanel.getStashCount();
     expect(stashCount).toBe(2);
   });

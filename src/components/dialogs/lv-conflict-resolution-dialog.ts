@@ -14,6 +14,16 @@ import type { ConflictFile } from '../../types/git.types.ts';
 import type { CommandResult } from '../../types/api.types.ts';
 import '../panels/lv-merge-editor.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
+// DELIBERATELY claim-only: this dialog does NOT bind its buttons to
+// isRefOpRunning the way its siblings do. Abort and Continue are the only two
+// exits from a conflicted repository, and greying an exit out because an
+// unrelated surface holds the lock is the trap that greying Abort out during a
+// minutes-long fsck already produced once. Both handlers still claim the lock
+// and report the refusal, so the operation stays serialized; only the
+// affordance stays live.
+import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
+import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -78,6 +88,12 @@ export class LvConflictResolutionDialog extends LitElement {
         flex-direction: column;
         overflow: hidden;
         box-shadow: var(--shadow-xl);
+      }
+
+      /* Focused programmatically on open (see updated()); it is a focus
+         container, not a control, so it needs no ring of its own. */
+      .dialog:focus {
+        outline: none;
       }
 
       .header {
@@ -352,6 +368,16 @@ export class LvConflictResolutionDialog extends LitElement {
   /** For 'stash' completion: which stash entry to drop once conflicts are resolved. */
   @property({ type: Number }) stashIndex = 0;
   /**
+   * The stash's oid, when the caller knows it. Preferred over `stashIndex`.
+   *
+   * `git stash push` prepends, so a stash created by another surface or a
+   * terminal renumbers the list — and checkout_with_autostash now resolves its
+   * own entry by oid rather than assuming position 0. Its callers used to pass
+   * `stashIndex: 0` regardless, so the identity captured here could be a
+   * foreign stash, which Complete would then drop.
+   */
+  @property({ type: String }) stashOid: string | null = null;
+  /**
    * For 'stash' completion: whether to drop stash@{stashIndex} on Complete. Pop
    * semantics (auto-stash, explicit pop) drop it; a plain apply keeps it.
    */
@@ -432,6 +458,36 @@ export class LvConflictResolutionDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
 
+    // Move focus into the dialog once it is on screen. It builds its own
+    // overlay instead of using <lv-modal> and had no focus() anywhere, so it
+    // opened with focus still on <body>: Tab started at the skip link and
+    // walked the entire app UNDERNEATH the backdrop. This dialog is the worst
+    // case because it also suppresses Escape by design — there was no keyboard
+    // way in and none out. The dialog element itself takes focus (its own
+    // controls are Abort and Complete; neither should be one Enter away).
+    if (changedProperties.has('open') && this.open) {
+      requestAnimationFrame(() => {
+        if (!this.open) return;
+        if (containsDeepActiveElement(this)) return;
+        const dialog = this.shadowRoot?.querySelector('.dialog') as HTMLElement | null;
+        dialog?.focus();
+      });
+    }
+
+    // The abort confirm renders LAST, over a dialog whose controls stay
+    // focusable, and opening it left focus on the Abort button underneath —
+    // so reaching Cancel meant Tabbing through every remaining control of the
+    // live dialog. Take focus to Cancel (never the danger button) instead.
+    if (changedProperties.has('showAbortConfirm') && this.showAbortConfirm) {
+      requestAnimationFrame(() => {
+        if (!this.showAbortConfirm) return;
+        const cancelBtn = this.shadowRoot?.querySelector(
+          '.confirm-actions .btn:not(.btn-danger)'
+        ) as HTMLElement | null;
+        cancelBtn?.focus();
+      });
+    }
+
     // When open changes to true, load conflicts
     if (changedProperties.has('open') && this.open) {
       this.resolvedFiles = new Set();
@@ -459,13 +515,19 @@ export class LvConflictResolutionDialog extends LitElement {
       this.stashOidToDrop = null;
       this.stashCaptureEpoch++;
       if (this.operationType === 'stash' && this.dropStashOnComplete) {
-        const idx = this.stashIndex;
-        const epoch = this.stashCaptureEpoch;
-        void gitService.getStashes(this.repositoryPath).then((result) => {
-          if (this.open && epoch === this.stashCaptureEpoch && result.success) {
-            this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
-          }
-        });
+        if (this.stashOid) {
+          // The caller knows exactly which entry it created; no position
+          // lookup, so nothing to get wrong.
+          this.stashOidToDrop = this.stashOid;
+        } else {
+          const idx = this.stashIndex;
+          const epoch = this.stashCaptureEpoch;
+          void gitService.getStashes(this.repositoryPath).then((result) => {
+            if (this.open && epoch === this.stashCaptureEpoch && result.success) {
+              this.stashOidToDrop = result.data?.[idx]?.oid ?? null;
+            }
+          });
+        }
       }
     }
   }
@@ -482,6 +544,14 @@ export class LvConflictResolutionDialog extends LitElement {
 
     if (e.key === 'Escape') {
       e.preventDefault();
+      // Escape dismisses the abort confirm. Without this arm the key was
+      // swallowed unconditionally, so a keyboard user who opened the
+      // "this cannot be undone" confirm had no way back except Tabbing
+      // through the whole dialog to reach Cancel.
+      if (this.showAbortConfirm) {
+        this.handleAbortCancel();
+        return;
+      }
       // Don't close on escape - require explicit abort/continue
     } else if (e.key === 'ArrowUp' && e.altKey) {
       e.preventDefault();
@@ -852,6 +922,17 @@ export class LvConflictResolutionDialog extends LitElement {
       return;
     }
 
+    // The banner's Abort claims the shared working-tree lock; this dialog
+    // reaches the identical abort_merge/abort_rebase commands and claimed
+    // nothing. The backdrop blocks the mouse, but keyboard shortcuts fire
+    // through it — Ctrl+Shift+S and Ctrl+Shift+P both claim a free lock and
+    // run beside an abort that is restoring the working tree.
+    const lockedRepo = this.repositoryPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
     this.aborting = true;
     this.showAbortConfirm = false;
 
@@ -942,6 +1023,13 @@ export class LvConflictResolutionDialog extends LitElement {
             'The develop merge was aborted, but the master merge and version tag from this finish are already committed',
             'warning',
           );
+        } else {
+          // The operation banner's Abort reaches these same backend commands
+          // and toasts `Aborted merge`. This one — behind an EXTRA in-dialog
+          // confirmation, so the more deliberate of the two — said nothing at
+          // all for merge/rebase/cherry-pick/revert. Only the stash arm above
+          // and the gitflow arm spoke.
+          showToast(`Aborted ${this.getOperationTitle().toLowerCase()}`, 'success');
         }
         this.dispatchEvent(
           new CustomEvent('operation-aborted', {
@@ -973,6 +1061,8 @@ export class LvConflictResolutionDialog extends LitElement {
       console.error('Failed to abort:', err);
       showToast(`Failed to abort ${this.getOperationTitle()}`, 'error');
       this.aborting = false; // Allow retry
+    } finally {
+      releaseRefOp(lockedRepo);
     }
   }
 
@@ -1027,7 +1117,12 @@ export class LvConflictResolutionDialog extends LitElement {
       this.aborting ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
-      this.editorResolveDepth > 0
+      this.editorResolveDepth > 0 ||
+      // The abort confirm is a plain overlay: its backdrop stops the mouse but
+      // nothing stopped Enter on a still-focusable "Complete Merge" from
+      // committing the merge out from under a confirm that says the resolved
+      // changes are about to be thrown away.
+      this.showAbortConfirm
     ) {
       return;
     }
@@ -1037,6 +1132,15 @@ export class LvConflictResolutionDialog extends LitElement {
     // The Complete AND Abort buttons' disabled bindings both reflect
     // `continuing`, so claiming here also inerts Abort for the confirm
     // window.
+    // Shared working-tree lock — see handleAbortConfirm. A gitflow-finish
+    // Complete is a multi-second, multi-command sequence during which every
+    // sidebar and graph control otherwise reads the lock as free.
+    const lockedContinueRepo = this.repositoryPath;
+    if (!tryAcquireRefOp(lockedContinueRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
     this.continuing = true;
     try {
       // The editor can hold visible rework that was never Mark-Resolved: a
@@ -1066,6 +1170,7 @@ export class LvConflictResolutionDialog extends LitElement {
       await this.runContinue();
     } finally {
       this.continuing = false;
+      releaseRefOp(lockedContinueRepo);
     }
   }
 
@@ -1107,6 +1212,25 @@ export class LvConflictResolutionDialog extends LitElement {
         case 'rebase':
           result = await gitService.continueRebase({ path: this.repositoryPath });
           if (!result.success) {
+            // A PAUSE is not a failure. `git rebase --continue` stops again at
+            // the next `edit`/`break` line, and the remedy — amend the commit —
+            // lives in the commit panel, outside this dialog. Staying open
+            // would trap the user: there is no ×, Escape is swallowed, the
+            // backdrop is inert, and the only working exit is Abort, which
+            // discards the whole rebase. Close and let the banner drive the
+            // next Continue, exactly as the initial execute does.
+            if (result.error?.code === 'REBASE_PAUSED') {
+              showToast(
+                REBASE_PAUSED_MESSAGE,
+                'warning',
+                8000,
+              );
+              this.dispatchEvent(
+                new CustomEvent('operation-completed', { bubbles: true, composed: true }),
+              );
+              this.close();
+              return;
+            }
             console.error('Failed to continue rebase:', result.error);
             // Might have more conflicts — reload and stay open if any appeared.
             await this.loadConflicts();
@@ -1234,6 +1358,12 @@ export class LvConflictResolutionDialog extends LitElement {
         }
       }
 
+      // The banner's Abort toasts; this dialog's Complete said nothing, so the
+      // full-screen dialog simply vanished with no statement that the merge
+      // commit was created — the same gesture that, had it failed, produces a
+      // red toast. (The paused-rebase branch above returns before this and
+      // carries its own, different message.)
+      showToast(`${this.getOperationTitle()} completed`, 'success');
       this.dispatchEvent(
         new CustomEvent('operation-completed', {
           bubbles: true,
@@ -1389,7 +1519,9 @@ export class LvConflictResolutionDialog extends LitElement {
 
     return html`
       <div class="backdrop"></div>
-      <div class="dialog">
+      <!-- tabindex="-1" so the open pass above can put focus inside the
+           dialog; it is not a tab stop of its own. -->
+      <div class="dialog" role="dialog" aria-modal="true" tabindex="-1">
         <div class="header">
           <div>
             <div class="header-title">
@@ -1529,7 +1661,8 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.aborting ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
-                this.editorResolveDepth > 0}
+                this.editorResolveDepth > 0 ||
+                this.showAbortConfirm}
             >
               Abort ${this.getOperationTitle()}
             </button>
@@ -1541,6 +1674,9 @@ export class LvConflictResolutionDialog extends LitElement {
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
                 this.editorResolveDepth > 0 ||
+                // Matches handleContinue's guard so the button is not a dead
+                // control while the abort confirm is up.
+                this.showAbortConfirm ||
                 this.loadFailed ||
                 this.resolvedCount < this.totalCount ||
                 (this.operationType === 'stash' && this.conflicts.length === 0)}

@@ -612,11 +612,15 @@ describe('lv-file-status', () => {
       expect(stageItem).to.not.be.undefined;
     });
 
-    it('shows "Discard changes" menu item with danger class', async () => {
+    it('shows "Discard changes" menu item with danger class on an unstaged row', async () => {
       const el = await renderFileStatus();
 
-      const fileItems = el.shadowRoot!.querySelectorAll('.file-item');
-      fileItems[0].dispatchEvent(
+      // Section 0 is Staged, section 1 is Changes. Discard is meaningful only
+      // on the latter: for a path already in the index, discard_changes
+      // restores the worktree FROM the index, so on a staged row it is a
+      // byte-identical rewrite that does nothing.
+      const unstagedItems = el.shadowRoot!.querySelectorAll('.section')[1].querySelectorAll('.file-item');
+      unstagedItems[0].dispatchEvent(
         new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
       );
       await el.updateComplete;
@@ -627,6 +631,19 @@ describe('lv-file-status', () => {
         (item) => item.textContent!.trim().includes('Discard'),
       );
       expect(discardItem).to.not.be.undefined;
+    });
+
+    it('does not offer Discard on a staged row', async () => {
+      const el = await renderFileStatus();
+
+      const stagedItems = el.shadowRoot!.querySelectorAll('.section')[0].querySelectorAll('.file-item');
+      stagedItems[0].dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
+      );
+      await el.updateComplete;
+
+      const items = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item'));
+      expect(items.some((i) => i.textContent!.includes('Discard'))).to.equal(false);
     });
   });
 

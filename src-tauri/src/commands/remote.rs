@@ -210,6 +210,247 @@ pub async fn fetch(
     }
 }
 
+/// Refuse a pull while another operation is unresolved, the way merge() does.
+fn ensure_pullable(repo_path: &Path) -> Result<()> {
+    let repo = git2::Repository::open(repo_path)?;
+    match repo.state() {
+        git2::RepositoryState::Clean => Ok(()),
+        git2::RepositoryState::Merge => Err(LeviathanError::OperationFailed(
+            "You have not concluded your merge (MERGE_HEAD exists). Resolve the \
+             conflicts and commit, or abort the merge, before pulling."
+                .to_string(),
+        )),
+        state => Err(LeviathanError::OperationFailed(format!(
+            "Cannot pull: another operation is in progress ({:?}). \
+             Complete or abort it first.",
+            state
+        ))),
+    }
+}
+
+/// Fast-forward `refname` to `target_oid`, checking out the target tree first.
+///
+/// The checkout is SAFE (git2's default), not forced, and the ref only moves
+/// once it succeeded — exactly what `merge()`'s fast-forward path does. This
+/// used to `checkout_head` with `.force()` AFTER moving the ref:
+/// `GIT_CHECKOUT_FORCE` overwrites modified files, so a pull onto a branch
+/// with an uncommitted edit to a file the incoming commits touch silently
+/// destroyed that edit — content that is in no git object and has no reflog to
+/// recover it. git itself refuses such a fast-forward.
+fn fast_forward_to(repo: &git2::Repository, refname: &str, target_oid: git2::Oid) -> Result<()> {
+    let target_commit = repo.find_commit(target_oid)?;
+    // Resolved before the checkout: a refname that does not exist must abort
+    // while the working tree is still untouched, not after it has been
+    // rewritten to content HEAD does not point at.
+    repo.find_reference(refname)?;
+
+    // Collect the conflicting paths so the error can name them, like git's own
+    // "Your local changes to the following files ..." message.
+    let conflict_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let notify_paths = std::rc::Rc::clone(&conflict_paths);
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout
+        .notify_on(git2::CheckoutNotificationType::CONFLICT)
+        .notify(move |_why, path, _baseline, _target, _workdir| {
+            if let Some(p) = path {
+                notify_paths.borrow_mut().push(p.display().to_string());
+            }
+            true
+        });
+
+    match repo.checkout_tree(target_commit.as_object(), Some(&mut checkout)) {
+        Ok(()) => {}
+        Err(e) if e.code() == git2::ErrorCode::Conflict => {
+            let files = conflict_paths.borrow().join(", ");
+            return Err(LeviathanError::OperationFailed(if files.is_empty() {
+                "Your local changes would be overwritten by merge. \
+                 Commit or stash them before you pull."
+                    .to_string()
+            } else {
+                format!(
+                    "Your local changes to the following files would be overwritten by \
+                     merge: {}. Commit or stash them before you pull.",
+                    files
+                )
+            }));
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    let mut reference = repo.find_reference(refname)?;
+    reference.set_target(target_oid, "Fast-forward")?;
+    repo.set_head(refname)?;
+
+    // git runs post-merge after a fast-forward too (flag 0 = not a squash
+    // merge). merge() fires it; this path did not.
+    crate::commands::hooks::run_hook_noblock(repo, "post-merge", &["0"]);
+    Ok(())
+}
+
+/// Which remote to fetch, and which remote-tracking ref to merge, for a pull.
+///
+/// Asks git rather than rebuilding "<remote>/<shorthand>". The rebuilt form was
+/// wrong twice over: it hard-coded "origin", so `git clone -o upstream`, a
+/// Gerrit checkout, or a remote the app's own Remote dialog renamed all failed
+/// with "Remote not found: origin" and no way to pick another; and in the
+/// standard fork workflow (origin = your fork, upstream = canonical, main
+/// tracking upstream/main) it merged the FORK's branch while the sidebar showed
+/// the branch tracking upstream/main.
+pub(crate) fn resolve_pull_target(
+    repo: &git2::Repository,
+    requested_remote: Option<String>,
+    branch_name: &str,
+    head_refname: &str,
+) -> (String, String) {
+    let upstream_ref = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .ok()
+        .and_then(|b| b.upstream().ok())
+        .and_then(|u| u.get().name().ok().map(|n| n.to_string()));
+
+    let remote = match requested_remote {
+        Some(r) => r,
+        None => repo
+            .branch_upstream_remote(head_refname)
+            .ok()
+            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
+            .unwrap_or_else(|| "origin".to_string()),
+    };
+
+    let remote_ref = upstream_ref
+        .as_deref()
+        .and_then(|r| r.strip_prefix("refs/remotes/"))
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| format!("{}/{}", remote, branch_name));
+
+    (remote, remote_ref)
+}
+
+/// Which remote a push should target when the caller named none.
+///
+/// git's documented precedence: branch.<n>.pushRemote, then remote.pushDefault,
+/// then branch.<n>.remote, then origin. Reading only branch_upstream_remote was
+/// a REGRESSION on the fork workflow it was meant to help: with main tracking
+/// upstream/main and remote.pushDefault=origin, a Force Push aimed at the
+/// CANONICAL repo rather than the user's fork — and its confirm names no remote.
+pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<String>) -> String {
+    if let Some(r) = requested {
+        return r;
+    }
+    let head_branch = repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
+    let cfg = repo.config().ok();
+    let from_push_config = cfg.as_ref().and_then(|c| {
+        head_branch
+            .as_ref()
+            .and_then(|b| c.get_string(&format!("branch.{}.pushRemote", b)).ok())
+            .or_else(|| c.get_string("remote.pushDefault").ok())
+    });
+    if let Some(r) = from_push_config {
+        return r;
+    }
+    let from_upstream = repo
+        .head()
+        .ok()
+        .filter(|h| h.is_branch())
+        .and_then(|h| h.name().ok().map(|n| n.to_string()))
+        .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+        .and_then(|b| b.as_str().ok().map(|s| s.to_string()));
+    if let Some(r) = from_upstream {
+        return r;
+    }
+    match repo.remotes() {
+        Ok(names) if names.len() == 1 => {
+            names.get(0).ok().flatten().unwrap_or("origin").to_string()
+        }
+        _ => "origin".to_string(),
+    }
+}
+
+/// The merge-and-commit body of a non-fast-forward `pull`.
+///
+/// Extracted from `pull` so it can be TESTED. `pull` takes a Tauri
+/// `AppHandle`, so it cannot be driven from a unit test at all; two real bugs
+/// have already shipped in this arm — a `cleanup_state()` that destroyed a
+/// resumable merge, and missing `pre-merge-commit` / `commit-msg` hooks — and
+/// the only guard was an `include_str!` grep over this file, which can see
+/// that a hook is NAMED but not that it runs, in what order, or what it leaves
+/// on disk when it vetoes. This takes a plain `&Repository`, so all of that is
+/// assertable.
+///
+/// The contract, matching `merge()`:
+/// - `pre-merge-commit` and `commit-msg` run BEFORE the commit and OUTSIDE any
+///   cleanup, so a veto returns with `MERGE_HEAD` intact and the merge still
+///   resumable (and abortable).
+/// - Conflicts return `MergeConflict` with the merge state left in place for
+///   the conflict-resolution flow.
+/// - No `cleanup_state()` on failure. On success: cleanup, then `post-merge`.
+pub(crate) fn merge_fetched_commit(
+    repo: &git2::Repository,
+    fetch_commit: &git2::AnnotatedCommit<'_>,
+    remote_ref: &str,
+    branch_name: &str,
+) -> Result<()> {
+    // Anything that fails AFTER repo.merge() succeeds must leave the state
+    // coherent, otherwise the working copy is stuck in MERGING.
+    repo.merge(&[fetch_commit], None, None)?;
+
+    // Hoisted ABOVE the guarded closure, like merge(). A veto must return with
+    // MERGE_HEAD intact so the merge stays resumable — which is only true out
+    // here.
+    crate::commands::hooks::run_hook_blocking(repo, "pre-merge-commit", &[], None)?;
+    let default_message = format!("Merge {} into {}", remote_ref, branch_name);
+    let commit_message = crate::commands::hooks::run_commit_msg_hook(repo, &default_message)?;
+
+    let merge_commit_result = (|| -> Result<()> {
+        if repo.index()?.has_conflicts() {
+            return Err(LeviathanError::MergeConflict);
+        }
+        // The same two hooks merge() runs. `git pull` is fetch + merge, and
+        // githooks(5) has git merge fire pre-merge-commit and commit-msg — so
+        // whether a repo's merge policy (a Gerrit Change-Id hook, a
+        // Conventional-Commits linter) was enforced depended only on which of
+        // two buttons the user pressed. A veto returns before the commit with
+        // MERGE_HEAD intact, so the merge stays resumable, which is the
+        // contract merge() already documents. post-merge is already fired
+        // below for this same parity reason.
+        let signature = repo.signature()?;
+        let head = repo.head()?.peel_to_commit()?;
+        let remote_commit = repo.find_commit(fetch_commit.id())?;
+        let tree_oid = repo.index()?.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &commit_message,
+            &tree,
+            &[&head, &remote_commit],
+        )?;
+        Ok(())
+    })();
+
+    // MergeConflict is the expected "user must resolve" path; the UI drives a
+    // conflict-resolution flow that needs MERGE_HEAD intact.
+    // NO cleanup_state on failure — the same trap removed from merge(). It
+    // only unlinks MERGE_HEAD/MERGE_MSG while repo.merge() has already written
+    // the merged result into the index and working tree, so it leaves the
+    // merge fully applied but unmarked: banner gone, abort_merge refusing, the
+    // whole diff staged under a failure toast. The pre-merge-commit and
+    // commit-msg hooks above made a veto the ROUTINE way in.
+    merge_commit_result?;
+
+    repo.cleanup_state()?;
+    // git runs post-merge after a merge commit (flag 0 = not a squash). The
+    // fast-forward arm of pull fires it; this one did not, so whether a repo's
+    // hooks ran depended only on whether the history happened to diverge.
+    crate::commands::hooks::run_hook_noblock(repo, "post-merge", &["0"]);
+    Ok(())
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -225,8 +466,9 @@ pub async fn pull(
 ) -> Result<()> {
     let do_pull = async move {
         let path_for_task = path.clone();
-        let remote_owned = remote.unwrap_or_else(|| "origin".to_string());
-        let remote_for_task = remote_owned.clone();
+        // NOT defaulted to "origin" here. The branch's configured upstream is
+        // the right answer when the caller did not name a remote — see below.
+        let requested_remote = remote.clone();
         let branch_for_task = branch.clone();
         let rebase_val = rebase.unwrap_or(false);
 
@@ -234,19 +476,57 @@ pub async fn pull(
         // thread so the Tokio runtime stays responsive.
         let (remote_name_returned, message) =
             tokio::task::spawn_blocking(move || -> Result<(String, String)> {
-                // First fetch (network I/O)
-                fetch_internal(&path_for_task, &remote_for_task, false, token)?;
+                // Refuse before the network round trip if another operation is
+                // unresolved. merge() has always had this guard; pull never
+                // did, and its normal-merge branch calls repo.merge() a SECOND
+                // time on top of the first. libgit2 errors out — but as a side
+                // effect it deletes MERGE_HEAD and flips state() back to Clean
+                // while the index still holds the conflicted entries. abort_merge
+                // then refuses ("no merge to abort"), so the app's only recovery
+                // action for a stuck merge is gone and the conflicted index still
+                // blocks a commit. The keyboard shortcut fires through an open
+                // conflict dialog, so this is one keystroke away.
+                ensure_pullable(Path::new(&path_for_task))?;
 
                 let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
-                let branch_name = if let Some(ref b) = branch_for_task {
-                    b.clone()
+                // On a detached HEAD, shorthand() is the literal "HEAD" — so
+                // this used to resolve origin/HEAD (a symref that DOES exist in
+                // a normal clone), fast-forward-check-out its tree, and only
+                // then fail looking up "refs/heads/HEAD". The tree ended up
+                // holding origin/main's content while HEAD still pointed at the
+                // tag, so every diverging file showed as an uncommitted change.
+                // git refuses to pull with no upstream; so do we. merge() gets
+                // this right by using head.name() rather than rebuilding it.
+                let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
+                    (b.clone(), format!("refs/heads/{}", b))
                 } else {
                     let head = repo.head()?;
-                    head.shorthand().unwrap_or("main").to_string()
+                    if !head.is_branch() {
+                        return Err(LeviathanError::OperationFailed(
+                            "You are not currently on a branch. Check out a branch before \
+                             pulling, or say which branch to pull."
+                                .to_string(),
+                        ));
+                    }
+                    let refname = head
+                        .name()
+                        .map_err(|_| LeviathanError::InvalidReference)?
+                        .to_string();
+                    (head.shorthand().unwrap_or("main").to_string(), refname)
                 };
 
-                let remote_ref = format!("{}/{}", remote_for_task, branch_name);
+                let (effective_remote, remote_ref) = resolve_pull_target(
+                    &repo,
+                    requested_remote.clone(),
+                    &branch_name,
+                    &head_refname,
+                );
+
+                // Fetch (network I/O) the remote we actually resolved.
+                fetch_internal(&path_for_task, &effective_remote, false, token)?;
+                let repo = git2::Repository::open(Path::new(&path_for_task))?;
+
                 let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
                 let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
 
@@ -297,59 +577,17 @@ pub async fn pull(
                     if analysis.is_up_to_date() {
                         message = "Already up to date".to_string();
                     } else if analysis.is_fast_forward() {
-                        let refname = format!("refs/heads/{}", branch_name);
-                        let mut reference = repo.find_reference(&refname)?;
-                        reference.set_target(fetch_commit.id(), "Fast-forward")?;
-                        repo.set_head(&refname)?;
-                        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+                        fast_forward_to(&repo, &head_refname, fetch_commit.id())?;
                         message = "Fast-forward merge completed".to_string();
                     } else {
-                        // Normal merge. Anything that fails AFTER repo.merge()
-                        // succeeds must reset state, otherwise the working
-                        // copy is permanently stuck in MERGING.
-                        repo.merge(&[&fetch_commit], None, None)?;
-
-                        let merge_commit_result = (|| -> Result<()> {
-                            if repo.index()?.has_conflicts() {
-                                return Err(LeviathanError::MergeConflict);
-                            }
-                            let signature = repo.signature()?;
-                            let head = repo.head()?.peel_to_commit()?;
-                            let remote_commit = repo.find_commit(fetch_commit.id())?;
-                            let tree_oid = repo.index()?.write_tree()?;
-                            let tree = repo.find_tree(tree_oid)?;
-                            repo.commit(
-                                Some("HEAD"),
-                                &signature,
-                                &signature,
-                                &format!("Merge {} into {}", remote_ref, branch_name),
-                                &tree,
-                                &[&head, &remote_commit],
-                            )?;
-                            Ok(())
-                        })();
-
-                        // MergeConflict is the expected "user must resolve"
-                        // path; the UI drives a conflict-resolution flow
-                        // that needs MERGE_HEAD intact. Only cleanup_state
-                        // for non-conflict errors.
-                        match merge_commit_result {
-                            Err(LeviathanError::MergeConflict) => {
-                                return Err(LeviathanError::MergeConflict);
-                            }
-                            Err(e) => {
-                                let _ = repo.cleanup_state();
-                                return Err(e);
-                            }
-                            Ok(()) => {}
-                        }
-
-                        repo.cleanup_state()?;
+                        // Normal merge. Body extracted to merge_fetched_commit
+                        // so it can be tested — see the doc comment there.
+                        merge_fetched_commit(&repo, &fetch_commit, &remote_ref, &branch_name)?;
                         message = "Merge completed".to_string();
                     }
                 }
 
-                Ok((remote_for_task, message))
+                Ok((effective_remote, message))
             })
             .await
             .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
@@ -439,8 +677,7 @@ pub async fn push(
 
     let do_push = async move {
         let path_for_task = path.clone();
-        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
-        let remote_for_task = remote_name_owned.clone();
+        let requested_remote = remote.clone();
         let branch_for_task = branch.clone();
         let force_val = force.unwrap_or(false);
         let use_force_with_lease = force_with_lease.unwrap_or(false);
@@ -453,6 +690,14 @@ pub async fn push(
             tokio::task::spawn_blocking(move || -> Result<(String, String)> {
                 let repo = git2::Repository::open(Path::new(&path_for_task))?;
 
+                // Resolve the remote from the branch's upstream, then the sole
+                // remote, before falling back to "origin". Hard-coding origin
+                // failed outright on `git clone -o upstream`, on a Gerrit
+                // checkout, and on any remote the app's own Remote dialog
+                // renamed — with no remote selector on Push anywhere in the UI,
+                // the user's only recovery was to rename it back.
+                let remote_for_task = resolve_push_remote(&repo, requested_remote.clone());
+
                 repo.find_remote(&remote_for_task)
                     .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
 
@@ -462,6 +707,28 @@ pub async fn push(
                     let head = repo.head()?;
                     head.shorthand().unwrap_or("main").to_string()
                 };
+
+                // A `preventForcePush` rule was stored and read by nothing —
+                // only `preventDeletion` was ever enforced, so the field was
+                // decorative while the app grew a one-click Force Push action
+                // on the push-rejection toast. Checked here, in the command, for
+                // the same reason deletion is: every surface reaches this path,
+                // and none of them load the rules themselves.
+                //
+                // Propagated rather than defaulted, like delete_branch: a
+                // protection that fails open is worse than none.
+                if force_val || use_force_with_lease {
+                    let rules =
+                        crate::commands::branch_rules::load_rules(Path::new(&path_for_task))?;
+                    if crate::commands::branch_rules::is_force_push_prevented(&rules, &branch_name)
+                    {
+                        return Err(LeviathanError::OperationFailed(format!(
+                            "Branch \"{}\" is protected by a branch rule and cannot be \
+                             force-pushed. Remove the rule first.",
+                            branch_name
+                        )));
+                    }
+                }
 
                 if use_force_with_lease || use_push_tags {
                     push_via_cli(
@@ -577,6 +844,20 @@ fn push_via_cli(
     // force_with_lease takes priority over force
     if force_with_lease {
         cmd.arg("--force-with-lease");
+        // --force-if-includes is what makes the lease mean what the confirm
+        // says it means. A BARE --force-with-lease leases against the local
+        // remote-tracking ref, and this app ships a background auto-fetch
+        // (services/autofetch_service.rs) that updates exactly that ref on a
+        // timer. With auto-fetch on, a colleague's push landed in
+        // refs/remotes/<remote>/<branch> seconds later, the lease then matched
+        // it, and the force push destroyed their commits — the one outcome the
+        // confirm promises cannot happen. --force-if-includes additionally
+        // requires that the remote tip be reachable from the local branch's
+        // reflog, i.e. that the user actually SAW and integrated it, which a
+        // background fetch cannot fake. Verified: with a background fetch in
+        // between, bare --force-with-lease overwrites the colleague's commit
+        // and --force-if-includes refuses it.
+        cmd.arg("--force-if-includes");
     } else if force {
         cmd.arg("--force");
     }
@@ -595,15 +876,28 @@ fn push_via_cli(
     cmd.arg(remote_name);
     cmd.arg(branch_name);
 
-    // If a token is provided, configure it via the GIT_ASKPASS mechanism
+    // Feed the token through a credential helper, the way the git2 path does
+    // with Cred::userpass_plaintext.
+    //
+    // This used to set GIT_ASKPASS=echo, which makes git run `echo <prompt>` —
+    // so it authenticated with the literal string "Username for
+    // 'https://...'" as the username and the prompt text as the password.
+    // GIT_TOKEN is not a variable git reads, and clearing credential.helper
+    // also disabled the user's own helper, so the fallback could not save it.
+    // The net effect was that Force Push — the only route through this
+    // function — failed to authenticate on HTTPS precisely BECAUSE a token was
+    // found, while pushing with no token stored worked.
     if let Some(ref token_value) = token {
-        // Use a helper that echoes the token for password prompts
-        cmd.env("GIT_ASKPASS", "echo");
+        cmd.env("LEVIATHAN_PUSH_TOKEN", token_value);
         cmd.env("GIT_CONFIG_COUNT", "1");
         cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
-        cmd.env("GIT_CONFIG_VALUE_0", "");
-        // Provide credentials via URL embedding for HTTPS
-        cmd.env("GIT_TOKEN", token_value);
+        // `git` as the username matches the git2 path's fallback; every
+        // provider we support authenticates a token as the password and
+        // ignores the username.
+        cmd.env(
+            "GIT_CONFIG_VALUE_0",
+            "!f() { echo username=git; echo \"password=$LEVIATHAN_PUSH_TOKEN\"; }; f",
+        );
     }
 
     let output = cmd.output().map_err(|e| {
@@ -612,6 +906,17 @@ fn push_via_cli(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // git older than 2.30 has no --force-if-includes. Say so instead of
+        // reporting a bare "unknown option", and do NOT retry without it: the
+        // whole point of the flag is that the lease is unsafe on this app
+        // without it, so silently dropping it would trade a clear error for a
+        // force push that can discard a colleague's commits.
+        if force_with_lease && stderr.contains("force-if-includes") {
+            return Err(LeviathanError::OperationFailed(
+                "Force push needs git 2.30 or newer for its safety check (--force-if-includes). Please update git."
+                    .to_string(),
+            ));
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "git push failed: {}",
             stderr.trim()
@@ -631,6 +936,23 @@ fn push_single_remote(
     push_tags: bool,
     token: Option<String>,
 ) -> std::result::Result<(), String> {
+    // The same branch-rule gate the single-remote `push` command applies. A
+    // protection enforced on only some of the paths that reach a force push is
+    // the stale hand-enumerated list this codebase keeps being bitten by, so
+    // this one is checked here even though the multi-remote command currently
+    // has no UI caller — the hole would be invisible the day it gets one.
+    if force || force_with_lease {
+        let rules = crate::commands::branch_rules::load_rules(Path::new(path))
+            .map_err(|e| e.to_string())?;
+        if crate::commands::branch_rules::is_force_push_prevented(&rules, branch_name) {
+            return Err(format!(
+                "Branch \"{}\" is protected by a branch rule and cannot be force-pushed. \
+                 Remove the rule first.",
+                branch_name
+            ));
+        }
+    }
+
     if force_with_lease || push_tags {
         push_via_cli(
             path,
@@ -995,6 +1317,741 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- fast-forward pull must not overwrite uncommitted work ----
+
+    /// Build a repo whose `main` is one commit behind `refs/heads/incoming`,
+    /// where the incoming commit touches `tracked.txt`.
+    fn repo_behind_by_one() -> (TestRepo, git2::Oid) {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        let base = test_repo
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        let incoming = test_repo.create_commit("incoming", &[("tracked.txt", "incoming\n")]);
+        let repo = test_repo.repo();
+        repo.reference("refs/heads/incoming", incoming, true, "test")
+            .unwrap();
+
+        // Put main (and the working tree) back on `base`.
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let refname = format!("refs/heads/{}", branch);
+        repo.find_reference(&refname)
+            .unwrap()
+            .set_target(base, "test")
+            .unwrap();
+        repo.set_head(&refname).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        (test_repo, incoming)
+    }
+
+    #[test]
+    fn test_fast_forward_refuses_when_a_touched_file_is_dirty() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        // Uncommitted edit to the very file the incoming commit changes.
+        test_repo.create_file("tracked.txt", "my unsaved work\n");
+
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+        let before = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let err = fast_forward_to(&repo, &refname, incoming)
+            .expect_err("a forced checkout would have destroyed the edit");
+        let message = err.to_string();
+        assert!(
+            message.contains("would be overwritten") && message.contains("tracked.txt"),
+            "the error must name the file, got: {}",
+            message
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "my unsaved work\n",
+            "the uncommitted edit is in no git object — losing it is unrecoverable"
+        );
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            before,
+            "the branch must not move when the checkout was refused"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_succeeds_with_a_clean_tree() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+
+        fast_forward_to(&repo, &refname, incoming).expect("clean tree fast-forwards");
+
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            incoming
+        );
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "incoming\n"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_keeps_an_unrelated_dirty_file() {
+        let (test_repo, incoming) = repo_behind_by_one();
+        // Dirty, but not a file the incoming commit touches — git allows this.
+        test_repo.create_commit("other", &[("other.txt", "committed\n")]);
+        let repo = test_repo.repo();
+        let refname = format!("refs/heads/{}", repo.head().unwrap().shorthand().unwrap());
+        // Re-point main back to the base of the incoming commit.
+        let base = repo.find_commit(incoming).unwrap().parent(0).unwrap().id();
+        repo.find_reference(&refname)
+            .unwrap()
+            .set_target(base, "test")
+            .unwrap();
+        repo.set_head(&refname).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        test_repo.create_file("other.txt", "uncommitted\n");
+
+        fast_forward_to(&test_repo.repo(), &refname, incoming)
+            .expect("an unrelated dirty file must not block the fast-forward");
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("other.txt")).unwrap(),
+            "uncommitted\n",
+            "the unrelated edit survives"
+        );
+    }
+
+    #[test]
+    fn test_fast_forward_aborts_before_touching_the_tree_when_the_ref_is_missing() {
+        // On a detached HEAD, pull used to rebuild the refname from
+        // shorthand() — "refs/heads/HEAD" — and only look it up AFTER the
+        // checkout had already rewritten the working tree. HEAD stayed on the
+        // tag while every tracked file held the incoming content, so the whole
+        // diverging file set showed up as uncommitted modifications.
+        let (test_repo, incoming) = repo_behind_by_one();
+        let before = std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap();
+        let head_before = test_repo
+            .repo()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        fast_forward_to(&test_repo.repo(), "refs/heads/HEAD", incoming)
+            .expect_err("a missing ref must abort the fast-forward");
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            before,
+            "the working tree must be untouched when the ref lookup fails"
+        );
+        assert_eq!(
+            test_repo
+                .repo()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            head_before
+        );
+    }
+
+    // ---- pull must not clobber an unresolved operation ----
+
+    /// A second git2 merge on top of an unresolved one errors out, but as a
+    /// side effect deletes MERGE_HEAD and flips state() back to Clean while
+    /// the index still holds the conflicted entries — after which abort_merge
+    /// refuses ("no merge to abort") and the conflicted index still blocks a
+    /// commit. This locks in the refusal that keeps that from happening.
+    #[test]
+    fn test_pull_refuses_while_a_merge_is_unresolved() {
+        let t = TestRepo::with_initial_commit();
+        t.create_commit("base", &[("f.txt", "base\n")]);
+        let repo = t.repo();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("side", &repo.find_commit(base).unwrap(), false)
+            .unwrap();
+        t.create_commit("main side", &[("f.txt", "main\n")]);
+
+        repo.set_head("refs/heads/side").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        t.create_commit("other side", &[("f.txt", "side\n")]);
+        let side_oid = t.repo().head().unwrap().peel_to_commit().unwrap().id();
+
+        let repo = t.repo();
+        repo.set_head(&main_ref).unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+
+        // Conflicting merge, left unresolved — what the conflict dialog shows.
+        let annotated = repo.find_annotated_commit(side_oid).unwrap();
+        let _ = repo.merge(&[&annotated], None, None);
+        assert_eq!(repo.state(), git2::RepositoryState::Merge);
+        assert!(repo.index().unwrap().has_conflicts());
+
+        let err = ensure_pullable(&t.path).expect_err("pull must refuse mid-merge");
+        assert!(
+            err.to_string().contains("not concluded your merge"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The recovery path is still intact.
+        assert_eq!(t.repo().state(), git2::RepositoryState::Merge);
+        assert!(t.path.join(".git/MERGE_HEAD").exists());
+    }
+
+    #[test]
+    fn test_pull_is_allowed_on_a_clean_repo() {
+        let t = TestRepo::with_initial_commit();
+        ensure_pullable(&t.path).expect("a clean repo must be pullable");
+    }
+
+    /// Push must honour branch.<n>.pushRemote and remote.pushDefault.
+    ///
+    /// In the fork workflow (origin = your fork, upstream = canonical, main
+    /// tracking upstream/main, pushDefault=origin) reading only
+    /// branch.<n>.remote sent a FORCE PUSH at the canonical repository — with a
+    /// confirm that names no remote at all. The hard-coded "origin" this
+    /// replaced was correct there, so getting it half-right was a regression.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_push_remote_honours_push_default() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        repo_dir.add_remote("origin", "https://example.test/fork.git");
+        repo_dir.add_remote("upstream", "https://example.test/canonical.git");
+
+        // main tracks upstream/main ...
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str(&format!("branch.{}.remote", branch), "upstream")
+                .unwrap();
+            cfg.set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "upstream",
+            "with no push config, the tracking remote is right"
+        );
+
+        // ... but pushes go to the fork.
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("remote.pushDefault", "origin").unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "origin",
+            "remote.pushDefault must win over the tracking remote"
+        );
+
+        // The per-branch override wins over both.
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str(&format!("branch.{}.pushRemote", branch), "upstream")
+                .unwrap();
+        }
+        assert_eq!(
+            resolve_push_remote(&repo, None),
+            "upstream",
+            "branch.<n>.pushRemote must win over remote.pushDefault"
+        );
+
+        assert_eq!(
+            resolve_push_remote(&repo, Some("chosen".to_string())),
+            "chosen",
+            "an explicit remote still wins over everything"
+        );
+    }
+
+    /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".
+    ///
+    /// In the standard fork workflow (origin = your fork, upstream = canonical,
+    /// main tracking upstream/main) the rebuilt form fetched and merged the
+    /// FORK's branch while the sidebar showed the branch tracking
+    /// upstream/main — a working-tree and ref mutation against a ref the user
+    /// never chose.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_follows_the_configured_upstream() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().join("canonical.git");
+        let work = root.path().join("work");
+        git2::Repository::init_bare(&canonical).unwrap();
+
+        let out = crate::utils::create_command("git")
+            .arg("clone")
+            .arg(&canonical)
+            .arg(&work)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        git_in(&work, &["config", "user.email", "u@test"]);
+        git_in(&work, &["config", "user.name", "u"]);
+        std::fs::write(work.join("f.txt"), "base\n").unwrap();
+        git_in(&work, &["add", "f.txt"]);
+        git_in(&work, &["commit", "-m", "base"]);
+        git_in(&work, &["branch", "-M", "main"]);
+        git_in(&work, &["push", "-u", "origin", "main"]);
+
+        // Rename the remote away from `origin` — the app's own Remote dialog
+        // can do exactly this, and `git clone -o upstream` starts here.
+        git_in(&work, &["remote", "rename", "origin", "upstream"]);
+
+        let repo = git2::Repository::open(&work).unwrap();
+        let (remote, remote_ref) = resolve_pull_target(&repo, None, "main", "refs/heads/main");
+
+        assert_eq!(
+            remote, "upstream",
+            "must follow the configured upstream remote"
+        );
+        assert_eq!(remote_ref, "upstream/main", "and its actual tracking ref");
+    }
+
+    /// With no upstream configured at all, fall back to origin as before.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_falls_back_to_origin() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        let (remote, remote_ref) =
+            resolve_pull_target(&repo, None, &branch, &format!("refs/heads/{}", branch));
+        assert_eq!(remote, "origin");
+        assert_eq!(remote_ref, format!("origin/{}", branch));
+    }
+
+    /// An explicit remote from the caller still wins.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_pull_target_honours_an_explicit_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let repo = repo_dir.repo();
+        let branch = repo_dir.current_branch();
+        let (remote, _) = resolve_pull_target(
+            &repo,
+            Some("chosen".to_string()),
+            &branch,
+            &format!("refs/heads/{}", branch),
+        );
+        assert_eq!(remote, "chosen");
+    }
+
+    // ---- pull's normal-merge arm (merge_fetched_commit) ----
+
+    /// A repo whose checked-out branch and `refs/remotes/origin/<branch>` have
+    /// diverged with NON-conflicting changes — the shape that reaches pull's
+    /// normal-merge arm. Returns the repo, the branch name and the remote tip.
+    fn repo_diverged_from_origin() -> (TestRepo, String, git2::Oid) {
+        let test_repo = TestRepo::with_initial_commit();
+        let branch = test_repo.current_branch();
+        test_repo.create_commit("base", &[("base.txt", "base\n")]);
+        let base = test_repo.head_oid();
+
+        // The remote side: a commit touching a file the local side never has.
+        let remote_tip = test_repo.create_commit("remote change", &[("remote.txt", "remote\n")]);
+        test_repo.create_remote_branch(&branch, remote_tip);
+
+        // Rewind the branch (and the working tree) to `base`, then diverge
+        // locally on a different file.
+        {
+            let repo = test_repo.repo();
+            let refname = format!("refs/heads/{}", branch);
+            repo.find_reference(&refname)
+                .unwrap()
+                .set_target(base, "test")
+                .unwrap();
+            repo.set_head(&refname).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .unwrap();
+        }
+        let _ = std::fs::remove_file(test_repo.path.join("remote.txt"));
+        test_repo.create_commit("local change", &[("local.txt", "local\n")]);
+
+        (test_repo, branch, remote_tip)
+    }
+
+    fn merge_origin(test_repo: &TestRepo, branch: &str) -> Result<()> {
+        let repo = test_repo.repo();
+        let remote_ref = format!("origin/{}", branch);
+        let fetch_head = repo
+            .find_reference(&format!("refs/remotes/{}", remote_ref))
+            .unwrap();
+        let fetch_commit = repo.reference_to_annotated_commit(&fetch_head).unwrap();
+        merge_fetched_commit(&repo, &fetch_commit, &remote_ref, branch)
+    }
+
+    /// The happy path: a real two-parent merge commit, and the state cleaned up.
+    #[test]
+    fn test_pull_merge_creates_a_two_parent_commit() {
+        let (test_repo, branch, remote_tip) = repo_diverged_from_origin();
+        let local_tip = test_repo.head_oid();
+
+        merge_origin(&test_repo, &branch).expect("a non-conflicting merge must succeed");
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 2, "a merge commit has two parents");
+        assert_eq!(head.parent_id(0).unwrap(), local_tip);
+        assert_eq!(head.parent_id(1).unwrap(), remote_tip);
+        assert_eq!(
+            head.message().unwrap(),
+            format!("Merge origin/{} into {}", branch, branch)
+        );
+        assert_eq!(
+            repo.state(),
+            git2::RepositoryState::Clean,
+            "a completed merge must leave no merge state"
+        );
+        // Both sides' content is present.
+        assert!(test_repo.path.join("local.txt").exists());
+        assert!(test_repo.path.join("remote.txt").exists());
+    }
+
+    /// A `pre-merge-commit` veto must leave the merge RESUMABLE: MERGE_HEAD on
+    /// disk, state() == Merge, and abort_merge still able to undo it.
+    ///
+    /// This is the bug a `cleanup_state()` on the failure path caused — it
+    /// unlinks MERGE_HEAD while repo.merge() has already written the merged
+    /// result into the index and tree, so the merge is fully applied but
+    /// unmarked: the banner disappears, abort_merge refuses "no merge to
+    /// abort", and the whole diff sits staged under a failure toast.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_veto_leaves_the_merge_resumable() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook(
+            "pre-merge-commit",
+            "#!/bin/sh\necho policy says no\nexit 1\n",
+        );
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the hook must veto the merge");
+        assert!(
+            err.to_string().contains("pre-merge-commit"),
+            "the error must name the hook that vetoed: {}",
+            err
+        );
+
+        assert_eq!(
+            test_repo.head_oid(),
+            head_before,
+            "a vetoed merge must not commit"
+        );
+        assert!(
+            test_repo.path.join(".git/MERGE_HEAD").exists(),
+            "MERGE_HEAD must survive so the merge stays resumable"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+
+        // The app's only recovery action must still work.
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must still be able to undo the vetoed merge");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// A `commit-msg` veto must behave the same way — resumable, uncommitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_commit_msg_veto_leaves_the_merge_resumable() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook("commit-msg", "#!/bin/sh\necho bad message\nexit 1\n");
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the hook must veto the merge");
+        assert!(
+            err.to_string().contains("commit-msg"),
+            "the error must name the hook that vetoed: {}",
+            err
+        );
+        assert_eq!(test_repo.head_oid(), head_before);
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must still work after a commit-msg veto");
+    }
+
+    /// `commit-msg` may REWRITE the message in place (a Gerrit Change-Id hook
+    /// is the canonical example). The rewritten message is the one that must be
+    /// committed — a hook that is merely invoked and then ignored enforces
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_merge_commits_the_message_the_commit_msg_hook_rewrote() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        test_repo.install_hook(
+            "commit-msg",
+            "#!/bin/sh\nprintf 'rewritten by the hook\\n\\nChange-Id: I1234\\n' > \"$1\"\n",
+        );
+
+        merge_origin(&test_repo, &branch).expect("the merge must succeed");
+
+        let repo = test_repo.repo();
+        let message = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.contains("rewritten by the hook") && message.contains("Change-Id: I1234"),
+            "the hook's rewritten message must be the committed one, got: {:?}",
+            message
+        );
+        assert!(
+            !message.starts_with("Merge origin/"),
+            "the default message must have been replaced, got: {:?}",
+            message
+        );
+    }
+
+    /// The hooks must run in git's order: pre-merge-commit, then commit-msg.
+    /// A commit-msg hook that ran first would see a message the merge policy
+    /// had not yet approved.
+    #[cfg(unix)]
+    #[test]
+    fn test_pull_merge_runs_the_hooks_in_gits_order() {
+        let (test_repo, branch, _) = repo_diverged_from_origin();
+        let log = test_repo.path.join("hook-order.log");
+        for name in ["pre-merge-commit", "commit-msg", "post-merge"] {
+            test_repo.install_hook(
+                name,
+                &format!("#!/bin/sh\necho {} >> {}\n", name, log.to_string_lossy()),
+            );
+        }
+
+        merge_origin(&test_repo, &branch).expect("the merge must succeed");
+
+        let order = std::fs::read_to_string(&log).expect("the hooks must have run");
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["pre-merge-commit", "commit-msg", "post-merge"],
+            "hooks must fire in git's documented order"
+        );
+    }
+
+    /// A conflicting merge returns MergeConflict with the merge state intact,
+    /// so the conflict-resolution flow (and abort_merge) can take over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pull_merge_conflict_keeps_the_merge_state() {
+        let test_repo = TestRepo::with_initial_commit();
+        let branch = test_repo.current_branch();
+        test_repo.create_commit("base", &[("shared.txt", "base\n")]);
+        let base = test_repo.head_oid();
+        let remote_tip = test_repo.create_commit("remote change", &[("shared.txt", "remote\n")]);
+        test_repo.create_remote_branch(&branch, remote_tip);
+        {
+            let repo = test_repo.repo();
+            let refname = format!("refs/heads/{}", branch);
+            repo.find_reference(&refname)
+                .unwrap()
+                .set_target(base, "test")
+                .unwrap();
+            repo.set_head(&refname).unwrap();
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .unwrap();
+        }
+        test_repo.create_commit("local change", &[("shared.txt", "local\n")]);
+        let head_before = test_repo.head_oid();
+
+        let err = merge_origin(&test_repo, &branch).expect_err("the merge must conflict");
+        assert!(matches!(err, LeviathanError::MergeConflict));
+        assert_eq!(
+            test_repo.head_oid(),
+            head_before,
+            "nothing may be committed"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Merge);
+        crate::commands::merge::abort_merge(test_repo.path_str())
+            .await
+            .expect("abort_merge must work after a conflicted pull merge");
+    }
+
+    // ---- force push lease must survive the app's own background fetch ----
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A colleague pushes, THEN the app's auto-fetch runs, THEN the user force
+    /// pushes. The force push must be refused.
+    ///
+    /// A bare `--force-with-lease` leases against the local remote-tracking
+    /// ref, and this app ships a background auto-fetch that updates exactly
+    /// that ref on a timer. Without --force-if-includes the lease matched the
+    /// colleague's brand-new commit and the push destroyed it — while the
+    /// confirm the user had just read promised "the push is refused if the
+    /// remote has moved since your last fetch".
+    #[cfg(unix)]
+    #[test]
+    fn test_force_push_refused_after_background_fetch_moved_the_remote() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let alice = root.path().join("alice");
+        let bob = root.path().join("bob");
+        git2::Repository::init_bare(&origin).unwrap();
+
+        for (dir, email) in [(&alice, "alice@test"), (&bob, "bob@test")] {
+            let out = crate::utils::create_command("git")
+                .arg("clone")
+                .arg(&origin)
+                .arg(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            git_in(dir, &["config", "user.email", email]);
+            git_in(dir, &["config", "user.name", email]);
+        }
+
+        // Alice publishes `main`.
+        std::fs::write(alice.join("f.txt"), "1").unwrap();
+        git_in(&alice, &["add", "f.txt"]);
+        git_in(&alice, &["commit", "-m", "base"]);
+        git_in(&alice, &["branch", "-M", "main"]);
+        git_in(&alice, &["push", "-u", "origin", "main"]);
+        git_in(&bob, &["fetch"]);
+        git_in(&bob, &["checkout", "main"]);
+
+        // Alice amends — the classic reason to force push.
+        std::fs::write(alice.join("f.txt"), "2").unwrap();
+        git_in(&alice, &["commit", "-am", "amended", "--amend"]);
+
+        // Bob pushes work Alice has never seen.
+        std::fs::write(bob.join("g.txt"), "bob").unwrap();
+        git_in(&bob, &["add", "g.txt"]);
+        git_in(&bob, &["commit", "-m", "bob work"]);
+        git_in(&bob, &["push", "origin", "main"]);
+        let bob_oid = {
+            let repo = git2::Repository::open(&bob).unwrap();
+            repo.refname_to_id("refs/heads/main").unwrap()
+        };
+
+        // The app's background auto-fetch ticks, updating origin/main.
+        git_in(&alice, &["fetch", "origin"]);
+
+        let result = push_via_cli(
+            &alice.to_string_lossy(),
+            "origin",
+            "main",
+            false,
+            true,
+            false,
+            false,
+            None,
+        );
+
+        assert!(
+            result.is_err(),
+            "the lease must refuse a remote the user has not integrated"
+        );
+
+        let origin_repo = git2::Repository::open(&origin).unwrap();
+        assert_eq!(
+            origin_repo.refname_to_id("refs/heads/main").unwrap(),
+            bob_oid,
+            "the colleague's commit must still be the remote tip"
+        );
+    }
+
+    /// The legitimate case still works: amend, nobody else pushed, force push.
+    #[cfg(unix)]
+    #[test]
+    fn test_force_push_still_succeeds_when_nobody_else_pushed() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let alice = root.path().join("alice");
+        git2::Repository::init_bare(&origin).unwrap();
+
+        let out = crate::utils::create_command("git")
+            .arg("clone")
+            .arg(&origin)
+            .arg(&alice)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        git_in(&alice, &["config", "user.email", "alice@test"]);
+        git_in(&alice, &["config", "user.name", "alice"]);
+
+        std::fs::write(alice.join("f.txt"), "1").unwrap();
+        git_in(&alice, &["add", "f.txt"]);
+        git_in(&alice, &["commit", "-m", "base"]);
+        git_in(&alice, &["branch", "-M", "main"]);
+        git_in(&alice, &["push", "-u", "origin", "main"]);
+
+        // An auto-fetch tick that changes nothing, then an amend.
+        git_in(&alice, &["fetch", "origin"]);
+        std::fs::write(alice.join("f.txt"), "2").unwrap();
+        git_in(&alice, &["commit", "-am", "amended", "--amend"]);
+
+        push_via_cli(
+            &alice.to_string_lossy(),
+            "origin",
+            "main",
+            false,
+            true,
+            false,
+            false,
+            None,
+        )
+        .expect("an uncontested force push must still go through");
+
+        let alice_oid = git2::Repository::open(&alice)
+            .unwrap()
+            .refname_to_id("refs/heads/main")
+            .unwrap();
+        let origin_repo = git2::Repository::open(&origin).unwrap();
+        assert_eq!(
+            origin_repo.refname_to_id("refs/heads/main").unwrap(),
+            alice_oid
+        );
+    }
 
     // ---- pre-push hook parity (git2 push path) ----
 

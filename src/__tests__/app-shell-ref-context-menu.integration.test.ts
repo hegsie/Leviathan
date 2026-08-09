@@ -28,6 +28,7 @@ import type { AppShell } from '../app-shell.ts';
 import type { OpenRepository } from '../stores/index.ts';
 import type { Repository } from '../types/git.types.ts';
 import { uiStore } from '../stores/ui.store.ts';
+import { repositoryStore } from '../stores/repository.store.ts';
 
 // Import the real component
 import '../app-shell.ts';
@@ -259,6 +260,8 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
     it('opens conflict dialog on MERGE_CONFLICT', async () => {
       mockInvoke = async (command: string) => {
+        // These handlers now confirm first, like their sidebar counterparts.
+        if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'merge') {
           throw { code: 'MERGE_CONFLICT', message: 'Merge conflict' };
         }
@@ -275,6 +278,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect((el as any).showConflictDialog).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('merge');
+    });
+  });
+
+  describe('handleRefMerge confirmation', () => {
+    it('declining blocks the merge', async () => {
+      setupDefaultMocks();
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+      invokeHistory.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefMerge();
+
+      expect(invokeHistory.some((c) => c.command === 'merge')).to.be.false;
     });
   });
 
@@ -306,6 +324,8 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
     it('opens conflict dialog on REBASE_CONFLICT', async () => {
       mockInvoke = async (command: string) => {
+        // These handlers now confirm first, like their sidebar counterparts.
+        if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'rebase') {
           throw { code: 'REBASE_CONFLICT', message: 'Rebase conflict' };
         }
@@ -322,6 +342,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect((el as any).showConflictDialog).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('rebase');
+    });
+  });
+
+  describe('handleRefRebase confirmation', () => {
+    it('declining blocks the rebase', async () => {
+      setupDefaultMocks();
+      declineConfirms();
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+      invokeHistory.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      expect(invokeHistory.some((c) => c.command === 'rebase')).to.be.false;
     });
   });
 
@@ -398,13 +433,23 @@ describe('app-shell ref context menu handlers (integration)', () => {
   });
 
   describe('force delete from the error-suggestion toast', () => {
+    // forceDeleteBranch now takes the originating repo explicitly: the toast
+    // outlives a repository switch, so the repo cannot be resolved at click time.
+    beforeEach(() => {
+      repositoryStore.setState({ openRepositories: [mockOpenRepository], activeIndex: 0 });
+    });
+
+    afterEach(() => {
+      repositoryStore.setState({ openRepositories: [], activeIndex: -1 });
+    });
+
     it('does not force delete when the confirm is declined', async () => {
       // One click on a toast button must not discard unmerged commits.
       declineConfirms();
       const el = createAppShell();
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (el as any).forceDeleteBranch('unmerged-feature');
+      await (el as any).forceDeleteBranch('unmerged-feature', REPO_PATH);
 
       expect(findCommands('delete_branch')).to.have.length(0);
     });
@@ -413,7 +458,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
       const el = createAppShell();
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (el as any).forceDeleteBranch('unmerged-feature');
+      await (el as any).forceDeleteBranch('unmerged-feature', REPO_PATH);
 
       const calls = findCommands('delete_branch');
       expect(calls).to.have.length(1);
@@ -559,3 +604,55 @@ describe('app-shell ref context menu handlers (integration)', () => {
     });
   });
 });
+
+describe('app-shell force-delete toast action (integration)', () => {
+  beforeEach(() => {
+    clearHistory();
+    setupDefaultMocks();
+    uiStore.setState({ toasts: [] });
+    // The handler resolves the originating repo through the store, so it must
+    // actually be open there.
+    repositoryStore.setState({ openRepositories: [mockOpenRepository], activeIndex: 0 });
+  });
+
+  afterEach(() => {
+    repositoryStore.setState({ openRepositories: [], activeIndex: -1 });
+  });
+
+  // The Force Delete button lives on an 8-second error toast, and nothing
+  // clears toasts when the user switches repository. Resolving the repo when
+  // the button is clicked therefore force-deleted from whichever tab happened
+  // to be active by then — with two repos both holding a branch of the same
+  // name, that discards unmerged commits in a repo the user never aimed at.
+  it('force-deletes in the repository the failure came from, not the active one', async () => {
+    const el = createAppShell();
+    // The user has since switched to a different repository.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).activeRepository = {
+      ...mockOpenRepository,
+      repository: { ...mockOpenRepository.repository, path: '/other/repo', name: 'other' },
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).forceDeleteBranch('feature/x', REPO_PATH);
+
+    const calls = findCommands('delete_branch');
+    expect(calls.length, 'delete_branch issued').to.equal(1);
+    expect((calls[0].args as { path: string }).path, 'targets the originating repo')
+      .to.equal(REPO_PATH);
+  });
+
+  it('refuses when the originating repository is no longer open', async () => {
+    const el = createAppShell();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).forceDeleteBranch('feature/x', '/closed/repo');
+
+    expect(findCommands('delete_branch').length, 'no delete against a closed repo')
+      .to.equal(0);
+    const toasts = uiStore.getState().toasts;
+    expect(toasts.some((t) => /no longer open/i.test(t.message)), 'user is told why')
+      .to.be.true;
+  });
+});
+

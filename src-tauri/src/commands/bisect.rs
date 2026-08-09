@@ -59,10 +59,23 @@ pub struct CulpritCommit {
     pub email: String,
 }
 
+/// The `git` invocation every bisect shell-out is built from.
+///
+/// `LC_ALL=C` is not cosmetic: every caller below matches git's English output
+/// ("is the first bad commit", "We cannot bisect more"). Under a localized git
+/// those strings are translated, so the culprit parsed as `None`, the dialog
+/// never advanced to its result step, and the finished search was reachable
+/// only through the danger-styled "Abort Bisect" that discards it. The sibling
+/// CLI shell-outs in merge.rs and worktree.rs already pin this.
+fn git_command(repo_path: &Path) -> std::process::Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path).env("LC_ALL", "C");
+    cmd
+}
+
 /// Helper to run git commands
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = create_command("git")
-        .current_dir(repo_path)
+    let output = git_command(repo_path)
         .args(args)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
@@ -305,14 +318,25 @@ pub async fn bisect_start(
     // Start bisect
     run_git_command(repo_path, &["bisect", "start"])?;
 
-    // Mark bad commit if provided
-    if let Some(bad) = &bad_commit {
-        run_git_command(repo_path, &["bisect", "bad", bad])?;
-    }
-
-    // Mark good commit if provided
-    if let Some(good) = &good_commit {
-        run_git_command(repo_path, &["bisect", "good", good])?;
+    // The two marking steps take free-text refs straight from the dialog, so a
+    // typo fails them — but `git bisect start` has already written BISECT_LOG,
+    // and libgit2 keys RepositoryState::Bisect off that file. Reporting the
+    // failure and leaving the state behind meant ensure_checkoutable and
+    // ensure_resettable then refused EVERY checkout, reset and git-flow
+    // operation in the app, while the dialog said the bisect had not started.
+    // Rolled back the way create_branch and the git-flow starts are.
+    let marked = (|| -> Result<()> {
+        if let Some(bad) = &bad_commit {
+            run_git_command(repo_path, &["bisect", "bad", bad])?;
+        }
+        if let Some(good) = &good_commit {
+            run_git_command(repo_path, &["bisect", "good", good])?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = marked {
+        let _ = run_git_command(repo_path, &["bisect", "reset"]);
+        return Err(e);
     }
 
     let status = get_bisect_status(path.clone()).await?;
@@ -477,6 +501,58 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// `git bisect start` writes BISECT_LOG before the marking steps run, and
+    /// libgit2 keys RepositoryState::Bisect off that file. A failed start that
+    /// left it behind put the repo in a state where ensure_checkoutable and
+    /// ensure_resettable refuse every checkout and reset in the app.
+    #[tokio::test]
+    async fn test_bisect_start_rolls_back_when_a_ref_is_bogus() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("second", &[("f.txt", "b\n")]);
+
+        let result = bisect_start(
+            repo.path_str(),
+            Some("HEAD".to_string()),
+            Some("no-such-ref".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err(), "an unresolvable ref must fail the start");
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "a start that reports failure must leave the repo as it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bisect_start_succeeds_with_valid_refs() {
+        let repo = TestRepo::with_initial_commit();
+        let first = repo.head_oid().to_string();
+        repo.create_commit("second", &[("f.txt", "b\n")]);
+
+        bisect_start(repo.path_str(), Some("HEAD".to_string()), Some(first))
+            .await
+            .expect("a valid start must not be rolled back");
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Bisect);
+    }
+
+    #[test]
+    fn test_git_command_pins_the_locale() {
+        // Every parse in this module matches git's English output. Under a
+        // localized git those strings are translated, the culprit parses as
+        // None, and the dialog never leaves its Good/Bad/Skip step.
+        let repo = TestRepo::with_initial_commit();
+        let cmd = git_command(&repo.path);
+
+        let lc_all = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("LC_ALL"))
+            .and_then(|(_, v)| v)
+            .expect("LC_ALL must be set, or a localized git breaks every parse below");
+        assert_eq!(lc_all, std::ffi::OsStr::new("C"));
+    }
 
     #[tokio::test]
     async fn test_get_bisect_status_inactive() {

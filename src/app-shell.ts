@@ -1,9 +1,10 @@
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
+import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
@@ -31,6 +32,7 @@ import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
 import './components/panels/lv-diff-view.ts';
+import type { LvDiffView } from './components/panels/lv-diff-view.ts';
 import './components/panels/lv-blame-view.ts';
 import './components/panels/lv-output-panel.ts';
 import './components/sidebar/lv-left-panel.ts';
@@ -104,9 +106,21 @@ import {
   confirmPrune,
   summariseFsck,
   tryAcquireMaintenance,
+  tryAcquireMaintenanceReadOnly,
   releaseMaintenance,
-  isMaintenanceRunning,
+  isMaintenanceBlocked,
 } from './utils/maintenance-confirms.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+  warnRepositoryBusy,
+  tryAcquirePush,
+  releasePush,
+  pushTagKey,
+  isPushRunning,
+} from './utils/ref-lock.ts';
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
@@ -572,7 +586,17 @@ export class AppShell extends LitElement {
     refName: string;
     fullName: string;
     refType: 'localBranch' | 'remoteBranch' | 'tag';
-  } = { visible: false, x: 0, y: 0, refName: '', fullName: '', refType: 'localBranch' };
+    /** The checked-out branch cannot be deleted — see renderRefContextMenu. */
+    isHead: boolean;
+  } = {
+    visible: false,
+    x: 0,
+    y: 0,
+    refName: '',
+    fullName: '',
+    refType: 'localBranch',
+    isHead: false,
+  };
 
   // Conflict resolution dialog
   @state() private showConflictDialog = false;
@@ -591,6 +615,7 @@ export class AppShell extends LitElement {
     initialFilePath: string | null;
     stashSourceCertain: boolean;
     stashIndex: number;
+    stashOid: string | null;
     dropStashOnComplete: boolean;
     squashMerge: boolean;
     gitflowFinish: GitflowFinishContext | null;
@@ -599,6 +624,8 @@ export class AppShell extends LitElement {
   // Stash-completion semantics for the conflict dialog (which entry to drop and
   // whether to drop it at all — pop drops, plain apply keeps).
   @state() private conflictStashIndex = 0;
+  /** The auto-stash's oid, when the operation reported one. Preferred over the index. */
+  @state() private conflictStashOid: string | null = null;
   @state() private conflictDropStashOnComplete = true;
   // Whether a conflicted merge should complete as a squash (single-parent) commit.
   @state() private conflictSquashMerge = false;
@@ -722,6 +749,7 @@ export class AppShell extends LitElement {
   private resizeStartValue = 0;
 
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
+  @query('lv-diff-view') private diffView?: LvDiffView;
   @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
@@ -744,6 +772,152 @@ export class AppShell extends LitElement {
   private badgeHydrationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Last auto-fetch interval applied to the backend (settings subscription
   // must only restart timers when THIS value actually changes)
+  /** Repos with a window-focus fetch already running. */
+  private focusFetchInFlight = new Set<string>();
+  /** Guards the graph ref menu's merge/rebase the way lv-branch-list guards
+   * its own: from the graph you could right-click a second ref and start a
+   * second history rewrite while the first was still running.
+   *
+   * Keyed by repo path, like destructiveActionsInFlight below. It used to be a
+   * single boolean, so a rebase running in one repo tab greyed out every
+   * mutating control in EVERY other open repo — with no banner or tooltip to
+   * explain why, because those repos are clean. Separate repos have separate
+   * working trees and nothing to serialize against each other. Reassigned
+   * rather than mutated so Lit sees the change and re-renders the menus. */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+  /**
+   * Keys for destructive actions already running.
+   *
+   * Force push, force push tag and force delete are reachable only from an
+   * error-suggestion toast's action button, so they never got the
+   * claim-before-confirm guard every dialog-hosted destructive button has.
+   * Keyed so two repos can each run one, and claimed before the confirm — that
+   * confirm is an IPC round trip, and a second dispatch during it would raise a
+   * second native prompt for the same operation.
+   */
+  private destructiveActionsInFlight = new Set<string>();
+
+  /**
+   * Claim the graph's working-tree lock for `fn`.
+   *
+   * The commit context menu's mutating actions live in the same canvas as the
+   * ref menu's and touch the same working tree, but were never added to the
+   * flag when it was extended by hand — the same stale-enumeration pattern that
+   * produced the earlier holes. Wrapping rather than editing each body means no
+   * early return can leak the claim.
+   */
+  private async runRefExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
+    if (!this.claimRefOperation(repoPath)) {
+      // Audible by DEFAULT rather than at a hand-picked set of call sites.
+      // A silent return only reads correctly for controls carrying a
+      // ?disabled binding, where the refusal is already visible — and every
+      // attempt to enumerate "the ones without a binding" has gone stale
+      // within a round (toast actions, keyboard shortcuts, palette entries,
+      // a batch loop). For a disabled control this can only fire in the race
+      // window, where saying so is right too.
+      this.warnRepositoryBusy();
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      this.releaseRefOperation(repoPath);
+    }
+  }
+
+  /** The one refusal message every busy-repo path shows. */
+  private warnRepositoryBusy(): void {
+    warnRepositoryBusy();
+  }
+
+  /** True when `repoPath` (default: the active repo) has a ref operation running. */
+  private isRefOperationInFlight(repoPath?: string): boolean {
+    // Reading refOpsVersion is what makes this a reactive binding: the lock
+    // itself is module state (shared with the sidebar lists), which Lit cannot
+    // observe. The subscription in connectedCallback bumps the counter.
+    void this.refOpsVersion;
+    return isRefOpRunning(repoPath ?? this.activeRepository?.repository.path);
+  }
+
+  /**
+   * True when THIS tag already has a push in flight.
+   *
+   * The tag-push slot is separate from the working-tree lock, so
+   * isRefOperationInFlight cannot see it: Force Push Tag holds only the push
+   * slot, and holds it across its confirm. Without this the Push Tag item
+   * stayed lit through that whole window and the click did nothing but raise a
+   * refusal toast — the dead control the lock work exists to remove.
+   */
+  private isTagPushInFlight(tagName: string, repoPath?: string): boolean {
+    void this.refOpsVersion;
+    const path = repoPath ?? this.activeRepository?.repository.path;
+    return path !== undefined && isPushRunning(pushTagKey(path, tagName));
+  }
+
+  /** Claim the lock for `repoPath`; false when it is already held. */
+  private claimRefOperation(repoPath: string): boolean {
+    return tryAcquireRefOp(repoPath);
+  }
+
+  private releaseRefOperation(repoPath: string): void {
+    releaseRefOp(repoPath);
+  }
+
+  /** Run `fn` unless an identical action is already in flight. */
+  /**
+   * Push and Force Push must be mutually exclusive across EVERY surface.
+   *
+   * `destructiveActionsInFlight` is this component's own state, so the context
+   * dashboard's Push button could launch a plain push while the force-push
+   * confirm raised from a suggestion toast was still on screen. The shared
+   * slot is what both can see.
+   */
+  /** The same exclusion as runPushExclusive, scoped to one tag. */
+  private async runTagPushExclusive(
+    repoPath: string,
+    tagName: string,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const key = pushTagKey(repoPath, tagName);
+    if (!tryAcquirePush(key)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      releasePush(key);
+    }
+  }
+
+  private async runPushExclusive(repoPath: string, fn: () => Promise<void>): Promise<void> {
+    if (!tryAcquirePush(repoPath)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    try {
+      await fn();
+    } finally {
+      releasePush(repoPath);
+    }
+  }
+
+  private async runExclusive(key: string, fn: () => Promise<void>): Promise<void> {
+    if (this.destructiveActionsInFlight.has(key)) {
+      // Audible for the same reason as runRefExclusive: every caller of this
+      // helper is a toast action button, whose affordance the click destroys.
+      this.warnRepositoryBusy();
+      return;
+    }
+    this.destructiveActionsInFlight.add(key);
+    try {
+      await fn();
+    } finally {
+      this.destructiveActionsInFlight.delete(key);
+    }
+  }
+  private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
@@ -869,6 +1043,7 @@ export class AppShell extends LitElement {
     // A later repo at the same path must not flash this repo's graph
     evictGraphCache(path);
     this.staleRepoPaths.delete(path);
+    this.focusFetchInFlight.delete(path);
     const pendingHydration = this.badgeHydrationTimers.get(path);
     if (pendingHydration) {
       clearTimeout(pendingHydration);
@@ -1000,6 +1175,7 @@ export class AppShell extends LitElement {
     const customEvent = e as CustomEvent<{
       operationType?: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
       stashIndex?: number;
+      stashOid?: string | null;
       dropStashOnComplete?: boolean;
       squash?: boolean;
       gitflowFinish?: GitflowFinishContext;
@@ -1011,6 +1187,7 @@ export class AppShell extends LitElement {
       // Thread stash-completion semantics so the dialog drops the correct entry
       // (and only when the failed operation had pop semantics).
       this.conflictStashIndex = customEvent.detail?.stashIndex ?? 0;
+      this.conflictStashOid = customEvent.detail?.stashOid ?? null;
       this.conflictDropStashOnComplete = customEvent.detail?.dropStashOnComplete ?? true;
       // A squash finish that conflicted must complete as a squash, not a merge commit.
       this.conflictSquashMerge = customEvent.detail?.squash ?? false;
@@ -1032,8 +1209,14 @@ export class AppShell extends LitElement {
 
   // Handle merge-conflict events from branch list (e.g., sidebar merge resulting in conflicts)
   private handleMergeConflictEvent = (e?: Event): void => {
-    const detail = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail;
-    this.conflictOperationType = 'merge';
+    const detail = (
+      e as CustomEvent<{ repositoryPath?: string; operationType?: 'merge' | 'rebase' }> | undefined
+    )?.detail;
+    // A pull configured to rebase raises REBASE_CONFLICT, and the dialog's
+    // Complete/Abort actions differ per operation — continuing a rebase is not
+    // committing a merge. Dispatchers that omit the type are all merges, so the
+    // default keeps them working unchanged.
+    this.conflictOperationType = detail?.operationType ?? 'merge';
     this.resetConflictDetailState();
     this.openConflictDialogPinned(detail?.repositoryPath);
     this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
@@ -1081,11 +1264,41 @@ export class AppShell extends LitElement {
       initialFilePath: this.conflictInitialFilePath,
       stashSourceCertain: this.conflictStashSourceCertain,
       stashIndex: this.conflictStashIndex,
+      stashOid: this.conflictStashOid,
       dropStashOnComplete: this.conflictDropStashOnComplete,
       squashMerge: this.conflictSquashMerge,
       gitflowFinish: this.conflictGitflowFinish,
     };
     this.showConflictDialog = true;
+  }
+
+  /** Dialog flags that are NOT tied to an open repository. */
+  private static readonly REPO_INDEPENDENT_DIALOGS = new Set([
+    'showSettings',
+    'showShortcuts',
+    'showOutputPanel',
+    'showCommandPalette',
+    'showWorkspaceManager',
+  ]);
+
+  /**
+   * Clear every repo-scoped `show*` flag. See the call site for why this is an
+   * exclusion list: an inclusion list has gone stale here more than once.
+   */
+  private closeRepoScopedDialogs(): void {
+    // Enumerated from Lit's own reactive-property map, NOT Object.keys: an
+    // @state() field is an accessor on the prototype backed by a private slot,
+    // so it never appears as an own enumerable key.
+    const self = this as unknown as Record<string, unknown>;
+    const declared = (this.constructor as unknown as {
+      elementProperties: Map<PropertyKey, unknown>;
+    }).elementProperties;
+    for (const key of declared.keys()) {
+      if (typeof key !== 'string') continue;
+      if (!/^show[A-Z]/.test(key)) continue;
+      if (AppShell.REPO_INDEPENDENT_DIALOGS.has(key)) continue;
+      if (self[key] === true) self[key] = false;
+    }
   }
 
   private closeConflictDialog(): void {
@@ -1098,6 +1311,7 @@ export class AppShell extends LitElement {
   // stash index) can't leak into an unrelated conflict resolution.
   private resetConflictDetailState(): void {
     this.conflictStashIndex = 0;
+    this.conflictStashOid = null;
     this.conflictDropStashOnComplete = true;
     this.conflictSquashMerge = false;
     this.conflictGitflowFinish = null;
@@ -1129,11 +1343,35 @@ export class AppShell extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    // The ref lock is module state shared with the sidebar lists, so a claim
+    // taken there must re-render this component's ?disabled bindings too.
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
 
     this.unsubscribe = repositoryStore.subscribe((state) => {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
+
+      // Every repo-scoped dialog flag must die with the last repository.
+      //
+      // These dialogs render inside the `${this.activeRepository ? ...}` block,
+      // so closing the last tab destroys the ELEMENT while its `show*` flag
+      // stays true. Open the next repository and the element is reconstructed
+      // with ?open=true — a full-screen overlay springing up unbidden over a
+      // repo the user just opened, freshly constructed with every button
+      // re-enabled. lv-repository-health-dialog carries that exact story, and
+      // lv-bisect-dialog then reproduced it because it has no pinned path and
+      // so was in neither hand-written sweep.
+      //
+      // Written as an EXCLUSION list, not an inclusion one. A list of dialogs
+      // to close goes stale every time one is added — which is how this keeps
+      // recurring — whereas the handful that are genuinely not repo-scoped is
+      // stable, and a new dialog defaults to the safe behaviour.
+      if (state.openRepositories.length === 0) {
+        this.closeRepoScopedDialogs();
+      }
 
       // Closing the pinned repo's TAB while its conflict dialog is up
       // would leave the dialog floating over whatever renders next, with
@@ -1155,137 +1393,110 @@ export class AppShell extends LitElement {
         );
       }
 
-      // Same for the cherry-pick / interactive-rebase dialogs: they pin to
-      // their repo at open() and stay open across tab switches, so closing
-      // the pinned tab must dismiss them too — otherwise they float over
-      // another repo and their next click would run against a repository
-      // that is no longer in the tab bar.
-      const repoOpen = (path: string | null): boolean =>
-        !!path && state.openRepositories.some((r) => r.repository.path === path);
-      const cpPinned = this.cherryPickDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cpPinned && !repoOpen(cpPinned)) {
-        this.cherryPickDialog?.close();
-        showToast('The repository tab was closed — cherry-pick cancelled', 'warning');
-      }
-      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rbPinned && !repoOpen(rbPinned)) {
-        this.interactiveRebaseDialog?.close();
-        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
-      }
-      // Same for the create-tag / create-branch dialogs: they pin to their repo
-      // at open() and stay open across tab switches, so closing the pinned tab
-      // must dismiss them — otherwise a successful create (create-branch even
-      // moves HEAD via checkout) would silently mutate a repo no longer in the
-      // tab bar, invisible in the visible one.
-      const ctPinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (ctPinned && !repoOpen(ctPinned)) {
-        this.createTagDialog?.close();
-        showToast('The repository tab was closed — tag creation cancelled', 'warning');
-      }
-      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cbPinned && !repoOpen(cbPinned)) {
-        this.createBranchDialog?.close();
-        showToast('The repository tab was closed — branch creation cancelled', 'warning');
-      }
-
-      // The repo-scoped dialogs hosted directly by app-shell pin their repo on
-      // open for the same reason, so they need the same sweep: the clean
-      // dialog would otherwise delete files from — and the reflog dialog reset
-      // — a repository that is no longer in the tab bar.
-      const cleanPinned = this.cleanDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cleanPinned && !repoOpen(cleanPinned)) {
-        this.showClean = false;
-        showToast('The repository tab was closed — clean cancelled', 'warning');
-      }
-      const rfPinned = this.reflogDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rfPinned && !repoOpen(rfPinned)) {
-        this.showReflog = false;
-        showToast('The repository tab was closed — undo history closed', 'warning');
-      }
-      const rmPinned = this.remoteDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rmPinned && !repoOpen(rmPinned)) {
-        this.showRemotes = false;
-        showToast('The repository tab was closed — remote management closed', 'warning');
-      }
-
-      // The remaining pinned dialogs, swept the same way. Every one of these
-      // exposes pinnedRepositoryPathIfOpen but nothing read it, so Repository
-      // Health would still run `git gc --aggressive`, and the worktree /
-      // submodule dialogs still remove, against a repo whose tab is gone.
-      // Driven off the DOM element so a dialog cannot be added to the app and
-      // silently miss the sweep.
-      // Each closer returns whether it actually closed: Repository Health
-      // refuses while gc/prune is in flight (closing DESTROYS the element and
-      // would leave the operation running with no surface), so the sweep must
-      // not announce a dismissal that did not happen.
-      const pinnedFlagDialogs: Array<[string, () => boolean, string]> = [
-        ['lv-repository-health-dialog', () => {
-          // Hands the close to the dialog: it dismisses now if idle, or after
-          // the running gc/prune lands. Merely refusing left it open and
-          // pinned to a repo with no tab, where a SECOND gc could be started
-          // once the first finished.
-          const running = this.repositoryHealthDialog?.isRunning ?? false;
-          this.repositoryHealthDialog?.closeWhenIdle();
-          // The flag must never outlive the element. Its render block is also
-          // gated on activeRepository, so closing the LAST tab removes the
-          // element regardless of the deferral — leaving showRepositoryHealth
-          // true meant the dialog sprang open unbidden over the next repo the
-          // user opened, freshly constructed with every button re-enabled.
-          if (!running || state.openRepositories.length === 0) {
-            this.showRepositoryHealth = false;
-          }
-          if (running && state.openRepositories.length > 0) {
-            showToast(
-              'The repository tab was closed — repository health will close when the current maintenance finishes',
-              'warning',
-            );
-          } else if (running) {
-            // Last tab: the force-close above already removed the dialog, so
-            // promising a later dismissal would describe something that just
-            // did not happen. The gc itself keeps running to completion.
-            showToast(
-              'The repository tab was closed — the maintenance operation will finish in the background',
-              'warning',
-            );
-          }
-          return !running;
-        }, 'repository health closed'],
-        ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
-        ['lv-submodule-dialog', () => { this.showSubmodules = false; return true; }, 'submodules closed'],
-        ['lv-lfs-dialog', () => { this.showLfs = false; return true; }, 'Git LFS closed'],
-        ['lv-gpg-dialog', () => { this.showGpg = false; return true; }, 'signing settings closed'],
-        ['lv-config-dialog', () => { this.showConfig = false; return true; }, 'configuration closed'],
-        ['lv-credentials-dialog', () => { this.showCredentials = false; return true; }, 'credentials closed'],
-        ['lv-hooks-dialog', () => { this.showHooksDialog = false; return true; }, 'hooks closed'],
-        // close() here is a bare modal.open = false — it does NOT apply the
-        // in-flight re-assert handleModalClose does for Escape/overlay/x.
-        // Dismissing mid-generation hid a running AI call and then reported
-        // "changelog closed", which was simply untrue.
-        ['lv-changelog-dialog', () => {
-          if (this.changelogDialog?.generationInFlight) {
-            // Say so. This block is also gated on activeRepository, so on the
-            // LAST tab the element is destroyed on the next render regardless
-            // and the generation completes into a detached component — the
-            // user would otherwise get silence: no changelog, no error.
-            showToast(
-              'The repository tab was closed — changelog generation was abandoned',
-              'warning',
-            );
-            return false;
-          }
-          this.changelogDialog?.close();
-          return true;
-        }, 'changelog closed'],
-      ];
-      for (const [tag, close, label] of pinnedFlagDialogs) {
-        const el = this.renderRoot.querySelector(tag) as
-          | (Element & { pinnedRepositoryPathIfOpen?: string | null })
-          | null;
-        const pinned = el?.pinnedRepositoryPathIfOpen ?? null;
-        if (pinned && !repoOpen(pinned) && close()) {
-          showToast(`The repository tab was closed — ${label}`, 'warning');
-        }
-      }
+      // ONE sweep for EVERY repo-scoped dialog. They all pin to their repo at
+      // open() and stay open across tab switches, so closing the pinned tab
+      // must dismiss them — otherwise they float over another repo and their
+      // next click runs against a repository that is no longer in the tab bar.
+      //
+      // Discovery is from the DOM (`pinnedRepositoryPathIfOpen`), not a list of
+      // tag names. This used to be seven hand-written arms plus a hand-written
+      // table, and the arms were the stale half: each one force-cleared the
+      // host flag or called a bare `close()`, bypassing the dialog's OWN
+      // in-flight guard, so closing a tab mid-`clean_files` reported "clean
+      // cancelled" and then deleted 4,913 files anyway. The sweep now consults
+      // `operationInFlight` — the same flag `dismiss()`/`handleModalClose()`
+      // refuse on — and NEVER announces a dismissal that did not happen.
+      //
+      // The table below only supplies wording and the host flag to clear; a
+      // dialog missing from it is still swept, with generic wording.
+      sweepRepoScopedDialogs({
+        root: this.renderRoot,
+        isRepoOpen: (path) =>
+          state.openRepositories.some((r) => r.repository.path === path),
+        hostHasRepositories: state.openRepositories.length > 0,
+        entries: {
+          'lv-cherry-pick-dialog': {
+            dismissed: 'cherry-pick cancelled',
+            running: 'cherry-pick',
+          },
+          'lv-interactive-rebase-dialog': {
+            dismissed: 'interactive rebase cancelled',
+            running: 'interactive rebase',
+          },
+          // create-branch even moves HEAD via checkout, so a "cancelled" it did
+          // not honour is a silent mutation of a repo not in the tab bar.
+          'lv-create-tag-dialog': {
+            dismissed: 'tag creation cancelled',
+            running: 'tag creation',
+          },
+          'lv-create-branch-dialog': {
+            dismissed: 'branch creation cancelled',
+            running: 'branch creation',
+          },
+          'lv-clean-dialog': {
+            dismissed: 'clean cancelled',
+            running: 'clean',
+            clearFlag: () => { this.showClean = false; },
+          },
+          'lv-reflog-dialog': {
+            dismissed: 'undo history closed',
+            running: 'reset',
+            clearFlag: () => { this.showReflog = false; },
+          },
+          'lv-remote-dialog': {
+            dismissed: 'remote management closed',
+            running: 'remote update',
+            clearFlag: () => { this.showRemotes = false; },
+          },
+          // Closing this one DESTROYS the element (its render block is gated on
+          // showRepositoryHealth), so it implements closeWhenIdle() and the
+          // sweep hands the close over rather than orphaning a running gc.
+          'lv-repository-health-dialog': {
+            dismissed: 'repository health closed',
+            running: 'maintenance operation',
+            clearFlag: () => { this.showRepositoryHealth = false; },
+          },
+          'lv-worktree-dialog': {
+            dismissed: 'worktrees closed',
+            running: 'worktree removal',
+            clearFlag: () => { this.showWorktrees = false; },
+          },
+          'lv-submodule-dialog': {
+            dismissed: 'submodules closed',
+            running: 'submodule removal',
+            clearFlag: () => { this.showSubmodules = false; },
+          },
+          'lv-lfs-dialog': {
+            dismissed: 'Git LFS closed',
+            running: 'LFS prune',
+            clearFlag: () => { this.showLfs = false; },
+          },
+          'lv-gpg-dialog': {
+            dismissed: 'signing settings closed',
+            running: 'signing update',
+            clearFlag: () => { this.showGpg = false; },
+          },
+          'lv-config-dialog': {
+            dismissed: 'configuration closed',
+            running: 'configuration save',
+            clearFlag: () => { this.showConfig = false; },
+          },
+          'lv-credentials-dialog': {
+            dismissed: 'credentials closed',
+            running: 'credential test',
+            clearFlag: () => { this.showCredentials = false; },
+          },
+          'lv-hooks-dialog': {
+            dismissed: 'hooks closed',
+            running: 'hook save',
+            clearFlag: () => { this.showHooksDialog = false; },
+          },
+          'lv-changelog-dialog': {
+            dismissed: 'changelog closed',
+            running: 'changelog generation',
+          },
+        },
+      });
 
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the
@@ -1309,6 +1520,9 @@ export class AppShell extends LitElement {
           // A conflicted file that left the status entirely was resolved and
           // committed (e.g. Complete Merge) — close the diff rather than
           // showing a permanently stale "has merge conflicts" interstitial.
+          // Not a gesture, but the same unmount: if the user was mid-edit on
+          // that file the typed text goes with the pane, so say so.
+          this.warnIfDiscardingEdits();
           this.diffFile = null;
           this.showDiff = false;
         }
@@ -1345,6 +1559,10 @@ export class AppShell extends LitElement {
         // Clear selected commit and refs
         this.selectedCommit = null;
         this.selectedCommitRefs = [];
+
+        // Same gesture-owned teardown as handleCloseDiff: the tab switch
+        // unmounts the editor along with the pane.
+        this.warnIfDiscardingEdits();
 
         // Close any open overlays
         this.showDiff = false;
@@ -1406,12 +1624,16 @@ export class AppShell extends LitElement {
     window.addEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.addEventListener('open-settings', this.handleOpenSettings);
     window.addEventListener('trigger-abort', this.handleTriggerAbort);
+    window.addEventListener('force-push', this.handleForcePush);
+    window.addEventListener('force-push-tag', this.handleForcePushTag);
     this.addEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     this.addEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.addEventListener('gitflow-initialized', this.handleGitflowEvent);
     this.addEventListener('gitflow-operation', this.handleGitflowEvent);
-    // Host-level so the branch-list's own rebase dialog reaches it too, not
-    // just the app-shell dialog.
+    // Host-level, so it catches the event once wherever the dialog is mounted.
+    // Do NOT also bind @rebase-complete on the dialog element: the event
+    // bubbles composed, so both would fire and every rebase would run two full
+    // refreshes (two open_repository round trips, two graph rebuilds).
     this.addEventListener('rebase-complete', this.handleRebaseComplete);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
     window.addEventListener('settings-changed', this.handleSettingsChanged);
@@ -1442,13 +1664,35 @@ export class AppShell extends LitElement {
 
     // Set up window focus handler for fetch-on-focus
     this.focusHandler = () => {
-      if (settingsStore.getState().fetchOnFocus && this.activeRepository) {
-        gitService.getRemoteStatus(this.activeRepository.repository.path).then((result) => {
-          if (result.success && result.data) {
-            this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
-          }
-        }).catch(() => { /* background status check — silent fail is acceptable */ });
-      }
+      if (!settingsStore.getState().fetchOnFocus || !this.activeRepository) return;
+      // "Fetch on Window Focus" used to call getRemoteStatus, which only runs
+      // graph_ahead_behind over refs already on disk — no network. It
+      // recomputed a number that could not have changed, so the setting never
+      // did anything. Fetch first, then read the counts — via the background
+      // route, because alt-tabbing back into the app is not a gesture that
+      // should raise a native "Allow fetch?" modal.
+      // Pinned: the user can switch tabs during the fetch; the result belongs
+      // to the repo it was started for.
+      const repoPath = this.activeRepository.repository.path;
+      // Alt-tabbing repeatedly used to start a fetch per focus event; on a hung
+      // remote they stacked with nothing to cancel them.
+      if (this.focusFetchInFlight.has(repoPath)) return;
+      this.focusFetchInFlight.add(repoPath);
+      void (async () => {
+        try {
+        await gitService.fetchInBackground(repoPath);
+        const result = await gitService.getRemoteStatus(repoPath);
+        if (
+          result.success &&
+          result.data &&
+          repoPath === this.activeRepository?.repository.path
+        ) {
+          this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
+        }
+        } finally {
+          this.focusFetchInFlight.delete(repoPath);
+        }
+      })();
     };
     window.addEventListener('focus', this.focusHandler);
 
@@ -1472,8 +1716,8 @@ export class AppShell extends LitElement {
       pageUp: () => this.graphCanvas?.navigatePageUp?.(),
       pageDown: () => this.graphCanvas?.navigatePageDown?.(),
       selectCommit: () => {/* handled by graph canvas */},
-      stageAll: () => this.handleStageAll(),
-      unstageAll: () => this.handleUnstageAll(),
+      stageAll: this.requiresRepository(() => this.handleStageAll()),
+      unstageAll: this.requiresRepository(() => this.handleUnstageAll()),
       commit: () => {/* handled by commit panel */},
       refresh: () => this.handleRefresh(),
       search: () => this.handleToggleSearch(),
@@ -1482,11 +1726,15 @@ export class AppShell extends LitElement {
       toggleLeftPanel: () => this.toggleLeftPanel(),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
-      openReflog: () => { this.showReflog = true; },
-      fetch: () => this.handleFetch(),
-      pull: () => this.handlePull(),
-      push: () => this.handlePush(),
-      createStash: () => this.handleCreateStash(),
+      openReflog: this.requiresRepository(() => { this.showReflog = true; }),
+      // Wrapped like the palette entries: pressing Ctrl+Shift+F on the welcome
+      // screen used to do nothing at all while the same command from the
+      // palette explained that a repository is needed.
+      fetch: this.requiresRepository(() => this.handleFetch()),
+      pull: this.requiresRepository(() => this.handlePull()),
+      push: this.requiresRepository(() => this.handlePush()),
+      createStash: this.requiresRepository(() => this.handleCreateStash()),
+      createBranch: this.requiresRepository(() => this.createBranchDialog?.open()),
       closeDiff: () => this.handleCloseOverlay(),
       nextTab: () => this.cycleRepositoryTab(1),
       previousTab: () => this.cycleRepositoryTab(-1),
@@ -1503,6 +1751,8 @@ export class AppShell extends LitElement {
   // Verified: every addEventListener has a corresponding removeEventListener below.
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     this.unsubscribe?.();
     this.unsubscribeUi?.();
     this.unsubscribeWatcher?.();
@@ -1532,6 +1782,8 @@ export class AppShell extends LitElement {
     window.removeEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.removeEventListener('open-settings', this.handleOpenSettings);
     window.removeEventListener('trigger-abort', this.handleTriggerAbort);
+    window.removeEventListener('force-push', this.handleForcePush);
+    window.removeEventListener('force-push-tag', this.handleForcePushTag);
     this.removeEventListener('open-conflict-dialog', this.handleOpenConflictDialogEvent);
     this.removeEventListener('merge-conflict', this.handleMergeConflictEvent);
     this.removeEventListener('gitflow-initialized', this.handleGitflowEvent);
@@ -1806,10 +2058,11 @@ export class AppShell extends LitElement {
   }
 
   private handleRefContextMenu(e: CustomEvent): void {
-    const { refName, fullName, refType, position } = e.detail as {
+    const { refName, fullName, refType, isHead, position } = e.detail as {
       refName: string;
       fullName: string;
       refType: 'localBranch' | 'remoteBranch' | 'tag';
+      isHead?: boolean;
       position: { x: number; y: number };
     };
 
@@ -1820,26 +2073,65 @@ export class AppShell extends LitElement {
       refName,
       fullName,
       refType,
+      isHead: isHead ?? false,
     };
   }
 
   private async handleRefCheckout(): Promise<void> {
     if (!this.activeRepository) return;
-
+    // Checking out the branch you are already on is a no-op that nonetheless
+    // parks the entire working tree in a stash and re-applies it. The sidebar
+    // and the direct graph-label click both refuse it; this menu item and the
+    // palette's "Switch to <branch>" were never folded into that guard.
+    if (this.refContextMenu.refType === 'localBranch' && this.refContextMenu.isHead) {
+      showToast('Already on this branch', 'info');
+      this.refContextMenu = { ...this.refContextMenu, visible: false };
+      return;
+    }
+    // Checkout mutates the same working tree merge/rebase/delete do, and was
+    // left out when this flag was extended to them — so it stayed clickable
+    // during an in-flight merge and ran concurrently against it. There is no
+    // per-repo lock in the backend. The sidebar has always guarded its own
+    // checkout with the flag it shares with merge/rebase/rename.
     const refName = this.refContextMenu.refName;
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
+    const refType = this.refContextMenu.refType;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    const result = await gitService.checkoutWithAutoStash(repoPath, refName);
+    // Checking out a tag detaches HEAD. The Tags sidebar warns about that; this
+    // handler was written for branches and later reused for the tag menu entry,
+    // so the graph route silently detached and a commit made afterwards was
+    // reachable from no ref.
+    if (refType === 'tag') {
+      const confirmed = await showConfirm(
+        'Checkout Tag',
+        `Checking out tag "${refName}" will put you in 'detached HEAD' state. Any new commits won't belong to any branch. Continue?`,
+        'warning',
+      );
+      if (!confirmed) {
+        this.releaseRefOperation(repoPath);
+        return;
+      }
+    }
 
-    if (result.success && result.data?.success) {
-      this.handleAutoStashToast(result.data, refName, repoPath);
-      // Pinned refresh, matching the sibling command-palette checkout: the
-      // checkout ran on repoPath, which may be backgrounded by completion.
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      log.error('Checkout failed:', result.data?.message || result.error);
-      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Checkout failed');
+    try {
+      const result = await gitService.checkoutWithAutoStash(repoPath, refName);
+
+      if (result.success && result.data?.success) {
+        this.handleAutoStashToast(result.data, refName, repoPath);
+        // Pinned refresh, matching the sibling command-palette checkout: the
+        // checkout ran on repoPath, which may be backgrounded by completion.
+        this.refreshConflictDialogRepo(repoPath);
+      } else {
+        log.error('Checkout failed:', result.data?.message || result.error);
+        showErrorWithSuggestion(
+          result.data?.message || result.error?.message || '',
+          'Checkout failed',
+        );
+      }
+    } finally {
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -1851,10 +2143,14 @@ export class AppShell extends LitElement {
     if (data.stashed && data.stashConflict) {
       showToast(`Switched to ${refName} — stash conflicts need resolution`, 'warning');
       // Open the conflict dialog so the user can resolve the failed stash pop.
-      // Auto-stash is pop semantics: the conflicted auto-stash sits at index 0 and
-      // must be dropped once its changes are applied and resolved.
+      // Auto-stash is pop semantics: the entry must be dropped once its changes
+      // are applied and resolved. Identified by oid rather than assumed to sit
+      // at index 0 — checkout_with_autostash no longer trusts that position
+      // either, because another surface or a terminal can push a stash in
+      // between and renumber the list.
       this.conflictOperationType = 'stash';
       this.resetConflictDetailState();
+      this.conflictStashOid = data.stashOid ?? null;
       this.conflictDropStashOnComplete = true;
       this.openConflictDialogPinned(repoPath);
       this.refreshConflictDialogRepo(repoPath);
@@ -1874,6 +2170,24 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    // Same confirm the sidebar and drag-drop paths show for the same
+    // operation. The sibling delete handlers below already carry a comment
+    // saying the graph ref menu must not be the one unguarded path; merge and
+    // rebase were missed by that pass.
+    // Claimed BEFORE the confirm, like the delete siblings below: showConfirm
+    // is an IPC round trip, so a claim taken after it does not serialize two
+    // dispatches that both got past the check.
+    if (!this.claimRefOperation(repoPath)) return;
+    if (!await showConfirm(
+      'Merge Branch',
+      `Merge "${refName}" into the current branch?`,
+      'info',
+    )) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
+
+    try {
     const result = await gitService.merge({
       path: repoPath,
       sourceRef: refName,
@@ -1896,6 +2210,9 @@ export class AppShell extends LitElement {
       log.error('Merge failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Merge failed');
     }
+    } finally {
+      this.releaseRefOperation(repoPath);
+    }
   }
 
   private async handleRefRebase(): Promise<void> {
@@ -1905,6 +2222,18 @@ export class AppShell extends LitElement {
     const repoPath = this.activeRepository.repository.path;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
+    // Claimed BEFORE the confirm — see handleRefMerge.
+    if (!this.claimRefOperation(repoPath)) return;
+    if (!await showConfirm(
+      'Rebase Branch',
+      `Rebase current branch onto "${refName}"?\n\nThis will rewrite commit history.`,
+      'warning',
+    )) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
+
+    try {
     const result = await gitService.rebase({
       path: repoPath,
       onto: refName,
@@ -1927,15 +2256,25 @@ export class AppShell extends LitElement {
       log.error('Rebase failed:', result.error);
       showErrorWithSuggestion(result.error?.message || '', 'Rebase failed');
     }
+    } finally {
+      this.releaseRefOperation(repoPath);
+    }
   }
 
   private async handleRefDeleteBranch(): Promise<void> {
     if (!this.activeRepository) return;
-
+    // Serialized with Merge and Rebase from this same menu. The lock was
+    // introduced to stop those two racing each other, and these three were
+    // never folded in — so a delete or a tag push could run concurrently with a
+    // still-running merge or rebase against the same working tree. There is no
+    // per-repo lock in the backend (every command opens its own git2 handle),
+    // so this flag is the only thing serializing them. The sidebar gets it
+    // right: its delete shares operationInProgress with merge/rebase/rename.
     const branchName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     // Deleting from the graph's ref menu destroys the same branch as the
@@ -1943,80 +2282,113 @@ export class AppShell extends LitElement {
     // handleDeleteBranch). Without this, one click on a graph label is enough.
     const confirmed = await showConfirm(
       'Delete Branch',
-      `Are you sure you want to delete the branch "${branchName}"?`,
+      // Same stakes, same words as the sidebar's delete. Two surfaces for
+      // one irreversible operation must not state them differently — and
+      // the graph route is the faster gesture.
+      `Are you sure you want to delete the branch "${branchName}"?\n\n` +
+        `This action cannot be undone.`,
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
 
-    const result = await gitService.deleteBranch(
-      repoPath,
-      branchName,
-      false
-    );
+    try {
+      const result = await gitService.deleteBranch(repoPath, branchName, false);
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Deleted branch ${branchName}`, 'success');
-    } else {
-      log.error('Delete branch failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', { branchName });
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Deleted branch ${branchName}`, 'success');
+      } else {
+        log.error('Delete branch failed:', result.error);
+        showErrorWithSuggestion(result.error?.message || '', 'Delete branch failed', {
+          branchName,
+          repoPath,
+        });
+      }
+    } finally {
+      this.releaseRefOperation(repoPath);
     }
   }
 
   private async handleRefDeleteTag(): Promise<void> {
     if (!this.activeRepository) return;
-
+    // Serialized with the rest of this menu — see handleRefDeleteBranch.
     const tagName = this.refContextMenu.refName;
     // Captured before the delete await: the delete and its refresh must target
     // the repo it was invoked on, even if the user switches tabs mid-operation.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     // Gated to match the sidebar's tag delete (lv-tag-list.ts) — the graph ref
     // menu deletes the same tag and must not be the one unguarded path.
     const confirmed = await showConfirm(
       'Delete Tag',
-      `Are you sure you want to delete the tag "${tagName}"?`,
+      // See handleRefDeleteBranch — the sidebar says this too.
+      `Are you sure you want to delete the tag "${tagName}"?\n\n` +
+        `This action cannot be undone.`,
       'warning'
     );
 
-    if (!confirmed) return;
+    if (!confirmed) {
+      this.releaseRefOperation(repoPath);
+      return;
+    }
 
-    const result = await gitService.deleteTag({
-      path: repoPath,
-      name: tagName,
-    });
+    try {
+      const result = await gitService.deleteTag({ path: repoPath, name: tagName });
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Deleted tag ${tagName}`, 'success');
-    } else {
-      log.error('Delete tag failed:', result.error);
-      showToast(result.error?.message || 'Delete tag failed', 'error');
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Deleted tag ${tagName}`, 'success');
+      } else {
+        log.error('Delete tag failed:', result.error);
+        showToast(result.error?.message || 'Delete tag failed', 'error');
+      }
+    } finally {
+      this.releaseRefOperation(repoPath);
     }
   }
 
   private async handleRefPushTag(): Promise<void> {
     if (!this.activeRepository) return;
-
+    // Serialized with the rest of this menu — see handleRefDeleteBranch.
     const tagName = this.refContextMenu.refName;
     // Captured before the (slow, network) push await: the push and its refresh
     // must target the repo it was invoked on, even if the user switches tabs.
     const repoPath = this.activeRepository.repository.path;
+    if (!this.claimRefOperation(repoPath)) return;
+    // Also the shared tag-push key, so this cannot race a Force Push Tag
+    // sitting on its confirm — that one holds no working-tree claim.
+    const tagKey = pushTagKey(repoPath, tagName);
+    if (!tryAcquirePush(tagKey)) {
+      this.releaseRefOperation(repoPath);
+      this.warnRepositoryBusy();
+      return;
+    }
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
-    const result = await gitService.pushTag({
-      path: repoPath,
-      name: tagName,
-    });
+    try {
+      const result = await gitService.pushTag({ path: repoPath, name: tagName });
 
-    if (result.success) {
-      this.refreshConflictDialogRepo(repoPath);
-      showToast(`Pushed tag ${tagName}`, 'success');
-    } else {
-      log.error('Push tag failed:', result.error);
-      showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', { operation: 'push' });
+      if (result.success) {
+        this.refreshConflictDialogRepo(repoPath);
+        showToast(`Pushed tag ${tagName}`, 'success');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        log.error('Push tag failed:', result.error);
+        showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
+          operation: 'push-tag',
+          // Carries the tag through to the Force Push Tag suggestion action.
+          branchName: tagName,
+          repoPath,
+        });
+      }
+    } finally {
+      releasePush(tagKey);
+      this.releaseRefOperation(repoPath);
     }
   }
 
@@ -2136,7 +2508,13 @@ export class AppShell extends LitElement {
     this.openConflictDialogFromState();
   }
 
-  private async handleRevertCommit(): Promise<void> {
+  private handleRevertCommit(): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.revertCommit());
+  }
+
+  private async revertCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2189,11 +2567,24 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleAbortOperation(): Promise<void> {
-    if (!this.activeRepository || this.abortInProgress) return;
+  /** `pinnedRepoPath` is optional, so this must NEVER be bound directly as an
+   * event handler — a MouseEvent would arrive in that slot and the lookup below
+   * would silently find no repo, making Abort do nothing. Bind it as
+   * `() => this.handleAbortOperation()`. */
+  private async handleAbortOperation(pinnedRepoPath?: string): Promise<void> {
+    if (this.abortInProgress) return;
 
-    const state = this.activeRepository.repository.state;
-    const path = this.activeRepository.repository.path;
+    // An abort discards the in-progress operation AND any conflict resolution,
+    // so a toast action must target the repo that failed, not the active tab.
+    const repo = pinnedRepoPath
+      ? repositoryStore
+          .getState()
+          .openRepositories.find((r) => r.repository.path === pinnedRepoPath)
+      : this.activeRepository;
+    if (!repo) return;
+
+    const state = repo.repository.state;
+    const path = repo.repository.path;
     let result;
 
     // Reject an unabortable state BEFORE prompting — otherwise the user
@@ -2208,6 +2599,25 @@ export class AppShell extends LitElement {
     // gates this behind an explicit confirmation panel; the banner button
     // reaches the same command, so it needs the same gate rather than being a
     // one-click path to the identical loss.
+    // Claimed BEFORE the confirm, not after. There is an IPC round trip between
+    // the click and the native dialog actually opening and taking focus, so a
+    // double-click landed a second call while the flag was still false and
+    // raised two abort prompts — the second then ran against an
+    // already-restored tree with a stale `state` and reported a failure for an
+    // operation that had in fact succeeded. Same reasoning as
+    // lv-gitflow-panel's handleFinishFeature.
+    //
+    // The claim is on the SHARED working-tree lock, not just this banner's own
+    // flag. An abort is a full working-tree restore, and this is the only
+    // always-visible non-modal destructive control — so a hard reset from the
+    // graph could run beside it in one direction, and a sidebar discard could
+    // start during this confirm's IPC round trip in the other.
+    if (!this.claimRefOperation(path)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    this.abortInProgress = true;
+
     const confirmed = await showConfirm(
       `Abort ${state}?`,
       `This discards all conflict resolutions and restores the working tree to ` +
@@ -2215,11 +2625,11 @@ export class AppShell extends LitElement {
       'warning'
     );
 
-    if (!confirmed) return;
-
-    // Guards against a double-click firing two aborts: the second would run
-    // against an already-restored tree and surface a confusing failure.
-    this.abortInProgress = true;
+    if (!confirmed) {
+      this.abortInProgress = false;
+      this.releaseRefOperation(path);
+      return;
+    }
 
     try {
       switch (state) {
@@ -2256,25 +2666,75 @@ export class AppShell extends LitElement {
       }
     } finally {
       this.abortInProgress = false;
+      this.releaseRefOperation(path);
     }
   }
 
   // Error suggestion action handlers
-  private handleTriggerPull = (): void => {
-    this.handlePull();
+  /**
+   * A suggestion toast lives 8 seconds and nothing clears toasts on a repo
+   * switch, so an action clicked from one must run against the repo that
+   * FAILED — not whichever tab happens to be active by then. Same reasoning as
+   * handleForceDeleteBranch; these two were left resolving `activeRepository`.
+   */
+  private resolvePinnedRepo(repoPath?: string): string | null {
+    if (!repoPath) return this.activeRepository?.repository.path ?? null;
+    const open = repositoryStore
+      .getState()
+      .openRepositories.some((r) => r.repository.path === repoPath);
+    if (!open) {
+      showToast('That repository is no longer open', 'warning');
+      return null;
+    }
+    return repoPath;
+  }
+
+  private handleTriggerPull = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.handlePull(repoPath);
   };
 
-  private handleForceDeleteBranch = (e: CustomEvent<{ branchName?: string }>): void => {
+  private handleForceDeleteBranch = (
+    e: CustomEvent<{ branchName?: string; repoPath?: string }>
+  ): void => {
     const branchName = e.detail?.branchName;
-    if (branchName) void this.forceDeleteBranch(branchName);
+    const repoPath = e.detail?.repoPath;
+    if (branchName && repoPath) {
+      // The SHARED working-tree lock, not a private key. Its sibling
+      // handleRefDeleteBranch says why: a delete can run concurrently with a
+      // still-running merge or rebase, and this flag is the only thing
+      // serializing them. Keying it privately left the toast button live while
+      // every menu was greyed out.
+      //
+      // runRefExclusive reports the refusal itself, which matters here: a toast
+      // action button carries no ?disabled binding, and clicking it destroys
+      // the toast — so a silent refusal takes the affordance away with it.
+      void this.runRefExclusive(repoPath, () =>
+        this.forceDeleteBranch(branchName, repoPath),
+      );
+    }
   };
 
-  private async forceDeleteBranch(branchName: string): Promise<void> {
-    if (!this.activeRepository) return;
-
-    // Captured before the confirm: the force-delete and its refresh must target
-    // the repo it was invoked on, even if the user switches tabs mid-operation.
-    const repoPath = this.activeRepository.repository.path;
+  private async forceDeleteBranch(branchName: string, repoPath: string): Promise<void> {
+    // The repo comes from the event, NOT from activeRepository. This runs from
+    // an 8-second error toast, and nothing clears toasts on a repository
+    // switch — so resolving the repo at click time force-deleted from whichever
+    // tab was active by then. With two repos both holding a branch of the same
+    // name, that discarded unmerged commits in the repo the user never aimed at,
+    // under a confirm quoting facts measured in the other one.
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) {
+      showToast(
+        `Cannot force delete ${branchName}: its repository is no longer open`,
+        'warning'
+      );
+      return;
+    }
 
     // This fires from the "Force Delete" action on an error-suggestion toast,
     // i.e. one click away from an ordinary delete that just failed as unmerged.
@@ -2284,9 +2744,10 @@ export class AppShell extends LitElement {
     // irreversible outcome.
     const confirmed = await showConfirm(
       'Force Delete Branch',
-      `"${branchName}" has commits that are not merged anywhere else. ` +
-        `Force deleting it discards those commits permanently — they will be ` +
-        `recoverable only through the reflog. Continue?`,
+      `"${branchName}" in ${repo.repository.name} has commits that are not ` +
+        `merged anywhere else. Force deleting it discards those commits ` +
+        `permanently — they will be recoverable only through the reflog. ` +
+        `Continue?`,
       'warning'
     );
 
@@ -2395,11 +2856,132 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleTriggerAbort = (): void => {
-    this.handleAbortOperation();
+  private handleTriggerAbort = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.handleAbortOperation(repoPath);
   };
 
-  private async handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
+  /**
+   * "Force Push" from a rejected-push suggestion toast.
+   *
+   * The suggestion for libgit2's "non-fastforwardable" told the user to
+   * force-push — the only correct recovery after an amend or rebase — but the
+   * app had no affordance for it anywhere, so the advice dead-ended. This is
+   * that affordance, and it uses force-with-lease: if the remote moved since
+   * the last fetch (someone else pushed while the toast was up) the push is
+   * refused rather than silently discarding their commits.
+   */
+  private handleForcePush = (e: Event): void => {
+    const repoPath = this.resolvePinnedRepo(
+      (e as CustomEvent<{ repoPath?: string }>).detail?.repoPath,
+    );
+    if (!repoPath) return;
+    void this.runPushExclusive(repoPath, () => this.forcePush(repoPath));
+  };
+
+  private async forcePush(repoPath: string): Promise<void> {
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) return;
+
+    // Names the BRANCH, not just the repository: this is the one operation in
+    // the app that can discard commits belonging to someone else, so the
+    // confirm has to say which ref it is about to overwrite.
+    const branch = repo.currentBranch?.shorthand ?? repo.repository.headRef;
+    const confirmed = await showConfirm(
+      'Force Push',
+      `This replaces "${branch}" on the remote of ${repo.repository.name} with your ` +
+        `local commits. Any commits on the remote that you do not have will be ` +
+        `removed from it. The push is refused if the remote has moved since your ` +
+        `last fetch.`,
+      'error'
+    );
+    if (!confirmed) return;
+
+    const opId = progressService.startOperation('push', 'Force pushing to remote...');
+    const result = await gitService.push({
+      path: repoPath,
+      forceWithLease: true,
+      silent: true,
+    });
+    if (result.success) {
+      progressService.completeOperation(opId);
+      // No success toast here: the backend emits remote-operation-completed and
+      // setupRemoteOperationListeners toasts it — naming the branch and remote,
+      // which this one could not. Adding a second stacked two messages on one
+      // click, the same rule handleFetch/handlePull/handlePush already follow.
+      this.refreshConflictDialogRepo(repoPath);
+    } else {
+      progressService.failOperation(opId);
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        // NOT through showErrorWithSuggestion: a force push that is itself
+        // rejected would match the same branch that produced this toast and
+        // offer Force Push again, an unbounded loop over the one action that
+        // discards remote commits.
+        showToast(result.error?.message || 'Force push failed', 'error');
+      }
+    }
+  }
+
+  /**
+   * "Force Push Tag" from a rejected tag-push suggestion toast. The previous
+   * suggestion said to delete the remote tag first, which Leviathan cannot do.
+   */
+  private handleForcePushTag = (e: Event): void => {
+    const detail = (e as CustomEvent<{ tagName?: string; repoPath?: string }>).detail;
+    const tagName = detail?.tagName;
+    const repoPath = this.resolvePinnedRepo(detail?.repoPath);
+    if (!tagName || !repoPath) return;
+    // The SHARED tag-push key, not a private one. This slot is held across the
+    // "this moves the remote tag" confirm, and the sidebar's Push and the graph
+    // ref menu's Push Tag claim the same key — so neither can push the tag out
+    // from under the force push the user is authorising.
+    void this.runTagPushExclusive(repoPath, tagName, () =>
+      this.forcePushTag(tagName, repoPath),
+    );
+  };
+
+  private async forcePushTag(tagName: string, repoPath: string): Promise<void> {
+    const repo = repositoryStore
+      .getState()
+      .openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo) return;
+
+    const confirmed = await showConfirm(
+      'Force Push Tag',
+      `This moves the remote tag "${tagName}" in ${repo.repository.name} to your ` +
+        `local commit. Anyone who already fetched the tag keeps the old one until ` +
+        `they delete it locally.`,
+      'error'
+    );
+    if (!confirmed) return;
+
+    const result = await gitService.pushTag({
+      path: repoPath,
+      name: tagName,
+      force: true,
+    });
+    if (result.success) {
+      showToast(`Force pushed tag ${tagName}`, 'success');
+      this.refreshConflictDialogRepo(repoPath);
+    } else if (!gitService.isNetworkGateRefusal(result.error)) {
+      // Plain toast, same reason as forcePush: routing through the suggestion
+      // service would offer Force Push Tag again.
+      showToast(result.error?.message || 'Force push tag failed', 'error');
+    }
+  }
+
+  private handleResetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.resetToCommit(mode));
+  }
+
+  private async resetToCommit(mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2494,7 +3076,13 @@ export class AppShell extends LitElement {
    * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
    * Can be auto-squashed later with interactive rebase --autosquash
    */
-  private async handleFixupCommit(): Promise<void> {
+  private handleFixupCommit(): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.fixupCommit());
+  }
+
+  private async fixupCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2536,7 +3124,13 @@ export class AppShell extends LitElement {
    * Create a squash commit targeting the selected commit
    * Similar to fixup but preserves the message for editing during autosquash
    */
-  private async handleSquashCommit(): Promise<void> {
+  private handleSquashCommit(): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.squashCommit());
+  }
+
+  private async squashCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
 
@@ -2579,6 +3173,26 @@ export class AppShell extends LitElement {
    * For HEAD: Opens amend mode in commit panel
    * For other commits: Dispatches event to open interactive rebase with reword action
    */
+  /**
+   * Refuse a rewrite-in-place of a merge commit, with a reason.
+   *
+   * get_rebase_commits skips merge commits (a `pick` of one dies mid-rebase),
+   * so the plan the dialog loads for `<merge>^` contains every commit in
+   * `<merge>^..HEAD` EXCEPT the one the user asked to reword — including the
+   * merged-in side branch. Start Rebase stays enabled, and one click replays
+   * that set linearly onto the merge's first parent: the merge is destroyed
+   * and the side branch rewritten, from a gesture that promised only to change
+   * a message.
+   */
+  private isMergeCommit(commit: { shortId: string; parentIds?: string[] }): boolean {
+    if ((commit.parentIds?.length ?? 0) <= 1) return false;
+    showToast(
+      `${commit.shortId} is a merge commit — its message cannot be rewritten by rebase`,
+      'warning',
+    );
+    return true;
+  }
+
   private async handleRewordCommit(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.activeRepository) return;
@@ -2588,33 +3202,16 @@ export class AppShell extends LitElement {
     // Captured BEFORE the history await: the reword targets THIS repo's commit.
     const repoPath = this.activeRepository.repository.path;
 
-    // Check if this is HEAD commit by comparing with the first commit in history.
-    // Note: This works for the common case of a branch checkout. In detached HEAD state,
-    // the first commit in history is still HEAD, so this approach remains valid.
-    const historyResult = await gitService.getCommitHistory({
-      path: repoPath,
-      limit: 1,
-    });
-
-    // The interactive-rebase dialog and the commit panel both bind to the LIVE
-    // active repo. If the user switched tabs during the history await, opening
-    // either would configure a reword of THIS repo's commit against another
-    // repo (rewriting the wrong history, or dead-ending on a missing commit).
-    if (this.activeRepository?.repository.path !== repoPath) {
-      showToast('Repository changed — reword cancelled', 'warning');
-      return;
-    }
-
-    const isHead = historyResult.success && historyResult.data &&
-      historyResult.data.length > 0 && historyResult.data[0].oid === commit.oid;
+    const isHead = await this.isHeadCommit(commit.oid, repoPath, 'reword');
+    if (isHead === null) return;
 
     if (isHead) {
       // For HEAD, just trigger amend mode
-      window.dispatchEvent(new CustomEvent('trigger-amend', {
-        detail: { commit },
-      }));
+      await this.dispatchAmend(commit);
     } else {
       // For other commits, open interactive rebase dialog pre-configured for rewording
+      if (this.isMergeCommit(commit)) return;
+      if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
       this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
         rewordCommitOid: commit.oid,
       });
@@ -2622,19 +3219,106 @@ export class AppShell extends LitElement {
   }
 
   /**
-   * Quick amend - only available for HEAD commit
-   * Triggers amend mode in commit panel
+   * Is `oid` the commit HEAD points at?
+   *
+   * Returns null when the answer must not be acted on — the user switched
+   * repository during the history await, and both the commit panel and the
+   * interactive-rebase dialog bind to the LIVE active repo, so acting would
+   * configure THIS repo's commit against another one.
+   *
+   * Compares against the first commit in history: correct for a branch
+   * checkout, and still correct in detached HEAD, where the first commit in
+   * history is HEAD.
    */
-  private handleQuickAmend(): void {
+  /**
+   * Refuse the interactive-rebase reword/amend route for a commit that is not
+   * in HEAD's history.
+   *
+   * The graph loads every branch, so both menu items are offered on commits
+   * that live only elsewhere. `<oid>^` is a valid revspec for any commit, so
+   * nothing downstream noticed: the plan came back as the CURRENT branch's
+   * history with the target absent, no reword row appeared, and Start Rebase
+   * was still enabled — one click from replaying this branch onto an unrelated
+   * one.
+   */
+  private async canRewriteInPlace(
+    oid: string,
+    shortId: string,
+    repoPath: string,
+  ): Promise<boolean> {
+    const result = await gitService.isAncestorOfHead(repoPath, oid);
+    if (this.activeRepository?.repository.path !== repoPath) return false;
+    if (!result.success) {
+      showToast(result.error?.message ?? 'Could not check where that commit lives', 'error');
+      return false;
+    }
+    if (!result.data) {
+      showToast(
+        `${shortId} is not on the current branch — check out the branch that ` +
+          `contains it first`,
+        'warning',
+      );
+      return false;
+    }
+    return true;
+  }
+
+  private async isHeadCommit(
+    oid: string,
+    repoPath: string,
+    operation: string,
+  ): Promise<boolean | null> {
+    const historyResult = await gitService.getCommitHistory({ path: repoPath, limit: 1 });
+    if (this.activeRepository?.repository.path !== repoPath) {
+      showToast(`Repository changed — ${operation} cancelled`, 'warning');
+      return null;
+    }
+    return !!(
+      historyResult.success &&
+      historyResult.data &&
+      historyResult.data.length > 0 &&
+      historyResult.data[0].oid === oid
+    );
+  }
+
+  /**
+   * Quick amend from the graph's commit context menu.
+   *
+   * Amend ONLY ever rewrites HEAD — create_commit re-parents
+   * `repo.head()?.peel_to_commit()` regardless of which commit the UI thinks
+   * it is amending. This handler used to trust the clicked commit, so amending
+   * any older commit replaced HEAD instead: HEAD's message became the clicked
+   * commit's, any staged changes were folded into HEAD, the commit the user
+   * actually right-clicked was untouched, and HEAD's original commit survived
+   * only in the reflog. The commit panel showed the clicked commit's short id
+   * throughout, so nothing said otherwise.
+   *
+   * Reword has always performed this check; amend was left behind. Non-HEAD
+   * commits go to the same interactive-rebase route rather than dead-ending.
+   */
+  private async handleQuickAmend(): Promise<void> {
     const commit = this.contextMenu.commit;
-    if (!commit) return;
+    if (!commit || !this.activeRepository) return;
 
     this.contextMenu = { ...this.contextMenu, visible: false };
 
-    // Dispatch event to trigger amend mode in commit panel
-    window.dispatchEvent(new CustomEvent('trigger-amend', {
-      detail: { commit },
-    }));
+    const repoPath = this.activeRepository.repository.path;
+    const isHead = await this.isHeadCommit(commit.oid, repoPath, 'amend');
+    if (isHead === null) return;
+
+    if (isHead) {
+      await this.dispatchAmend(commit);
+    } else {
+      // Same gates as reword — see isMergeCommit and canRewriteInPlace. Checked
+      // BEFORE the "opening interactive rebase" toast, so a refusal is not
+      // preceded by a promise the app is about to break.
+      if (this.isMergeCommit(commit)) return;
+      if (!(await this.canRewriteInPlace(commit.oid, commit.shortId, repoPath))) return;
+      showToast('Only the latest commit can be amended — opening interactive rebase', 'info');
+      this.interactiveRebaseDialog?.open(`${commit.oid}^`, {
+        rewordCommitOid: commit.oid,
+      });
+    }
   }
 
   private handleConflictResolved(): void {
@@ -2665,6 +3349,17 @@ export class AppShell extends LitElement {
       this.handleRefresh();
       return;
     }
+    // Only for a repo that is still OPEN. A slow operation can land after its
+    // tab was closed — teardownRepoServices() has already dropped the path,
+    // and adding it back here left an entry no one ever removes: it survived
+    // for the rest of the session, made a later reopen of the same path do a
+    // spurious extra refresh, and grew without bound across close/reopen
+    // cycles. Nothing to refresh either way once the tab is gone.
+    const isOpen = repositoryStore
+      .getState()
+      .openRepositories.some((r) => r.repository.path === pinnedPath);
+    if (!isOpen) return;
+
     this.staleRepoPaths.add(pinnedPath);
     this.scheduleBadgeHydration(pinnedPath);
   }
@@ -2710,10 +3405,27 @@ export class AppShell extends LitElement {
   }
 
   private async handleCheckoutBranchFromGraph(e: CustomEvent<{ branchName: string }>): Promise<void> {
+    // A SINGLE left-click on a branch label reaches here, so this is the
+    // easiest checkout in the app to fire twice. With a dirty tree,
+    // checkout_with_autostash stashes, applies index 0, then drops index 0 —
+    // and a stash index is a position, so a second run's save shifts the
+    // first's entry and the two cross-apply and cross-drop each other's work.
+    // Routed through the helper rather than claiming inline: the canvas draws
+    // its ref labels itself, so this control can render no disabled state and
+    // a silent refusal is indistinguishable from a dead click. The helper
+    // reports it. The ref-menu handlers below still claim inline, which is
+    // fine — their buttons carry ?disabled bindings, so the refusal is
+    // already visible there.
     if (!this.activeRepository) return;
-
-    const branchName = e.detail.branchName;
     const repoPath = this.activeRepository.repository.path;
+    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromGraph(e, repoPath));
+  }
+
+  private async checkoutBranchFromGraph(
+    e: CustomEvent<{ branchName: string }>,
+    repoPath: string,
+  ): Promise<void> {
+    const branchName = e.detail.branchName;
     const result = await gitService.checkoutWithAutoStash(repoPath, branchName);
 
     if (result.success && result.data?.success) {
@@ -2722,7 +3434,10 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       log.error('Failed to checkout branch:', result.data?.message || result.error);
-      showErrorWithSuggestion(result.data?.message || result.error?.message || '', 'Failed to checkout branch');
+      showErrorWithSuggestion(
+        result.data?.message || result.error?.message || '',
+        'Failed to checkout branch',
+      );
     }
   }
 
@@ -2769,7 +3484,28 @@ export class AppShell extends LitElement {
     this.showDiff = true;
   }
 
+  /**
+   * Closing the diff pane unmounts the inline editor with it.
+   *
+   * The editor guards every teardown it can see — Cancel confirms, a file
+   * change warns — but the × button, Escape and a repository tab switch are all
+   * owned by app-shell and simply set `showDiff = false`, dropping typed text
+   * with no confirm and no message. Escape is the sharpest case: the editor's
+   * own indicator says "Esc to cancel" while the header says "Close diff (Esc)",
+   * and which one won depended purely on whether the caret was in the textarea.
+   */
+  private warnIfDiscardingEdits(): void {
+    const editing = this.diffView;
+    if (editing?.hasUnsavedEdits) {
+      showToast(
+        `Unsaved edits to ${editing.editingPath ?? 'this file'} were discarded`,
+        'warning'
+      );
+    }
+  }
+
   private handleCloseDiff(): void {
+    this.warnIfDiscardingEdits();
     this.showDiff = false;
     this.diffFile = null;
     this.diffCommitFile = null;
@@ -2810,11 +3546,77 @@ export class AppShell extends LitElement {
   }
 
   private handleStageAll(): void {
-    window.dispatchEvent(new CustomEvent('stage-all'));
+    void this.dispatchToFileStatus('stage-all');
   }
 
   private handleUnstageAll(): void {
-    window.dispatchEvent(new CustomEvent('unstage-all'));
+    void this.dispatchToFileStatus('unstage-all');
+  }
+
+  /**
+   * `trigger-amend` is heard only by `lv-commit-panel`, which lives in the
+   * right panel's Changes tab.
+   *
+   * Right-clicking a commit in the graph selects it first, and a new selection
+   * auto-switches that panel to Details — so amend mode was being turned on
+   * inside a `.tab-panel` with `display: none` and the gesture looked like it
+   * did nothing. With the panel hidden entirely (Ctrl+J) the component is
+   * unmounted and the event had no listener at all. Same class as
+   * dispatchToFileStatus and openBranchCleanup.
+   */
+  private async dispatchAmend(commit: Commit): Promise<void> {
+    if (!this.rightPanelVisible) {
+      uiStore.getState().togglePanel('right');
+      await this.updateComplete;
+    }
+    // Optional chaining: a shell that has never rendered has no renderRoot,
+    // and the dispatch below must still happen.
+    const panel = this.renderRoot?.querySelector('lv-right-panel') as
+      | (LitElement & { showChanges?: () => void })
+      | null;
+    await panel?.updateComplete;
+    panel?.showChanges?.();
+    await panel?.updateComplete;
+    window.dispatchEvent(new CustomEvent('trigger-amend', { detail: { commit } }));
+  }
+
+  /**
+   * `stage-all` / `unstage-all` are heard only by `lv-file-status`, which lives
+   * inside the right panel and is unmounted while that panel is hidden — so
+   * with Ctrl+J pressed the `s` / `u` shortcuts and both palette entries
+   * silently did nothing, and there was no other way to stage. Reveal the panel
+   * and let it render before dispatching, exactly as openBranchCleanup does for
+   * the left panel.
+   */
+  private async dispatchToFileStatus(eventName: string): Promise<void> {
+    if (!this.rightPanelVisible) {
+      uiStore.getState().togglePanel('right');
+      await this.updateComplete;
+    }
+    {
+      const panel = this.renderRoot.querySelector('lv-right-panel') as LitElement | null;
+      await panel?.updateComplete;
+      // Mounted is not the same as ready. lv-file-status registers the listener
+      // in connectedCallback but loads its file list over IPC, so dispatching
+      // as soon as it exists found `unstagedFiles` still empty and
+      // handleStageAll returned at `if (paths.length === 0)` — the first press
+      // did nothing, the second worked. loadStatus is sequence-guarded, so
+      // awaiting it again is safe.
+      const fileStatus = panel?.renderRoot?.querySelector('lv-file-status') as
+        | (LitElement & { ensureStatusFresh?: () => Promise<void> })
+        | null;
+      await fileStatus?.updateComplete;
+      // Require a CURRENT list, not a blind reload. With the panel already
+      // visible — the default — the cached list can belong to the previous repo
+      // after a tab switch, or predate a watcher event still inside its
+      // debounce; either way "Stage all" would act on the wrong set. But
+      // loadStatus always issues a full working-tree walk, so calling it every
+      // time cost two scans per keypress. ensureStatusFresh awaits an in-flight
+      // load, reloads only when something could have changed, and is otherwise
+      // free.
+      await fileStatus?.ensureStatusFresh?.();
+    }
+    window.dispatchEvent(new CustomEvent(eventName));
   }
 
   // Re-entrancy state for handleRefresh. Multiple callers (file-watcher,
@@ -2966,6 +3768,9 @@ export class AppShell extends LitElement {
   }
 
   private handleShowBlame(e: CustomEvent<{ filePath: string; commitOid?: string }>): void {
+    // A fourth app-shell-owned gesture that unmounts the diff pane, and so the
+    // inline editor with it — same teardown as the × and a tab switch.
+    this.warnIfDiscardingEdits();
     // Close diff if open
     this.showDiff = false;
     this.diffFile = null;
@@ -3028,21 +3833,21 @@ export class AppShell extends LitElement {
         label: 'Fetch from remote',
         category: 'action',
         icon: 'fetch',
-        action: () => this.handleFetch(),
+        action: this.requiresRepository(() => this.handleFetch()),
       },
       {
         id: 'pull',
         label: 'Pull from remote',
         category: 'action',
         icon: 'pull',
-        action: () => this.handlePull(),
+        action: this.requiresRepository(() => this.handlePull()),
       },
       {
         id: 'push',
         label: 'Push to remote',
         category: 'action',
         icon: 'push',
-        action: () => this.handlePush(),
+        action: this.requiresRepository(() => this.handlePush()),
       },
       {
         id: 'refresh',
@@ -3083,7 +3888,15 @@ export class AppShell extends LitElement {
         label: 'Create stash',
         category: 'action',
         icon: 'stash',
-        action: () => this.handleCreateStash(),
+        action: this.requiresRepository(() => this.handleCreateStash()),
+      },
+      {
+        id: 'create-branch',
+        label: 'Create branch',
+        category: 'action',
+        icon: 'branch',
+        shortcut: `${mod}⇧N`,
+        action: this.requiresRepository(() => this.createBranchDialog?.open()),
       },
       {
         id: 'create-tag',
@@ -3160,17 +3973,34 @@ export class AppShell extends LitElement {
               'warning'
             );
             if (confirmed) {
-              const resetResult = await git.resetToReflog(
-                repoPath,
-                match.index,
-                'soft',
-                target.oid
-              );
-              if (resetResult.success) {
-                showToast('Undo successful', 'success');
-                this.refreshConflictDialogRepo(repoPath);
-              } else {
-                showToast(resetResult.error?.message ?? 'Undo failed', 'error');
+              // The other caller of reset_to_reflog — lv-reflog-dialog — claims
+              // the shared working-tree lock; this palette route to the same
+              // command was missed by that sweep. The expected_oid pin guards
+              // against a STALE index, not against a checkout moving the branch
+              // underneath the reset.
+              // runRefExclusive returns silently when the lock is held, which
+              // suits context-menu items whose buttons carry a ?disabled
+              // binding. This one sits behind a prompt, an AI call and a
+              // confirm, so a silent return reads as "the reset happened".
+              if (!this.claimRefOperation(repoPath)) {
+                this.warnRepositoryBusy();
+                return;
+              }
+              try {
+                const resetResult = await git.resetToReflog(
+                  repoPath,
+                  match.index,
+                  'soft',
+                  target.oid
+                );
+                if (resetResult.success) {
+                  showToast('Undo successful', 'success');
+                  this.refreshConflictDialogRepo(repoPath);
+                } else {
+                  showToast(resetResult.error?.message ?? 'Undo failed', 'error');
+                }
+              } finally {
+                this.releaseRefOperation(repoPath);
               }
             }
           } else {
@@ -3339,14 +4169,14 @@ export class AppShell extends LitElement {
         label: 'Stage all changes',
         category: 'action',
         icon: 'commit',
-        action: () => this.handleStageAll(),
+        action: this.requiresRepository(() => this.handleStageAll()),
       },
       {
         id: 'unstage-all',
         label: 'Unstage all changes',
         category: 'action',
         icon: 'commit',
-        action: () => this.handleUnstageAll(),
+        action: this.requiresRepository(() => this.handleUnstageAll()),
       },
       {
         id: 'toggle-left-panel',
@@ -3522,13 +4352,21 @@ export class AppShell extends LitElement {
     // (theme, tray, ...) and each backend restart resets the fetch delay, so
     // reacting to unrelated changes would defer fetches indefinitely.
     this.lastAutoFetchInterval = settings.autoFetchInterval;
+    this.lastOfflineMode = settings.offlineMode;
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
-      if (state.autoFetchInterval !== this.lastAutoFetchInterval) {
+      // Offline mode gates the START call, but the loop it started is a Tokio
+      // task with no re-check: turning offline mode on left it fetching every
+      // N minutes forever, and turning it back off never revived a repo whose
+      // start had been refused. Treat an offline-mode flip like an interval
+      // change.
+      const offlineChanged = state.offlineMode !== this.lastOfflineMode;
+      if (state.autoFetchInterval !== this.lastAutoFetchInterval || offlineChanged) {
         this.lastAutoFetchInterval = state.autoFetchInterval;
+        this.lastOfflineMode = state.offlineMode;
         const paths = repositoryStore
           .getState()
           .openRepositories.map((r) => r.repository.path);
-        if (state.autoFetchInterval > 0) {
+        if (state.autoFetchInterval > 0 && !state.offlineMode) {
           for (const path of paths) {
             this.startAutoFetchLogged(path, state.autoFetchInterval);
           }
@@ -3564,6 +4402,23 @@ export class AppShell extends LitElement {
     this.updateUnlisteners.push(unlistenUpdates);
   }
 
+  /** Repos whose auto-fetch failure has already been reported. Auto-fetch
+   * retries on a timer, so an un-deduped toast would repeat forever; a silent
+   * failure is worse, though — it freezes the ahead/behind badge the user reads
+   * before deciding to push or force-push. Report once per repo per outage. */
+  private autoFetchFailureReported = new Set<string>();
+
+  private reportAutoFetchFailure(repoPath: string, message?: string): void {
+    if (this.autoFetchFailureReported.has(repoPath)) return;
+    this.autoFetchFailureReported.add(repoPath);
+    const repoName = repoPath.split(/[\\/]/).filter(Boolean).pop() || repoPath;
+    showToast(
+      `${repoName}: auto-fetch failed${message ? ` — ${message}` : ''}. Ahead/behind counts may be stale.`,
+      'warning',
+      6000,
+    );
+  }
+
   // Auto-fetch runs for every open repo. Every successful result updates
   // that repo's ahead/behind in the store (so tab badges stay fresh even for
   // background tabs), but only the ACTIVE repo's result may drive the
@@ -3575,7 +4430,12 @@ export class AppShell extends LitElement {
     ahead: number;
     message?: string;
   }): void => {
-    if (!event.success) return;
+    if (!event.success) {
+      this.reportAutoFetchFailure(event.repoPath, event.message);
+      return;
+    }
+    // Recovered — let the next failure speak again.
+    this.autoFetchFailureReported.delete(event.repoPath);
 
     const store = repositoryStore.getState();
     const repo = store.openRepositories.find((r) => r.repository.path === event.repoPath);
@@ -3625,6 +4485,24 @@ export class AppShell extends LitElement {
 
   private async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
+    // Coalesced like its pull and push siblings. keyboardService has no
+    // e.repeat guard, so HOLDING Ctrl+Shift+F fires many times a second and
+    // every repeat launched a fully concurrent fetch — each with its own
+    // progress row, and a stacked toast per repeat from the backend's
+    // remote-operation-completed. Fetch must NOT take the working-tree lock
+    // (it touches no working tree), so it gets its own key.
+    const fetchRepo = this.activeRepository.repository.path;
+    const fetchKey = `fetch:${fetchRepo}`;
+    if (!tryAcquirePush(fetchKey)) return;
+    try {
+      await this.fetchRepository();
+    } finally {
+      releasePush(fetchKey);
+    }
+  }
+
+  private async fetchRepository(): Promise<void> {
+    if (!this.activeRepository) return;
     const opId = progressService.startOperation('fetch', 'Fetching from remote...');
     // gitService.fetch returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — a catch-only path always reported success and
@@ -3633,23 +4511,52 @@ export class AppShell extends LitElement {
     // Pinned: fetch is a slow network op; if the user switches tabs while it
     // runs, the refresh must target the repo that fetched, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.fetch({ path: repoPath });
+    // silent: this handler owns the messaging (and the backend's
+    // remote-operation-completed event toasts the success). Without it every
+    // toolbar fetch stacked two toasts, and every failure two errors.
+    const result = await gitService.fetch({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Fetch failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        showToast(result.error?.message ?? 'Fetch failed', 'error');
+      }
     }
   }
 
-  private async handlePull(): Promise<void> {
-    if (!this.activeRepository) return;
-    const repoPath = this.activeRepository.repository.path;
+  private handlePull(pinnedRepoPath?: string): Promise<void> {
+    // pinnedRepoPath comes from a suggestion toast's Pull Now, which must pull
+    // the repo whose push failed even if the user has since switched tabs.
+    const repoPath = pinnedRepoPath ?? this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    // Three surfaces reach this — Ctrl+Shift+P, the palette, and the Pull Now
+    // toast action — and none guarded against a second call. ensure_pullable
+    // in the backend only refuses when a merge is ALREADY unresolved; two pulls
+    // that both start clean both pass it, and the second calls repo.merge() on
+    // top of the first, which deletes MERGE_HEAD and leaves a conflicted index
+    // that abort_merge then refuses to clean up. Keyboard auto-repeat alone
+    // fires this ~30x a second.
+    //
+    // Held on the SHARED working-tree lock, not a private key: a pull's
+    // fast-forward runs checkout_tree and moves the branch ref, and its merge
+    // and rebase paths rewrite the tree outright. Keying it separately
+    // serialized pull against pull but left every sidebar checkout, discard
+    // and reset fully enabled beside it — the exact split ref-lock.ts exists
+    // to close. Claimed before the network-permission confirm so that round
+    // trip is covered too.
+    return this.runRefExclusive(repoPath, () => this.pullRepository(repoPath));
+  }
+
+  private async pullRepository(repoPath: string): Promise<void> {
     const opId = progressService.startOperation('pull', 'Pulling from remote...');
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.
-    const result = await gitService.pull({ path: repoPath });
+    const result = await gitService.pull({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       // Pinned: a ref-only pull emits no working-tree watcher event, so a
@@ -3658,23 +4565,43 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'MERGE_CONFLICT') {
       progressService.failOperation(opId);
+      // Not a failure from the user's side — the pull landed and now needs
+      // resolving. A red "Pull failed" here reads as "nothing happened".
+      showToast('Pull produced conflicts — resolve them to finish the merge', 'warning');
       this.conflictOperationType = 'merge';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
       this.refreshConflictDialogRepo(repoPath);
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       progressService.failOperation(opId);
+      showToast('Pull produced conflicts — resolve them to finish the rebase', 'warning');
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
       this.openConflictDialogPinned(repoPath);
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Pull failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        showToast(result.error?.message ?? 'Pull failed', 'error');
+      }
     }
   }
 
-  private async handlePush(): Promise<void> {
+  private handlePush(): Promise<void> {
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    // Keyed like the force-push sibling, which was hardened against exactly
+    // this: the shortcut has no e.repeat guard, so holding Ctrl+Shift+U fires
+    // it many times a second and every repeat launched a fully concurrent
+    // push. Sharing the key also makes Push and Force Push mutually exclusive
+    // on one repo.
+    return this.runPushExclusive(repoPath, () => this.pushRepository());
+  }
+
+  private async pushRepository(): Promise<void> {
     if (!this.activeRepository) return;
     const opId = progressService.startOperation('push', 'Pushing to remote...');
     // gitService.push returns a CommandResult (invokeCommand never throws), so we
@@ -3684,13 +4611,24 @@ export class AppShell extends LitElement {
     // Pinned: push is a slow network op; if the user switches tabs while it
     // runs, the refresh must target the repo that pushed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.push({ path: repoPath });
+    const result = await gitService.push({ path: repoPath, silent: true });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      showToast(result.error?.message ?? 'Push failed', 'error');
+      // A security-gate refusal already announced itself, and a declined
+      // confirm is the user's own decision — reporting either as a red error
+      // tells them their own click failed.
+      if (!gitService.isNetworkGateRefusal(result.error)) {
+        // Through the suggestion service so a non-fast-forward rejection offers
+        // the Pull Now action the app already implements — a plain toast made
+        // that recovery unreachable from the only push surface there is.
+        showErrorWithSuggestion(result.error?.message ?? '', 'Push failed', {
+          operation: 'push',
+          repoPath,
+        });
+      }
     }
   }
 
@@ -3698,11 +4636,20 @@ export class AppShell extends LitElement {
     progressService.cancelOperation(e.detail.id);
   }
 
-  private async handleCreateStash(): Promise<void> {
-    if (!this.activeRepository) return;
+  private handleCreateStash(): Promise<void> {
+    if (!this.activeRepository) return Promise.resolve();
     // Pinned: if the user switches tabs while the stash is being created, the
     // refresh must target the repo that was stashed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
+    // `git stash push` resets the working tree to HEAD and prepends to the
+    // stash list, renumbering every entry — a full working-tree mutation. The
+    // shortcut fires through open dialogs, and it was for a long time the only
+    // route to a stash at all, so it was never in the enumeration the lock
+    // sweep worked from.
+    return this.runRefExclusive(repoPath, () => this.createStashOnRepo(repoPath));
+  }
+
+  private async createStashOnRepo(repoPath: string): Promise<void> {
     // includeUntracked matches the stash-list button (lv-stash-list.ts): both
     // surfaces report an identical "Stash created", so they must stash the same
     // set — otherwise the shortcut silently leaves untracked files behind and
@@ -3734,10 +4681,20 @@ export class AppShell extends LitElement {
 
     // Checked before the confirm so a destructive prompt is never shown for a
     // run the shared claim below was always going to refuse.
-    if (isMaintenanceRunning(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
+
+    // Claimed BEFORE the confirm, not only checked. showConfirm is an IPC round
+    // trip before the native dialog takes focus, and the palette entry can be
+    // re-invoked through it — so a double-invoke read and dismissed the same
+    // "permanently deletes unreachable objects" warning twice for one gesture.
+    // runExclusive owns the release, including on a declined confirm.
+    const claim = `maintenance:${repoPath}`;
+    if (this.destructiveActionsInFlight.has(claim)) return;
+    this.destructiveActionsInFlight.add(claim);
+    try {
 
     // Shared with the Repository Health dialog so the two surfaces that reach
     // this command cannot drift apart on whether it is gated.
@@ -3749,7 +4706,7 @@ export class AppShell extends LitElement {
     // start a second gc over the dialog's — or race a prune against it on the
     // objects directory, which git does not serialise at all.
     if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -3767,6 +4724,9 @@ export class AppShell extends LitElement {
     } finally {
       releaseMaintenance(repoPath);
     }
+    } finally {
+      this.destructiveActionsInFlight.delete(claim);
+    }
   }
 
   private async handleRunFsck(): Promise<void> {
@@ -3774,8 +4734,10 @@ export class AppShell extends LitElement {
 
     const repoPath = this.activeRepository.repository.path;
 
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    // Read-only: fsck writes nothing, so it must not take the exclusive
+    // working-tree lock — see tryAcquireMaintenanceReadOnly.
+    if (!tryAcquireMaintenanceReadOnly(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
 
@@ -3801,31 +4763,51 @@ export class AppShell extends LitElement {
 
     const repoPath = this.activeRepository.repository.path;
 
-    if (isMaintenanceRunning(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(repoPath)) {
+      this.warnRepositoryBusy();
       return;
     }
 
-    if (!(await confirmPrune())) return;
+    // Claimed before the confirm — see handleRunGc.
+    const claim = `maintenance:${repoPath}`;
+    if (this.destructiveActionsInFlight.has(claim)) return;
+    this.destructiveActionsInFlight.add(claim);
+    try {
+      if (!(await confirmPrune())) return;
 
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
-      return;
+      if (!tryAcquireMaintenance(repoPath)) {
+        this.warnRepositoryBusy();
+        return;
+      }
+
+      // silent: the service toasts by default; this handler owns the message.
+      const result = await gitService
+        .runPrune({ path: repoPath, silent: true })
+        .finally(() => releaseMaintenance(repoPath));
+      showToast(
+        result.success
+          ? 'Pruned unreachable objects'
+          : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
+        result.success ? 'success' : 'error'
+      );
+    } finally {
+      this.destructiveActionsInFlight.delete(claim);
     }
-
-    // silent: the service toasts by default; this handler owns the message.
-    const result = await gitService
-      .runPrune({ path: repoPath, silent: true })
-      .finally(() => releaseMaintenance(repoPath));
-    showToast(
-      result.success
-        ? 'Pruned unreachable objects'
-        : `Prune failed: ${result.error?.message ?? 'Unknown error'}`,
-      result.success ? 'success' : 'error'
-    );
   }
 
-  private async handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+  private handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+    // The third checkout surface. Round 33 folded the ref menu's and the graph
+    // label's into this lock and left the palette's out — the same stale
+    // enumeration again. Two concurrent auto-stash checkouts cross-apply and
+    // cross-drop each other's stash, because a stash index is a position.
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromPalette(e));
+  }
+
+  private async checkoutBranchFromPalette(
+    e: CustomEvent<{ branch: string }>,
+  ): Promise<void> {
     if (!this.activeRepository) return;
 
     const branch = e.detail.branch;
@@ -3946,7 +4928,16 @@ export class AppShell extends LitElement {
       <lv-toolbar
         @open-settings=${() => { this.showSettings = true; }}
         @open-shortcuts=${() => { this.showShortcuts = true; }}
-        @open-command-palette=${() => { this.showCommandPalette = true; }}
+        @open-command-palette=${() => {
+            // Through openCommandPalette, like Ctrl+P. Setting the flag alone
+            // skipped the loader, so the toolbar button opened a palette with
+            // no branch or file entries at all on a cold start — and after a
+            // tab switch, with the PREVIOUS repo's branches. Selecting one ran
+            // a checkout against the active repo, stashing its whole working
+            // tree for a ref it does not have, and offered "Switch to <current
+            // branch>" — the no-op the palette excludes on purpose.
+            void this.openCommandPalette();
+          }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
         @repository-refresh=${() => this.handleRefresh()}
@@ -3973,7 +4964,14 @@ export class AppShell extends LitElement {
                 @tag-selected=${this.handleTagSelected}
                 @branch-selected=${this.handleBranchSelected}
                 @repository-changed=${() => this.handleRefresh()}
-                @create-tag=${() => this.createTagDialog?.open()}
+                @create-tag=${(e: CustomEvent<{ targetRef?: string }>) =>
+                  this.createTagDialog?.open(e.detail?.targetRef)}
+                @create-branch=${(e: CustomEvent<{ startPoint?: string }>) =>
+                  this.createBranchDialog?.open(e.detail?.startPoint)}
+                @interactive-rebase=${(e: CustomEvent<{ onto?: string }>) => {
+                  const onto = e.detail?.onto;
+                  if (onto) this.interactiveRebaseDialog?.open(onto);
+                }}
               >
                 <lv-left-panel></lv-left-panel>
               </aside>
@@ -4016,7 +5014,11 @@ export class AppShell extends LitElement {
                             : ''}
                           ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
-                                <button class="operation-abort-btn" @click=${this.handleAbortOperation}>
+                                <button
+                                  class="operation-abort-btn"
+                                  ?disabled=${this.abortInProgress || this.isRefOperationInFlight()}
+                                  @click=${() => this.handleAbortOperation()}
+                                >
                                   Abort
                                 </button>
                               `
@@ -4185,6 +5187,7 @@ export class AppShell extends LitElement {
               .initialFilePath=${this.conflictDialogConfig.initialFilePath}
               .stashSourceCertain=${this.conflictDialogConfig.stashSourceCertain}
               .stashIndex=${this.conflictDialogConfig.stashIndex}
+              .stashOid=${this.conflictDialogConfig.stashOid}
               .dropStashOnComplete=${this.conflictDialogConfig.dropStashOnComplete}
               .squashMerge=${this.conflictDialogConfig.squashMerge}
               .gitflowFinish=${this.conflictDialogConfig.gitflowFinish}
@@ -4206,14 +5209,14 @@ export class AppShell extends LitElement {
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleQuickAmend} title="Amend (edit) this commit">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
                 </svg>
                 Amend
               </button>
-              <button class="context-menu-item" @click=${this.handleRewordCommit} title="Change the commit message">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRewordCommit} title="Change the commit message">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="17" y1="10" x2="3" y2="10"></line>
                   <line x1="21" y1="6" x2="3" y2="6"></line>
@@ -4223,7 +5226,7 @@ export class AppShell extends LitElement {
                 Reword
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleFixupCommit} title="Create fixup commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                   <polyline points="17 8 12 3 7 8"></polyline>
@@ -4231,7 +5234,7 @@ export class AppShell extends LitElement {
                 </svg>
                 Fixup into this
               </button>
-              <button class="context-menu-item" @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleSquashCommit} title="Create squash commit for this commit (requires staged changes)">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                   <line x1="9" y1="3" x2="9" y2="21"></line>
@@ -4240,14 +5243,14 @@ export class AppShell extends LitElement {
                 Squash into this
               </button>
               <div class="context-menu-divider"></div>
-              <button class="context-menu-item" @click=${this.handleCherryPick}>
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleCherryPick}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z"/>
                   <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" fill="none"/>
                 </svg>
                 Cherry-pick
               </button>
-              <button class="context-menu-item" @click=${this.handleRevertCommit}>
+              <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRevertCommit}>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0zM8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3z"/>
                   <path d="M8 4v4l3 2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
@@ -4273,13 +5276,13 @@ export class AppShell extends LitElement {
               <div class="context-menu-divider"></div>
               <div class="context-menu-submenu">
                 <span class="context-menu-label">Reset to this commit</span>
-                <button class="context-menu-item" @click=${() => this.handleResetToCommit('soft')}>
+                <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('soft')}>
                   Soft (keep changes staged)
                 </button>
-                <button class="context-menu-item" @click=${() => this.handleResetToCommit('mixed')}>
+                <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('mixed')}>
                   Mixed (keep changes unstaged)
                 </button>
-                <button class="context-menu-item danger" @click=${() => this.handleResetToCommit('hard')}>
+                <button class="context-menu-item danger" ?disabled=${this.isRefOperationInFlight()} @click=${() => this.handleResetToCommit('hard')}>
                   Hard (discard all changes)
                 </button>
               </div>
@@ -4301,13 +5304,17 @@ export class AppShell extends LitElement {
               <div class="context-menu-divider"></div>
               ${this.refContextMenu.refType === 'localBranch'
                 ? html`
-                    <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                    <button
+                      class="context-menu-item"
+                      ?disabled=${this.isRefOperationInFlight()}
+                      @click=${this.handleRefCheckout}
+                    >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="20 6 9 17 4 12"></polyline>
                       </svg>
                       Checkout
                     </button>
-                    <button class="context-menu-item" @click=${this.handleRefMerge}>
+                    <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefMerge}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <circle cx="18" cy="18" r="3"></circle>
                         <circle cx="6" cy="6" r="3"></circle>
@@ -4315,7 +5322,7 @@ export class AppShell extends LitElement {
                       </svg>
                       Merge into current branch
                     </button>
-                    <button class="context-menu-item" @click=${this.handleRefRebase}>
+                    <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefRebase}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="6" y1="3" x2="6" y2="15"></line>
                         <circle cx="18" cy="6" r="3"></circle>
@@ -4324,24 +5331,41 @@ export class AppShell extends LitElement {
                       </svg>
                       Rebase current branch onto this
                     </button>
-                    <div class="context-menu-divider"></div>
-                    <button class="context-menu-item danger" @click=${this.handleRefDeleteBranch}>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                      </svg>
-                      Delete branch
-                    </button>
+                    ${this.refContextMenu.isHead
+                      ? nothing
+                      : html`
+                          <div class="context-menu-divider"></div>
+                          <!-- Hidden on the checked-out branch: libgit2 refuses
+                               to delete the current HEAD, so the item could only
+                               ever produce a confirm followed by an error. The
+                               sidebar branch list already hides it; the graph
+                               did not. -->
+                          <button
+                            class="context-menu-item danger"
+                            ?disabled=${this.isRefOperationInFlight()}
+                            @click=${this.handleRefDeleteBranch}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                              <polyline points="3 6 5 6 21 6"></polyline>
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            Delete branch
+                          </button>
+                        `}
                   `
                 : this.refContextMenu.refType === 'remoteBranch'
                   ? html`
-                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.isRefOperationInFlight()}
+                        @click=${this.handleRefCheckout}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="20 6 9 17 4 12"></polyline>
                         </svg>
                         Checkout
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefMerge}>
+                      <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefMerge}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <circle cx="18" cy="18" r="3"></circle>
                           <circle cx="6" cy="6" r="3"></circle>
@@ -4349,7 +5373,7 @@ export class AppShell extends LitElement {
                         </svg>
                         Merge into current branch
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefRebase}>
+                      <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${this.handleRefRebase}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="6" y1="3" x2="6" y2="15"></line>
                           <circle cx="18" cy="6" r="3"></circle>
@@ -4360,13 +5384,22 @@ export class AppShell extends LitElement {
                       </button>
                     `
                   : html`
-                      <button class="context-menu-item" @click=${this.handleRefCheckout}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.isRefOperationInFlight()}
+                        @click=${this.handleRefCheckout}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="20 6 9 17 4 12"></polyline>
                         </svg>
                         Checkout tag
                       </button>
-                      <button class="context-menu-item" @click=${this.handleRefPushTag}>
+                      <button
+                        class="context-menu-item"
+                        ?disabled=${this.isRefOperationInFlight() ||
+                        this.isTagPushInFlight(this.refContextMenu.refName)}
+                        @click=${this.handleRefPushTag}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <line x1="12" y1="19" x2="12" y2="5"></line>
                           <polyline points="5 12 12 5 19 12"></polyline>
@@ -4374,7 +5407,11 @@ export class AppShell extends LitElement {
                         Push tag to remote
                       </button>
                       <div class="context-menu-divider"></div>
-                      <button class="context-menu-item danger" @click=${this.handleRefDeleteTag}>
+                      <button
+                        class="context-menu-item danger"
+                        ?disabled=${this.isRefOperationInFlight()}
+                        @click=${this.handleRefDeleteTag}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="3 6 5 6 21 6"></polyline>
                           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -4476,7 +5513,12 @@ export class AppShell extends LitElement {
           ?open=${this.showSubmodules}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showSubmodules = false; }}
-          @submodules-changed=${() => this.handleRefresh()}
+          @submodules-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-submodule-dialog>
       ` : ''}
 
@@ -4485,7 +5527,12 @@ export class AppShell extends LitElement {
           ?open=${this.showWorktrees}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showWorktrees = false; }}
-          @worktrees-changed=${() => this.handleRefresh()}
+          @worktrees-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-worktree-dialog>
       ` : ''}
 
@@ -4494,7 +5541,12 @@ export class AppShell extends LitElement {
           ?open=${this.showLfs}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showLfs = false; }}
-          @lfs-changed=${() => this.handleRefresh()}
+          @lfs-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Routed to the repo the operation RAN ON. handleRefresh resolves
+            // activeRepository at call time, so a Ctrl+Tab during a slow
+            // operation refreshed the wrong repo — and left the right one out
+            // of staleRepoPaths, so it never recovered on re-activation either.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-lfs-dialog>
       ` : ''}
 
@@ -4503,7 +5555,8 @@ export class AppShell extends LitElement {
           ?open=${this.showGpg}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showGpg = false; }}
-          @gpg-changed=${() => this.handleRefresh()}
+          @gpg-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-gpg-dialog>
       ` : ''}
 

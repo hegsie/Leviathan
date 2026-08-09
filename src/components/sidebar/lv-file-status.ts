@@ -11,6 +11,12 @@ import type { StatusEntry, FileStatus } from "../../types/git.types.ts";
 import { repositoryStore } from "../../stores/repository.store.ts";
 import { settingsStore } from "../../stores/settings.store.ts";
 import { isTopOverlay } from "../../utils/overlay-stack.ts";
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface FileContextMenuState {
   visible: boolean;
@@ -721,13 +727,41 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard(entries, dirPath))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard(entries, dirPath))) return;
 
-    const result = await gitService.discardChanges(repoPath, paths);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, paths);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -738,6 +772,9 @@ export class LvFileStatus extends LitElement {
 
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.requestUpdate();
+    });
 
     // Add document click listener for closing context menu
     document.addEventListener("click", this.handleDocumentClick);
@@ -752,9 +789,19 @@ export class LvFileStatus extends LitElement {
     this.boundHandleStageAllEvent = () => this.handleStageAll();
     this.boundHandleUnstageAllEvent = () => this.handleUnstageAll();
     this.boundHandleRefreshEvent = () => this.refresh();
+    this.boundMarkStatusDirty = () => {
+      this.statusDirtySeq++;
+    };
     window.addEventListener("stage-all", this.boundHandleStageAllEvent);
     window.addEventListener("unstage-all", this.boundHandleUnstageAllEvent);
     window.addEventListener("status-refresh", this.boundHandleRefreshEvent);
+    // `repository-refresh` is the broadcast handleRefresh() fires after EVERY
+    // state-mutating operation — stash apply/pop/drop, reset, merge, rebase,
+    // revert, a hunk staged from the diff view. Marking dirty here (rather than
+    // reloading) means ensureStatusFresh cannot skip after an out-of-band
+    // mutation, without enumerating the operations one by one: that list is
+    // exactly what went stale and put "Stage all" back on a cached list.
+    window.addEventListener("repository-refresh", this.boundMarkStatusDirty);
 
     // Listen for keyboard events
     this.addEventListener("keydown", this.handleKeyDown);
@@ -766,6 +813,15 @@ export class LvFileStatus extends LitElement {
   private handleKeyDown = (e: KeyboardEvent): void => {
     const allFiles = this.getAllVisibleFiles();
     if (allFiles.length === 0) return;
+
+    // Single-character keys are bare shortcuts, never chords: the host row
+    // carries tabindex="0", so clicking a file and then hitting the save
+    // reflex Ctrl+S ran "stage selected" and Ctrl+U ran "unstage selected",
+    // both silently. Modifier-carrying presses belong to the app-level
+    // shortcuts, so let them through untouched. The multi-character arms
+    // (Arrow*, Enter, Home, End) are unaffected — same guard lv-diff-view
+    // already applies to its own `[` / `]` bindings.
+    if (e.key.length === 1 && (e.ctrlKey || e.metaKey || e.altKey)) return;
 
     switch (e.key) {
       case "ArrowDown":
@@ -923,9 +979,12 @@ export class LvFileStatus extends LitElement {
   private boundHandleStageAllEvent: (() => void) | null = null;
   private boundHandleUnstageAllEvent: (() => void) | null = null;
   private boundHandleRefreshEvent: (() => void) | null = null;
+  private boundMarkStatusDirty: (() => void) | null = null;
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
 
     // Remove document click listener
     document.removeEventListener("click", this.handleDocumentClick);
@@ -959,6 +1018,9 @@ export class LvFileStatus extends LitElement {
         this.boundHandleRefreshEvent,
       );
     }
+    if (this.boundMarkStatusDirty) {
+      window.removeEventListener("repository-refresh", this.boundMarkStatusDirty);
+    }
 
     // Remove keyboard listener
     this.removeEventListener("keydown", this.handleKeyDown);
@@ -989,6 +1051,9 @@ export class LvFileStatus extends LitElement {
     if (this.statusRefreshTimeout) {
       clearTimeout(this.statusRefreshTimeout);
     }
+    // The list is known-stale from the moment the watcher fires, not from when
+    // the debounce expires — a stage-all inside that window must reload.
+    this.statusDirtySeq++;
     this.statusRefreshTimeout = setTimeout(() => {
       this.statusRefreshTimeout = null;
       this.loadStatus();
@@ -999,6 +1064,7 @@ export class LvFileStatus extends LitElement {
     if (changedProperties.has("repositoryPath") && this.repositoryPath) {
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
+      this.statusDirtySeq++;
       // Start watching the new repository
       try {
         await watcherService.startWatching(this.repositoryPath);
@@ -1014,13 +1080,62 @@ export class LvFileStatus extends LitElement {
   // can't catch A -> B -> A switches reordering two loads for A)
   private statusLoadSeq = new Map<string, number>();
 
+  /** Path of the last COMPLETED successful load.
+   *
+   * Freshness is a GENERATION counter, not a boolean. A boolean is wrong
+   * because ensureStatusFresh awaits a load already in flight: if the mutation
+   * happened after that load started, its result predates the change, and
+   * clearing a flag on completion would declare a stale list fresh. Each dirty
+   * signal bumps `statusDirtySeq`; a load records which generation it observed,
+   * so a signal that arrives mid-flight still leaves the two unequal. */
+  private statusLoadedForPath: string | null = null;
+  /** Re-entrancy guard for the discard controls; see handleDiscardFile. */
+  @state() private discarding = false;
+  private unsubscribeRefOps?: () => void;
+  private statusDirtySeq = 1;
+  private statusCleanSeq = 0;
+  /** The load currently in flight, so a caller can await it instead of racing. */
+  private statusLoadInFlight: Promise<void> | null = null;
+
+  /**
+   * Resolve once `unstagedFiles`/`stagedFiles` reflect the current repository.
+   *
+   * "Stage all" must act on what is on disk, not on a list left over from
+   * another repo or from before a watcher event. Calling loadStatus()
+   * unconditionally did that but cost a full working-tree walk on every
+   * keypress — the sequence guard only discards a stale RESPONSE, it never
+   * skips the request.
+   */
+  public async ensureStatusFresh(): Promise<void> {
+    if (this.statusLoadInFlight) {
+      await this.statusLoadInFlight;
+    }
+    if (
+      this.statusCleanSeq !== this.statusDirtySeq ||
+      this.statusLoadedForPath !== this.repositoryPath
+    ) {
+      await this.loadStatus();
+    }
+  }
+
   async loadStatus(): Promise<void> {
+    const run = this.runLoadStatus();
+    this.statusLoadInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.statusLoadInFlight === run) this.statusLoadInFlight = null;
+    }
+  }
+
+  private async runLoadStatus(): Promise<void> {
     if (!this.repositoryPath) return;
     // Captured before the await so a mid-flight tab switch still writes the
     // result to the repo it was loaded FROM
     const loadedPath = this.repositoryPath;
     const seq = (this.statusLoadSeq.get(loadedPath) ?? 0) + 1;
     this.statusLoadSeq.set(loadedPath, seq);
+    const dirtyAtStart = this.statusDirtySeq;
 
     // Only show loading indicator on the very first load
     if (!this.hasInitiallyLoaded) {
@@ -1059,6 +1174,12 @@ export class LvFileStatus extends LitElement {
         stagedFiles: newStagedFiles,
         unstagedFiles: newUnstagedFiles,
       });
+
+      // The list for `loadedPath` is now current AS OF the generation this load
+      // observed — a dirty signal that arrived while it was in flight leaves
+      // the counters unequal, so the next ensureStatusFresh reloads.
+      this.statusLoadedForPath = loadedPath;
+      this.statusCleanSeq = dirtyAtStart;
 
       if (!isCurrent) return;
 
@@ -1344,15 +1465,41 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard([file]))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard([file]))) return;
 
-    const result = await gitService.discardChanges(repoPath, [
-      file.path,
-    ]);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, [file.path]);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1482,16 +1629,44 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard(entries))) return;
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard(entries))) return;
 
-    const result = await gitService.discardChanges(repoPath, paths);
-    if (result.success) {
-      const newSelected = new Set(this.selectedFiles);
-      paths.forEach((p) => newSelected.delete(p));
-      this.selectedFiles = newSelected;
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      const result = await gitService.discardChanges(repoPath, paths);
+      if (result.success) {
+        const newSelected = new Set(this.selectedFiles);
+        paths.forEach((p) => newSelected.delete(p));
+        this.selectedFiles = newSelected;
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1608,14 +1783,41 @@ export class LvFileStatus extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (which
     // rebinds this.repositoryPath) while the confirm is up.
     const repoPath = this.repositoryPath;
-    if (!(await this.confirmDiscard([file]))) return;
-    const result = await gitService.discardChanges(repoPath, [
-      file.path,
-    ]);
-    if (result.success) {
-      await this.loadStatus();
-    } else {
-      showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+    // Claimed BEFORE the confirm. showConfirm is an IPC round trip before the
+    // native dialog opens and takes focus, and the row × / toolbar button stay
+    // on screen through that window — so a double-click stacked two
+    // "permanently delete" prompts for one gesture and ran the discard twice.
+    // The context-menu surfaces elsewhere are exempt because they close their
+    // menu synchronously; these controls do not.
+    // Reports its refusal. Returning bare here meant a discard requested while
+    // "Discard all selected" was still running over hundreds of files did
+    // NOTHING visible — no toast, no error, not even a console line — because
+    // this check sat above the one that speaks.
+    if (this.discarding) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    // discard_changes does its own forced checkout against the same working
+    // tree every other destructive surface mutates, and the backend takes no
+    // per-repo lock — so this must join the shared one rather than guard only
+    // itself. Claimed before the confirm, like its siblings.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.discarding = true;
+    try {
+      if (!(await this.confirmDiscard([file]))) return;
+
+      const result = await gitService.discardChanges(repoPath, [file.path]);
+      if (result.success) {
+        await this.loadStatus();
+      } else {
+        showToast(result.error?.message ?? 'Failed to discard changes', 'error');
+      }
+    } finally {
+      this.discarding = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -1700,6 +1902,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard changes"
                   aria-label="Discard changes for ${name}"
+                  ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                   @click=${(e: Event) => this.handleDiscardFile(file, e)}
                 >
                   <svg
@@ -1794,6 +1997,7 @@ export class LvFileStatus extends LitElement {
                   <button
                     class="file-action"
                     title="Discard changes"
+                    ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                     @click=${(e: Event) => this.handleDiscardFile(file, e)}
                   >
                     <svg
@@ -1893,6 +2097,7 @@ export class LvFileStatus extends LitElement {
                   class="file-action"
                   title="Discard directory changes"
                   aria-label="Discard changes for directory ${path}"
+                  ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                   @click=${(e: Event) => this.handleDiscardDirectory(path, e)}
                 >
                   <svg
@@ -1969,6 +2174,7 @@ export class LvFileStatus extends LitElement {
               </button>
               <button
                 class="selection-action-btn danger"
+                ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
                 @click=${() => this.handleDiscardSelected()}
                 title="Discard selected files"
               >
@@ -2123,11 +2329,15 @@ export class LvFileStatus extends LitElement {
           </svg>
           Copy file path
         </button>
+        ${isStaged
+          ? nothing
+          : html`
         <div class="context-menu-divider" role="separator"></div>
         <button
           class="context-menu-item danger"
           role="menuitem"
           @click=${this.handleContextDiscard}
+          ?disabled=${this.discarding || isRefOpRunning(this.repositoryPath)}
         >
           <svg
             viewBox="0 0 24 24"
@@ -2142,6 +2352,7 @@ export class LvFileStatus extends LitElement {
           </svg>
           Discard changes
         </button>
+        `}
       </div>
     `;
   }

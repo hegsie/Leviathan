@@ -203,7 +203,7 @@ test.describe('Settings Dialog — Local AI', () => {
       (window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
       }).__TAURI_INTERNALS__.invoke = async (command: string, args?: unknown) => {
-        if (command in mocks) return mocks[command];
+        if (command in mocks) return (mocks as Record<string, unknown>)[command];
         if (command === 'load_model') {
           // Never resolve — simulates a slow load
           return new Promise(() => {});
@@ -287,7 +287,7 @@ test.describe('Settings Dialog — Local AI', () => {
         if (command === 'is_ai_available') {
           return !!(window as unknown as { __MODEL_LOADED__?: boolean }).__MODEL_LOADED__;
         }
-        if (command in mocks) return mocks[command];
+        if (command in mocks) return (mocks as Record<string, unknown>)[command];
         return originalInvoke(command, args);
       };
     }, {
@@ -596,7 +596,7 @@ test.describe('Local AI Full Lifecycle', () => {
           case 'get_downloaded_models':
             return [mocks.downloadedModel];
           default:
-            if (command in mocks.base) return mocks.base[command];
+            if (command in mocks.base) return (mocks.base as Record<string, unknown>)[command];
             return originalInvoke(command, args);
         }
       };

@@ -13,7 +13,7 @@ use crate::error::Result;
 /// silently destroying the in-progress operation. Mirror git by refusing.
 /// (A plain single-op Merge / CherryPick / Revert is intentionally allowed:
 /// `git reset` is the documented way to abort those.)
-fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
+pub(crate) fn ensure_resettable(repo: &git2::Repository) -> Result<()> {
     use git2::RepositoryState::*;
     match repo.state() {
         Rebase | RebaseInteractive | RebaseMerge | ApplyMailbox | ApplyMailboxOrRebase => {
@@ -154,12 +154,16 @@ pub async fn reset_to_reflog(
     };
 
     // A MIXED or HARD reset triggers libgit2's repository state cleanup, which
-    // would delete any in-progress rebase/bisect/sequencer state. Refuse in
-    // that case, mirroring what canonical git preserves. (SOFT resets do not
-    // trigger the cleanup, so they are left alone.)
-    if matches!(reset_type, git2::ResetType::Mixed | git2::ResetType::Hard) {
-        ensure_resettable(&repo)?;
-    }
+    // would delete any in-progress rebase/bisect/sequencer state.
+    //
+    // A SOFT reset skips that cleanup, but it still repoints HEAD — and doing
+    // that under a paused rebase leaves the sequencer's orig-head/onto files
+    // describing a base the user never chose, so Continue replays onto the
+    // wrong commit. `rewrite.rs`'s reset applies this check for every mode, so
+    // gating it on the type here meant the same soft reset was refused from the
+    // graph and allowed from Undo History. Round 30 shared the helper between
+    // the two paths but not the condition; this finishes that.
+    ensure_resettable(&repo)?;
 
     // Perform the reset
     repo.reset(target_commit.as_object(), reset_type, None)?;
@@ -339,7 +343,7 @@ mod tests {
         let git_repo = repo.repo();
         let status = git_repo.statuses(None).unwrap();
         // The file from second commit should show as staged
-        assert!(status.len() > 0 || repo.path.join("file2.txt").exists());
+        assert!(!status.is_empty() || repo.path.join("file2.txt").exists());
     }
 
     #[tokio::test]

@@ -395,6 +395,14 @@ export class LvConfigDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while an identity write is in flight. The host's tab-close sweep must
+   * not report "configuration closed" over a config write still landing.
+   */
+  public get operationInFlight(): boolean {
+    return this.saving;
+  }
+
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;

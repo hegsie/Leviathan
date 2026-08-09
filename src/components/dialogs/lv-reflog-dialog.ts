@@ -11,6 +11,13 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { ReflogEntry } from '../../types/git.types.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 interface ReflogContextMenuState {
   visible: boolean;
@@ -323,6 +330,26 @@ export class LvReflogDialog extends LitElement {
   @state() private loading = false;
   @state() private selectedIndex: number | null = null;
   @state() private resetting = false;
+
+  /**
+   * The OBSERVATION half of the shared lock, which this dialog was missing.
+   *
+   * handleReset already CLAIMS the lock and correctly refuses when another
+   * surface holds it — but the Undo and Hard buttons were bound to `resetting`
+   * alone, a flag that only ever tracked this dialog. So while a checkout or a
+   * merge ran elsewhere, "Hard reset (discard all changes)" stayed fully
+   * clickable and did nothing but raise a refusal toast: exactly the dead
+   * control the rest of the lock rollout exists to eliminate. isRefOpRunning is
+   * plain module state Lit cannot observe, so the subscription is what makes
+   * the binding re-render on a transition.
+   */
+  @state() private refOpsVersion = 0;
+  private unsubscribeRefOps?: () => void;
+
+  private get repositoryBusy(): boolean {
+    void this.refOpsVersion;
+    return isRefOpRunning(this.pinnedRepoPath || this.repositoryPath);
+  }
   @state() private contextMenu: ReflogContextMenuState = { visible: false, x: 0, y: 0, entry: null };
 
   private handleDocumentClick = (): void => {
@@ -347,6 +374,15 @@ export class LvReflogDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the reflog reset is running. A hard reset discards uncommitted
+   * work, so the host's tab-close sweep must not report "undo history closed"
+   * over one that is still in flight.
+   */
+  public get operationInFlight(): boolean {
+    return this.resetting;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {
@@ -358,8 +394,30 @@ export class LvReflogDialog extends LitElement {
       // session on top of it.
       if (this.resetting) return;
       this.pinnedRepoPath = this.repositoryPath;
+      this.focusInitialControl();
       await this.loadReflog();
     }
+  }
+
+  /**
+   * Move focus into the dialog once it is on screen.
+   *
+   * This dialog builds its own overlay instead of using <lv-modal>, and had no
+   * focus() anywhere: opening it from the command palette left focus on
+   * <body>, so Tab started at the skip link and walked the whole app
+   * UNDERNEATH the backdrop before ever reaching the reflog's own controls —
+   * every Enter on the way acting on a live control behind the dialog.
+   *
+   * The close button is the dialog's only non-destructive control (the entry
+   * rows carry Undo and Hard reset), so focus starts there.
+   */
+  private focusInitialControl(): void {
+    requestAnimationFrame(() => {
+      if (!this.open) return;
+      if (containsDeepActiveElement(this)) return;
+      const closeBtn = this.shadowRoot?.querySelector('.close-btn') as HTMLElement | null;
+      closeBtn?.focus();
+    });
   }
 
   private async loadReflog(): Promise<void> {
@@ -417,6 +475,9 @@ export class LvReflogDialog extends LitElement {
     super.connectedCallback();
     document.addEventListener('keydown', this.handleKeyDown);
     document.addEventListener('click', this.handleDocumentClick);
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
   }
 
   disconnectedCallback(): void {
@@ -424,6 +485,8 @@ export class LvReflogDialog extends LitElement {
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
     document.removeEventListener('click', this.handleDocumentClick);
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   public close(): void {
@@ -438,11 +501,27 @@ export class LvReflogDialog extends LitElement {
 
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
+    // Claimed BEFORE the confirm, not after. Unlike the context-menu surfaces —
+    // which close their menu synchronously and so cannot be clicked twice — the
+    // reflog rows stay on screen through the confirm, and showConfirm is an IPC
+    // round trip before the native dialog takes focus. A double-click stacked
+    // two reset prompts, and a hard reset run twice discards uncommitted work
+    // against a branch that has already moved.
+    this.resetting = true;
 
     // The repo the listed entries were read from — NOT the live prop. Pinning
     // only at click time still reset the wrong repository whenever the tab
     // switch happened before the click rather than during the confirm.
     const repoPath = this.pinnedRepoPath;
+
+    // `resetting` only guards THIS dialog. The sidebar lists and the graph menu
+    // gate on the shared working-tree lock, so without claiming it a checkout
+    // stayed clickable while this reset was moving the branch.
+    if (!tryAcquireRefOp(repoPath)) {
+      this.resetting = false;
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
 
     // EVERY mode is a reset — the "Undo" button runs a mixed one — so every
     // mode repoints the branch and drops commits off it. Gating the confirm on
@@ -467,9 +546,11 @@ export class LvReflogDialog extends LitElement {
       `Reset to ${entry.shortId}?\n\n${droppedNote}\n\n${modeNote}`,
       'warning'
     );
-    if (!confirmed) return;
-
-    this.resetting = true;
+    if (!confirmed) {
+      this.resetting = false;
+      releaseRefOp(repoPath);
+      return;
+    }
 
     try {
       // entry.oid pins the reset to the commit the user was actually shown:
@@ -478,6 +559,11 @@ export class LvReflogDialog extends LitElement {
       const result = await gitService.resetToReflog(repoPath, entry.index, mode, entry.oid);
 
       if (result.success) {
+        // The graph's reset toasts this exact line and Smart Undo toasts too;
+        // this surface closed in silence, so the strongest signal after the
+        // most destructive action here was nothing — indistinguishable from
+        // having pressed Escape.
+        showToast(`Reset to ${entry.shortId} (${mode})`, 'success');
         this.dispatchEvent(new CustomEvent('undo-complete', {
           // repositoryPath so the host refreshes the repo the reset ran on —
           // the user may have switched tabs during the IPC await.
@@ -504,6 +590,7 @@ export class LvReflogDialog extends LitElement {
       );
     } finally {
       this.resetting = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -588,7 +675,7 @@ export class LvReflogDialog extends LitElement {
             <button
               class="reset-btn"
               @click=${(e: Event) => { e.stopPropagation(); this.handleReset(entry, 'mixed'); }}
-              ?disabled=${this.resetting}
+              ?disabled=${this.resetting || this.repositoryBusy}
               title="Reset (keep changes unstaged)"
             >
               Undo
@@ -596,7 +683,7 @@ export class LvReflogDialog extends LitElement {
             <button
               class="reset-btn hard"
               @click=${(e: Event) => { e.stopPropagation(); this.handleReset(entry, 'hard'); }}
-              ?disabled=${this.resetting}
+              ?disabled=${this.resetting || this.repositoryBusy}
               title="Hard reset (discard all changes)"
             >
               Hard
@@ -659,7 +746,11 @@ export class LvReflogDialog extends LitElement {
     return html`
       <div class="context-menu" style="left: ${x}px; top: ${y}px">
         ${!isCurrent ? html`
-          <button class="context-menu-item" @click=${this.handleContextCheckout}>
+          <button
+            class="context-menu-item"
+            ?disabled=${this.resetting || this.repositoryBusy}
+            @click=${this.handleContextCheckout}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="1 4 1 10 7 10"></polyline>
               <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>

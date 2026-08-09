@@ -97,6 +97,67 @@ describe('lv-tag-list feedback', () => {
     expect(successToast!.message).to.equal('Pushed tag v2.0.0 to remote');
   });
 
+  it('deleting a tag confirms the destructive operation happened', async () => {
+    // The identical delete from the graph's ref menu toasts. Here the only
+    // signal was a row disappearing from a list that is often filtered or
+    // scrolled away from the deleted row — i.e. no signal at all.
+    const el = await createComponent();
+
+    mockInvoke = (command: string) => {
+      if (command === 'delete_tag') return Promise.resolve(null);
+      return defaultMockInvoke(command);
+    };
+
+    const tag = makeTag('v3.0.0');
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, tag,
+    };
+
+    await (el as unknown as { handleDeleteTag: () => Promise<void> }).handleDeleteTag();
+
+    const successToast = uiStore.getState().toasts.find((t) => t.type === 'success');
+    expect(successToast, 'the delete is acknowledged').to.not.be.undefined;
+    expect(successToast!.message).to.equal('Deleted tag v3.0.0');
+  });
+
+  it('a rejected tag push carries the tag name to the Force Push Tag action', async () => {
+    // Without it the suggestion renders a button that dispatches an undefined
+    // target — a dead affordance on the recovery path.
+    const el = await createComponent();
+
+    mockInvoke = (command: string) => {
+      if (command === 'push_tag') {
+        return Promise.reject({
+          code: 'COMMAND_ERROR',
+          message: 'cannot push non-fastforwardable reference',
+        });
+      }
+      return defaultMockInvoke(command);
+    };
+
+    const tag = makeTag('v5.0.0');
+    (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+      visible: true, x: 0, y: 0, tag,
+    };
+
+    await (el as unknown as { handlePushTag: () => Promise<void> }).handlePushTag();
+
+    const toast = uiStore.getState().toasts.find((t) => t.action?.label === 'Force Push Tag');
+    expect(toast, 'the recovery action is offered').to.not.be.undefined;
+
+    let detail: { tagName?: string } | null = null;
+    const handler = (e: Event): void => {
+      detail = (e as CustomEvent<{ tagName?: string }>).detail;
+    };
+    window.addEventListener('force-push-tag', handler);
+    try {
+      toast!.action!.callback();
+    } finally {
+      window.removeEventListener('force-push-tag', handler);
+    }
+    expect(detail!.tagName).to.equal('v5.0.0');
+  });
+
   it('handlePushTag pins push + tags-changed to the origin repo after a mid-push tab switch', async () => {
     // Pushing is a slow network op; a tab switch during it rebinds
     // this.repositoryPath. Both the push and the tags-changed refresh must pin

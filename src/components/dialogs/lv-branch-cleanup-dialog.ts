@@ -14,6 +14,11 @@ import { settingsStore } from '../../stores/settings.store.ts';
 import type { Branch, CleanupCandidate } from '../../types/git.types.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  RefLockController,
+} from '../../utils/ref-lock.ts';
 
 type CleanupTab = 'merged' | 'stale' | 'gone';
 type RiskLevel = 'safe' | 'warning' | 'danger';
@@ -281,6 +286,16 @@ export class LvBranchCleanupDialog extends LitElement {
 
   @property({ type: String }) repositoryPath = '';
 
+  /**
+   * Observe the shared working-tree lock, not just claim it.
+   *
+   * The handlers below already refuse when another surface holds the lock, but
+   * the action buttons were bound to this dialog's own flag alone — so while a
+   * checkout, reset or gc ran elsewhere they stayed lit and did nothing except
+   * raise a refusal toast.
+   */
+  private lock = new RefLockController(this, () => this.pinnedRepoPath || this.repositoryPath);
+
   /** The repo this dialog was opened for, captured at open(). repositoryPath is
    * bound live to the active tab, so a tab switch while the modal is open would
    * otherwise make the irreversible force-deletes / remote prune target the
@@ -293,6 +308,15 @@ export class LvBranchCleanupDialog extends LitElement {
    * repo would otherwise force-delete branches in a repo not in the tab bar). */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.isOpen ? this.pinnedRepoPath : null;
+  }
+
+  /**
+   * True while the force-delete + prune loop is running. `handleModalClose()`
+   * re-asserts the modal open on this; the host's tab-close sweep must consult
+   * it too, because `close()` bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.deleting;
   }
 
   @state() private loading = true;
@@ -627,7 +651,31 @@ export class LvBranchCleanupDialog extends LitElement {
   }
 
   private async handleDelete(): Promise<void> {
-    if (this.totalSelected === 0) return;
+    // The prune is a tail step of THIS handler, so returning here whenever
+    // nothing is selected made a ticked "Also prune remote tracking branches"
+    // unrunnable — and it is ticked by default. That is the exact state the
+    // dialog exists for: a repo whose upstreams were deleted server-side shows
+    // "No branches with deleted upstreams found" precisely because the prune
+    // that would reveal them has not run.
+    if (this.deleting) return;
+    if (this.totalSelected === 0 && !this.pruneRemotes) return;
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click stacked two prompts for
+    // the same target and, if both were accepted, ran the operation twice.
+    // Same claim-before-confirm the abort banner and the clean dialog use.
+    //
+    // `deleting` only guards THIS dialog. The sidebar lists and the graph menu
+    // gate on the shared working-tree lock, so without claiming it a checkout
+    // of a branch this loop is about to delete stayed clickable. Held across
+    // the WHOLE loop, not per branch: what is being serialized is the
+    // repository's working tree, not an individual ref.
+    const lockedRepo = this.pinnedRepoPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.deleting = true;
 
     const toDelete = this.selectedForDeletion();
 
@@ -658,10 +706,13 @@ export class LvBranchCleanupDialog extends LitElement {
         `Of the selected branches, ${parts.join(', and ')}.\n\nThis action cannot be undone. Continue?`,
         'warning',
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.deleting = false;
+        releaseRefOp(lockedRepo);
+        return;
+      }
     }
 
-    this.deleting = true;
     let deleted = 0;
     let failed = 0;
     let kept = 0;
@@ -798,7 +849,7 @@ export class LvBranchCleanupDialog extends LitElement {
       // "remotes pruned" for that overstates, and it forced a reload after
       // every zero-delete attempt.
       pruned = pruneResult.success && (pruneResult.data?.branchesPruned.length ?? 0) > 0;
-      if (!pruneResult.success) {
+      if (!pruneResult.success && !gitService.isNetworkGateRefusal(pruneResult.error)) {
         showToast(
           `Failed to prune remote branches: ${pruneResult.error?.message ?? 'Unknown error'}`,
           'error',
@@ -807,6 +858,7 @@ export class LvBranchCleanupDialog extends LitElement {
     }
 
     this.deleting = false;
+    releaseRefOp(lockedRepo);
 
     // ONE composite message covering every combination. Reporting deleted /
     // failed / kept in mutually exclusive branches silently dropped whichever
@@ -1045,11 +1097,16 @@ export class LvBranchCleanupDialog extends LitElement {
               <button
                 class="btn btn-danger"
                 @click=${this.handleDelete}
-                ?disabled=${this.totalSelected === 0 || this.deleting || this.loading}
+                ?disabled=${(this.totalSelected === 0 && !this.pruneRemotes) ||
+                this.deleting ||
+                this.loading ||
+                this.lock.busy}
               >
                 ${this.deleting
-                  ? 'Deleting...'
-                  : `Delete Selected (${this.totalSelected})`}
+                  ? 'Working...'
+                  : this.totalSelected === 0
+                    ? 'Prune Remotes'
+                    : `Delete Selected (${this.totalSelected})`}
               </button>
             </div>
           </div>

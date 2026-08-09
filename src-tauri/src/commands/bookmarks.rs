@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_bookmark_sorting_by_last_opened() {
-        let mut bookmarks = vec![
+        let mut bookmarks = [
             RepoBookmark {
                 path: "/old".to_string(),
                 name: "Old".to_string(),
@@ -338,7 +338,7 @@ mod tests {
             },
         ];
 
-        bookmarks.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+        bookmarks.sort_by_key(|b| std::cmp::Reverse(b.last_opened));
 
         assert_eq!(bookmarks[0].path, "/new");
         assert_eq!(bookmarks[1].path, "/mid");
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_bookmark_duplicate_detection() {
-        let bookmarks = vec![
+        let bookmarks = [
             RepoBookmark {
                 path: "/repo1".to_string(),
                 name: "Repo 1".to_string(),
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_bookmark_update_in_place() {
-        let mut bookmarks = vec![
+        let mut bookmarks = [
             RepoBookmark {
                 path: "/repo1".to_string(),
                 name: "Repo 1".to_string(),
@@ -492,7 +492,7 @@ mod tests {
             let (pinned, mut unpinned): (Vec<_>, Vec<_>) =
                 bookmarks.into_iter().partition(|b| b.pinned);
 
-            unpinned.sort_by(|a, b| b.last_opened.cmp(&a.last_opened));
+            unpinned.sort_by_key(|b| std::cmp::Reverse(b.last_opened));
             let keep_count = MAX_RECENT_REPOS.saturating_sub(pinned.len());
             unpinned.truncate(keep_count);
 

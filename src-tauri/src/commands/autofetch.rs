@@ -11,6 +11,7 @@ pub async fn start_auto_fetch(
     state: State<'_, AutoFetchState>,
     path: String,
     interval_minutes: u32,
+    token: Option<String>,
 ) -> Result<()> {
     if interval_minutes == 0 {
         return Err(LeviathanError::OperationFailed(
@@ -19,7 +20,7 @@ pub async fn start_auto_fetch(
     }
 
     let mut service = state.write().await;
-    service.start(path, interval_minutes, app);
+    service.start(path, interval_minutes, token, app);
     Ok(())
 }
 

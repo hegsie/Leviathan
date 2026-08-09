@@ -6,7 +6,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { cloneRepository } from '../../services/git.service.ts';
+import { isNetworkGateRefusal, cloneRepository } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
@@ -347,7 +347,12 @@ export class LvCloneDialog extends LitElement {
           this.close();
         }, 500);
       } else {
-        this.error = result.error?.message ?? 'Failed to clone repository';
+        // The gate already explained a block, and a declined confirm is the
+        // user's own decision — showing "Cancelled" as a red error in the
+        // dialog reports their click back to them as a failure.
+        if (!isNetworkGateRefusal(result.error)) {
+          this.error = result.error?.message ?? 'Failed to clone repository';
+        }
         this.isCloning = false;
         this.cleanupListener();
       }

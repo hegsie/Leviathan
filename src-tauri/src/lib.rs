@@ -338,6 +338,7 @@ pub fn run() {
             commands::merge::continue_rebase,
             commands::merge::abort_rebase,
             commands::merge::get_rebase_commits,
+            commands::merge::is_ancestor_of_head,
             commands::merge::execute_interactive_rebase,
             commands::merge::get_conflicts,
             commands::merge::get_blob_content,

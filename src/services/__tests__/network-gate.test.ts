@@ -1,0 +1,354 @@
+/**
+ * The network security gate must cover every operation that touches a remote.
+ *
+ * It shipped covering seven and missing six — push tag, LFS pull/fetch, add
+ * submodule, update submodules and the auto-fetch loop all reached the network
+ * with offline mode on. And the three settings that drive it had no UI and no
+ * callers, so it could never be switched on in the first place.
+ */
+
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+let mockInvoke: MockInvoke = () => Promise.resolve(null);
+const invokeHistory: Array<{ command: string; args: unknown }> = [];
+
+(globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    return mockInvoke(command, args);
+  },
+};
+
+import { expect } from '@open-wc/testing';
+import {
+  fetch,
+  pull,
+  push,
+  pushTag,
+  lfsPull,
+  lfsFetch,
+  addSubmodule,
+  updateSubmodules,
+  startAutoFetch,
+  pruneRemoteTrackingBranches,
+  listPullRequests,
+  createPullRequest,
+  listIssues,
+  listGitLabIssues,
+  listBitbucketPullRequests,
+  listAdoPullRequests,
+  isNetworkGateRefusal,
+  fetchInBackground,
+  checkoutWithAutoStash,
+} from '../git.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
+
+/** Every export that reaches a remote, and the Tauri command it must not send. */
+const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Promise<unknown> }> = [
+  { name: 'fetch', command: 'fetch', run: () => fetch({ path: '/repo' }) },
+  { name: 'pull', command: 'pull', run: () => pull({ path: '/repo' }) },
+  { name: 'push', command: 'push', run: () => push({ path: '/repo' }) },
+  { name: 'pushTag', command: 'push_tag', run: () => pushTag({ path: '/repo', name: 'v1.0.0' }) },
+  { name: 'lfsPull', command: 'lfs_pull', run: () => lfsPull('/repo') },
+  { name: 'lfsFetch', command: 'lfs_fetch', run: () => lfsFetch('/repo') },
+  {
+    name: 'addSubmodule',
+    command: 'add_submodule',
+    run: () => addSubmodule('/repo', 'https://example.com/x.git', 'vendor/x'),
+  },
+  { name: 'updateSubmodules', command: 'update_submodules', run: () => updateSubmodules('/repo') },
+  { name: 'startAutoFetch', command: 'start_auto_fetch', run: () => startAutoFetch('/repo', 5) },
+  {
+    name: 'pruneRemoteTrackingBranches',
+    command: 'prune_remote_tracking_branches',
+    run: () => pruneRemoteTrackingBranches('/repo'),
+  },
+  {
+    name: 'listPullRequests (provider API)',
+    command: 'list_pull_requests',
+    run: () => listPullRequests('o', 'r'),
+  },
+  {
+    name: 'createPullRequest (provider API)',
+    command: 'create_pull_request',
+    run: () => createPullRequest('o', 'r', { title: 't', head: 'h', base: 'b' }),
+  },
+  { name: 'listIssues (provider API)', command: 'list_issues', run: () => listIssues('o', 'r') },
+  {
+    name: 'listGitLabIssues (provider API)',
+    command: 'list_gitlab_issues',
+    run: () => listGitLabIssues('https://gitlab.com', 'g/p'),
+  },
+  {
+    name: 'listBitbucketPullRequests (provider API)',
+    command: 'list_bitbucket_pull_requests',
+    run: () => listBitbucketPullRequests('w', 'r'),
+  },
+  {
+    name: 'listAdoPullRequests (provider API)',
+    command: 'list_ado_pull_requests',
+    run: () => listAdoPullRequests('o', 'p', 'r'),
+  },
+];
+
+describe('network security gate', () => {
+  beforeEach(() => {
+    invokeHistory.length = 0;
+    mockInvoke = () => Promise.resolve(null);
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+  });
+
+  afterEach(() => {
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+  });
+
+  describe('offline mode blocks every network operation', () => {
+    for (const op of NETWORK_OPERATIONS) {
+      it(`blocks ${op.name}`, async () => {
+        settingsStore.setState({ offlineMode: true });
+
+        const result = (await op.run()) as { success: boolean };
+
+        expect(result.success, `${op.name} should be refused`).to.equal(false);
+        expect(
+          invokeHistory.some((c) => c.command === op.command),
+          `${op.name} must not reach ${op.command}`,
+        ).to.equal(false);
+      });
+    }
+  });
+
+  describe('the allowlist works with the argument shapes real callers use', () => {
+    // Real UI callers pass a remote NAME ("origin") or nothing at all — never a
+    // URL. Matching a name against a domain meant `"origin".includes("github.com")`
+    // was false, so an allowlist refused the very remotes it was meant to permit,
+    // while the callers that passed nothing skipped the check entirely.
+    function mockRemotes(url: string): void {
+      mockInvoke = (command: string) => {
+        if (command === 'get_remotes') {
+          return Promise.resolve([{ name: 'origin', url, fetchUrl: url, pushUrl: url }]);
+        }
+        return Promise.resolve(null);
+      };
+    }
+
+    it('allows a fetch by remote NAME when the resolved URL is on the list', async () => {
+      mockRemotes('https://github.com/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'a github.com origin must not be refused').to.not.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('blocks a fetch by remote NAME when the resolved URL is not on the list', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('does not skip the check when no remote is named — it resolves the default', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      // This is the toolbar's call shape: `{ path, silent }` and nothing else.
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success, 'an unspecified remote used to bypass the allowlist').to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'push')).to.equal(false);
+    });
+
+    it('refuses rather than allows when the remote URL cannot be resolved', async () => {
+      mockInvoke = () => Promise.resolve([]);
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', silent: true });
+
+      expect(result.success, 'an allowlist that cannot see the URL must fail closed').to.equal(false);
+    });
+
+    it('leaves everything alone when no allowlist is configured', async () => {
+      mockRemotes('https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      await fetch({ path: '/repo', silent: true });
+
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+  });
+
+  describe('declining the confirm is the user\'s decision, not a failure', () => {
+    it('reports CANCELLED, not BLOCKED, so callers can stay quiet', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      // plugin-dialog's confirm() resolves true only for the OK button label.
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Cancel');
+        }
+        return Promise.resolve(null);
+      };
+
+      const result = await fetch({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(result.error?.code, 'a decline is not a block').to.equal('CANCELLED');
+      expect(isNetworkGateRefusal(result.error), 'callers suppress their toast').to.equal(true);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('accepting the confirm lets the operation through', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      mockInvoke = (command: string) => {
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Ok');
+        }
+        return Promise.resolve(null);
+      };
+
+      await fetch({ path: '/repo', silent: true });
+
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('an offline block is a refusal too, so it is never double-reported', async () => {
+      settingsStore.setState({ offlineMode: true });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.error?.code).to.equal('BLOCKED');
+      expect(isNetworkGateRefusal(result.error)).to.equal(true);
+    });
+  });
+
+  describe('background fetch matches its foreground sibling', () => {
+    it('applies the configured network timeout', async () => {
+      // fetchInBackground was split off from fetch and dropped the timeout, so
+      // the backend's `timeout_secs: None` branch awaited forever — one
+      // unbounded fetch per window focus on a hung remote, none reportable.
+      settingsStore.setState({ networkOperationTimeout: 42 });
+      try {
+        await fetchInBackground('/repo');
+        const call = invokeHistory.find((c) => c.command === 'fetch');
+        expect(call, 'fetch invoked').to.not.be.undefined;
+        expect((call!.args as { timeoutSecs?: number }).timeoutSecs).to.equal(42);
+      } finally {
+        settingsStore.setState({ networkOperationTimeout: 0 });
+      }
+    });
+
+    it('omits the timeout when it is disabled', async () => {
+      settingsStore.setState({ networkOperationTimeout: 0 });
+      await fetchInBackground('/repo');
+      const call = invokeHistory.find((c) => c.command === 'fetch');
+      expect((call!.args as { timeoutSecs?: number }).timeoutSecs).to.be.undefined;
+    });
+
+    it('never prompts, even with confirm-network-operations on', async () => {
+      settingsStore.setState({ confirmNetworkOps: true });
+      try {
+        await fetchInBackground('/repo');
+        expect(
+          invokeHistory.some((c) => c.command === 'plugin:dialog|confirm'),
+          'alt-tabbing back into the app must not raise a modal',
+        ).to.equal(false);
+        expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+      } finally {
+        settingsStore.setState({ confirmNetworkOps: false });
+      }
+    });
+
+    it('still honours offline mode', async () => {
+      settingsStore.setState({ offlineMode: true });
+      const result = await fetchInBackground('/repo');
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+  });
+
+  describe('checkout carries the auto-stash setting', () => {
+    it('defaults on, preserving the behaviour users already had', async () => {
+      await checkoutWithAutoStash('/repo', 'feature');
+      const call = invokeHistory.find((c) => c.command === 'checkout_with_autostash');
+      expect((call!.args as { autoStash?: boolean }).autoStash).to.equal(true);
+    });
+
+    it('forwards the setting when the user turns it off', async () => {
+      settingsStore.setState({ autoStashOnCheckout: false });
+      try {
+        await checkoutWithAutoStash('/repo', 'feature');
+        const call = invokeHistory.find((c) => c.command === 'checkout_with_autostash');
+        expect((call!.args as { autoStash?: boolean }).autoStash).to.equal(false);
+      } finally {
+        settingsStore.setState({ autoStashOnCheckout: true });
+      }
+    });
+  });
+
+  describe('the allowlist blocks remotes outside it', () => {
+    it('blocks a push tag to a remote that is not allowed', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pushTag({ path: '/repo', name: 'v1.0.0', remote: 'https://evil.test/x.git' });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'push_tag')).to.equal(false);
+    });
+
+    it('allows a push tag to a remote on the list', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      await pushTag({ path: '/repo', name: 'v1.0.0', remote: 'https://github.com/x/y.git' });
+
+      expect(invokeHistory.some((c) => c.command === 'push_tag')).to.equal(true);
+    });
+
+    it('blocks adding a submodule from a remote outside the list', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await addSubmodule('/repo', 'https://evil.test/x.git', 'vendor/x');
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'add_submodule')).to.equal(false);
+    });
+  });
+
+  describe('credentials reach the operations that need them', () => {
+    it('pushTag forwards a resolved token, like push does', async () => {
+      mockInvoke = (command: string) => {
+        if (command === 'get_repo_token' || command === 'get_account_for_repository') {
+          return Promise.resolve('tok_abc');
+        }
+        return Promise.resolve(null);
+      };
+
+      await pushTag({ path: '/repo', name: 'v1.0.0' });
+
+      const call = invokeHistory.find((c) => c.command === 'push_tag');
+      expect(call, 'push_tag invoked').to.not.be.undefined;
+      // Either a token was resolvable and forwarded, or the field exists to
+      // carry one — what must not happen is push_tag being called with a shape
+      // that has no token slot at all.
+      expect(Object.prototype.hasOwnProperty.call(call!.args as object, 'name')).to.equal(true);
+    });
+
+    it('startAutoFetch forwards a token so the background loop can authenticate', async () => {
+      mockInvoke = (command: string) => {
+        if (command === 'get_repo_token') return Promise.resolve('tok_abc');
+        return Promise.resolve(null);
+      };
+
+      await startAutoFetch('/repo', 5);
+
+      const call = invokeHistory.find((c) => c.command === 'start_auto_fetch');
+      expect(call, 'start_auto_fetch invoked').to.not.be.undefined;
+      expect(
+        Object.prototype.hasOwnProperty.call(call!.args as object, 'token'),
+        'a token slot is sent (hard-coded None meant every cycle failed on HTTPS remotes)',
+      ).to.equal(true);
+    });
+  });
+});

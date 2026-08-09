@@ -11,6 +11,13 @@ import type { CleanEntry } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import { containsDeepActiveElement } from '../../utils/focus.ts';
+import {
+  tryAcquireRefOp,
+  releaseRefOp,
+  isRefOpRunning,
+  subscribeRefOps,
+} from '../../utils/ref-lock.ts';
 
 @customElement('lv-clean-dialog')
 export class LvCleanDialog extends LitElement {
@@ -349,10 +356,21 @@ export class LvCleanDialog extends LitElement {
    * have no trash and no recovery path.
    */
   private pinnedRepoPath = '';
+  private unsubscribeRefOps?: () => void;
 
   /** The repo this dialog is pinned to while open, or null when closed. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.open ? this.pinnedRepoPath : null;
+  }
+
+  /**
+   * True while `clean_files` is deleting. `dismiss()` already refuses on this;
+   * the host's tab-close sweep must consult the same flag, or it clears the
+   * host flag directly and reports "clean cancelled" over a delete that is
+   * still unlinking files that have no trash and no recovery path.
+   */
+  public get operationInFlight(): boolean {
+    return this.cleaning;
   }
 
   async updated(changedProps: Map<string, unknown>): Promise<void> {
@@ -366,8 +384,34 @@ export class LvCleanDialog extends LitElement {
       // session on top of it.
       if (this.cleaning) return;
       this.pinnedRepoPath = this.repositoryPath;
+      this.focusInitialControl();
       await this.loadFiles();
     }
+  }
+
+  /**
+   * Move focus into the dialog once it is on screen.
+   *
+   * This dialog builds its own overlay instead of using <lv-modal>, and had no
+   * focus() anywhere: opening it from the command palette left focus on
+   * <body> (the palette restores focus to a host that carries no tabindex), so
+   * Tab started at the skip link and walked the entire app UNDERNEATH the
+   * backdrop — every Enter acting on a live control while a dialog listing
+   * files for permanent deletion was on screen.
+   *
+   * Cancel, not "Delete Selected": the first thing Enter can reach must not be
+   * the destructive one. Guarded like <lv-modal>'s own pass so it cannot yank
+   * focus off something the user already moved to.
+   */
+  private focusInitialControl(): void {
+    requestAnimationFrame(() => {
+      if (!this.open) return;
+      if (containsDeepActiveElement(this)) return;
+      const cancelBtn = this.shadowRoot?.querySelector(
+        '.footer-right .btn-secondary'
+      ) as HTMLElement | null;
+      cancelBtn?.focus();
+    });
   }
 
   private async loadFiles(): Promise<void> {
@@ -432,11 +476,16 @@ export class LvCleanDialog extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.requestUpdate();
+    });
     document.addEventListener('keydown', this.handleKeyDown);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
     removeOverlay(this);
     document.removeEventListener('keydown', this.handleKeyDown);
   }
@@ -469,12 +518,28 @@ export class LvCleanDialog extends LitElement {
   }
 
   private async handleClean(): Promise<void> {
-    if (this.selectedPaths.size === 0) return;
+    // Claimed on ENTRY, not after the confirms. showConfirm is an IPC round
+    // trip before the native dialog opens and takes focus, and the button stays
+    // enabled through that window — so a double-click raised a second delete
+    // confirm over the same selection. Confirming both ran the clean twice: the
+    // second on paths that no longer existed, producing a "0 of N items"
+    // warning that contradicted the success toast the user had just read. Same
+    // claim-before-confirm the abort banner and the gitflow panel apply.
+    if (this.cleaning || this.selectedPaths.size === 0) return;
 
     // The repo the listed files were read from — NOT the live prop. Pinning
     // only at click time still deleted from the wrong repository whenever the
     // tab switch happened before the click rather than during the confirm.
     const repoPath = this.pinnedRepoPath;
+
+    // Clean deletes files from the same working tree checkout, reset, merge and
+    // rebase mutate, and the backend takes no per-repo lock — so this joins the
+    // shared one rather than guarding only itself.
+    if (!tryAcquireRefOp(repoPath)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+    this.cleaning = true;
 
     // Captured BEFORE the confirms too. loadFiles() reassigns selectedPaths on
     // every option change and on its own initial load, so reading it after an
@@ -499,7 +564,11 @@ export class LvCleanDialog extends LitElement {
         `They are not in Git and cannot be recovered.`,
       'warning'
     );
-    if (!confirmedDelete) return;
+    if (!confirmedDelete) {
+      this.cleaning = false;
+      releaseRefOp(repoPath);
+      return;
+    }
 
     // A nested git repository additionally destroys that repo's whole history,
     // which `git clean` itself guards behind a second `-f` — so it gets its own
@@ -515,11 +584,13 @@ export class LvCleanDialog extends LitElement {
           `This cannot be undone. Continue?`,
         'warning'
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        this.cleaning = false;
+        releaseRefOp(repoPath);
+        return;
+      }
     }
     const forceNested = nestedRepos.length > 0;
-
-    this.cleaning = true;
 
     try {
       const result = await gitService.cleanFiles(repoPath, paths, forceNested);
@@ -555,6 +626,7 @@ export class LvCleanDialog extends LitElement {
       showToast('Clean operation failed', 'error');
     } finally {
       this.cleaning = false;
+      releaseRefOp(repoPath);
     }
   }
 
@@ -713,10 +785,16 @@ export class LvCleanDialog extends LitElement {
             ` : html`No files selected`}
           </div>
           <div class="footer-right">
+            <!-- Cancel destroys nothing, so it is gated on this dialog's own
+                 in-flight flag only. The lock check belongs on Delete, and was
+                 copy-pasted onto Cancel in the same edit — greying out the most
+                 obvious way to close the dialog whenever anything else touched
+                 the repo, which reads as a broken dialog. dismiss() already
+                 guards itself on the cleaning flag alone. -->
             <button class="btn btn-secondary" ?disabled=${this.cleaning} @click=${this.dismiss}>Cancel</button>
             <button
               class="btn btn-danger"
-              ?disabled=${!someSelected || this.cleaning}
+              ?disabled=${!someSelected || this.cleaning || isRefOpRunning(this.pinnedRepoPath)}
               @click=${this.handleClean}
             >
               ${this.cleaning ? 'Cleaning...' : 'Delete Selected'}

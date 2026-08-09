@@ -82,37 +82,6 @@ fi
 echo "All tests passed."
 exit 0
 `,
-  'prepare-commit-msg': `#!/bin/sh
-#
-# prepare-commit-msg hook: Prefix commit message with branch name.
-# Example: [feature/login] Your commit message
-#
-
-COMMIT_MSG_FILE="$1"
-COMMIT_SOURCE="$2"
-
-# Only modify if this is not a merge, amend, or squash
-if [ -n "$COMMIT_SOURCE" ]; then
-  exit 0
-fi
-
-BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
-
-# Skip for main/master/develop branches
-case "$BRANCH" in
-  main|master|develop)
-    exit 0
-    ;;
-esac
-
-# Prepend branch name if not already present
-CURRENT_MSG=$(cat "$COMMIT_MSG_FILE")
-if ! echo "$CURRENT_MSG" | grep -q "^\\[$BRANCH\\]"; then
-  echo "[$BRANCH] $CURRENT_MSG" > "$COMMIT_MSG_FILE"
-fi
-
-exit 0
-`,
 };
 
 @customElement('lv-hooks-dialog')
@@ -738,6 +707,14 @@ export class LvHooksDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while a hook script write is in flight. The host's tab-close sweep must
+   * not report "hooks closed" over a write still landing on disk.
+   */
+  public get operationInFlight(): boolean {
+    return this.saving;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {
@@ -854,7 +831,7 @@ export class LvHooksDialog extends LitElement {
           }
         }
       } else {
-        showToast(`Failed to save hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to save hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to save hook:', err);
@@ -887,7 +864,7 @@ export class LvHooksDialog extends LitElement {
           }
         }
       } else {
-        showToast(`Failed to toggle hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to toggle hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to toggle hook:', err);
@@ -926,7 +903,7 @@ export class LvHooksDialog extends LitElement {
           this.hooks = hooksResult.data;
         }
       } else {
-        showToast(`Failed to delete hook: ${result.error ?? 'Unknown error'}`, 'error');
+        showToast(`Failed to delete hook: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
       console.error('Failed to delete hook:', err);

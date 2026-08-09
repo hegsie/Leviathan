@@ -10,7 +10,9 @@ import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import {
   tryAcquireMaintenance,
+  tryAcquireMaintenanceReadOnly,
   releaseMaintenance,
+  isMaintenanceBlocked,
   isMaintenanceRunning,
 } from '../../utils/maintenance-confirms.ts';
 import {
@@ -18,6 +20,7 @@ import {
   confirmPrune,
   summariseFsck,
 } from '../../utils/maintenance-confirms.ts';
+import { subscribeRefOps, warnRepositoryBusy } from '../../utils/ref-lock.ts';
 
 interface HealthStats {
   objectCount: number;
@@ -237,6 +240,31 @@ export class LvRepositoryHealthDialog extends LitElement {
    * destroying unreachable objects the user never chose to expire.
    */
   private pinnedRepoPath = '';
+  private unsubscribeRefOps?: () => void;
+  /** Bumped by the ref-lock subscription; read by `repositoryBusy` so Lit
+   * re-renders when another surface claims or releases this repo. */
+  @state() private refOpsVersion = 0;
+
+  /**
+   * True while a working-tree operation holds this repo.
+   *
+   * Maintenance takes that lock too now (see maintenance-confirms.ts), so
+   * without this the buttons would stay enabled and then refuse on click.
+   */
+  /**
+   * True when an EXCLUSIVE maintenance claim would be refused.
+   *
+   * Mirrors tryAcquireMaintenance rather than just the ref lock. After the
+   * claim was split into exclusive (gc/prune) and read-only (fsck), one shared
+   * predicate described the wrong condition in BOTH directions: fsck greyed
+   * out by a lock it deliberately does not take, and gc/prune left clickable
+   * when they were going to refuse. A gate that does not mirror its own claim
+   * is how "grey out rather than refuse on click" quietly stops holding.
+   */
+  private get maintenanceBlocked(): boolean {
+    void this.refOpsVersion;
+    return isMaintenanceBlocked(this.pinnedRepoPath);
+  }
 
   /**
    * True while gc / prune / fsck is running. The host must refuse to close on
@@ -276,15 +304,50 @@ export class LvRepositoryHealthDialog extends LitElement {
     }
   }
 
+  /**
+   * The ONE way an action stops running.
+   *
+   * settleClosePending used to be wired only into the `finally` blocks, on the
+   * assumption that the operation's own completion was the only exit from
+   * "running". It is not: gc and prune claim `runningAction` BEFORE the confirm
+   * (so a double-click cannot stack two warnings), and so they also clear it on
+   * a declined confirm and on a lost claim race. Closing the pinned repo's tab
+   * during that window left closePending stuck true with nothing running — the
+   * dialog stayed open pinned to a repo with no tab, promising in a toast that
+   * it would close, with every action button rendering enabled and silently
+   * no-opping against the `closePending` guard.
+   */
+  private clearRunningAction(): void {
+    this.runningAction = null;
+    this.settleClosePending();
+  }
+
   /** The repo this dialog is pinned to, for the host's tab-close sweep. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.pinnedRepoPath || null;
   }
 
+  /**
+   * The shared name the host's tab-close sweep reads. Aliases `isRunning` so
+   * this dialog participates in the one sweep rather than a bespoke arm.
+   */
+  public get operationInFlight(): boolean {
+    return this.isRunning;
+  }
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    this.unsubscribeRefOps = subscribeRefOps(() => {
+      this.refOpsVersion++;
+    });
     this.pinnedRepoPath = this.repositoryPath;
     await this.loadHealthStats();
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeRefOps?.();
+    this.unsubscribeRefOps = undefined;
   }
 
   private async loadHealthStats(): Promise<void> {
@@ -396,8 +459,8 @@ export class LvRepositoryHealthDialog extends LitElement {
     // serialises, but taking it only after the prompt meant the user read a
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
-    if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(this.pinnedRepoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
@@ -405,19 +468,29 @@ export class LvRepositoryHealthDialog extends LitElement {
     // repository and rebinds live on a tab switch.
     const repoPath = this.pinnedRepoPath;
 
+    // Claimed BEFORE the confirm, not just checked. showConfirm is an IPC round
+    // trip before the native dialog takes focus, and the button stays live
+    // through it — so a double-click read and dismissed the same "permanently
+    // deletes unreachable objects" warning twice for one gesture, the second
+    // then refused by the cross-surface lock. Released on decline so a
+    // declined run does not hold the slot.
+    this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
+
     // Same gate as the command palette (shared helper) — this dialog reaches
     // the identical irreversible command and must not be the unguarded route.
-    if (!(await confirmGarbageCollection(aggressive))) return;
+    if (!(await confirmGarbageCollection(aggressive))) {
+      this.clearRunningAction();
+      return;
+    }
 
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      this.clearRunningAction();
+      warnRepositoryBusy();
       return;
     }
-
-    this.runningAction = aggressive ? 'gc-aggressive' : 'gc';
 
     try {
       const result = await gitService.runGc({
@@ -434,9 +507,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`Garbage collection failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 
@@ -448,7 +520,7 @@ export class LvRepositoryHealthDialog extends LitElement {
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
     if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      warnRepositoryBusy();
       return;
     }
 
@@ -456,8 +528,10 @@ export class LvRepositoryHealthDialog extends LitElement {
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
-    if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    // Read-only: fsck writes nothing, so it must not take the exclusive
+    // working-tree lock — see tryAcquireMaintenanceReadOnly.
+    if (!tryAcquireMaintenanceReadOnly(repoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
@@ -480,9 +554,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`File system check failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 
@@ -493,24 +566,29 @@ export class LvRepositoryHealthDialog extends LitElement {
     // serialises, but taking it only after the prompt meant the user read a
     // full "this permanently deletes unreachable objects" warning, clicked
     // through it, and only then got told the run was refused.
-    if (isMaintenanceRunning(this.pinnedRepoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+    if (isMaintenanceBlocked(this.pinnedRepoPath)) {
+      warnRepositoryBusy();
       return;
     }
 
     const repoPath = this.pinnedRepoPath;
 
-    if (!(await confirmPrune())) return;
+    // Claimed before the confirm — see runGc.
+    this.runningAction = 'prune';
+
+    if (!(await confirmPrune())) {
+      this.clearRunningAction();
+      return;
+    }
 
     // Shared with the command palette, which reaches these same three
     // commands: runningAction only ever covered THIS dialog, so a palette run
     // could start a second maintenance command against the same repo.
     if (!tryAcquireMaintenance(repoPath)) {
-      showToast('A maintenance operation is already running on this repository', 'warning');
+      this.clearRunningAction();
+      warnRepositoryBusy();
       return;
     }
-
-    this.runningAction = 'prune';
 
     try {
       const result = await gitService.runPrune({
@@ -526,9 +604,8 @@ export class LvRepositoryHealthDialog extends LitElement {
         showToast(`Prune failed: ${result.error?.message}`, 'error');
       }
     } finally {
-      this.runningAction = null;
       releaseMaintenance(repoPath);
-      this.settleClosePending();
+      this.clearRunningAction();
     }
   }
 
@@ -630,7 +707,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(false)}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -647,7 +724,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${() => this.runGc(true)}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
@@ -665,7 +742,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runFsck}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || isMaintenanceRunning(this.pinnedRepoPath)}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -684,7 +761,7 @@ export class LvRepositoryHealthDialog extends LitElement {
             <button
               class="action-btn"
               @click=${this.runPrune}
-              ?disabled=${!!this.runningAction}
+              ?disabled=${!!this.runningAction || this.maintenanceBlocked}
             >
               <svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
@@ -704,8 +781,11 @@ export class LvRepositoryHealthDialog extends LitElement {
       <div class="footer">
         <!-- Disabled while an action runs: the host refuses to close mid-gc
              (closing destroys this element and would orphan the operation), so
-             an enabled Done was a button that silently did nothing. Every
-             sibling dialog with this guard disables its cancel control too. -->
+             an enabled Done was a button that silently did nothing. NOT gated
+             on repositoryBusy: Done destroys nothing, and greying it out
+             because something elsewhere touched the repo kills the button the
+             user aims at for a reason that has nothing to do with it — the
+             same copy-paste reverted on lv-clean-dialog's Cancel. -->
         <button
           class="primary"
           ?disabled=${!!this.runningAction}

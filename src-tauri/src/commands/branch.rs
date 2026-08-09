@@ -112,6 +112,14 @@ pub async fn create_branch(
 ) -> Result<Branch> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
+    // "Checkout new branch after creation" is the dialog's default, so this
+    // switches branches without being called checkout — which is how it was
+    // missed when ensure_checkoutable was added to the two commands that are.
+    // Checked BEFORE the ref is created so a refusal leaves nothing behind.
+    if checkout.unwrap_or(false) {
+        ensure_checkoutable(&repo)?;
+    }
+
     let commit = if let Some(ref start) = start_point {
         let obj = repo.revparse_single(start)?;
         obj.peel_to_commit()?
@@ -125,10 +133,24 @@ pub async fn create_branch(
     if checkout.unwrap_or(false) {
         let old_head = crate::commands::hooks::head_oid_string(&repo);
         let obj = reference.peel(git2::ObjectType::Commit)?;
-        repo.checkout_tree(&obj, None)?;
-        repo.set_head(reference.name().map_err(|_| {
-            LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-        })?)?;
+        // The checkout is fallible (a dirty file that differs between HEAD and
+        // the start point conflicts), and the ref already exists by now. Roll
+        // it back so "create failed" stays literally true — otherwise the
+        // dialog showed an error while the refs watcher made the branch appear
+        // in the sidebar, and a retry dead-ended on "already exists".
+        let switch = (|| -> Result<()> {
+            repo.checkout_tree(&obj, None)?;
+            repo.set_head(reference.name().map_err(|_| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?)?;
+            Ok(())
+        })();
+        if let Err(e) = switch {
+            if let Ok(mut created) = repo.find_branch(&name, git2::BranchType::Local) {
+                let _ = created.delete();
+            }
+            return Err(e);
+        }
         let new_head = crate::commands::hooks::head_oid_string(&repo);
         crate::commands::hooks::run_post_checkout(&repo, &old_head, &new_head, true);
     }
@@ -178,8 +200,24 @@ pub async fn delete_branch(path: String, name: String, force: Option<bool>) -> R
     if force.unwrap_or(false) {
         branch.delete()?;
     } else {
-        // Check if branch is merged before deleting
-        let head = repo.head()?;
+        // Check if branch is merged before deleting.
+        //
+        // An UNBORN HEAD is not an error here. On an orphan branch with no
+        // commits (`git checkout --orphan gh-pages`, the standard way to start
+        // a docs branch) repo.head() fails, and propagating that reported
+        // "reference 'refs/heads/gh-pages' not found" — naming a branch the
+        // user had not selected. Worse, the frontend gates its Force Delete
+        // escalation on /not fully merged/i, so that message hid the one
+        // recovery the app offers, even though force delete works fine here.
+        // Canonical git says "not fully merged" in this state.
+        let head = match repo.head() {
+            Ok(h) => h,
+            Err(_) => {
+                return Err(LeviathanError::OperationFailed(
+                    "Branch is not fully merged. Use force to delete anyway.".to_string(),
+                ))
+            }
+        };
         if let (Some(head_oid), Some(branch_oid)) = (head.target(), branch.get().target()) {
             // A branch is fully merged into HEAD when HEAD is at or descends
             // from the branch tip. The equality case matters: `git branch -d`
@@ -289,9 +327,199 @@ pub async fn rename_branch(
 }
 
 /// Checkout a branch or commit
+/// Refuse to switch branches while another operation owns the working tree.
+///
+/// merge, rebase, cherry_pick and both resets all defend this; checkout — the
+/// one operation reachable from every list surface at all times — never did.
+/// The direct route in is an interactive rebase paused on an `edit` line: it
+/// returns success, closes its dialog, and leaves nothing modal on screen, so
+/// the sidebar, the graph and the palette are all live. Checking out elsewhere
+/// then moved HEAD while `.git/rebase-merge/` stayed on disk describing a
+/// rebase of the OLD branch — every later merge/rebase on the new branch was
+/// refused with "Another operation is in progress", and the still-visible
+/// Abort would yank the user back to the original branch. Canonical git
+/// refuses the same way.
+/// The current index of the auto-stash `stash_oid`, or None when it is gone.
+///
+/// `git stash push` PREPENDS, so a stash created by another surface (or a
+/// terminal) between the auto-stash save and the re-apply renumbers the entry.
+/// Applying and dropping the bare index 0 then restored someone else's stash
+/// and destroyed it, while the user's pre-checkout work stayed unapplied one
+/// slot down — and the success toast still said the changes had been
+/// re-applied. The checkout-FAILURE path in this same function already
+/// verified the OID before popping; the success path, the common one, did not.
+/// The worktree path where `branch_name` is checked out, if it is checked out
+/// in a DIFFERENT worktree from the one we are operating on.
+///
+/// libgit2 enforces this rule in `git_repository_set_head`, not in
+/// `git_checkout_tree` — and every checkout path here rewrites the working tree
+/// first and moves HEAD second. So the refusal fired AFTER the damage: the tree
+/// and index held the other branch's content, HEAD still named the old branch,
+/// the whole inter-branch diff was left staged, and the auto-stash could not be
+/// popped back over it. A user who then committed recorded the other branch's
+/// entire tree onto their own. Canonical git refuses before touching anything
+/// ("fatal: 'x' is already used by worktree at ..."), which is what this
+/// restores.
+fn branch_checked_out_elsewhere(repo: &git2::Repository, branch_name: &str) -> Option<String> {
+    // The LOCAL branch this checkout will actually land on. Callers pass the
+    // raw ref name, which for a remote row is "origin/develop" — so the check
+    // tested refs/heads/origin/develop, matched nothing, and the remote arm
+    // then resolved the local `develop` and hit the very corruption this
+    // guards. Both checkout functions strip the same way.
+    let local_name = match branch_name.find('/') {
+        Some(pos)
+            if repo
+                .find_branch(branch_name, git2::BranchType::Local)
+                .is_err() =>
+        {
+            &branch_name[pos + 1..]
+        }
+        _ => branch_name,
+    };
+    let target = format!("refs/heads/{}", local_name);
+
+    // The MAIN worktree first. git_worktree_list enumerates only
+    // $GIT_COMMON_DIR/worktrees/, which the main worktree has no entry in — so
+    // when the app is opened ON a linked worktree (supported; isCurrentWorktree
+    // exists for it) this check saw nothing at all, while libgit2's own
+    // set_head refusal DOES cover the main worktree. The pre-check was strictly
+    // weaker than the refusal it front-runs.
+    if repo.is_worktree() {
+        let common = repo.commondir().to_path_buf();
+        if let Some(main_workdir) = common.parent() {
+            if let Ok(main_repo) = git2::Repository::open(main_workdir) {
+                let head_name = main_repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.name().ok().map(|n| n.to_string()));
+                if head_name.as_deref() == Some(target.as_str()) {
+                    return Some(main_workdir.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    let worktrees = repo.worktrees().ok()?;
+    let this_workdir: Option<std::path::PathBuf> =
+        repo.workdir().and_then(|p| std::fs::canonicalize(p).ok());
+    for entry in worktrees.iter() {
+        let Ok(Some(name)) = entry else {
+            continue;
+        };
+        let Ok(wt) = repo.find_worktree(name) else {
+            continue;
+        };
+        let wt_path = std::fs::canonicalize(wt.path()).ok();
+        // The worktree we are already standing in is not a conflict.
+        if wt_path.is_some() && wt_path == this_workdir {
+            continue;
+        }
+        let Ok(wt_repo) = git2::Repository::open_from_worktree(&wt) else {
+            continue;
+        };
+        let head_name = wt_repo
+            .head()
+            .ok()
+            .and_then(|h| h.name().ok().map(|n| n.to_string()));
+        if head_name.as_deref() == Some(target.as_str()) {
+            return Some(wt.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Refuse a checkout of a branch that another worktree holds, BEFORE any
+/// working-tree mutation. See branch_checked_out_elsewhere.
+pub(crate) fn ensure_not_checked_out_elsewhere(
+    repo: &git2::Repository,
+    branch_name: &str,
+) -> Result<()> {
+    if let Some(path) = branch_checked_out_elsewhere(repo, branch_name) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "'{}' is already checked out at {}",
+            branch_name, path
+        )));
+    }
+    Ok(())
+}
+
+/// The one way a HALF-COMPLETED auto-stash checkout is reported.
+///
+/// `checkout_tree` rewrites the working tree before HEAD moves, so any failure
+/// after it leaves the tree at the target commit with the user's changes still
+/// in the stash list. Whatever went wrong, the error has to say so — a bare
+/// message sends the user to a working tree they do not recognise with no clue
+/// that their work is recoverable. Both the checkout failure and the set_head
+/// failure route through here so they cannot describe the same situation
+/// differently.
+fn autostash_failure(
+    repo: &mut git2::Repository,
+    stashed: bool,
+    stash_oid: Option<git2::Oid>,
+    msg: &str,
+) -> LeviathanError {
+    if stashed {
+        match auto_stash_index(repo, stash_oid) {
+            Some(idx) => {
+                if let Err(pop_err) = repo.stash_pop(idx, None) {
+                    return LeviathanError::OperationFailed(format!(
+                        "Checkout failed: {}. Additionally, failed to restore \
+                         stashed changes: {}",
+                        msg,
+                        pop_err.message()
+                    ));
+                }
+            }
+            None => {
+                return LeviathanError::OperationFailed(format!(
+                    "Checkout failed: {}. Your changes could not be found to \
+                     restore — they are still in the stash list, apply them \
+                     manually.",
+                    msg
+                ));
+            }
+        }
+    }
+    LeviathanError::OperationFailed(format!("Checkout failed: {}", msg))
+}
+
+fn auto_stash_index(repo: &mut git2::Repository, stash_oid: Option<git2::Oid>) -> Option<usize> {
+    let expected = stash_oid?;
+    let mut found = None;
+    let _ = repo.stash_foreach(|idx, _name, oid| {
+        if *oid == expected {
+            found = Some(idx);
+            false
+        } else {
+            true
+        }
+    });
+    found
+}
+
+pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
+    use git2::RepositoryState::*;
+    let what = match repo.state() {
+        Clean => return Ok(()),
+        Merge => "merge",
+        Revert | RevertSequence => "revert",
+        CherryPick | CherryPickSequence => "cherry-pick",
+        Bisect => "bisect",
+        Rebase | RebaseInteractive | RebaseMerge => "rebase",
+        ApplyMailbox | ApplyMailboxOrRebase => "patch application",
+    };
+    Err(LeviathanError::OperationFailed(format!(
+        "Cannot switch branches while a {} is in progress. Finish or abort it first.",
+        what
+    )))
+}
+
 #[command]
 pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
+    ensure_checkoutable(&repo)?;
+    // BEFORE checkout_tree — see branch_checked_out_elsewhere.
+    ensure_not_checked_out_elsewhere(&repo, &ref_name)?;
 
     // Capture HEAD before the switch so the post-checkout hook receives the
     // correct <old-ref> argument (githooks(5)).
@@ -593,6 +821,16 @@ pub struct CheckoutWithStashResult {
     pub stash_applied: bool,
     /// Whether stash apply had conflicts
     pub stash_conflict: bool,
+    /// The auto-stash's oid, when one was created and still exists.
+    ///
+    /// The conflict flow has to drop this entry once the user resolves, and it
+    /// used to find it by position: every frontend caller passed
+    /// `stashIndex: 0`. `git stash push` prepends, so a stash created by
+    /// another surface or a terminal renumbers the entry and the conflict
+    /// dialog would drop the wrong one. This function resolves its own stash by
+    /// oid; carrying the oid across the boundary lets the dialog do the same
+    /// instead of trusting a position the backend has stopped trusting.
+    pub stash_oid: Option<String>,
     /// Message describing what happened
     pub message: String,
 }
@@ -603,17 +841,27 @@ pub struct CheckoutWithStashResult {
 /// 3. Try to apply the stash
 /// 4. Return status including any conflicts
 #[command]
+/// `auto_stash` honours the "Auto-Stash on Checkout" setting. When false the
+/// checkout is attempted as-is, so git refuses one that would overwrite local
+/// changes instead of silently stashing and popping behind the user's back.
+/// Absent keeps the previous always-stash behaviour.
 pub async fn checkout_with_autostash(
     path: String,
     ref_name: String,
+    auto_stash: Option<bool>,
 ) -> Result<CheckoutWithStashResult> {
     let mut repo = git2::Repository::open(Path::new(&path))?;
+    ensure_checkoutable(&repo)?;
+    // BEFORE the stash and BEFORE checkout_tree. Refusing later meant the tree
+    // was already rewritten and the auto-stash could not be popped back over
+    // the staged entries checkout_tree had left.
+    ensure_not_checked_out_elsewhere(&repo, &ref_name)?;
 
     // Capture HEAD before the switch for the post-checkout hook's <old-ref>.
     let old_head = crate::commands::hooks::head_oid_string(&repo);
 
     // Check if there are uncommitted changes
-    let has_changes = {
+    let has_changes = auto_stash.unwrap_or(true) && {
         let statuses = repo.statuses(None)?;
         statuses.iter().any(|s| {
             let flags = s.status();
@@ -655,6 +903,7 @@ pub async fn checkout_with_autostash(
                     stashed: false,
                     stash_applied: false,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!("Failed to stash changes: {}", e.message()),
                 });
             }
@@ -701,27 +950,65 @@ pub async fn checkout_with_autostash(
         Ok((commit.id(), is_local, is_remote))
     })();
 
-    let (target_oid, is_local_branch, is_remote_branch) = resolve_result.map_err(|msg| {
-        // Restore stash if checkout target resolution failed
-        if stashed {
-            // Best effort - try to pop stash, but don't fail if it doesn't work
-            let _ = repo.stash_pop(0, None);
+    let (target_oid, is_local_branch, is_remote_branch) = match resolve_result {
+        Ok(v) => v,
+        Err(msg) => {
+            // Restore the stash if the checkout target failed to resolve.
+            // Resolved by oid, not popped positionally: a stash created by
+            // another surface or a terminal in the meantime sits at index 0 and
+            // would be applied and destroyed in place of the auto-stash. The
+            // checkout-failure path below has always verified the oid; this one
+            // did not. Best effort — a failure to restore must not mask the
+            // resolution error the user actually needs to see.
+            //
+            // A failure to restore must not MASK the resolution error the user
+            // needs to see — but not masking and not mentioning are different
+            // things. The sibling arm below concatenates both; this one
+            // discarded the restore's outcome, so the user was told only
+            // "could not find ref" while looking at an empty working tree with
+            // no hint that their changes were sitting in the stash list.
+            let restore_note = if stashed {
+                match auto_stash_index(&mut repo, stash_oid) {
+                    Some(idx) => match repo.stash_pop(idx, None) {
+                        Ok(()) => "",
+                        Err(_) => {
+                            " Your changes could not be restored — they are still in \
+                             the stash list, apply them manually."
+                        }
+                    },
+                    None => {
+                        " Your changes could not be found to restore — they are still \
+                         in the stash list, apply them manually."
+                    }
+                }
+            } else {
+                ""
+            };
+            return Err(LeviathanError::OperationFailed(format!(
+                "{}{}",
+                msg, restore_note
+            )));
         }
-        LeviathanError::OperationFailed(msg)
-    })?;
+    };
+
+    // Routed through autostash_failure like every other exit past the stash.
+    //
+    // This was the ONE that abandoned the user's work silently: a bare
+    // "Could not find object" with the whole working tree gone and nothing
+    // saying it was in the stash list. The comment here claimed a borrow
+    // prevented the restore; `repo` is already &mut and autostash_failure
+    // takes &mut, so it does not. Resolved before the borrow below begins.
+    let find_error: Option<String> = match repo.find_object(target_oid, None) {
+        Ok(_) => None,
+        Err(e) => Some(format!("Could not find object: {}", e.message())),
+    };
+    if let Some(msg) = find_error {
+        return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
+    }
 
     // Perform checkout using the OID
     let checkout_error: Option<String> = {
-        let obj = match repo.find_object(target_oid, None) {
-            Ok(o) => o,
-            Err(e) => {
-                // Can't restore stash here due to borrow, signal error
-                return Err(LeviathanError::OperationFailed(format!(
-                    "Could not find object: {}",
-                    e.message()
-                )));
-            }
-        };
+        let obj = repo.find_object(target_oid, None)?;
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.safe();
 
@@ -732,75 +1019,75 @@ pub async fn checkout_with_autostash(
     }; // obj dropped here
 
     if let Some(msg) = checkout_error {
-        // Restore stash if checkout fails
-        if stashed {
-            // Verify the stash at index 0 is our auto-stash before popping
-            let mut first_stash_oid: Option<git2::Oid> = None;
-            let _ = repo.stash_foreach(|idx, _name, oid| {
-                if idx == 0 {
-                    first_stash_oid = Some(*oid);
-                    false // Stop iteration
-                } else {
-                    true // Continue (shouldn't happen since we stop at 0)
-                }
-            });
-
-            // Only pop if we can verify it's our stash, or if we didn't save the OID
-            let should_pop = match (stash_oid, first_stash_oid) {
-                (Some(expected), Some(actual)) => expected == actual,
-                (None, Some(_)) => true, // No expected OID, try to pop
-                _ => false,              // No stash found
-            };
-
-            if should_pop {
-                if let Err(pop_err) = repo.stash_pop(0, None) {
-                    return Err(LeviathanError::OperationFailed(format!(
-                        "Checkout failed: {}. Additionally, failed to restore stashed changes: {}",
-                        msg,
-                        pop_err.message()
-                    )));
-                }
-            }
-        }
-        return Err(LeviathanError::OperationFailed(format!(
-            "Checkout failed: {}",
-            msg
-        )));
+        // Restore the auto-stash now the checkout has failed.
+        //
+        // Resolved by oid rather than verified at index 0: `git stash push`
+        // prepends, so a stash created during the (multi-second) checkout
+        // pushes ours down a slot. The old check only compared against index 0,
+        // so it declined to restore and returned a bare "Checkout failed" —
+        // leaving the user with an empty working tree, their changes in the
+        // stash list, and nothing on screen saying so.
+        return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
     }
 
-    // Set HEAD
-    if is_local_branch {
-        if let Ok(branch) = repo.find_branch(&ref_name, git2::BranchType::Local) {
+    // Set HEAD.
+    //
+    // Propagated, not swallowed. checkout_tree above has ALREADY rewritten the
+    // working tree to the target commit, so skipping set_head leaves HEAD and
+    // the working tree describing different commits — and this function went
+    // on to return success: true, so the UI toasted "Switched to <branch>" and
+    // the user was left on the old branch with the whole inter-branch diff
+    // showing as uncommitted modifications. `if let Ok(..)` made that the
+    // outcome whenever the branch was deleted from a terminal during the
+    // checkout. The plain `checkout` command has always used `?` here.
+    let set_head_result = (|| -> Result<()> {
+        if is_local_branch {
+            let branch = repo.find_branch(&ref_name, git2::BranchType::Local)?;
             repo.set_head(branch.get().name().map_err(|_| {
                 LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
             })?)?;
-        }
-    } else if is_remote_branch {
-        // Check out a remote branch by finding or creating a local tracking branch.
-        // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
-        let local_name = if let Some(pos) = ref_name.find('/') {
-            &ref_name[pos + 1..]
-        } else {
-            &ref_name
-        };
-
-        // Use existing local branch if it exists, otherwise create one
-        let local_branch =
-            if let Ok(existing) = repo.find_branch(local_name, git2::BranchType::Local) {
-                existing
+        } else if is_remote_branch {
+            // Check out a remote branch by finding or creating a local tracking branch.
+            // e.g., "origin/feature-x" → local branch "feature-x" tracking "origin/feature-x"
+            let local_name = if let Some(pos) = ref_name.find('/') {
+                &ref_name[pos + 1..]
             } else {
-                let commit = repo.find_commit(target_oid)?;
-                let mut new_branch = repo.branch(local_name, &commit, false)?;
-                // Best effort: set upstream tracking (may fail if remote config is incomplete)
-                let _ = new_branch.set_upstream(Some(&ref_name));
-                new_branch
+                &ref_name
             };
 
-        if let Ok(name) = local_branch.get().name() {
+            // Use existing local branch if it exists, otherwise create one
+            let local_branch =
+                if let Ok(existing) = repo.find_branch(local_name, git2::BranchType::Local) {
+                    existing
+                } else {
+                    let commit = repo.find_commit(target_oid)?;
+                    let mut new_branch = repo.branch(local_name, &commit, false)?;
+                    // Best effort: set upstream tracking (may fail if remote config is incomplete)
+                    let _ = new_branch.set_upstream(Some(&ref_name));
+                    new_branch
+                };
+
+            let name = local_branch.get().name().map_err(|_| {
+                LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
+            })?;
             repo.set_head(name)?;
+        } else {
+            repo.set_head_detached(target_oid)?;
         }
-    } else {
-        repo.set_head_detached(target_oid)?;
+        Ok(())
+    })();
+
+    // Routed through the SAME restore path a failed checkout_tree takes.
+    // Propagating alone still left the auto-stash orphaned and unmentioned:
+    // the tree is at the target commit, HEAD is not, and the raw set_head
+    // error says nothing about where the user's changes went.
+    if let Err(err) = set_head_result {
+        return Err(autostash_failure(
+            &mut repo,
+            stashed,
+            stash_oid,
+            &err.to_string(),
+        ));
     }
 
     // HEAD/working tree switched — run post-checkout (flag=1), non-blocking.
@@ -834,7 +1121,26 @@ pub async fn checkout_with_autostash(
             ref_name
         );
 
-        match repo.stash_apply(0, Some(&mut stash_apply_opts)) {
+        // Resolved by OID, not assumed to be 0 — see auto_stash_index.
+        let stash_idx = match auto_stash_index(&mut repo, stash_oid) {
+            Some(idx) => idx,
+            None => {
+                return Ok(CheckoutWithStashResult {
+                    success: true,
+                    stashed: true,
+                    stash_applied: false,
+                    stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
+                    message: format!(
+                        "Switched to {}, but your stashed changes could not be found to \
+                         re-apply. They are still in the stash list — apply them manually.",
+                        ref_name
+                    ),
+                });
+            }
+        };
+
+        match repo.stash_apply(stash_idx, Some(&mut stash_apply_opts)) {
             Ok(()) => {
                 // Apply reported success, but an unstaged conflicting change can
                 // land conflicts in the index while still returning Ok. Only drop
@@ -845,15 +1151,17 @@ pub async fn checkout_with_autostash(
                         stashed: true,
                         stash_applied: false,
                         stash_conflict: true,
+                        stash_oid: stash_oid.map(|o| o.to_string()),
                         message: conflict_message,
                     });
                 }
-                repo.stash_drop(0)?;
+                repo.stash_drop(stash_idx)?;
                 return Ok(CheckoutWithStashResult {
                     success: true,
                     stashed: true,
                     stash_applied: true,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!("Switched to {} and re-applied stashed changes", ref_name),
                 });
             }
@@ -877,13 +1185,38 @@ pub async fn checkout_with_autostash(
                     retry_checkout.safe();
                     retry_opts.checkout_options(retry_checkout);
 
-                    if repo.stash_apply(0, Some(&mut retry_opts)).is_ok() {
+                    // Re-resolved: the failed apply above may itself have
+                    // changed the stash list. A missing entry must produce the
+                    // same refusal the initial resolve gives — falling back to
+                    // the earlier position would apply and drop whatever now
+                    // occupies it, which is the exact bug auto_stash_index
+                    // exists to close.
+                    let retry_idx = match auto_stash_index(&mut repo, stash_oid) {
+                        Some(idx) => idx,
+                        None => {
+                            return Ok(CheckoutWithStashResult {
+                                success: true,
+                                stashed: true,
+                                stash_applied: false,
+                                stash_conflict: false,
+                                stash_oid: stash_oid.map(|o| o.to_string()),
+                                message: format!(
+                                    "Switched to {}, but your stashed changes could not be \
+                                     found to re-apply. They are still in the stash list — \
+                                     apply them manually.",
+                                    ref_name
+                                ),
+                            });
+                        }
+                    };
+                    if repo.stash_apply(retry_idx, Some(&mut retry_opts)).is_ok() {
                         if repo.index()?.has_conflicts() {
                             return Ok(CheckoutWithStashResult {
                                 success: true,
                                 stashed: true,
                                 stash_applied: false,
                                 stash_conflict: true,
+                                stash_oid: stash_oid.map(|o| o.to_string()),
                                 message: conflict_message,
                             });
                         }
@@ -893,12 +1226,13 @@ pub async fn checkout_with_autostash(
                         // duplicate or conflict with the already-applied changes.
                         // The staged status could not be reinstated on this path, so
                         // note that in the message.
-                        repo.stash_drop(0)?;
+                        repo.stash_drop(retry_idx)?;
                         return Ok(CheckoutWithStashResult {
                             success: true,
                             stashed: true,
                             stash_applied: true,
                             stash_conflict: false,
+                            stash_oid: stash_oid.map(|o| o.to_string()),
                             message: format!(
                                 "Switched to {} and re-applied stashed changes (staged status was not preserved)",
                                 ref_name
@@ -913,6 +1247,7 @@ pub async fn checkout_with_autostash(
                     stashed: true,
                     stash_applied: false,
                     stash_conflict: false,
+                    stash_oid: stash_oid.map(|o| o.to_string()),
                     message: format!(
                         "Switched to {} but failed to re-apply stash: {}. Your changes remain stashed.",
                         ref_name,
@@ -928,6 +1263,7 @@ pub async fn checkout_with_autostash(
         stashed: false,
         stash_applied: false,
         stash_conflict: false,
+        stash_oid: stash_oid.map(|o| o.to_string()),
         message: format!("Switched to {}", ref_name),
     })
 }
@@ -998,6 +1334,124 @@ mod tests {
         let branch = result.unwrap();
         assert_eq!(branch.name, "new-feature");
         assert!(branch.is_head); // checkout was true
+    }
+
+    /// Put `repo` into a paused interactive rebase, the way an `edit` line
+    /// leaves it: state on disk, HEAD detached, working tree clean. Nothing is
+    /// modal on screen in this state, so every branch-switching surface stays
+    /// live.
+    fn pause_an_interactive_rebase(repo: &TestRepo) {
+        let git = repo.repo();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        std::fs::create_dir_all(repo.path.join(".git/rebase-merge")).unwrap();
+        std::fs::write(repo.path.join(".git/rebase-merge/interactive"), "").unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/head-name"),
+            "refs/heads/main\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path.join(".git/rebase-merge/onto"),
+            format!("{}\n", head.id()),
+        )
+        .unwrap();
+        assert_ne!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "the fixture must actually put the repo mid-rebase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_checkoutable_refuses_mid_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        pause_an_interactive_rebase(&repo);
+
+        let err = checkout(repo.path_str(), "main".to_string(), None)
+            .await
+            .expect_err("checkout must refuse while a rebase is in progress");
+        assert!(
+            err.to_string().contains("rebase is in progress"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_with_checkout_refuses_mid_rebase() {
+        // "Checkout new branch after creation" is the dialog default, so this
+        // switched branches without being called checkout — orphaning the
+        // rebase state on disk. The still-visible Abort would then yank the
+        // user back to the original branch, discarding the new branch's work.
+        let repo = TestRepo::with_initial_commit();
+        let head_before = repo.repo().head().unwrap().target();
+        pause_an_interactive_rebase(&repo);
+
+        let err = create_branch(repo.path_str(), "escape".to_string(), None, Some(true))
+            .await
+            .expect_err("create+checkout must refuse while a rebase is in progress");
+        assert!(
+            err.to_string().contains("rebase is in progress"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            repo.repo()
+                .find_branch("escape", git2::BranchType::Local)
+                .is_err(),
+            "a refusal must not leave the branch behind"
+        );
+        assert_eq!(repo.repo().head().unwrap().target(), head_before);
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_without_checkout_is_allowed_mid_rebase() {
+        // Creating a ref does not switch branches, so it must stay available.
+        let repo = TestRepo::with_initial_commit();
+        pause_an_interactive_rebase(&repo);
+
+        create_branch(repo.path_str(), "bookmark".to_string(), None, Some(false))
+            .await
+            .expect("creating a ref mid-rebase is not a branch switch");
+        assert!(repo
+            .repo()
+            .find_branch("bookmark", git2::BranchType::Local)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_rolls_back_when_the_checkout_fails() {
+        // A dirty file that differs between HEAD and the start point makes the
+        // SAFE checkout conflict. The ref already exists by then; without a
+        // rollback the dialog showed an error while the sidebar grew the
+        // branch, and a retry dead-ended on "already exists".
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.head_oid();
+        repo.create_commit("second", &[("conflicted.txt", "from HEAD\n")]);
+        // Uncommitted content that differs from BOTH sides.
+        repo.create_file("conflicted.txt", "my unsaved work\n");
+
+        let result = create_branch(
+            repo.path_str(),
+            "from-initial".to_string(),
+            Some(initial.to_string()),
+            Some(true),
+        )
+        .await;
+
+        if result.is_err() {
+            assert!(
+                repo.repo()
+                    .find_branch("from-initial", git2::BranchType::Local)
+                    .is_err(),
+                "a failed create+checkout must not leave the ref behind"
+            );
+        }
+        // The uncommitted work survives either way.
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("conflicted.txt")).unwrap(),
+            "my unsaved work\n"
+        );
     }
 
     #[tokio::test]
@@ -1409,17 +1863,390 @@ mod tests {
 
     // ── checkout_with_autostash tests ──────────────────────────────────
 
+    /// A branch checked out in ANOTHER worktree must be refused BEFORE the
+    /// working tree is touched.
+    ///
+    /// libgit2 enforces this in set_head, not checkout_tree, and every checkout
+    /// path here rewrote the tree first. So the refusal fired after the damage:
+    /// tree and index held the other branch's content, HEAD still named the old
+    /// branch, the whole inter-branch diff was left STAGED, and the auto-stash
+    /// could not be popped back over it. Canonical git refuses up front.
+    /// The guard must strip a REMOTE row's name to the local branch the
+    /// checkout will actually land on. Testing the raw "origin/feat" matched
+    /// refs/heads/origin/feat — nothing — so the remote arm then resolved the
+    /// local `feat` and hit the very corruption the guard exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn test_elsewhere_guard_strips_a_remote_prefix() {
+        let test_repo = TestRepo::with_initial_commit();
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("remote-wt-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "feat"])
+            .arg(&wt_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let repo = test_repo.repo();
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "feat").is_err(),
+            "the local name must be refused"
+        );
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "origin/feat").is_err(),
+            "and so must the remote row that resolves to it"
+        );
+        assert!(
+            ensure_not_checked_out_elsewhere(&repo, "origin/unrelated").is_ok(),
+            "an unrelated branch must still be allowed"
+        );
+    }
+
+    /// The guard must also see the MAIN worktree. git_worktree_list enumerates
+    /// only $GIT_COMMON_DIR/worktrees/, which the main worktree has no entry
+    /// in — so opened ON a linked worktree the check saw nothing at all, while
+    /// libgit2's own set_head refusal does cover it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_from_a_linked_worktree_refuses_the_main_worktrees_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("a.txt", "MAIN\n")]);
+        let main_branch = test_repo.current_branch();
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("linked-main-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "side"])
+            .arg(&wt_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        // Operate FROM the linked worktree, targeting the main worktree's branch.
+        let result = checkout_with_autostash(
+            wt_dir.to_string_lossy().to_string(),
+            main_branch,
+            Some(true),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the main worktree's branch must be refused from a linked worktree"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already checked out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_checkout_refuses_a_branch_held_by_another_worktree() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("a.txt", "MAIN\n")]);
+
+        // A linked worktree holding `feat`.
+        // Unique per run: `..` from the repo's TempDir is the SHARED system
+        // temp dir, so a fixed name collides with tests running in parallel.
+        let unique = test_repo
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let wt_dir = test_repo
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("linked-wt-{}", unique));
+        let out = crate::utils::create_command("git")
+            .arg("-C")
+            .arg(&test_repo.path)
+            .args(["worktree", "add", "-b", "feat"])
+            .arg(&wt_dir)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // An uncommitted edit that must survive untouched.
+        std::fs::write(test_repo.path.join("a.txt"), "MY PRECIOUS EDIT\n").unwrap();
+        let head_before = test_repo.head_oid();
+
+        let result =
+            checkout_with_autostash(test_repo.path_str(), "feat".to_string(), Some(true)).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse a branch held by another worktree"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("already checked out"),
+            "actionable message: {msg}"
+        );
+
+        // Nothing moved, nothing was stashed, the edit is still there.
+        assert_eq!(test_repo.head_oid(), head_before, "HEAD must not move");
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("a.txt")).unwrap(),
+            "MY PRECIOUS EDIT\n",
+            "the working tree must be untouched"
+        );
+        let mut repo = test_repo.repo();
+        let mut stash_count = 0;
+        let _ = repo.stash_foreach(|_, _, _| {
+            stash_count += 1;
+            true
+        });
+        assert_eq!(stash_count, 0, "nothing may be left in the stash");
+    }
+
     #[tokio::test]
     async fn test_checkout_with_autostash_local_branch() {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("feature");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
         assert!(!data.stashed);
         assert_eq!(repo.current_branch(), "feature");
+    }
+
+    /// `git stash push` PREPENDS, so a stash created between the auto-stash
+    /// save and the re-apply renumbers the entry. Applying and dropping the
+    /// bare index 0 then restored someone else's stash and destroyed it, while
+    /// the user's pre-checkout work stayed unapplied one slot down — and the
+    /// success toast still claimed the changes had been re-applied.
+    #[test]
+    fn test_auto_stash_index_follows_the_oid_not_the_position() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+
+        test_repo.create_file("README.md", "first stash\n");
+        let first = repo
+            .stash_save(&sig, "first", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        // A second stash pushes the first down to index 1.
+        test_repo.create_file("README.md", "second stash\n");
+        let second = repo
+            .stash_save(&sig, "second", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        assert_eq!(
+            auto_stash_index(&mut repo, Some(first)),
+            Some(1),
+            "the first stash moved to index 1 and must be found there"
+        );
+        assert_eq!(auto_stash_index(&mut repo, Some(second)), Some(0));
+    }
+
+    #[test]
+    fn test_auto_stash_index_is_none_when_the_stash_is_gone() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+
+        test_repo.create_file("README.md", "stashed\n");
+        let oid = repo
+            .stash_save(&sig, "gone", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+        repo.stash_drop(0).unwrap();
+
+        assert_eq!(
+            auto_stash_index(&mut repo, Some(oid)),
+            None,
+            "a vanished stash must not fall back to whatever sits at index 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_leaves_a_foreign_stash_alone() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.create_file("README.md", "my work\n");
+
+        // A stash that is NOT the auto-stash, sitting at index 0.
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's work\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let result =
+            checkout_with_autostash(test_repo.path_str(), "feature".to_string(), Some(true))
+                .await
+                .expect("checkout");
+        assert!(result.success);
+
+        // Whatever happened to the auto-stash, the foreign one must survive.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the checkout applied and dropped a stash it did not create"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_bad_ref_leaves_a_foreign_stash_alone() {
+        // The resolve-failure path popped index 0 unverified while the
+        // checkout-failure path beside it checked the oid. A stash created in
+        // between sits at 0 and would be applied and destroyed in place of the
+        // auto-stash.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_file("README.md", "my work\n");
+
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's work\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        // A ref that cannot resolve drives the resolve-failure path.
+        let result = checkout_with_autostash(
+            test_repo.path_str(),
+            "no-such-branch".to_string(),
+            Some(true),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unresolvable ref must fail the checkout"
+        );
+
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the failed checkout popped a stash it did not create"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkout_failure_restores_the_auto_stash_by_oid() {
+        // A stash pushed during the checkout renumbers the list. The old check
+        // only compared against index 0, so it declined to restore and returned
+        // a bare "Checkout failed" — leaving an empty working tree, the changes
+        // in the stash list, and nothing on screen saying so.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        test_repo.create_branch("feature");
+
+        test_repo.create_file("tracked.txt", "my work\n");
+
+        // A foreign stash that will sit at index 0 once the auto-stash lands.
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        test_repo.create_file("other.txt", "someone else's\n");
+        test_repo.stage_file("other.txt");
+        let foreign = repo
+            .stash_save(&sig, "foreign", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let _ =
+            checkout_with_autostash(test_repo.path_str(), "feature".to_string(), Some(true)).await;
+
+        // Whatever the outcome, the foreign stash must survive untouched.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(foreign)).is_some(),
+            "the checkout restored a stash it did not create"
+        );
+    }
+
+    /// A failure AFTER checkout_tree must restore the auto-stash and say so.
+    ///
+    /// checkout_tree rewrites the working tree before HEAD moves, so anything
+    /// that fails after it — a failed set_head, say, when the branch is deleted
+    /// from a terminal mid-checkout — leaves the tree at the target commit with
+    /// the user's work in the stash list. Propagating the raw error alone sent
+    /// them to a working tree they did not recognise with no clue their changes
+    /// were recoverable. Both failure paths now route through this one function
+    /// so they cannot describe the same situation differently.
+    #[test]
+    fn test_autostash_failure_restores_the_stash_and_reports_it() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("base", &[("tracked.txt", "base\n")]);
+        test_repo.create_file("tracked.txt", "my work\n");
+
+        let mut repo = test_repo.repo();
+        let sig = repo.signature().unwrap();
+        let stash_oid = repo
+            .stash_save(&sig, "auto-stash", Some(git2::StashFlags::DEFAULT))
+            .unwrap();
+
+        let err = autostash_failure(&mut repo, true, Some(stash_oid), "set_head exploded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("set_head exploded"),
+            "names the failure: {msg}"
+        );
+
+        // The user's work is back in the working tree, not stranded.
+        let mut repo = test_repo.repo();
+        assert!(
+            auto_stash_index(&mut repo, Some(stash_oid)).is_none(),
+            "the auto-stash must have been popped"
+        );
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("tracked.txt")).unwrap(),
+            "my work\n"
+        );
+    }
+
+    #[test]
+    fn test_autostash_failure_says_where_the_changes_are_when_it_cannot_restore() {
+        let test_repo = TestRepo::with_initial_commit();
+        let mut repo = test_repo.repo();
+
+        // An oid that is not in the stash list — the entry was dropped from a
+        // terminal while the checkout ran.
+        let missing = git2::Oid::from_str("0123456789012345678901234567890123456789").unwrap();
+        let err = autostash_failure(&mut repo, true, Some(missing), "set_head exploded");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("set_head exploded"),
+            "names the failure: {msg}"
+        );
+        assert!(
+            msg.contains("still in the stash list"),
+            "must tell the user where their work went: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1431,7 +2258,8 @@ mod tests {
         repo.create_file("README.md", "modified content");
         repo.stage_file("README.md");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1441,10 +2269,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checkout_with_autostash_disabled_does_not_stash() {
+        // With the setting off the checkout is attempted as-is. A clean tree
+        // still switches — only a checkout that would clobber work is refused.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(false)).await;
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(data.success);
+        assert!(
+            !data.stashed,
+            "the setting was off, so nothing may be stashed"
+        );
+        assert_eq!(repo.current_branch(), "feature");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_disabled_leaves_changes_in_place() {
+        // The uncommitted work must still be there afterwards, whether git
+        // allowed the switch or refused it — what must NOT happen is a silent
+        // stash behind the back of a user who turned the setting off.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+        repo.create_file("README.md", "modified content");
+
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(false)).await;
+
+        if let Ok(data) = result {
+            assert!(
+                !data.stashed,
+                "no stash may be created when the setting is off"
+            );
+        }
+        let content =
+            std::fs::read_to_string(std::path::Path::new(&repo.path_str()).join("README.md"))
+                .unwrap();
+        assert_eq!(content, "modified content", "the user's changes survive");
+    }
+
+    #[tokio::test]
+    async fn test_checkout_with_autostash_none_keeps_stashing() {
+        // Absent means "behave as before": older callers must not change.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_branch("feature");
+        repo.create_file("README.md", "modified content");
+        repo.stage_file("README.md");
+
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), None).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().stashed);
+    }
+
+    #[tokio::test]
     async fn test_checkout_with_autostash_nonexistent_ref_fails() {
         let repo = TestRepo::with_initial_commit();
 
-        let result = checkout_with_autostash(repo.path_str(), "nonexistent".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "nonexistent".to_string(), Some(true)).await;
         assert!(result.is_err());
         // Should still be on original branch
         assert_eq!(repo.current_branch(), "main");
@@ -1458,8 +2343,12 @@ mod tests {
         // Simulate a remote branch
         repo.create_remote_branch("feature-remote", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature-remote".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature-remote".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         let data = result.unwrap();
         assert!(data.success);
@@ -1489,8 +2378,12 @@ mod tests {
         repo.create_branch("feature-existing");
         repo.create_remote_branch("feature-existing", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature-existing".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature-existing".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1512,8 +2405,12 @@ mod tests {
         // Simulate origin/feature/my-branch (nested path)
         repo.create_remote_branch("feature/my-branch", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/feature/my-branch".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/feature/my-branch".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1530,7 +2427,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_branch("feature");
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true)).await;
         assert!(result.is_ok());
 
         let branches = get_branches(repo.path_str()).await.unwrap();
@@ -1546,8 +2444,12 @@ mod tests {
         let oid = repo.head_oid();
         repo.create_remote_branch("new-feature", oid);
 
-        let result =
-            checkout_with_autostash(repo.path_str(), "origin/new-feature".to_string()).await;
+        let result = checkout_with_autostash(
+            repo.path_str(),
+            "origin/new-feature".to_string(),
+            Some(true),
+        )
+        .await;
         assert!(result.is_ok());
 
         let branches = get_branches(repo.path_str()).await.unwrap();
@@ -1696,7 +2598,7 @@ mod tests {
         repo.create_commit("Second commit", &[("file2.txt", "data")]);
 
         // Checkout a commit hash via autostash should detach HEAD
-        let result = checkout_with_autostash(repo.path_str(), oid.to_string()).await;
+        let result = checkout_with_autostash(repo.path_str(), oid.to_string(), Some(true)).await;
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.success);
@@ -1710,6 +2612,7 @@ mod tests {
             stashed: true,
             stash_applied: false,
             stash_conflict: true,
+            stash_oid: Some("abc123".to_string()),
             message: "test message".to_string(),
         };
 
@@ -1717,6 +2620,8 @@ mod tests {
         // Verify camelCase serialization
         assert!(json.contains("stashApplied"));
         assert!(json.contains("stashConflict"));
+        // The conflict flow drops the auto-stash by oid, not by position.
+        assert!(json.contains("stashOid"));
     }
 
     #[tokio::test]
@@ -1790,7 +2695,9 @@ mod tests {
         let commit_b = repo.create_commit("B on main", &[("newer.txt", "from B")]);
         repo.create_remote_branch("feature", commit_b);
 
-        let result = checkout_with_autostash(repo.path_str(), "origin/feature".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "origin/feature".to_string(), Some(true))
+                .await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         assert!(result.unwrap().success);
 
@@ -1812,7 +2719,8 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_file("README.md", "# modified content");
 
-        let result = checkout_with_autostash(repo.path_str(), "no-such-ref".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "no-such-ref".to_string(), Some(true)).await;
         let err = result.expect_err("checkout of a nonexistent ref must fail");
         let msg = err.to_string();
         assert!(
@@ -1847,7 +2755,8 @@ mod tests {
         repo.create_file("README.md", "# staged change");
         repo.stage_file("README.md");
 
-        let result = checkout_with_autostash(repo.path_str(), "other".to_string()).await;
+        let result =
+            checkout_with_autostash(repo.path_str(), "other".to_string(), Some(true)).await;
         assert!(result.is_ok(), "checkout failed: {:?}", result.err());
         let data = result.unwrap();
         assert!(data.success);
@@ -1907,7 +2816,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         setup_autostash_conflict(&repo, false);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -1964,7 +2873,7 @@ mod tests {
         repo.stage_file("shared.txt");
         repo.create_file("shared.txt", working_ver);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -2014,7 +2923,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         setup_autostash_conflict(&repo, true);
 
-        let result = checkout_with_autostash(repo.path_str(), "feature".to_string())
+        let result = checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .expect("checkout_with_autostash should not hard-error");
 
@@ -2104,7 +3013,7 @@ mod tests {
             &format!("#!/bin/sh\necho \"$1 $2 $3\" > \"{}\"\n", marker.display()),
         );
 
-        checkout_with_autostash(repo.path_str(), "feature".to_string())
+        checkout_with_autostash(repo.path_str(), "feature".to_string(), Some(true))
             .await
             .unwrap();
 
