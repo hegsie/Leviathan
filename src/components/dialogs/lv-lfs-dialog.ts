@@ -479,6 +479,12 @@ export class LvLfsDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProperties.has('open') && this.open) {
+      // A prune started against the previous pin may still be running (the
+      // host can clear ?open without going through handleClose). Re-pinning
+      // under it would point every post-await read and the `-changed` event at
+      // a repository the prune never touched, while the one whose local LFS
+      // objects were just deleted went unrefreshed.
+      if (this.operationInFlight) return;
       this.pinnedRepoPath = this.repositoryPath;
       // Cleared on the OPEN transition, not just per handler. These dialogs
       // stay mounted (app-shell only toggles ?open), so `success` survived
@@ -492,16 +498,28 @@ export class LvLfsDialog extends LitElement {
     }
   }
 
-  private async loadStatus(): Promise<void> {
+  /**
+   * @param repoPath The repo to read. Handlers pass the path they CAPTURED
+   * before their await: reading the live pin here refetched — and repainted —
+   * whichever repository the dialog had since been re-pinned to. A reload
+   * whose path no longer matches the pin is dropped rather than painted over
+   * the repository now on screen; its `lfs-changed` event still routes the
+   * refresh to the repo that actually changed.
+   */
+  private async loadStatus(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getLfsStatus(this.pinnedRepoPath);
+    const result = await gitService.getLfsStatus(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
 
     if (result.success && result.data) {
       this.status = result.data;
       if (result.data.enabled) {
-        await this.loadFiles();
+        await this.loadFiles(repoPath);
       }
     } else {
       this.error = result.error?.message || 'Failed to load LFS status';
@@ -510,8 +528,14 @@ export class LvLfsDialog extends LitElement {
     this.loading = false;
   }
 
-  private async loadFiles(): Promise<void> {
-    const result = await gitService.getLfsFiles(this.pinnedRepoPath);
+  /** @param repoPath See loadStatus. */
+  private async loadFiles(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
+    const result = await gitService.getLfsFiles(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
+
     if (result.success && result.data) {
       this.files = result.data;
     }
@@ -535,9 +559,9 @@ export class LvLfsDialog extends LitElement {
       // Says what actually happened: `git lfs install` sets hooks and config
       // but writes no .gitattributes, so nothing is tracked yet.
       this.success = 'Git LFS hooks installed — add a pattern below to start tracking files';
-      await this.loadStatus();
+      await this.loadStatus(repoPath);
       this.dispatchEvent(new CustomEvent('lfs-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else {
       this.error = result.error?.message || 'Failed to initialize LFS';
@@ -576,9 +600,9 @@ export class LvLfsDialog extends LitElement {
       // open, so it gets the same inline message its siblings use.
       this.success = `Now tracking ${pattern}`;
       this.newPattern = '';
-      await this.loadStatus();
+      await this.loadStatus(repoPath);
       this.dispatchEvent(new CustomEvent('lfs-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else {
       this.error = result.error?.message || 'Failed to track pattern';
@@ -612,9 +636,9 @@ export class LvLfsDialog extends LitElement {
     if (result.success) {
       // Same asymmetry as handleTrack — see the note there.
       this.success = `No longer tracking ${pattern}`;
-      await this.loadStatus();
+      await this.loadStatus(repoPath);
       this.dispatchEvent(new CustomEvent('lfs-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else {
       this.error = result.error?.message || 'Failed to untrack pattern';
@@ -647,9 +671,9 @@ export class LvLfsDialog extends LitElement {
 
     if (result.success) {
       this.success = 'LFS files pulled successfully';
-      await this.loadFiles();
+      await this.loadFiles(repoPath);
       this.dispatchEvent(new CustomEvent('lfs-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       // The gate already said why; a declined confirm needs no message at all.
@@ -716,9 +740,9 @@ export class LvLfsDialog extends LitElement {
 
       if (result.success) {
         this.success = result.data || 'LFS files pruned';
-        await this.loadStatus();
+        await this.loadStatus(repoPath);
         this.dispatchEvent(new CustomEvent('lfs-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
       } else {
         this.error = result.error?.message || 'Failed to prune LFS files';
@@ -738,6 +762,12 @@ export class LvLfsDialog extends LitElement {
   }
 
   private handleClose(): void {
+    // Escape, the overlay and the x must honour the same rule the Prune button
+    // does: dismissing mid-prune left `git lfs prune` deleting local objects
+    // with no visible surface, and a Ctrl+Tab plus reopen then re-pinned the
+    // dialog at another repository which the prune's own completion proceeded
+    // to report against.
+    if (this.operationInFlight) return;
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -755,7 +785,11 @@ export class LvLfsDialog extends LitElement {
               </svg>
               Git LFS
             </span>
-            <button class="close-btn" @click=${this.handleClose}>
+            <button
+              class="close-btn"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -774,7 +808,11 @@ export class LvLfsDialog extends LitElement {
           </div>
 
           <div class="dialog-footer">
-            <button class="btn btn-secondary" @click=${this.handleClose}>
+            <button
+              class="btn btn-secondary"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               Close
             </button>
           </div>

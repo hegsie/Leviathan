@@ -3349,6 +3349,17 @@ export class AppShell extends LitElement {
       this.handleRefresh();
       return;
     }
+    // Only for a repo that is still OPEN. A slow operation can land after its
+    // tab was closed — teardownRepoServices() has already dropped the path,
+    // and adding it back here left an entry no one ever removes: it survived
+    // for the rest of the session, made a later reopen of the same path do a
+    // spurious extra refresh, and grew without bound across close/reopen
+    // cycles. Nothing to refresh either way once the tab is gone.
+    const isOpen = repositoryStore
+      .getState()
+      .openRepositories.some((r) => r.repository.path === pinnedPath);
+    if (!isOpen) return;
+
     this.staleRepoPaths.add(pinnedPath);
     this.scheduleBadgeHydration(pinnedPath);
   }

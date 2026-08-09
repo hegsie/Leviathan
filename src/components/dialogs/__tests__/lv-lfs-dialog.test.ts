@@ -10,10 +10,53 @@ let failingCommands: Set<string> = new Set();
 /** Result of the app's showConfirm(); prune is gated behind it. */
 let confirmResult = true;
 
+/** Commands parked mid-flight until the test releases them. */
+const gatedCommands = new Set<string>();
+const gateReleases = new Map<string, () => void>();
+/** Every repo path `get_lfs_status` was asked for, in order. */
+const statusReads: string[] = [];
+
+function gate(command: string): void {
+  gatedCommands.add(command);
+}
+
+/** Resolves once `command` is actually in flight (parked on its gate). */
+async function waitForGate(command: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (gateReleases.has(command)) return;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`${command} never reached its gate`);
+}
+
+function release(command: string): void {
+  const resolve = gateReleases.get(command);
+  gatedCommands.delete(command);
+  gateReleases.delete(command);
+  resolve?.();
+}
+
+/** Polls until `predicate` holds, so async work started by Lit can settle. */
+async function waitUntil(predicate: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
-const mockInvoke: MockInvoke = async (command: string) => {
+const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  if (command === 'get_lfs_status') {
+    statusReads.push(((args as { path?: string }) ?? {}).path ?? '');
+  }
+
+  if (gatedCommands.has(command)) {
+    await new Promise<void>((resolve) => gateReleases.set(command, resolve));
+  }
 
   if (
     command === 'plugin:dialog|message' ||
@@ -55,11 +98,19 @@ const mockInvoke: MockInvoke = async (command: string) => {
 // Import AFTER setting up the mock
 import '../lv-lfs-dialog.ts';
 import type { LvLfsDialog } from '../lv-lfs-dialog.ts';
+import { resetMaintenanceLocks } from '../../../utils/maintenance-confirms.ts';
 
 describe('lv-lfs-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
     confirmResult = true;
+    gatedCommands.clear();
+    // Release anything a failed test left parked, so its handler unwinds and
+    // frees the shared lock instead of poisoning every test after it.
+    gateReleases.forEach((resolve) => resolve());
+    gateReleases.clear();
+    statusReads.length = 0;
+    resetMaintenanceLocks();
   });
 
   it('renders when open', async () => {
@@ -192,6 +243,140 @@ describe('lv-lfs-dialog', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).success).to.contain('*.bin');
+    });
+  });
+
+  // `git lfs prune` deletes local LFS objects that were never pushed. The
+  // dialog is bound to the ACTIVE repository and re-pins on every open, so
+  // anything that lets it close (or re-pin) mid-prune points the completion —
+  // the banner, the reload and the `lfs-changed` refresh — at a repository the
+  // prune never touched.
+  describe('a prune in flight owns the dialog', () => {
+    const REPO_A = '/repo/a';
+    const REPO_B = '/repo/b';
+
+    /** Opens on `path` and drops the initial loads from the read log. */
+    async function openOn(path: string): Promise<LvLfsDialog> {
+      const el = await fixture<LvLfsDialog>(
+        html`<lv-lfs-dialog ?open=${true} .repositoryPath=${path}></lv-lfs-dialog>`,
+      );
+      // connectedCallback loads before the pin is taken, then the open
+      // transition pins and loads again.
+      await waitUntil(() => statusReads.includes(path), 'the initial status load');
+      expect(
+        statusReads.every((p) => p === '' || p === path),
+        'nothing but this repo was read while opening',
+      ).to.be.true;
+      statusReads.length = 0;
+      return el;
+    }
+
+    function routedRepos(el: LvLfsDialog): string[] {
+      const seen: string[] = [];
+      el.addEventListener('lfs-changed', (e) => {
+        seen.push((e as CustomEvent<{ repositoryPath?: string }>).detail?.repositoryPath ?? '');
+      });
+      return seen;
+    }
+
+    /** Starts a prune and returns once `lfs_prune` is in flight. */
+    async function startPrune(el: LvLfsDialog): Promise<{ done: Promise<void> }> {
+      gate('lfs_prune');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const done = (el as any).handlePrune() as Promise<void>;
+      await waitForGate('lfs_prune');
+      // Wrapped: `await`ing a promise that resolves TO a promise would chain
+      // onto the parked prune and hang the test.
+      return { done };
+    }
+
+    it('Escape does not close the dialog while the prune is running', async () => {
+      const el = await openOn(REPO_A);
+      let closes = 0;
+      el.addEventListener('close', () => { closes++; });
+
+      const { done } = await startPrune(el);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
+
+      expect(closes, 'objects that were never pushed are still being deleted').to.equal(0);
+      expect(
+        (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).disabled,
+        'and the x says so, instead of looking live and doing nothing',
+      ).to.be.true;
+
+      release('lfs_prune');
+      await done;
+      await el.updateComplete;
+      expect(
+        (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).disabled,
+        'and it comes back once the prune lands',
+      ).to.be.false;
+
+      // The control: once nothing is in flight, Escape dismisses as always.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
+      expect(closes, 'Escape still works when idle').to.equal(1);
+    });
+
+    it('reloads and routes the finished prune to the repo it ran on, not a repo reopened over it', async () => {
+      const el = await openOn(REPO_A);
+      const routed = routedRepos(el);
+      const { done } = await startPrune(el);
+
+      // The host owns ?open and can clear it without going through
+      // handleClose (closing the tab does exactly that), then reopen the
+      // dialog over another repository.
+      el.open = false;
+      await el.updateComplete;
+      el.repositoryPath = REPO_B;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      release('lfs_prune');
+      await done;
+
+      expect(
+        statusReads,
+        'the reopen must not re-pin under the prune, and the reload must read the repo that changed',
+      ).to.deep.equal([REPO_A]);
+      expect(routed, 'the host refreshes the repo whose objects were deleted').to.deep.equal([
+        REPO_A,
+      ]);
+    });
+
+    it('routes a track that lands after the dialog reopened elsewhere to the repo it ran on', async () => {
+      // Tracking a pattern is not destructive, so the dialog does close over
+      // it and legitimately re-pins on reopen. The completion must still
+      // follow the path it captured.
+      const el = await openOn(REPO_A);
+      const routed = routedRepos(el);
+
+      gate('lfs_track');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).newPattern = '*.psd';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const done = (el as any).handleTrack() as Promise<void>;
+      await waitForGate('lfs_track');
+
+      el.open = false;
+      await el.updateComplete;
+      el.repositoryPath = REPO_B;
+      el.open = true;
+      await el.updateComplete;
+      await waitUntil(() => statusReads.length === 1, 'the reopened dialog to load repo B');
+
+      release('lfs_track');
+      await done;
+
+      expect(
+        statusReads,
+        'the stale reload is dropped, not painted over the repository now on screen',
+      ).to.deep.equal([REPO_B]);
+      expect(routed, 'the host refreshes the repo the pattern was added to').to.deep.equal([
+        REPO_A,
+      ]);
     });
   });
 });

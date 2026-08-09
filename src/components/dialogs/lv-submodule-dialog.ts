@@ -448,6 +448,12 @@ export class LvSubmoduleDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProperties.has('open') && this.open) {
+      // A removal started against the previous pin may still be running (the
+      // host can clear ?open without going through handleClose). Re-pinning
+      // under it would point every post-await read and the `-changed` event at
+      // a repository the removal never touched, while the one whose index and
+      // working tree were just rewritten went unrefreshed.
+      if (this.operationInFlight) return;
       this.pinnedRepoPath = this.repositoryPath;
       // Cleared on the OPEN transition, not just per handler. These dialogs
       // stay mounted (app-shell only toggles ?open), so `success` survived
@@ -465,11 +471,23 @@ export class LvSubmoduleDialog extends LitElement {
     }
   }
 
-  private async loadSubmodules(): Promise<void> {
+  /**
+   * @param repoPath The repo to read. Handlers pass the path they CAPTURED
+   * before their await: reading the live pin here refetched — and repainted —
+   * whichever repository the dialog had since been re-pinned to. A reload
+   * whose path no longer matches the pin is dropped rather than painted over
+   * the repository now on screen; its `submodules-changed` event still routes
+   * the refresh to the repo that actually changed.
+   */
+  private async loadSubmodules(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getSubmodules(this.pinnedRepoPath);
+    const result = await gitService.getSubmodules(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
 
     if (result.success && result.data) {
       this.submodules = result.data;
@@ -508,9 +526,9 @@ export class LvSubmoduleDialog extends LitElement {
       this.addPath = '';
       this.addBranch = '';
       this.mode = 'list';
-      await this.loadSubmodules();
+      await this.loadSubmodules(repoPath);
       this.dispatchEvent(new CustomEvent('submodules-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       // The gate already announced a block, and a declined confirm is the
@@ -554,9 +572,9 @@ export class LvSubmoduleDialog extends LitElement {
         // it gets the inline message its siblings use.
         this.success = `Initialized ${submodule.path}`;
       }
-      await this.loadSubmodules();
+      await this.loadSubmodules(repoPath);
       this.dispatchEvent(new CustomEvent('submodules-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to initialize submodule';
@@ -589,9 +607,9 @@ export class LvSubmoduleDialog extends LitElement {
     if (result.success) {
       // Same asymmetry as handleInit — see the note there.
       this.success = `Updated ${submodule.path}`;
-      await this.loadSubmodules();
+      await this.loadSubmodules(repoPath);
       this.dispatchEvent(new CustomEvent('submodules-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodule';
@@ -654,9 +672,9 @@ export class LvSubmoduleDialog extends LitElement {
       if (result.success) {
         this.success = 'Submodule removed successfully';
         showToast('Submodule removed successfully', 'success');
-        await this.loadSubmodules();
+        await this.loadSubmodules(repoPath);
         this.dispatchEvent(new CustomEvent('submodules-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
       } else {
         this.error = result.error?.message || 'Failed to remove submodule';
@@ -686,9 +704,9 @@ export class LvSubmoduleDialog extends LitElement {
     if (result.success) {
       this.success = 'All submodules updated';
       showToast('All submodules updated', 'success');
-      await this.loadSubmodules();
+      await this.loadSubmodules(repoPath);
       this.dispatchEvent(new CustomEvent('submodules-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       this.error = result.error?.message || 'Failed to update submodules';
@@ -701,6 +719,12 @@ export class LvSubmoduleDialog extends LitElement {
   }
 
   private handleClose(): void {
+    // Escape, the overlay and the x must honour the same rule the Remove
+    // button does: dismissing mid-removal left `submodule deinit -f` + `git
+    // rm -f` deleting a working tree with no visible surface, and a Ctrl+Tab
+    // plus reopen then re-pinned the dialog at another repository which the
+    // removal's own completion proceeded to report against.
+    if (this.operationInFlight) return;
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -872,7 +896,11 @@ export class LvSubmoduleDialog extends LitElement {
               </svg>
               ${this.mode === 'list' ? 'Submodules' : 'Add Submodule'}
             </span>
-            <button class="close-btn" @click=${this.handleClose}>
+            <button
+              class="close-btn"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -905,7 +933,13 @@ export class LvSubmoduleDialog extends LitElement {
                     Add Submodule
                   </button>
                   <div class="dialog-footer-right">
-                    <button class="btn btn-secondary" @click=${this.handleClose}>Close</button>
+                    <button
+                      class="btn btn-secondary"
+                      @click=${this.handleClose}
+                      ?disabled=${this.operationInFlight}
+                    >
+                      Close
+                    </button>
                   </div>
                 `
               : html`

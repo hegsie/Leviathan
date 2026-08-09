@@ -70,23 +70,16 @@ class ProgressService {
       }
     });
 
-    // Listen for remote operation completion events
-    const unlistenRemote = await listen<{
-      operation: string;
-      remote: string;
-      success: boolean;
-      message: string;
-    }>('remote-operation-completed', (event) => {
-      // Find and remove the operation
-      for (const [id, op] of this.operations.entries()) {
-        if (op.type === event.payload.operation) {
-          this.removeOperation(id);
-          break;
-        }
-      }
-    });
-
-    this.unlistenFns.push(unlistenProgress, unlistenRemote);
+    // NOTE: `remote-operation-completed` is deliberately NOT listened to here.
+    // It carries only an operation NAME ("fetch"/"push"/...) and no repository,
+    // so removing "the first row whose type matches" removed whichever repo's
+    // row happened to be first in insertion order: fetch repo B, Ctrl+Tab,
+    // fetch repo A (a different `fetch:<repo>` key, so the two run
+    // concurrently), and A finishing tore down B's indicator while B was still
+    // fetching. Every fetch/pull/push row is started AND removed by its own
+    // caller in app-shell — completeOperation on success, failOperation on
+    // failure, on every branch — so nothing here needs to guess.
+    this.unlistenFns.push(unlistenProgress);
   }
 
   /**

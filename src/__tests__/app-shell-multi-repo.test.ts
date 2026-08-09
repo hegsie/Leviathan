@@ -1164,6 +1164,40 @@ describe('app-shell multi-repo behavior', () => {
       }
     });
 
+    it('does not mark a repository stale once its tab is closed', async () => {
+      // A slow operation started on A can land after the user closed A's tab.
+      // teardownRepoServices() has already dropped the path; adding it back
+      // here left an entry nothing ever removes — it survived the rest of the
+      // session, made a later reopen of the same path do a spurious extra
+      // refresh, and grew without bound across close/reopen cycles.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        // Control: while A is merely backgrounded it does get marked.
+        (el as any).refreshConflictDialogRepo('/repo/a');
+        expect((el as any).staleRepoPaths.has('/repo/a'), 'open background repo marked').to.be
+          .true;
+        (el as any).staleRepoPaths.delete('/repo/a');
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        (el as any).refreshConflictDialogRepo('/repo/a');
+
+        expect(
+          (el as any).staleRepoPaths.has('/repo/a'),
+          'a closed repo has no tab to refresh and no one to clear the entry',
+        ).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('cherry-pick-complete on a background-tabbed repo refreshes the PINNED repo, not the active one', async () => {
       const el = createAppShell();
       document.body.appendChild(el);

@@ -24,10 +24,53 @@ let failingCommands: Set<string> = new Set();
 let declineNextConfirm = false;
 let lastUpdateSubmodulesArgs: Record<string, unknown> | null = null;
 
+/** Commands parked mid-flight until the test releases them. */
+const gatedCommands = new Set<string>();
+const gateReleases = new Map<string, () => void>();
+/** Every repo path `get_submodules` was asked for, in order. */
+const submoduleReads: string[] = [];
+
+function gate(command: string): void {
+  gatedCommands.add(command);
+}
+
+/** Resolves once `command` is actually in flight (parked on its gate). */
+async function waitForGate(command: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (gateReleases.has(command)) return;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`${command} never reached its gate`);
+}
+
+function release(command: string): void {
+  const resolve = gateReleases.get(command);
+  gatedCommands.delete(command);
+  gateReleases.delete(command);
+  resolve?.();
+}
+
+/** Polls until `predicate` holds, so async work started by Lit can settle. */
+async function waitUntil(predicate: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  if (command === 'get_submodules') {
+    submoduleReads.push(((args as { path?: string }) ?? {}).path ?? '');
+  }
+
+  if (gatedCommands.has(command)) {
+    await new Promise<void>((resolve) => gateReleases.set(command, resolve));
+  }
 
   if (command === 'update_submodules') {
     lastUpdateSubmodulesArgs = (args as Record<string, unknown>) ?? null;
@@ -67,11 +110,19 @@ import '../lv-submodule-dialog.ts';
 import type { LvSubmoduleDialog } from '../lv-submodule-dialog.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
+import { resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 describe('lv-submodule-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
     lastUpdateSubmodulesArgs = null;
+    gatedCommands.clear();
+    // Release anything a failed test left parked, so its handler unwinds and
+    // frees the shared lock instead of poisoning every test after it.
+    gateReleases.forEach((resolve) => resolve());
+    gateReleases.clear();
+    submoduleReads.length = 0;
+    resetRefOpLocks();
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
@@ -334,6 +385,142 @@ describe('lv-submodule-dialog', () => {
       expect((el as any).success ?? '').to.equal('');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).error).to.contain('Operation failed');
+    });
+  });
+
+  // A removal runs `git submodule deinit -f` + `git rm -f` for seconds. The
+  // dialog is bound to the ACTIVE repository and re-pins on every open, so
+  // anything that lets it close (or re-pin) mid-removal points the completion
+  // — the banner, the reload and the `submodules-changed` refresh — at a
+  // repository the removal never touched.
+  describe('a removal in flight owns the dialog', () => {
+    const REPO_A = '/repo/a';
+    const REPO_B = '/repo/b';
+
+    /** Opens on `path` and drops the initial loads from the read log. */
+    async function openOn(path: string): Promise<LvSubmoduleDialog> {
+      const el = await fixture<LvSubmoduleDialog>(
+        html`<lv-submodule-dialog ?open=${true} .repositoryPath=${path}></lv-submodule-dialog>`,
+      );
+      // connectedCallback loads before the pin is taken, then the open
+      // transition pins and loads again.
+      await waitUntil(() => submoduleReads.includes(path), 'the initial list load');
+      expect(
+        submoduleReads.every((p) => p === '' || p === path),
+        'nothing but this repo was read while opening',
+      ).to.be.true;
+      submoduleReads.length = 0;
+      return el;
+    }
+
+    function routedRepos(el: LvSubmoduleDialog): string[] {
+      const seen: string[] = [];
+      el.addEventListener('submodules-changed', (e) => {
+        seen.push((e as CustomEvent<{ repositoryPath?: string }>).detail?.repositoryPath ?? '');
+      });
+      return seen;
+    }
+
+    /** Starts a removal and returns once `remove_submodule` is in flight. */
+    async function startRemoval(el: LvSubmoduleDialog): Promise<{ done: Promise<void> }> {
+      gate('remove_submodule');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const done = (el as any).handleRemove(mockSubmodules[0]) as Promise<void>;
+      await waitForGate('remove_submodule');
+      // Wrapped: `await`ing a promise that resolves TO a promise would chain
+      // onto the parked removal and hang the test.
+      return { done };
+    }
+
+    it('Escape does not close the dialog while the removal is running', async () => {
+      const el = await openOn(REPO_A);
+      let closes = 0;
+      el.addEventListener('close', () => { closes++; });
+
+      const { done } = await startRemoval(el);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
+
+      expect(closes, 'deinit + rm are still deleting a working tree').to.equal(0);
+      expect(
+        (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).disabled,
+        'and the x says so, instead of looking live and doing nothing',
+      ).to.be.true;
+
+      release('remove_submodule');
+      await done;
+      await el.updateComplete;
+      expect(
+        (el.shadowRoot!.querySelector('.close-btn') as HTMLButtonElement).disabled,
+        'and it comes back once the removal lands',
+      ).to.be.false;
+
+      // The control: once nothing is in flight, Escape dismisses as always.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
+      expect(closes, 'Escape still works when idle').to.equal(1);
+    });
+
+    it('reloads and routes the finished removal to the repo it ran on, not a repo reopened over it', async () => {
+      const el = await openOn(REPO_A);
+      const routed = routedRepos(el);
+      const { done } = await startRemoval(el);
+
+      // The host owns ?open and can clear it without going through
+      // handleClose (closing the tab does exactly that), then reopen the
+      // dialog over another repository.
+      el.open = false;
+      await el.updateComplete;
+      el.repositoryPath = REPO_B;
+      el.open = true;
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      release('remove_submodule');
+      await done;
+
+      expect(
+        submoduleReads,
+        'the reopen must not re-pin under the removal, and the reload must read the repo that changed',
+      ).to.deep.equal([REPO_A]);
+      expect(routed, 'the host refreshes the repo whose index was rewritten').to.deep.equal([
+        REPO_A,
+      ]);
+    });
+
+    it('routes an add that lands after the dialog reopened elsewhere to the repo it ran on', async () => {
+      // `submodule add` clones — also seconds — but it is not destructive, so
+      // the dialog does close over it and legitimately re-pins on reopen. The
+      // completion must still follow the path it captured.
+      const el = await openOn(REPO_A);
+      const routed = routedRepos(el);
+
+      gate('add_submodule');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).addUrl = 'https://github.com/test/new.git';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).addPath = 'lib/new';
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const done = (el as any).handleAdd() as Promise<void>;
+      await waitForGate('add_submodule');
+
+      el.open = false;
+      await el.updateComplete;
+      el.repositoryPath = REPO_B;
+      el.open = true;
+      await el.updateComplete;
+      await waitUntil(() => submoduleReads.length === 1, 'the reopened dialog to load repo B');
+
+      release('add_submodule');
+      await done;
+
+      expect(
+        submoduleReads,
+        'the stale reload is dropped, not painted over the repository now on screen',
+      ).to.deep.equal([REPO_B]);
+      expect(routed, 'the host refreshes the repo the submodule was added to').to.deep.equal([
+        REPO_A,
+      ]);
     });
   });
 });

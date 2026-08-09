@@ -445,6 +445,12 @@ export class LvWorktreeDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProperties.has('open') && this.open) {
+      // A removal started against the previous pin may still be running (the
+      // host can clear ?open without going through handleClose). Re-pinning
+      // under it would point every post-await read and the `-changed` event at
+      // a repository the removal never touched, while the one whose worktree
+      // was just deleted from disk went unrefreshed.
+      if (this.operationInFlight) return;
       this.pinnedRepoPath = this.repositoryPath;
       // Cleared on the OPEN transition, not just per handler. These dialogs
       // stay mounted (app-shell only toggles ?open), so `success` survived
@@ -460,11 +466,23 @@ export class LvWorktreeDialog extends LitElement {
     }
   }
 
-  private async loadWorktrees(): Promise<void> {
+  /**
+   * @param repoPath The repo to read. Handlers pass the path they CAPTURED
+   * before their await: reading the live pin here refetched — and repainted —
+   * whichever repository the dialog had since been re-pinned to. A reload
+   * whose path no longer matches the pin is dropped rather than painted over
+   * the repository now on screen; its `worktrees-changed` event still routes
+   * the refresh to the repo that actually changed.
+   */
+  private async loadWorktrees(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
     this.loading = true;
     this.error = '';
 
-    const result = await gitService.getWorktrees(this.pinnedRepoPath);
+    const result = await gitService.getWorktrees(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
 
     if (result.success && result.data) {
       this.worktrees = result.data;
@@ -475,8 +493,14 @@ export class LvWorktreeDialog extends LitElement {
     this.loading = false;
   }
 
-  private async loadBranches(): Promise<void> {
-    const result = await gitService.getBranches(this.pinnedRepoPath);
+  /** @param repoPath See loadWorktrees. */
+  private async loadBranches(repoPath: string = this.pinnedRepoPath): Promise<void> {
+    if (repoPath !== this.pinnedRepoPath) return;
+
+    const result = await gitService.getBranches(repoPath);
+
+    if (repoPath !== this.pinnedRepoPath) return;
+
     if (result.success && result.data) {
       // LOCAL branches only, and only those free.
       //
@@ -530,15 +554,15 @@ export class LvWorktreeDialog extends LitElement {
       this.newBranchName = '';
       this.createNewBranch = false;
       this.mode = 'list';
-      await this.loadWorktrees();
+      await this.loadWorktrees(repoPath);
       // The dropdown's "only branches not checked out elsewhere" filter is
       // derived from this.worktrees at LOAD time, so without this the branch
       // just consumed stayed listed and the next Add dead-ended on git's raw
       // "already used by worktree at ..." — and a freed branch stayed missing
       // until the dialog was closed and reopened.
-      await this.loadBranches();
+      await this.loadBranches(repoPath);
       this.dispatchEvent(new CustomEvent('worktrees-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else {
       this.error = result.error?.message || 'Failed to add worktree';
@@ -639,10 +663,10 @@ export class LvWorktreeDialog extends LitElement {
     if (result.success) {
       this.success = 'Worktree removed';
       this.error = '';
-      await this.loadWorktrees();
-      await this.loadBranches();
+      await this.loadWorktrees(repoPath);
+      await this.loadBranches(repoPath);
       this.dispatchEvent(new CustomEvent('worktrees-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
     } else {
       this.error = result.error?.message || 'Failed to remove worktree';
@@ -678,9 +702,9 @@ export class LvWorktreeDialog extends LitElement {
 
       if (result.success) {
         this.success = 'Worktree locked successfully';
-        await this.loadWorktrees();
+        await this.loadWorktrees(repoPath);
         this.dispatchEvent(new CustomEvent('worktrees-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
       } else {
         this.error = result.error?.message || 'Failed to lock worktree';
@@ -709,9 +733,9 @@ export class LvWorktreeDialog extends LitElement {
 
       if (result.success) {
         this.success = 'Worktree unlocked successfully';
-        await this.loadWorktrees();
+        await this.loadWorktrees(repoPath);
         this.dispatchEvent(new CustomEvent('worktrees-changed', {
-        detail: { repositoryPath: this.pinnedRepoPath || this.repositoryPath },
+        detail: { repositoryPath: repoPath || this.repositoryPath },
       }));
       } else {
         this.error = result.error?.message || 'Failed to unlock worktree';
@@ -723,6 +747,12 @@ export class LvWorktreeDialog extends LitElement {
   }
 
   private handleClose(): void {
+    // Escape, the overlay and the x must honour the same rule the Remove
+    // button does: dismissing mid-removal left `worktree remove --force`
+    // deleting a working directory with no visible surface, and a Ctrl+Tab
+    // plus reopen then re-pinned the dialog at another repository which the
+    // removal's own completion proceeded to report against.
+    if (this.operationInFlight) return;
     this.dispatchEvent(new CustomEvent('close'));
   }
 
@@ -888,7 +918,11 @@ export class LvWorktreeDialog extends LitElement {
               </svg>
               ${this.mode === 'list' ? 'Worktrees' : 'Add Worktree'}
             </span>
-            <button class="close-btn" @click=${this.handleClose}>
+            <button
+              class="close-btn"
+              @click=${this.handleClose}
+              ?disabled=${this.operationInFlight}
+            >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -928,7 +962,11 @@ export class LvWorktreeDialog extends LitElement {
                     Add Worktree
                   </button>
                   <div class="dialog-footer-right">
-                    <button class="btn btn-secondary" @click=${this.handleClose}>
+                    <button
+                      class="btn btn-secondary"
+                      @click=${this.handleClose}
+                      ?disabled=${this.operationInFlight}
+                    >
                       Close
                     </button>
                   </div>

@@ -649,7 +649,6 @@ export class LvBranchList extends LitElement {
     document.addEventListener('keydown', this.handleKeydown);
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
-    await this.loadBranches();
     // Close the branch-cleanup dialog when its pinned repo's tab is closed: its
     // Delete force-deletes branches + prunes remotes on the PINNED repo, so a
     // dialog left floating over another tab would run against a repository
@@ -659,6 +658,12 @@ export class LvBranchList extends LitElement {
     // bare `isOpen = false` that bypasses `handleModalClose()`'s `deleting`
     // guard, so the hand-written arm this replaces reported "branch cleanup
     // cancelled" while the force-delete loop went right on deleting.
+    //
+    // Registered BEFORE the load, for the same reason as the listeners above:
+    // loadBranches() awaits three IPC round trips, and closing the last tab
+    // inside that window ran disconnectedCallback() while `storeUnsubscribe`
+    // was still undefined — the subscription was then registered on a detached
+    // element and leaked, once per open/close cycle.
     this.storeUnsubscribe = repositoryStore.subscribe((state) => {
       sweepRepoScopedDialogs({
         root: this.renderRoot,
@@ -673,6 +678,7 @@ export class LvBranchList extends LitElement {
         },
       });
     });
+    await this.loadBranches();
   }
 
   disconnectedCallback(): void {
@@ -684,6 +690,7 @@ export class LvBranchList extends LitElement {
     window.removeEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
     this.storeUnsubscribe?.();
+    this.storeUnsubscribe = undefined;
   }
 
   private handleRepositoryRefresh = (): void => {
