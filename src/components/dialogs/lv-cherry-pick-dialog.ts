@@ -256,6 +256,15 @@ export class LvCherryPickDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the cherry-pick is running. `handleModalClose()` re-asserts the
+   * modal open on this; the host's tab-close sweep must consult it too, because
+   * `close()` is a bare `isOpen = false` that bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.isExecuting;
+  }
+
   private reset(): void {
     this.commit = null;
     this.noCommit = false;

@@ -430,6 +430,15 @@ export class LvWorktreeDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while `worktree remove --force` is running. The host's tab-close sweep
+   * must not hide it behind a "worktrees closed" toast — the removal deletes a
+   * working tree from disk and goes right on doing it.
+   */
+  public get operationInFlight(): boolean {
+    return this.removingPath !== null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProperties.has('open')) {

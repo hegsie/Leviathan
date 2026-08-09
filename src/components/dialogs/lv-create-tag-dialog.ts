@@ -196,6 +196,14 @@ export class LvCreateTagDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the tag is being created. The host's tab-close sweep must not
+   * report "tag creation cancelled" over a create that still lands.
+   */
+  public get operationInFlight(): boolean {
+    return this.isCreating;
+  }
+
   @state() private name = '';
   @state() private targetRef = '';
   @state() private message = '';

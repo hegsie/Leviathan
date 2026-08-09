@@ -362,6 +362,16 @@ export class LvCleanDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while `clean_files` is deleting. `dismiss()` already refuses on this;
+   * the host's tab-close sweep must consult the same flag, or it clears the
+   * host flag directly and reports "clean cancelled" over a delete that is
+   * still unlinking files that have no trash and no recovery path.
+   */
+  public get operationInFlight(): boolean {
+    return this.cleaning;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {

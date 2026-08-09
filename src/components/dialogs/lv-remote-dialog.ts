@@ -401,6 +401,20 @@ export class LvRemoteDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while a remote is being added/renamed/removed/pruned/fetched. The
+   * host's tab-close sweep must not report "remote management closed" over a
+   * write that is still landing in the closed repo's config.
+   */
+  public get operationInFlight(): boolean {
+    return (
+      this.saving ||
+      this.pruningRemote !== null ||
+      this.removingRemote !== null ||
+      this.fetchingRemote !== null
+    );
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {

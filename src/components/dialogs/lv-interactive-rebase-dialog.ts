@@ -592,6 +592,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
     return this.modal?.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the rebase is running. `handleModalClose()` re-asserts the modal
+   * open on this; the host's tab-close sweep must consult it too, because
+   * `close()` is a bare `modal.open = false` that bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.executing;
+  }
+
   private reset(): void {
     this.onto = '';
     this.commits = [];

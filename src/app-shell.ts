@@ -4,6 +4,7 @@ import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
+import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
@@ -1392,137 +1393,110 @@ export class AppShell extends LitElement {
         );
       }
 
-      // Same for the cherry-pick / interactive-rebase dialogs: they pin to
-      // their repo at open() and stay open across tab switches, so closing
-      // the pinned tab must dismiss them too — otherwise they float over
-      // another repo and their next click would run against a repository
-      // that is no longer in the tab bar.
-      const repoOpen = (path: string | null): boolean =>
-        !!path && state.openRepositories.some((r) => r.repository.path === path);
-      const cpPinned = this.cherryPickDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cpPinned && !repoOpen(cpPinned)) {
-        this.cherryPickDialog?.close();
-        showToast('The repository tab was closed — cherry-pick cancelled', 'warning');
-      }
-      const rbPinned = this.interactiveRebaseDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rbPinned && !repoOpen(rbPinned)) {
-        this.interactiveRebaseDialog?.close();
-        showToast('The repository tab was closed — interactive rebase cancelled', 'warning');
-      }
-      // Same for the create-tag / create-branch dialogs: they pin to their repo
-      // at open() and stay open across tab switches, so closing the pinned tab
-      // must dismiss them — otherwise a successful create (create-branch even
-      // moves HEAD via checkout) would silently mutate a repo no longer in the
-      // tab bar, invisible in the visible one.
-      const ctPinned = this.createTagDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (ctPinned && !repoOpen(ctPinned)) {
-        this.createTagDialog?.close();
-        showToast('The repository tab was closed — tag creation cancelled', 'warning');
-      }
-      const cbPinned = this.createBranchDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cbPinned && !repoOpen(cbPinned)) {
-        this.createBranchDialog?.close();
-        showToast('The repository tab was closed — branch creation cancelled', 'warning');
-      }
-
-      // The repo-scoped dialogs hosted directly by app-shell pin their repo on
-      // open for the same reason, so they need the same sweep: the clean
-      // dialog would otherwise delete files from — and the reflog dialog reset
-      // — a repository that is no longer in the tab bar.
-      const cleanPinned = this.cleanDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (cleanPinned && !repoOpen(cleanPinned)) {
-        this.showClean = false;
-        showToast('The repository tab was closed — clean cancelled', 'warning');
-      }
-      const rfPinned = this.reflogDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rfPinned && !repoOpen(rfPinned)) {
-        this.showReflog = false;
-        showToast('The repository tab was closed — undo history closed', 'warning');
-      }
-      const rmPinned = this.remoteDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (rmPinned && !repoOpen(rmPinned)) {
-        this.showRemotes = false;
-        showToast('The repository tab was closed — remote management closed', 'warning');
-      }
-
-      // The remaining pinned dialogs, swept the same way. Every one of these
-      // exposes pinnedRepositoryPathIfOpen but nothing read it, so Repository
-      // Health would still run `git gc --aggressive`, and the worktree /
-      // submodule dialogs still remove, against a repo whose tab is gone.
-      // Driven off the DOM element so a dialog cannot be added to the app and
-      // silently miss the sweep.
-      // Each closer returns whether it actually closed: Repository Health
-      // refuses while gc/prune is in flight (closing DESTROYS the element and
-      // would leave the operation running with no surface), so the sweep must
-      // not announce a dismissal that did not happen.
-      const pinnedFlagDialogs: Array<[string, () => boolean, string]> = [
-        ['lv-repository-health-dialog', () => {
-          // Hands the close to the dialog: it dismisses now if idle, or after
-          // the running gc/prune lands. Merely refusing left it open and
-          // pinned to a repo with no tab, where a SECOND gc could be started
-          // once the first finished.
-          const running = this.repositoryHealthDialog?.isRunning ?? false;
-          this.repositoryHealthDialog?.closeWhenIdle();
-          // The flag must never outlive the element. Its render block is also
-          // gated on activeRepository, so closing the LAST tab removes the
-          // element regardless of the deferral — leaving showRepositoryHealth
-          // true meant the dialog sprang open unbidden over the next repo the
-          // user opened, freshly constructed with every button re-enabled.
-          if (!running || state.openRepositories.length === 0) {
-            this.showRepositoryHealth = false;
-          }
-          if (running && state.openRepositories.length > 0) {
-            showToast(
-              'The repository tab was closed — repository health will close when the current maintenance finishes',
-              'warning',
-            );
-          } else if (running) {
-            // Last tab: the force-close above already removed the dialog, so
-            // promising a later dismissal would describe something that just
-            // did not happen. The gc itself keeps running to completion.
-            showToast(
-              'The repository tab was closed — the maintenance operation will finish in the background',
-              'warning',
-            );
-          }
-          return !running;
-        }, 'repository health closed'],
-        ['lv-worktree-dialog', () => { this.showWorktrees = false; return true; }, 'worktrees closed'],
-        ['lv-submodule-dialog', () => { this.showSubmodules = false; return true; }, 'submodules closed'],
-        ['lv-lfs-dialog', () => { this.showLfs = false; return true; }, 'Git LFS closed'],
-        ['lv-gpg-dialog', () => { this.showGpg = false; return true; }, 'signing settings closed'],
-        ['lv-config-dialog', () => { this.showConfig = false; return true; }, 'configuration closed'],
-        ['lv-credentials-dialog', () => { this.showCredentials = false; return true; }, 'credentials closed'],
-        ['lv-hooks-dialog', () => { this.showHooksDialog = false; return true; }, 'hooks closed'],
-        // close() here is a bare modal.open = false — it does NOT apply the
-        // in-flight re-assert handleModalClose does for Escape/overlay/x.
-        // Dismissing mid-generation hid a running AI call and then reported
-        // "changelog closed", which was simply untrue.
-        ['lv-changelog-dialog', () => {
-          if (this.changelogDialog?.generationInFlight) {
-            // Say so. This block is also gated on activeRepository, so on the
-            // LAST tab the element is destroyed on the next render regardless
-            // and the generation completes into a detached component — the
-            // user would otherwise get silence: no changelog, no error.
-            showToast(
-              'The repository tab was closed — changelog generation was abandoned',
-              'warning',
-            );
-            return false;
-          }
-          this.changelogDialog?.close();
-          return true;
-        }, 'changelog closed'],
-      ];
-      for (const [tag, close, label] of pinnedFlagDialogs) {
-        const el = this.renderRoot.querySelector(tag) as
-          | (Element & { pinnedRepositoryPathIfOpen?: string | null })
-          | null;
-        const pinned = el?.pinnedRepositoryPathIfOpen ?? null;
-        if (pinned && !repoOpen(pinned) && close()) {
-          showToast(`The repository tab was closed — ${label}`, 'warning');
-        }
-      }
+      // ONE sweep for EVERY repo-scoped dialog. They all pin to their repo at
+      // open() and stay open across tab switches, so closing the pinned tab
+      // must dismiss them — otherwise they float over another repo and their
+      // next click runs against a repository that is no longer in the tab bar.
+      //
+      // Discovery is from the DOM (`pinnedRepositoryPathIfOpen`), not a list of
+      // tag names. This used to be seven hand-written arms plus a hand-written
+      // table, and the arms were the stale half: each one force-cleared the
+      // host flag or called a bare `close()`, bypassing the dialog's OWN
+      // in-flight guard, so closing a tab mid-`clean_files` reported "clean
+      // cancelled" and then deleted 4,913 files anyway. The sweep now consults
+      // `operationInFlight` — the same flag `dismiss()`/`handleModalClose()`
+      // refuse on — and NEVER announces a dismissal that did not happen.
+      //
+      // The table below only supplies wording and the host flag to clear; a
+      // dialog missing from it is still swept, with generic wording.
+      sweepRepoScopedDialogs({
+        root: this.renderRoot,
+        isRepoOpen: (path) =>
+          state.openRepositories.some((r) => r.repository.path === path),
+        hostHasRepositories: state.openRepositories.length > 0,
+        entries: {
+          'lv-cherry-pick-dialog': {
+            dismissed: 'cherry-pick cancelled',
+            running: 'cherry-pick',
+          },
+          'lv-interactive-rebase-dialog': {
+            dismissed: 'interactive rebase cancelled',
+            running: 'interactive rebase',
+          },
+          // create-branch even moves HEAD via checkout, so a "cancelled" it did
+          // not honour is a silent mutation of a repo not in the tab bar.
+          'lv-create-tag-dialog': {
+            dismissed: 'tag creation cancelled',
+            running: 'tag creation',
+          },
+          'lv-create-branch-dialog': {
+            dismissed: 'branch creation cancelled',
+            running: 'branch creation',
+          },
+          'lv-clean-dialog': {
+            dismissed: 'clean cancelled',
+            running: 'clean',
+            clearFlag: () => { this.showClean = false; },
+          },
+          'lv-reflog-dialog': {
+            dismissed: 'undo history closed',
+            running: 'reset',
+            clearFlag: () => { this.showReflog = false; },
+          },
+          'lv-remote-dialog': {
+            dismissed: 'remote management closed',
+            running: 'remote update',
+            clearFlag: () => { this.showRemotes = false; },
+          },
+          // Closing this one DESTROYS the element (its render block is gated on
+          // showRepositoryHealth), so it implements closeWhenIdle() and the
+          // sweep hands the close over rather than orphaning a running gc.
+          'lv-repository-health-dialog': {
+            dismissed: 'repository health closed',
+            running: 'maintenance operation',
+            clearFlag: () => { this.showRepositoryHealth = false; },
+          },
+          'lv-worktree-dialog': {
+            dismissed: 'worktrees closed',
+            running: 'worktree removal',
+            clearFlag: () => { this.showWorktrees = false; },
+          },
+          'lv-submodule-dialog': {
+            dismissed: 'submodules closed',
+            running: 'submodule removal',
+            clearFlag: () => { this.showSubmodules = false; },
+          },
+          'lv-lfs-dialog': {
+            dismissed: 'Git LFS closed',
+            running: 'LFS prune',
+            clearFlag: () => { this.showLfs = false; },
+          },
+          'lv-gpg-dialog': {
+            dismissed: 'signing settings closed',
+            running: 'signing update',
+            clearFlag: () => { this.showGpg = false; },
+          },
+          'lv-config-dialog': {
+            dismissed: 'configuration closed',
+            running: 'configuration save',
+            clearFlag: () => { this.showConfig = false; },
+          },
+          'lv-credentials-dialog': {
+            dismissed: 'credentials closed',
+            running: 'credential test',
+            clearFlag: () => { this.showCredentials = false; },
+          },
+          'lv-hooks-dialog': {
+            dismissed: 'hooks closed',
+            running: 'hook save',
+            clearFlag: () => { this.showHooksDialog = false; },
+          },
+          'lv-changelog-dialog': {
+            dismissed: 'changelog closed',
+            running: 'changelog generation',
+          },
+        },
+      });
 
       // The open diff binds a click-time StatusEntry snapshot. Re-derive it
       // from every status refresh so a file that became conflicted since the

@@ -464,6 +464,15 @@ export class LvLfsDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while `git lfs prune` is running. The host's tab-close sweep must not
+   * hide it behind an "LFS closed" toast — the prune deletes local LFS objects
+   * and goes right on doing it.
+   */
+  public get operationInFlight(): boolean {
+    return this.pruning;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProperties.has('open')) {

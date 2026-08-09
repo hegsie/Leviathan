@@ -156,6 +156,15 @@ export class LvCreateBranchDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the branch is being created (and possibly checked out). The
+   * host's tab-close sweep must not report "branch creation cancelled" over a
+   * create that still lands — checkout even moves HEAD.
+   */
+  public get operationInFlight(): boolean {
+    return this.isCreating;
+  }
+
   @state() private branchName = '';
   @state() private checkoutAfterCreate = true;
   @state() private isCreating = false;

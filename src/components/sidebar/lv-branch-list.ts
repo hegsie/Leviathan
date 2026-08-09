@@ -4,6 +4,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { sweepRepoScopedDialogs } from '../../utils/repo-scoped-dialogs.ts';
 import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { dragDropService, type DragItem } from '../../services/drag-drop.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
@@ -649,17 +650,28 @@ export class LvBranchList extends LitElement {
     window.addEventListener('open-branch-cleanup', this.handleExternalCleanupOpen);
     window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     await this.loadBranches();
-    // Close the branch-cleanup dialog when its pinned repo's tab is closed.
+    // Close the branch-cleanup dialog when its pinned repo's tab is closed: its
+    // Delete force-deletes branches + prunes remotes on the PINNED repo, so a
+    // dialog left floating over another tab would run against a repository
+    // that is no longer in the tab bar.
+    //
+    // Routed through the same shared sweep app-shell uses — `close()` here is a
+    // bare `isOpen = false` that bypasses `handleModalClose()`'s `deleting`
+    // guard, so the hand-written arm this replaces reported "branch cleanup
+    // cancelled" while the force-delete loop went right on deleting.
     this.storeUnsubscribe = repositoryStore.subscribe((state) => {
-      const gone = (p: string | null): boolean =>
-        !!p && !state.openRepositories.some((r) => r.repository.path === p);
-      // The branch-cleanup dialog: its Delete force-deletes branches +
-      // prunes remotes on the pinned repo, so a closed tab must dismiss it.
-      const clPinned = this.branchCleanupDialog?.pinnedRepositoryPathIfOpen ?? null;
-      if (gone(clPinned)) {
-        this.branchCleanupDialog.close();
-        showToast('The repository tab was closed — branch cleanup cancelled', 'warning');
-      }
+      sweepRepoScopedDialogs({
+        root: this.renderRoot,
+        isRepoOpen: (path) =>
+          state.openRepositories.some((r) => r.repository.path === path),
+        hostHasRepositories: state.openRepositories.length > 0,
+        entries: {
+          'lv-branch-cleanup-dialog': {
+            dismissed: 'branch cleanup cancelled',
+            running: 'branch cleanup',
+          },
+        },
+      });
     });
   }
 

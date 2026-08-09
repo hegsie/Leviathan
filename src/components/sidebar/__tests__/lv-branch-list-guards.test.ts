@@ -369,6 +369,39 @@ describe('lv-branch-list operationInProgress guards', () => {
     expect(rebaseCalls).to.have.length(0);
   });
 
+  /**
+   * Stub the REAL embedded dialog element in the shadow root — the sweep
+   * discovers dialogs from the DOM, so a plain object hung off the @query field
+   * would never be seen (and a test that stubbed one would pass no matter what
+   * the sweep did).
+   */
+  async function stubCleanupDialog(
+    el: LvBranchList,
+    pinnedTo: string | null,
+    operationInFlight = false
+  ): Promise<{ closed: () => boolean }> {
+    const dialog = el.shadowRoot!.querySelector('lv-branch-cleanup-dialog')!;
+    expect(dialog, 'branch list embeds a real cleanup dialog').to.exist;
+    let closed = false;
+    Object.defineProperty(dialog, 'pinnedRepositoryPathIfOpen', {
+      configurable: true,
+      get: () => pinnedTo,
+    });
+    Object.defineProperty(dialog, 'operationInFlight', {
+      configurable: true,
+      get: () => operationInFlight,
+    });
+    (dialog as unknown as { close: () => void }).close = () => {
+      closed = true;
+    };
+    // The subscription is registered after loadBranches() resolves.
+    for (let i = 0; i < 50; i++) {
+      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return { closed: () => closed };
+  }
+
   it('closes its embedded branch-cleanup dialog when the pinned repo tab is removed', async () => {
     // Branch cleanup force-deletes branches + prunes remotes on the pinned repo;
     // a closed tab must dismiss it, or Delete would mutate a repo not in the tab
@@ -378,53 +411,59 @@ describe('lv-branch-list operationInProgress guards', () => {
     repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
 
     const el = await createComponent();
-    for (let i = 0; i < 50; i++) {
-      if ((el as unknown as { storeUnsubscribe?: () => void }).storeUnsubscribe) break;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-
-    let closed = false;
-    Object.defineProperty(el, 'branchCleanupDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
+    const spy = await stubCleanupDialog(el, '/repo/a');
 
     repositoryStore.getState().removeRepository('/repo/a');
     await el.updateComplete;
 
-    expect(closed, 'branch-cleanup dialog closed when its pinned tab was removed').to.be.true;
+    expect(spy.closed(), 'branch-cleanup dialog closed when its pinned tab was removed').to.be.true;
     repositoryStore.getState().reset();
   });
 
   it('leaves the dialog open when a DIFFERENT repo tab is removed', async () => {
-    // Only the pinned repo's removal cancels the rebase; unrelated tab churn
+    // Only the pinned repo's removal cancels the cleanup; unrelated tab churn
     // must not disrupt an in-progress plan.
     repositoryStore.getState().reset();
     repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
     repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
 
     const el = await createComponent();
-
-    let closed = false;
-    Object.defineProperty(el, 'interactiveRebaseDialog', {
-      configurable: true,
-      value: {
-        pinnedRepositoryPathIfOpen: '/repo/a',
-        close: () => {
-          closed = true;
-        },
-      },
-    });
+    const spy = await stubCleanupDialog(el, '/repo/a');
 
     repositoryStore.getState().removeRepository('/repo/b');
     await el.updateComplete;
 
-    expect(closed, 'dialog stays open when an unrelated tab is removed').to.be.false;
+    expect(spy.closed(), 'dialog stays open when an unrelated tab is removed').to.be.false;
+
+    repositoryStore.getState().reset();
+  });
+
+  it('does NOT close (or claim to cancel) a branch cleanup that is mid force-delete', async () => {
+    // The force-delete + prune loop keeps running whatever the sweep does:
+    // close() here is a bare `isOpen = false` that bypasses handleModalClose's
+    // `deleting` guard. Reporting "branch cleanup cancelled" over a loop still
+    // deleting branches is the exact lie this guard exists to stop.
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
+    repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+    const el = await createComponent();
+    const spy = await stubCleanupDialog(el, '/repo/a', true);
+    uiStore.setState({ toasts: [] });
+
+    repositoryStore.getState().removeRepository('/repo/a');
+    await el.updateComplete;
+
+    expect(spy.closed(), 'an in-flight cleanup is not force-dismissed').to.be.false;
+    const messages = uiStore.getState().toasts.map((t) => t.message);
+    expect(
+      messages.some((m) => /cleanup cancelled/i.test(m)),
+      `no toast may claim a cancellation that did not happen: ${JSON.stringify(messages)}`
+    ).to.be.false;
+    expect(
+      messages.some((m) => /still running/i.test(m)),
+      `the truth is toasted instead: ${JSON.stringify(messages)}`
+    ).to.be.true;
 
     repositoryStore.getState().reset();
   });

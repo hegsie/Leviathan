@@ -373,6 +373,15 @@ export class LvReflogDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the reflog reset is running. A hard reset discards uncommitted
+   * work, so the host's tab-close sweep must not report "undo history closed"
+   * over one that is still in flight.
+   */
+  public get operationInFlight(): boolean {
+    return this.resetting;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {

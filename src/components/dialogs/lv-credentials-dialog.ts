@@ -429,6 +429,14 @@ export class LvCredentialsDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while a credential test round-trip is in flight against the pinned
+   * repo's remote. The host's tab-close sweep must not claim otherwise.
+   */
+  public get operationInFlight(): boolean {
+    return this.testing;
+  }
+
   updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('open') && this.open) {
       this.pinnedRepoPath = this.repositoryPath;

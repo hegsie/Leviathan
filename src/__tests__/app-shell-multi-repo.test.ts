@@ -49,6 +49,38 @@ function mockRepo(path: string, name: string): Repository {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * Make a REAL dialog element in app-shell's shadow root look open and pinned
+ * to `pinnedTo`, optionally with work in flight, and report whether the sweep
+ * dismissed it.
+ *
+ * Stubbing the @query field with a plain object instead would be vacuous: the
+ * sweep discovers dialogs from the DOM via `pinnedRepositoryPathIfOpen`.
+ */
+function stubPinnedDialog(
+  el: AppShell,
+  tag: string,
+  pinnedTo: string | null,
+  operationInFlight = false
+): { closed: () => boolean } {
+  const dialog = el.shadowRoot!.querySelector(tag);
+  expect(dialog, `${tag} is rendered`).to.exist;
+  let closed = false;
+  Object.defineProperty(dialog!, 'pinnedRepositoryPathIfOpen', {
+    configurable: true,
+    get: () => pinnedTo,
+  });
+  Object.defineProperty(dialog!, 'operationInFlight', {
+    configurable: true,
+    get: () => operationInFlight,
+  });
+  (dialog as unknown as { close: () => void }).close = () => {
+    closed = true;
+  };
+  return { closed: () => closed };
+}
+
+
 describe('app-shell multi-repo behavior', () => {
   beforeEach(() => {
     invokeCallArgs.length = 0;
@@ -1287,31 +1319,198 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().setActiveByPath('/repo/b');
         await el.updateComplete;
 
-        // Fake the two dialogs as open and pinned to repo A. The @query
-        // fields are read-only getters, so shadow them on the instance.
-        let cpClosed = false;
-        let rbClosed = false;
-        Object.defineProperty(el, 'cherryPickDialog', {
-          configurable: true,
-          value: {
-            pinnedRepositoryPathIfOpen: '/repo/a',
-            close: () => { cpClosed = true; },
-          },
-        });
-        Object.defineProperty(el, 'interactiveRebaseDialog', {
-          configurable: true,
-          value: {
-            pinnedRepositoryPathIfOpen: '/repo/a',
-            close: () => { rbClosed = true; },
-          },
-        });
+        // Fake the two REAL elements as open and pinned to repo A. The sweep
+        // discovers dialogs from the DOM, so a plain object hung off the @query
+        // field would never be seen — and the test would pass whatever the
+        // sweep did.
+        const cp = stubPinnedDialog(el, 'lv-cherry-pick-dialog', '/repo/a');
+        const rb = stubPinnedDialog(el, 'lv-interactive-rebase-dialog', '/repo/a');
 
         // Close repo A's tab — the store subscription must dismiss both.
         repositoryStore.getState().removeRepository('/repo/a');
         await el.updateComplete;
 
-        expect(cpClosed, 'cherry-pick dialog closed').to.be.true;
-        expect(rbClosed, 'rebase dialog closed').to.be.true;
+        expect(cp.closed(), 'cherry-pick dialog closed').to.be.true;
+        expect(rb.closed(), 'rebase dialog closed').to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does NOT dismiss — or claim to cancel — a clean that is mid-delete', async () => {
+      // The repro: select thousands of untracked files, Delete, confirm, then
+      // close the tab while clean_files runs. The sweep used to set
+      // `showClean = false` directly, bypassing the dialog's own `cleaning`
+      // guard, and toast "clean cancelled" — seconds before "Deleted 4,913
+      // items" landed. Untracked files have no trash and no recovery path.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(clean.closed(), 'an in-flight clean is not force-dismissed').to.be.false;
+        expect(
+          (el as any).showClean,
+          'the host flag stays set — clearing it unmounts the dialog and orphans the delete',
+        ).to.be.true;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `no toast may announce a cancellation that did not happen: ${JSON.stringify(messages)}`,
+        ).to.be.false;
+        expect(
+          messages.some((m) => /the clean is still running against the closed repository/i.test(m)),
+          `the truth is toasted instead: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does dismiss an IDLE clean dialog and says so', async () => {
+      // The other half of the same guard: when nothing is running the sweep
+      // must still close the dialog, or it floats over another repo.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', false);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(clean.closed(), 'an idle clean dialog is dismissed').to.be.true;
+        expect((el as any).showClean, 'and its host flag cleared').to.be.false;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `and the dismissal is announced: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('does NOT dismiss an interactive rebase that is mid-execute', async () => {
+      // close() on this dialog is a bare `modal.open = false`; the `executing`
+      // re-assert lives only in handleModalClose(), which the sweep never
+      // reached — so "interactive rebase cancelled" was followed by "Rebased
+      // onto main".
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        const rb = stubPinnedDialog(el, 'lv-interactive-rebase-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        expect(rb.closed(), 'an in-flight rebase is not force-dismissed').to.be.false;
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /interactive rebase cancelled/i.test(m)),
+          `no cancellation may be announced: ${JSON.stringify(messages)}`,
+        ).to.be.false;
+        expect(
+          messages.some((m) => /still running against the closed repository/i.test(m)),
+          `the truth is toasted instead: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('keeps every flag-gated destructive dialog mounted while its operation runs', async () => {
+      // Each of these was its own hand-written arm (or table row) that cleared
+      // the host flag unconditionally: worktree remove --force, submodule
+      // deinit -f, git lfs prune, and the reflog hard reset all kept running
+      // behind a toast saying they had been closed.
+      const cases: Array<[string, string, string]> = [
+        ['lv-worktree-dialog', 'showWorktrees', 'worktree removal'],
+        ['lv-submodule-dialog', 'showSubmodules', 'submodule removal'],
+        ['lv-lfs-dialog', 'showLfs', 'LFS prune'],
+        ['lv-reflog-dialog', 'showReflog', 'reset'],
+      ];
+      for (const [tag, flag, running] of cases) {
+        const el = createAppShell();
+        document.body.appendChild(el);
+        try {
+          repositoryStore.getState().reset();
+          repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+          repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+          repositoryStore.getState().setActiveByPath('/repo/b');
+          await el.updateComplete;
+
+          (el as any)[flag] = true;
+          await el.updateComplete;
+          stubPinnedDialog(el, tag, '/repo/a', true);
+          uiStore.setState({ toasts: [] });
+
+          repositoryStore.getState().removeRepository('/repo/a');
+          await el.updateComplete;
+
+          expect((el as any)[flag], `${tag}: host flag survives an in-flight operation`).to.be.true;
+          const messages = uiStore.getState().toasts.map((t) => t.message);
+          expect(
+            messages.some((m) => m.includes(`the ${running} is still running`)),
+            `${tag}: names the running work: ${JSON.stringify(messages)}`,
+          ).to.be.true;
+        } finally {
+          el.remove();
+        }
+      }
+    });
+
+    it('tells the truth on the LAST tab: the operation finishes in the background', async () => {
+      // With no tabs left the host unmounts every repo-scoped dialog on the
+      // next render regardless, so promising a later dismissal would describe
+      // something that did not happen.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        await el.updateComplete;
+
+        (el as any).showClean = true;
+        await el.updateComplete;
+        stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
+        uiStore.setState({ toasts: [] });
+
+        repositoryStore.getState().removeRepository('/repo/a');
+        await el.updateComplete;
+
+        const messages = uiStore.getState().toasts.map((t) => t.message);
+        expect(
+          messages.some((m) => /the clean will finish in the background/i.test(m)),
+          `background wording on the last tab: ${JSON.stringify(messages)}`,
+        ).to.be.true;
+        expect(
+          messages.some((m) => /clean cancelled/i.test(m)),
+          `still no false cancellation: ${JSON.stringify(messages)}`,
+        ).to.be.false;
       } finally {
         el.remove();
       }

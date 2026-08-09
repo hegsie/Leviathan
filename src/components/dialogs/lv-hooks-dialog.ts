@@ -707,6 +707,14 @@ export class LvHooksDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while a hook script write is in flight. The host's tab-close sweep must
+   * not report "hooks closed" over a write still landing on disk.
+   */
+  public get operationInFlight(): boolean {
+    return this.saving;
+  }
+
   async updated(changedProps: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProps.has('open')) {

@@ -97,6 +97,15 @@ export class LvTagList extends LitElement {
         text-align: center;
       }
 
+      /* A failed load renders THIS, never the previous repository's rows. */
+      .error {
+        padding: 4px 8px;
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+        text-align: center;
+        overflow-wrap: anywhere;
+      }
+
       .loading {
         display: flex;
         align-items: center;
@@ -476,14 +485,50 @@ export class LvTagList extends LitElement {
     await this.loadTags();
   }
 
+  /**
+   * Per-path load generation. lv-left-panel keeps ONE instance of this element
+   * across tabs and only rebinds `.repositoryPath`, and Lit does not await an
+   * async `updated()` — so Ctrl+Tab twice quickly (A→B→A) starts overlapping
+   * loads with nothing sequencing them, and whichever resolved last won.
+   *
+   * This is the worst case in the sidebar: handleDeleteTag / handleCheckoutTag
+   * pass the clicked row's `tag.name` straight to the ACTIVE repo, and tag
+   * names collide across repositories routinely (`v1.0.0`) — so a stale row
+   * meant the confirm quoted a tag the user was not looking at and the delete
+   * landed on a different commit. Same shape as
+   * lv-branch-list.branchesLoadSeq and lv-file-status.statusLoadSeq.
+   */
+  private tagsLoadSeq = new Map<string, number>();
+
+  /**
+   * The load for the CURRENT repo failed. Rendered, because the alternative —
+   * leaving the previous repo's rows on screen — is indistinguishable from
+   * real data and every one of those rows is a live delete/checkout target.
+   */
+  @state() private error: string | null = null;
+
   private async loadTags(): Promise<void> {
     if (!this.repositoryPath) return;
+
+    // Captured before the await so a mid-flight tab switch still resolves this
+    // result against the repo it was loaded FROM.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.tagsLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.tagsLoadSeq.set(loadedPath, seq);
+    /** Latest load for this path AND this path is still the bound one. */
+    const isFresh = (): boolean =>
+      this.tagsLoadSeq.get(loadedPath) === seq && this.repositoryPath === loadedPath;
 
     this.loading = true;
 
     try {
-      const result = await gitService.getTags(this.repositoryPath);
+      const result = await gitService.getTags(loadedPath);
+      // A superseded load must touch NOTHING: not the rows, not the count
+      // badge, not the loading flag the live load owns.
+      if (!isFresh()) return;
+
       if (result.success) {
+        this.error = null;
         this.tags = result.data!;
         // Emit count changed event
         this.dispatchEvent(new CustomEvent('tag-count-changed', {
@@ -492,13 +537,31 @@ export class LvTagList extends LitElement {
           composed: true,
         }));
       } else {
-        showToast(result.error?.message || 'Failed to load tags', 'error');
+        this.error = result.error?.message || 'Failed to load tags';
+        this.tags = [];
+        this.dispatchEvent(new CustomEvent('tag-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast(this.error, 'error');
       }
     } catch (err) {
       console.error('Failed to load tags:', err);
-      showToast('Failed to load tags', 'error');
+      if (isFresh()) {
+        this.error = err instanceof Error ? err.message : 'Failed to load tags';
+        this.tags = [];
+        this.dispatchEvent(new CustomEvent('tag-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast('Failed to load tags', 'error');
+      }
     } finally {
-      this.loading = false;
+      if (isFresh()) {
+        this.loading = false;
+      }
     }
   }
 
@@ -976,6 +1039,12 @@ export class LvTagList extends LitElement {
   private renderBody() {
     if (this.loading) {
       return html`<div class="loading">Loading tags...</div>`;
+    }
+
+    // Before the empty check: "No tags" over a repo whose tag load failed is a
+    // lie the user would act on (and the previous repo's rows would be worse).
+    if (this.error) {
+      return html`<div class="error" role="alert">${this.error}</div>`;
     }
 
     if (this.tags.length === 0) {

@@ -433,6 +433,15 @@ export class LvSubmoduleDialog extends LitElement {
     return this.open ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while `submodule deinit -f` + removal is running. The host's tab-close
+   * sweep must not hide it behind a "submodules closed" toast — the removal
+   * deletes the submodule's working tree and goes right on doing it.
+   */
+  public get operationInFlight(): boolean {
+    return this.removingPath !== null;
+  }
+
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     // Announce/withdraw overlay ownership of Escape.
     if (changedProperties.has('open')) {

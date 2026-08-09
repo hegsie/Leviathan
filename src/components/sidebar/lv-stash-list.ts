@@ -83,6 +83,15 @@ export class LvStashList extends LitElement {
         text-align: center;
       }
 
+      /* A failed load renders THIS, never the previous repository's rows. */
+      .error {
+        padding: 4px 8px;
+        color: var(--color-error);
+        font-size: var(--font-size-sm);
+        text-align: center;
+        overflow-wrap: anywhere;
+      }
+
       .stash-actions {
         display: flex;
         justify-content: center;
@@ -321,14 +330,46 @@ export class LvStashList extends LitElement {
     await this.loadStashes();
   }
 
+  /**
+   * Per-path load generation. lv-left-panel keeps ONE instance of this element
+   * across tabs and only rebinds `.repositoryPath`, and Lit does not await an
+   * async `updated()` — so Ctrl+Tab twice quickly (A→B→A) starts overlapping
+   * loads with nothing sequencing them, and whichever resolved last won.
+   * Repo B's stashes rendering under repo A's tab is not cosmetic: the rows
+   * are what Apply/Pop/Drop act on. Same shape as
+   * lv-branch-list.branchesLoadSeq and lv-file-status.statusLoadSeq.
+   */
+  private stashesLoadSeq = new Map<string, number>();
+
+  /**
+   * The load for the CURRENT repo failed. Rendered, because the alternative —
+   * leaving the previous repo's rows on screen — is indistinguishable from
+   * real data and invites a Drop against a stash the user is not looking at.
+   */
+  @state() private error: string | null = null;
+
   private async loadStashes(): Promise<void> {
     if (!this.repositoryPath) return;
+
+    // Captured before the await so a mid-flight tab switch still resolves this
+    // result against the repo it was loaded FROM.
+    const loadedPath = this.repositoryPath;
+    const seq = (this.stashesLoadSeq.get(loadedPath) ?? 0) + 1;
+    this.stashesLoadSeq.set(loadedPath, seq);
+    /** Latest load for this path AND this path is still the bound one. */
+    const isFresh = (): boolean =>
+      this.stashesLoadSeq.get(loadedPath) === seq && this.repositoryPath === loadedPath;
 
     this.loading = true;
 
     try {
-      const result = await gitService.getStashes(this.repositoryPath);
+      const result = await gitService.getStashes(loadedPath);
+      // A superseded load must touch NOTHING: not the rows, not the count
+      // badge, not the loading flag the live load owns.
+      if (!isFresh()) return;
+
       if (result.success) {
+        this.error = null;
         this.stashes = result.data!;
         // Emit count changed event
         this.dispatchEvent(new CustomEvent('stash-count-changed', {
@@ -337,13 +378,31 @@ export class LvStashList extends LitElement {
           composed: true,
         }));
       } else {
-        showToast(result.error?.message || 'Failed to load stashes', 'error');
+        this.error = result.error?.message || 'Failed to load stashes';
+        this.stashes = [];
+        this.dispatchEvent(new CustomEvent('stash-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast(this.error, 'error');
       }
     } catch (err) {
       console.error('Failed to load stashes:', err);
-      showToast('Failed to load stashes', 'error');
+      if (isFresh()) {
+        this.error = err instanceof Error ? err.message : 'Failed to load stashes';
+        this.stashes = [];
+        this.dispatchEvent(new CustomEvent('stash-count-changed', {
+          detail: { count: 0 },
+          bubbles: true,
+          composed: true,
+        }));
+        showToast('Failed to load stashes', 'error');
+      }
     } finally {
-      this.loading = false;
+      if (isFresh()) {
+        this.loading = false;
+      }
     }
   }
 
@@ -708,7 +767,9 @@ export class LvStashList extends LitElement {
     return html`
       ${this.loading
         ? html`<div class="loading">Loading stashes...</div>`
-        : this.stashes.length === 0
+        : this.error
+          ? html`<div class="error" role="alert">${this.error}</div>`
+          : this.stashes.length === 0
           ? html`<div class="empty">No stashes</div>`
           : html`
               <ul class="stash-list" role="list">

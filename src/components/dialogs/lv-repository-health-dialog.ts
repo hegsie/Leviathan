@@ -327,6 +327,14 @@ export class LvRepositoryHealthDialog extends LitElement {
     return this.pinnedRepoPath || null;
   }
 
+  /**
+   * The shared name the host's tab-close sweep reads. Aliases `isRunning` so
+   * this dialog participates in the one sweep rather than a bespoke arm.
+   */
+  public get operationInFlight(): boolean {
+    return this.isRunning;
+  }
+
   async connectedCallback(): Promise<void> {
     super.connectedCallback();
     this.unsubscribeRefOps = subscribeRefOps(() => {

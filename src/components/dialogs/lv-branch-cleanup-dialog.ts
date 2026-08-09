@@ -310,6 +310,15 @@ export class LvBranchCleanupDialog extends LitElement {
     return this.isOpen ? this.pinnedRepoPath : null;
   }
 
+  /**
+   * True while the force-delete + prune loop is running. `handleModalClose()`
+   * re-asserts the modal open on this; the host's tab-close sweep must consult
+   * it too, because `close()` bypasses that guard.
+   */
+  public get operationInFlight(): boolean {
+    return this.deleting;
+  }
+
   @state() private loading = true;
   /** The candidate scan failed — render that, not "nothing to clean up". */
   @state() private loadFailed = false;
