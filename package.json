@@ -41,7 +41,7 @@
     "@tauri-apps/cli": "^2.11.4",
     "@types/mocha": "^10.0.10",
     "@web/dev-server-esbuild": "^2.0.0",
-    "@web/test-runner": "^0.20.2",
+    "@web/test-runner": "^1.0.0",
     "@web/test-runner-playwright": "^1.0.0",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
