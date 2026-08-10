@@ -278,6 +278,46 @@ mod tests {
         assert!(json.contains("targetType"));
     }
 
+    /// Signs a JWT with a freshly generated key and verifies it end to end.
+    ///
+    /// This is the only test that reaches jsonwebtoken's signing path. Without a
+    /// crypto backend feature enabled, `encode` resolves to a placeholder
+    /// CryptoProvider whose signer factory panics, so GitHub App auth would blow
+    /// up at runtime while every other test here still passed — the invalid-key
+    /// test fails earlier, inside PEM parsing, and never reaches the signer.
+    #[test]
+    fn test_generate_jwt_signs_and_verifies_under_rs256() {
+        use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
+        use aws_lc_rs::rsa::{KeyPair, KeySize};
+        use aws_lc_rs::signature::KeyPair as _;
+        use jsonwebtoken::{decode, DecodingKey, Validation};
+
+        let keypair = KeyPair::generate(KeySize::Rsa2048).expect("generate RSA key");
+        let private_der: Pkcs8V1Der = keypair.as_der().expect("private key DER");
+        let public_der: PublicKeyX509Der = keypair.public_key().as_der().expect("public key DER");
+        let private_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", private_der.as_ref()));
+        let public_pem = pem::encode(&pem::Pem::new("PUBLIC KEY", public_der.as_ref()));
+
+        let token = generate_jwt(12345, &private_pem).expect("generate_jwt must sign");
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_aud = false;
+        validation.set_issuer(&["12345"]);
+        let decoded = decode::<serde_json::Value>(
+            &token,
+            &DecodingKey::from_rsa_pem(public_pem.as_bytes()).expect("public key"),
+            &validation,
+        )
+        .expect("token must verify under RS256");
+
+        assert_eq!(decoded.header.alg, Algorithm::RS256);
+        assert_eq!(decoded.claims["iss"], "12345");
+        // iat is backdated 60s for clock drift, exp is 10 minutes out.
+        let iat = decoded.claims["iat"].as_u64().unwrap();
+        let exp = decoded.claims["exp"].as_u64().unwrap();
+        assert_eq!(exp - iat, 660);
+    }
+
     #[test]
     fn test_generate_jwt_invalid_key() {
         let result = generate_jwt(12345, "not a valid PEM key");
