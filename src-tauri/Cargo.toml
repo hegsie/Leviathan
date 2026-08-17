@@ -88,7 +88,7 @@ tempfile = "3"
 # tested without committing a private key to the repo. Both crates are already
 # in the tree via jsonwebtoken, so this adds no new dependencies.
 aws-lc-rs = "1"
-pem = "3"
+pem = "4"
 
 # Also needed at runtime for ghost rebase temp worktrees
 [dependencies.tempfile]
