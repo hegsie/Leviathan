@@ -1420,9 +1420,23 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
+  /**
+   * True when this connection is backed by a GitHub App installation rather
+   * than a token. App connections keep their credentials in a separate keyring
+   * entry, so removing the account's token alone leaves them working.
+   */
+  private isAppConnection(accountId: string | null): boolean {
+    return (
+      (accountId?.startsWith('github-app-') ?? false) ||
+      (this.connectionStatus?.scopes?.includes('app-installation') ?? false)
+    );
+  }
+
   private async handleDisconnect(): Promise<void> {
     this.isLoading = true;
     this.error = null;
+
+    const wasAppConnection = this.isAppConnection(this.selectedAccountId);
 
     try {
       // Delete token for selected account or legacy token
@@ -1430,6 +1444,22 @@ export class LvGitHubDialog extends LitElement {
         await credentialService.deleteAccountToken('github', this.selectedAccountId);
       } else {
         await gitService.deleteGitHubToken();
+      }
+
+      // The App config lives in its own keyring entry, so deleting the account
+      // token does not disconnect an App. Leaving it behind kept the App
+      // authenticating requests after the user pressed Disconnect.
+      if (wasAppConnection) {
+        try {
+          await credentialService.removeGitHubAppConfig();
+        } catch (appErr) {
+          showToast(
+            appErr instanceof Error
+              ? `Disconnected, but the GitHub App configuration could not be removed: ${appErr.message}`
+              : 'Disconnected, but the GitHub App configuration could not be removed',
+            'warning',
+          );
+        }
       }
 
       this.syncSharedConnectionStatus(false);
@@ -1467,8 +1497,25 @@ export class LvGitHubDialog extends LitElement {
     // deletion is best-effort last; if it fails we surface a warning rather than
     // leaving a half-deleted state.
     const accountId = this.selectedAccountId;
+    const wasAppConnection = this.isAppConnection(accountId);
     try {
       await unifiedProfileService.deleteGlobalAccount(accountId);
+
+      // Same as Disconnect: the App keeps its credentials in a separate keyring
+      // entry, so deleting the account record alone leaves it able to
+      // authenticate.
+      if (wasAppConnection) {
+        try {
+          await credentialService.removeGitHubAppConfig();
+        } catch (appErr) {
+          showToast(
+            appErr instanceof Error
+              ? `Account deleted, but the GitHub App configuration could not be removed: ${appErr.message}`
+              : 'Account deleted, but the GitHub App configuration could not be removed',
+            'warning',
+          );
+        }
+      }
 
       await unifiedProfileService.loadUnifiedProfiles();
       this.accounts = getAccountsByType('github');

@@ -197,30 +197,83 @@ pub struct DetectedGitHubRepo {
 // Authentication Commands
 // ============================================================================
 
-/// Helper to resolve token from parameter
-/// Returns an error if no token is provided
-fn resolve_github_token(token: Option<String>) -> Result<String> {
-    match token {
-        Some(t) if !t.is_empty() => Ok(t),
-        _ => Err(LeviathanError::OperationFailed(
-            "GitHub token not configured".to_string(),
-        )),
+/// Helper to resolve the token for a request.
+///
+/// Falls back to a GitHub App installation token when the caller has no
+/// per-account token but an App is configured. Without this, connecting via
+/// GitHub App was a dead end: `configure_github_app` persists only the app
+/// config, so every subsequent request arrived with `None` and failed with
+/// "GitHub token not configured" despite the UI reporting a live connection.
+///
+/// Minted per call rather than stored at connect time — installation tokens
+/// expire after an hour, so a stored one would leave the integration dead again
+/// shortly after it started working.
+async fn resolve_github_token(token: Option<String>) -> Result<String> {
+    if let Some(t) = token {
+        if !t.is_empty() {
+            return Ok(t);
+        }
     }
+
+    if let Some(app_token) = github_app_installation_token().await? {
+        return Ok(app_token);
+    }
+
+    Err(LeviathanError::OperationFailed(
+        "GitHub token not configured".to_string(),
+    ))
+}
+
+/// Mint a fresh installation token from the stored GitHub App config.
+///
+/// Returns `Ok(None)` when no App is configured, so callers can fall through to
+/// their own "not configured" handling.
+async fn github_app_installation_token() -> Result<Option<String>> {
+    use crate::commands::credentials::get_keyring_token;
+    use crate::services::github_app;
+
+    let raw = match get_keyring_token(GITHUB_APP_KEYRING_KEY.to_string()).await? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let cfg = deserialize_app_config(&raw)?;
+
+    let jwt = github_app::generate_jwt(cfg.app_id, &cfg.private_key_pem)
+        .map_err(LeviathanError::OperationFailed)?;
+    let token = github_app::get_installation_token(&jwt, cfg.installation_id)
+        .await
+        .map_err(LeviathanError::OperationFailed)?;
+
+    Ok(Some(token.token))
 }
 
 /// Check GitHub connection and get user info
 #[command]
 pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConnectionStatus> {
-    // Use provided token - no fallback to file storage
+    // No per-account token: fall back to a GitHub App installation token so an
+    // App-connected account reports connected instead of flipping back to
+    // "disconnected" the next time the dialog opens.
     let token = match token {
         Some(t) if !t.is_empty() => t,
-        _ => {
-            return Ok(GitHubConnectionStatus {
-                connected: false,
-                user: None,
-                scopes: vec![],
-            })
-        }
+        _ => match github_app_installation_token().await {
+            Ok(Some(app_token)) => {
+                // /user is a user-scoped endpoint an installation token cannot
+                // reach, so report the installation itself as the connection.
+                return Ok(GitHubConnectionStatus {
+                    connected: !app_token.is_empty(),
+                    user: None,
+                    scopes: vec!["app-installation".to_string()],
+                });
+            }
+            _ => {
+                return Ok(GitHubConnectionStatus {
+                    connected: false,
+                    user: None,
+                    scopes: vec![],
+                })
+            }
+        },
     };
 
     let client = reqwest::Client::new();
@@ -334,7 +387,7 @@ pub async fn list_pull_requests(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<PullRequestSummary>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -440,7 +493,7 @@ pub async fn get_pull_request(
     number: u32,
     token: Option<String>,
 ) -> Result<PullRequestDetails> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -595,7 +648,7 @@ pub async fn create_pull_request(
     input: CreatePullRequestInput,
     token: Option<String>,
 ) -> Result<PullRequestSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreatePRBody {
@@ -709,7 +762,7 @@ pub async fn get_pull_request_reviews(
     number: u32,
     token: Option<String>,
 ) -> Result<Vec<PullRequestReview>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -790,7 +843,7 @@ pub async fn get_workflow_runs(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<WorkflowRun>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(20);
 
@@ -876,7 +929,7 @@ pub async fn get_check_runs(
     commit_sha: String,
     token: Option<String>,
 ) -> Result<Vec<CheckRun>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -946,7 +999,7 @@ pub async fn get_commit_status(
     commit_sha: String,
     token: Option<String>,
 ) -> Result<String> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1044,7 +1097,7 @@ pub async fn list_issues(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<IssueSummary>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
@@ -1172,7 +1225,7 @@ pub async fn get_issue(
     number: u32,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1284,7 +1337,7 @@ pub async fn create_issue(
     input: CreateIssueInput,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreateIssueBody {
@@ -1416,7 +1469,7 @@ pub async fn update_issue_state(
     state: String,
     token: Option<String>,
 ) -> Result<IssueSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct UpdateBody {
@@ -1535,7 +1588,7 @@ pub async fn get_issue_comments(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<IssueComment>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1615,7 +1668,7 @@ pub async fn add_issue_comment(
     body: String,
     token: Option<String>,
 ) -> Result<IssueComment> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CommentBody {
@@ -1694,7 +1747,7 @@ pub async fn get_repo_labels(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<Label>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(100);
 
@@ -1807,7 +1860,7 @@ pub async fn list_releases(
     per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<ReleaseSummary>> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let per_page = per_page.unwrap_or(30);
 
@@ -1896,7 +1949,7 @@ pub async fn get_release_by_tag(
     tag: String,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -1978,7 +2031,7 @@ pub async fn get_latest_release(
     repo: String,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -2062,7 +2115,7 @@ pub async fn create_release(
     input: CreateReleaseInput,
     token: Option<String>,
 ) -> Result<ReleaseSummary> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     #[derive(Serialize)]
     struct CreateReleaseBody {
@@ -2173,7 +2226,7 @@ pub async fn delete_release(
     release_id: u64,
     token: Option<String>,
 ) -> Result<()> {
-    let token = resolve_github_token(token)?;
+    let token = resolve_github_token(token).await?;
 
     let client = reqwest::Client::new();
     let response = client
