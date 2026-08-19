@@ -365,7 +365,25 @@ export async function cloneRepository(
       // Since getAdoToken isn't exported globally/generically in this file (it's inside getRepoToken logic), we will stick to GitHub for now.
     }
   }
+  // Apply the same network timeout fetch/pull/push use. Without it a clone
+  // against an unreachable host hangs forever, and the dialog cannot be closed
+  // while one is in flight.
+  const timeoutSecs = settingsStore.getState().networkOperationTimeout;
+  if (args && timeoutSecs > 0) {
+    args.timeoutSecs = timeoutSecs;
+  }
+
   return invokeCommand<Repository>("clone_repository", args);
+}
+
+/**
+ * Cancel the clone currently in flight.
+ *
+ * Kills the `git clone` child process on the CLI path and aborts the transfer
+ * on the git2 path, then clears the partial destination directory.
+ */
+export async function cancelClone(): Promise<CommandResult<void>> {
+  return invokeCommand<void>("cancel_clone", {});
 }
 
 export async function initRepository(

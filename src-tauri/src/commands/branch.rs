@@ -563,18 +563,41 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                     LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
                 })?)?;
             } else {
-                // Create new local branch from the remote branch
+                // Create new local branch from the remote branch.
+                //
+                // The ref must exist BEFORE the working tree is rewritten. A
+                // failure here (invalid derived name such as "HEAD" from
+                // refs/remotes/origin/HEAD, or a D/F conflict against an
+                // existing refs/heads/<name>/*) would otherwise return with the
+                // tree already holding the remote tip while HEAD still names the
+                // old branch — the whole inter-branch diff appears staged and
+                // committing writes the other branch's tree onto this one.
                 let commit = remote_branch.get().peel_to_commit()?;
-                repo.checkout_tree(commit.as_object(), Some(&mut checkout_opts))?;
                 let mut new_branch = repo.branch(local_name, &commit, false)?;
 
-                // Set upstream tracking
-                new_branch.set_upstream(Some(&remote_name))?;
+                // Upstream tracking is best-effort: the branch already exists, so
+                // a tracking-config failure must not abort the checkout (matches
+                // checkout_with_autostash).
+                let _ = new_branch.set_upstream(Some(&remote_name));
 
-                // Set HEAD to the new branch
-                repo.set_head(new_branch.get().name().map_err(|_| {
-                    LeviathanError::OperationFailed("Invalid reference name encoding".to_string())
-                })?)?;
+                let branch_ref = new_branch
+                    .get()
+                    .name()
+                    .map_err(|_| {
+                        LeviathanError::OperationFailed(
+                            "Invalid reference name encoding".to_string(),
+                        )
+                    })?
+                    .to_string();
+
+                // Roll the new ref back if the tree cannot be written, so a
+                // failed checkout leaves no half-created branch behind.
+                if let Err(e) = repo.checkout_tree(commit.as_object(), Some(&mut checkout_opts)) {
+                    let _ = new_branch.delete();
+                    return Err(e.into());
+                }
+
+                repo.set_head(&branch_ref)?;
             }
         } else {
             // Couldn't parse remote name, detach HEAD
@@ -1004,6 +1027,47 @@ pub async fn checkout_with_autostash(
     };
     if let Some(msg) = find_error {
         return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
+    }
+
+    // Create the local tracking branch BEFORE the working tree is rewritten.
+    //
+    // Creating it inside the set_head closure below put it AFTER checkout_tree,
+    // so a failure (invalid derived name such as "HEAD", or a D/F conflict
+    // against an existing refs/heads/<name>/*) reached autostash_failure with
+    // the tree already at the target commit — popping the auto-stash over the
+    // wrong tree while HEAD still named the old branch. Failing here leaves the
+    // working tree untouched, so the restore lands on the tree it came from.
+    if is_remote_branch {
+        let local_name = if let Some(pos) = ref_name.find('/') {
+            &ref_name[pos + 1..]
+        } else {
+            ref_name.as_str()
+        };
+
+        if repo
+            .find_branch(local_name, git2::BranchType::Local)
+            .is_err()
+        {
+            let create_error: Option<String> = match repo.find_commit(target_oid) {
+                Ok(commit) => match repo.branch(local_name, &commit, false) {
+                    Ok(mut new_branch) => {
+                        // Best effort: tracking config must not abort the checkout.
+                        let _ = new_branch.set_upstream(Some(&ref_name));
+                        None
+                    }
+                    Err(e) => Some(format!(
+                        "Could not create local branch '{}': {}",
+                        local_name,
+                        e.message()
+                    )),
+                },
+                Err(e) => Some(format!("Could not find object: {}", e.message())),
+            };
+
+            if let Some(msg) = create_error {
+                return Err(autostash_failure(&mut repo, stashed, stash_oid, &msg));
+            }
+        }
     }
 
     // Perform checkout using the OID
@@ -1859,6 +1923,89 @@ mod tests {
             // Should be back on the original branch
             assert_eq!(repo.current_branch(), original_branch);
         }
+    }
+
+    /// Creating the local branch must happen BEFORE the working tree is
+    /// rewritten.
+    ///
+    /// With the old ordering, checkout_tree ran first and a failing
+    /// `repo.branch(..)` returned an error having already written the remote
+    /// tip into the tree and index while HEAD still named the old branch: the
+    /// entire inter-branch diff showed up staged, and committing recorded the
+    /// other branch's tree onto the current one. A D/F conflict reaches that
+    /// failure — refs/heads/feature cannot be created while refs/heads/feature/sub
+    /// exists — as does the "HEAD" name derived from refs/remotes/origin/HEAD.
+    #[tokio::test]
+    async fn test_failed_remote_checkout_leaves_tree_and_head_untouched() {
+        let test_repo = TestRepo::with_initial_commit();
+        let original_branch = test_repo.current_branch();
+
+        // A commit that only exists on the "remote" branch, so a rewritten
+        // working tree is detectable by remote-only.txt appearing on disk.
+        test_repo.create_branch("staging-for-remote");
+        test_repo.checkout_branch("staging-for-remote");
+        let remote_tip =
+            test_repo.create_commit("Remote only", &[("remote-only.txt", "remote content")]);
+        test_repo.checkout_branch(&original_branch);
+
+        {
+            let repo = test_repo.repo();
+            repo.reference(
+                "refs/remotes/origin/feature",
+                remote_tip,
+                true,
+                "test remote branch",
+            )
+            .unwrap();
+
+            // Forces the D/F conflict: refs/heads/feature/ now exists as a
+            // directory, so refs/heads/feature cannot be created.
+            let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("feature/sub", &head_commit, false).unwrap();
+        }
+
+        let head_before = {
+            let repo = test_repo.repo();
+            let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+            oid
+        };
+
+        let result = checkout(test_repo.path_str(), "origin/feature".to_string(), None).await;
+        assert!(
+            result.is_err(),
+            "checking out origin/feature must fail while refs/heads/feature/sub exists"
+        );
+
+        let repo = test_repo.repo();
+
+        // HEAD untouched: same branch, same commit.
+        assert_eq!(test_repo.current_branch(), original_branch);
+        assert_eq!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_before
+        );
+
+        // Working tree untouched: the remote-only file was never written.
+        assert!(
+            !test_repo.path.join("remote-only.txt").exists(),
+            "working tree was rewritten to the remote tip before the branch was created"
+        );
+
+        // Index untouched: nothing staged against HEAD.
+        let statuses = repo.statuses(None).unwrap();
+        assert!(
+            statuses.iter().all(|s| !s.status().is_index_new()
+                && !s.status().is_index_modified()
+                && !s.status().is_index_deleted()),
+            "failed checkout left staged changes in the index"
+        );
+
+        // No half-created branch left behind.
+        assert!(
+            repo.find_branch("feature", git2::BranchType::Local)
+                .is_err(),
+            "a failed checkout must not leave the local branch behind"
+        );
     }
 
     // ── checkout_with_autostash tests ──────────────────────────────────
