@@ -37,6 +37,22 @@ export interface KeyboardSettings {
 const STORAGE_KEY = 'leviathan-keyboard-settings';
 
 class KeyboardService {
+  /**
+   * Key combos the browser reserves for editing text. While the caret is in an
+   * input, textarea, or contenteditable these belong to the field, so a global
+   * shortcut must never claim them — undo/redo, select-all, and clipboard are
+   * reflexes users expect to work in every text box.
+   */
+  private static readonly NATIVE_EDITING_KEYS: ReadonlySet<string> = new Set([
+    'mod+z',
+    'mod+shift+z',
+    'mod+y',
+    'mod+a',
+    'mod+x',
+    'mod+c',
+    'mod+v',
+  ]);
+
   private shortcuts: Map<string, Shortcut> = new Map();
   /** Map of shortcut ID to default binding */
   private defaultBindings: Map<string, ShortcutBinding> = new Map();
@@ -521,6 +537,16 @@ class KeyboardService {
     }
 
     const key = this.getShortcutKey(e);
+
+    // Never take over the native editing combos while the caret is in a text
+    // field. `mod+z` is registered globally (Undo History), and matching it here
+    // preventDefault()s the browser's own undo — so pressing Ctrl/Cmd+Z to take
+    // back a word of a commit message threw a modal over the user's work
+    // instead, on every input in the app.
+    if (isInInput && KeyboardService.NATIVE_EDITING_KEYS.has(key)) {
+      return;
+    }
+
     const shortcut = this.shortcuts.get(key);
 
     if (shortcut) {
