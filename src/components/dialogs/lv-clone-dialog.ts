@@ -6,7 +6,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { isNetworkGateRefusal, cloneRepository } from '../../services/git.service.ts';
+import { isNetworkGateRefusal, cloneRepository, cancelClone } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
@@ -184,6 +184,8 @@ export class LvCloneDialog extends LitElement {
   @state() private filter: string | null = null;
   @state() private singleBranch = false;
   @state() private isCloning = false;
+  /** Set while a cancellation request is in flight, so Cancel cannot be spammed. */
+  @state() private isCancelling = false;
   @state() private progress = 0;
   @state() private progressText = '';
   @state() private error = '';
@@ -210,6 +212,7 @@ export class LvCloneDialog extends LitElement {
     // reset() can clear it, which made "Clone Repository" silently dead for
     // the rest of the session after the first successful clone.
     this.isCloning = false;
+    this.isCancelling = false;
     this.cleanupListener();
   }
 
@@ -226,6 +229,7 @@ export class LvCloneDialog extends LitElement {
     this.repoName = '';
     this.depth = null;
     this.isCloning = false;
+    this.isCancelling = false;
     this.progress = 0;
     this.progressText = '';
     this.error = '';
@@ -354,27 +358,57 @@ export class LvCloneDialog extends LitElement {
           this.error = result.error?.message ?? 'Failed to clone repository';
         }
         this.isCloning = false;
+        // Cleared alongside isCloning: leaving it set keeps Cancel disabled, so
+        // the dialog the cancellation was meant to release stays stuck.
+        this.isCancelling = false;
         this.cleanupListener();
       }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Unknown error occurred';
       this.isCloning = false;
+      this.isCancelling = false;
       this.cleanupListener();
     }
   }
 
   private handleModalClose(): void {
-    // Cancel is disabled while isCloning is in flight; Escape, the overlay and the
-    // × must honour the same rule. lv-modal.close() sets open=false BEFORE
-    // dispatching, so without re-asserting it here the clone kept running with no
-    // visible surface — and reported any failure into `error` on a hidden
-    // dialog. Mirrors lv-branch-cleanup-dialog.handleModalClose.
+    // A clone in flight must not be abandoned behind a hidden dialog: lv-modal
+    // sets open=false BEFORE dispatching, so re-assert it and route Escape, the
+    // overlay and the × into the same cancellation the Cancel button performs.
+    // Previously this simply refused to close, and since the clone had no
+    // cancellation and no timeout, a hung clone locked the modal for the life of
+    // the app.
     if (this.isCloning) {
       this.modal.open = true;
+      void this.handleCancelClone();
       return;
     }
 
     this.reset();
+  }
+
+  /**
+   * Stop the clone in flight.
+   *
+   * The backend kills the `git clone` child process (CLI path) or aborts the
+   * transfer (git2 path) and removes the partial destination, then
+   * `handleClone` returns an error and clears `isCloning`, which releases the
+   * dialog.
+   */
+  private async handleCancelClone(): Promise<void> {
+    if (this.isCancelling) return;
+
+    this.isCancelling = true;
+    this.progressText = 'Cancelling…';
+
+    const result = await cancelClone();
+    if (!result.success) {
+      // The dialog stays open, so the failure belongs inline rather than in a
+      // toast — and Cancel must become pressable again.
+      this.isCancelling = false;
+      this.progressText = '';
+      this.error = result.error?.message ?? 'Failed to cancel the clone';
+    }
   }
 
   private get fullPath(): string {
@@ -492,10 +526,10 @@ export class LvCloneDialog extends LitElement {
         <div slot="footer">
           <button
             class="btn btn-secondary"
-            @click=${this.close}
-            ?disabled=${this.isCloning}
+            @click=${this.isCloning ? this.handleCancelClone : this.close}
+            ?disabled=${this.isCancelling}
           >
-            Cancel
+            ${this.isCloning ? (this.isCancelling ? 'Cancelling…' : 'Cancel Clone') : 'Cancel'}
           </button>
           <button
             class="btn btn-primary"
