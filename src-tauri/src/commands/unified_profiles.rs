@@ -579,12 +579,43 @@ fn assign_and_apply(
     Ok(())
 }
 
+/// Clear the local git identity a profile wrote to a repository.
+///
+/// The mirror of `apply_profile_git_config`: it unsets exactly the five keys
+/// that function writes, so the repository falls back to the global identity it
+/// would have used had no profile ever been assigned. Unsetting a key that is
+/// not set is not an error in git, and is not treated as one here.
+fn clear_profile_git_config(repo_path: &Path) {
+    for key in [
+        "user.name",
+        "user.email",
+        "user.signingkey",
+        "gpg.format",
+        "commit.gpgsign",
+    ] {
+        let _ = run_git_config(Some(repo_path), &["--local", "--unset", key]);
+    }
+}
+
 /// Remove profile assignment from a repository
 #[command]
 pub async fn unassign_unified_profile_from_repository(path: String) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
     config.unassign_profile(&path);
     save_unified_profiles_config(&config)?;
+
+    // Assigning a profile WRITES the identity into .git/config, so unassigning
+    // has to take it back out. Dropping only the mapping left the repository
+    // committing as the profile the UI no longer showed — and with its
+    // commit.gpgsign and signing key still in force. The divergence is silent
+    // and survives restarts, because .git/config is the thing git actually
+    // reads.
+    //
+    // Done AFTER the mapping is saved: the identity is recoverable by
+    // re-assigning, but a mapping left behind for an identity that is gone
+    // would keep claiming an identity the repository does not have.
+    clear_profile_git_config(Path::new(&path));
+
     Ok(())
 }
 
@@ -1355,6 +1386,69 @@ mod tests {
             .unwrap(),
             "alice@work.example"
         );
+    }
+
+    /// Unassigning must TAKE BACK the identity assignment wrote.
+    ///
+    /// Dropping only the mapping left the repository committing as the profile
+    /// the UI no longer showed, with its signing key and commit.gpgsign still in
+    /// force — a silent divergence that survives restarts, because .git/config
+    /// is what git actually reads.
+    #[test]
+    fn test_unassign_clears_the_identity_assignment_wrote() {
+        let repo = TestRepo::with_initial_commit();
+
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        profile.signing_key = Some("ssh-ed25519 AAAAC3Nz".to_string());
+        let profile_id = profile.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile);
+        assign_and_apply(&mut config, repo.path_str(), profile_id)
+            .expect("assignment should succeed");
+
+        // Every key assignment writes is present...
+        for key in [
+            "user.name",
+            "user.email",
+            "user.signingkey",
+            "gpg.format",
+            "commit.gpgsign",
+        ] {
+            // `git config --get` on a missing key exits 1 with no output, which
+            // run_git_config maps to Ok(""), so presence means a NON-EMPTY value.
+            assert!(
+                !run_git_config(Some(repo.path.as_path()), &["--local", "--get", key])
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{} should be set after assignment",
+                key
+            );
+        }
+
+        clear_profile_git_config(repo.path.as_path());
+
+        // ...and every one of them is gone afterwards, so the repository falls
+        // back to the global identity it would have used all along.
+        for key in [
+            "user.name",
+            "user.email",
+            "user.signingkey",
+            "gpg.format",
+            "commit.gpgsign",
+        ] {
+            assert!(
+                run_git_config(Some(repo.path.as_path()), &["--local", "--get", key])
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{} must not survive unassignment",
+                key
+            );
+        }
     }
 
     /// An unknown profile must not be recorded as an assignment.
