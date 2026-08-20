@@ -11,10 +11,13 @@ let executeRebaseBehavior: 'success' | 'conflict' | 'error' = 'success';
 const mockInvoke = (command: string): Promise<unknown> => {
   switch (command) {
     case 'get_rebase_commits':
-      return Promise.resolve([
-        { oid: 'abc1234567890', shortId: 'abc1234', summary: 'Commit A', action: 'pick' },
-        { oid: 'def1234567890', shortId: 'def1234', summary: 'Commit B', action: 'pick' },
-      ]);
+      return Promise.resolve({
+        commits: [
+          { oid: 'abc1234567890', shortId: 'abc1234', summary: 'Commit A', action: 'pick' },
+          { oid: 'def1234567890', shortId: 'def1234', summary: 'Commit B', action: 'pick' },
+        ],
+        mergeCount: 0,
+      });
     case 'execute_interactive_rebase':
       if (executeRebaseBehavior === 'conflict') {
         return Promise.reject({ code: 'REBASE_CONFLICT', message: 'Conflicts detected' });

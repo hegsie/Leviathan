@@ -24,6 +24,21 @@ pub struct InteractiveRebaseOutcome {
     pub paused: bool,
 }
 
+/// The commits `git rebase -i` would list for a range, plus how many merge
+/// commits the range contained.
+///
+/// Merges are omitted from the todo (canonical `git rebase -i` does the same,
+/// and a `pick` of one fails mid-run), but omitting them SILENTLY hid that
+/// replaying the plan would flatten the topology and rewrite the merged-in side
+/// commits — from a gesture that promised only to change one commit message.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebasePlan {
+    pub commits: Vec<RebaseCommit>,
+    /// Merge commits in the range, excluded from `commits`.
+    pub merge_count: usize,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RebaseCommit {
@@ -1054,7 +1069,7 @@ pub async fn is_ancestor_of_head(path: String, oid: String) -> Result<bool> {
 
 /// Get commits between HEAD and a target ref for interactive rebase
 #[command]
-pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<RebaseCommit>> {
+pub async fn get_rebase_commits(path: String, onto: String) -> Result<RebasePlan> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Find the onto commit.
@@ -1087,6 +1102,7 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
     revwalk.hide(onto_oid)?;
 
     let mut commits = Vec::new();
+    let mut merge_count: usize = 0;
 
     for oid in revwalk {
         let oid = oid?;
@@ -1099,6 +1115,11 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
         // abort. The plain revwalk also emitted commits from the merged-in
         // side, which the user never touched and did not expect to see.
         if commit.parent_count() > 1 {
+            // Counted, not just skipped. Dropping them silently produced a plan
+            // that LOOKS linear while the range is not: replaying it flattens
+            // the merge topology and rewrites the merged-in side commits. The
+            // caller needs to know so it can warn — or refuse.
+            merge_count += 1;
             continue;
         }
 
@@ -1114,7 +1135,10 @@ pub async fn get_rebase_commits(path: String, onto: String) -> Result<Vec<Rebase
     // Reverse to get oldest first (git rebase order)
     commits.reverse();
 
-    Ok(commits)
+    Ok(RebasePlan {
+        commits,
+        merge_count,
+    })
 }
 
 /// Execute an interactive rebase using git CLI
@@ -2732,7 +2756,7 @@ mod tests {
         let result = get_rebase_commits(repo.path_str(), initial_branch).await;
         assert!(result.is_ok());
 
-        let commits = result.unwrap();
+        let commits = result.unwrap().commits;
         assert_eq!(commits.len(), 3);
 
         // Commits should be in oldest-first order (git rebase order)
@@ -2769,7 +2793,8 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), base.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .commits;
         assert_eq!(commits.len(), 2);
 
         // Oldest-first from get_rebase_commits, which is git's todo order.
@@ -2781,7 +2806,10 @@ mod tests {
         assert!(!outcome.paused, "and must not leave the rebase paused");
 
         // One commit above the base instead of two.
-        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let after = get_rebase_commits(repo.path_str(), base)
+            .await
+            .unwrap()
+            .commits;
         assert_eq!(after.len(), 1, "the two commits became one");
         assert_eq!(
             repo.repo().state(),
@@ -2831,7 +2859,8 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), base.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .commits;
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].summary, "Add retry to the uploader");
         assert!(
@@ -2858,7 +2887,8 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), base.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .commits;
         // An `edit` line pauses the rebase, which is the state Abort exists for.
         let todo = format!("edit {}\npick {}\n", commits[0].oid, commits[1].oid);
 
@@ -2943,7 +2973,10 @@ mod tests {
             .expect("a clean merge");
         repo.create_commit("after", &[("a.txt", "a")]);
 
-        let plan = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let plan = get_rebase_commits(repo.path_str(), base)
+            .await
+            .unwrap()
+            .commits;
         let git_repo = repo.repo();
         for c in &plan {
             let commit = git_repo.find_commit(c.oid.parse().unwrap()).unwrap();
@@ -3199,7 +3232,8 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), base.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .commits;
         let todo = commits
             .iter()
             .map(|c| format!("pick {}", c.oid))
@@ -3211,7 +3245,10 @@ mod tests {
             .expect("an all-pick interactive rebase must run");
         assert!(!outcome.paused);
 
-        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let after = get_rebase_commits(repo.path_str(), base)
+            .await
+            .unwrap()
+            .commits;
         assert_eq!(after.len(), 2, "both commits survive an all-pick plan");
     }
 
@@ -3225,14 +3262,18 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), base.clone())
             .await
-            .unwrap();
+            .unwrap()
+            .commits;
         let todo = format!("pick {}\ndrop {}\n", commits[0].oid, commits[1].oid);
 
         execute_interactive_rebase(repo.path_str(), base.clone(), todo)
             .await
             .expect("a drop plan must run");
 
-        let after = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let after = get_rebase_commits(repo.path_str(), base)
+            .await
+            .unwrap()
+            .commits;
         assert_eq!(after.len(), 1);
         assert!(after[0].summary.contains("keep"));
     }
@@ -3251,7 +3292,8 @@ mod tests {
 
         let commits = get_rebase_commits(repo.path_str(), format!("{}^", head_oid))
             .await
-            .expect("a revspec must resolve, not error");
+            .expect("a revspec must resolve, not error")
+            .commits;
 
         assert_eq!(commits.len(), 1, "just the tip, whose parent we asked for");
         assert_eq!(commits[0].oid, head_oid);
@@ -3265,7 +3307,10 @@ mod tests {
         repo.checkout_branch("feature");
         repo.create_commit("on feature", &[("a.txt", "a")]);
 
-        let commits = get_rebase_commits(repo.path_str(), base).await.unwrap();
+        let commits = get_rebase_commits(repo.path_str(), base)
+            .await
+            .unwrap()
+            .commits;
         assert_eq!(commits.len(), 1);
     }
 
@@ -3280,7 +3325,7 @@ mod tests {
         assert!(result.is_ok());
 
         // No commits to rebase
-        let commits = result.unwrap();
+        let commits = result.unwrap().commits;
         assert!(commits.is_empty());
     }
 
@@ -3570,6 +3615,64 @@ mod tests {
 
     /// Set up a merge conflict on shared.txt between the initial branch and
     /// "feature", ending checked out on the initial branch (merge not run).
+    /// The plan must report merges it excluded.
+    ///
+    /// Omitting them silently produced a todo that reads as a clean linear list
+    /// while the range is not linear: replaying it flattens the topology and
+    /// rewrites the merged-in side commits.
+    #[tokio::test]
+    async fn test_get_rebase_commits_reports_excluded_merges() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid();
+        let default_branch = repo.current_branch();
+
+        // A side branch merged back in, so the range contains a merge commit.
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        repo.create_commit("Side work", &[("side.txt", "side")]);
+        repo.checkout_branch(&default_branch);
+        repo.create_commit("Main work", &[("main.txt", "main")]);
+
+        merge(repo.path_str(), "side".to_string(), Some(true), None, None)
+            .await
+            .expect("merge should succeed");
+
+        let plan = get_rebase_commits(repo.path_str(), base.to_string())
+            .await
+            .expect("plan should load");
+
+        assert_eq!(
+            plan.merge_count, 1,
+            "the excluded merge commit must be reported"
+        );
+        assert!(
+            plan.commits
+                .iter()
+                .all(|c| c.summary != "Merge branch 'side'"),
+            "merge commits stay out of the todo"
+        );
+        assert!(
+            !plan.commits.is_empty(),
+            "the non-merge commits are still listed"
+        );
+    }
+
+    /// A linear range reports nothing, so the warning stays off.
+    #[tokio::test]
+    async fn test_get_rebase_commits_reports_zero_merges_for_linear_history() {
+        let repo = TestRepo::with_initial_commit();
+        let base = repo.head_oid();
+        repo.create_commit("One", &[("a.txt", "a")]);
+        repo.create_commit("Two", &[("b.txt", "b")]);
+
+        let plan = get_rebase_commits(repo.path_str(), base.to_string())
+            .await
+            .expect("plan should load");
+
+        assert_eq!(plan.merge_count, 0);
+        assert_eq!(plan.commits.len(), 2);
+    }
+
     fn setup_conflicting_branches(repo: &TestRepo) {
         let initial_branch = repo.current_branch();
         repo.create_commit("Add shared", &[("shared.txt", "base")]);

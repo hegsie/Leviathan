@@ -495,8 +495,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private executing = false;
   @state() private error = '';
   @state() private warning = '';
-  /** Set when open() was given a reword target the loaded plan does not contain. */
-  @state() private rewordTargetMissing = false;
+  /**
+   * Set when open()'s reword request was refused, so the dialog shows the
+   * reason and keeps Start Rebase disabled. Two causes: the target is not in
+   * the loaded plan, or the range contains merge commits a rebase would
+   * flatten.
+   */
+  @state() private rewordRefused = false;
+  /** Merge commits in the rebase range; they are excluded from the plan. */
+  @state() private mergeCountInRange = 0;
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
@@ -568,10 +575,27 @@ export class LvInteractiveRebaseDialog extends LitElement {
       // that would destroy the very commit the user asked to reword. Refuse
       // instead: say so, and keep Start Rebase disabled.
       if (!this.commits.some((c) => c.oid === options.rewordCommitOid)) {
-        this.rewordTargetMissing = true;
+        this.rewordRefused = true;
         this.warning =
           'This commit is not part of the rebase plan, so its message cannot be ' +
           'rewritten here. Merge commits cannot be reworded by rebase.';
+        return;
+      }
+
+      // Merges ABOVE the target are the unguarded case. The plan omits them, so
+      // it reads as a clean linear list, but replaying it flattens the merge
+      // topology and rewrites the merged-in side commits — a destructive
+      // history rewrite from a gesture that promised to change one commit
+      // message. Refuse, the same way an unrebaseable target is refused.
+      if (this.mergeCountInRange > 0) {
+        this.rewordRefused = true;
+        this.warning =
+          `This commit cannot be reworded here: the range contains ` +
+          `${this.mergeCountInRange} merge ` +
+          `${this.mergeCountInRange === 1 ? 'commit' : 'commits'}, and rebasing ` +
+          `would flatten ${this.mergeCountInRange === 1 ? 'it' : 'them'} and ` +
+          `rewrite the merged-in commits. Reword it from an interactive rebase ` +
+          `you start deliberately instead.`;
         return;
       }
       this.commits = this.commits.map((c) =>
@@ -608,7 +632,8 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.executing = false;
     this.error = '';
     this.warning = '';
-    this.rewordTargetMissing = false;
+    this.rewordRefused = false;
+    this.mergeCountInRange = 0;
     this.draggedIndex = null;
     this.dropTargetIndex = null;
     this.showPreview = true;
@@ -624,10 +649,14 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const result = await gitService.getRebaseCommits(this.pinnedRepoPath, this.onto);
 
       if (result.success) {
-        this.commits = (result.data || []).map(c => ({
+        this.commits = (result.data?.commits ?? []).map(c => ({
           ...c,
           action: 'pick' as RebaseAction,
         }));
+        // Merges are excluded from the todo, so a range containing them yields
+        // a plan that LOOKS linear while the history is not. Replaying it
+        // flattens the topology and rewrites the merged-in side commits.
+        this.mergeCountInRange = result.data?.mergeCount ?? 0;
       } else {
         this.error = result.error?.message ?? 'Failed to load commits';
       }
@@ -1010,7 +1039,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   private get canExecute(): boolean {
     return (
       this.commits.length > 0 &&
-      !this.rewordTargetMissing &&
+      !this.rewordRefused &&
       !this.executing &&
       !this.hasValidationErrors()
     );
@@ -1222,6 +1251,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
             </div>
           </div>
 
+          ${this.mergeCountInRange > 0 && !this.rewordRefused
+            ? html`<div class="warning-message">
+                This range contains ${this.mergeCountInRange} merge
+                ${this.mergeCountInRange === 1 ? 'commit' : 'commits'}, which are not
+                listed below. Rebasing will flatten
+                ${this.mergeCountInRange === 1 ? 'it' : 'them'} and rewrite the
+                commits that were merged in.
+              </div>`
+            : nothing}
           ${this.warning
             ? html`<div class="warning-message">${this.warning}</div>`
             : nothing}

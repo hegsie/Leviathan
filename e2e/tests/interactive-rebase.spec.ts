@@ -18,11 +18,14 @@ test.describe('Interactive Rebase Dialog', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
         { oid: 'ghi789', shortId: 'ghi789', summary: 'Third commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: null,
     });
   });
@@ -246,11 +249,14 @@ test.describe('Interactive Rebase Autosquash', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'Add feature', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'fixup! Add feature', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
         { oid: 'ghi789', shortId: 'ghi789', summary: 'Another commit', author: 'Test', timestamp: Date.now() / 1000 - 7200 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: null,
     });
   });
@@ -299,10 +305,13 @@ test.describe('Interactive Rebase - Event Propagation', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: null,
     });
   });
@@ -345,10 +354,13 @@ test.describe('Interactive Rebase - Error Handling', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: { __error__: 'Rebase failed: conflicts detected' },
     });
   });
@@ -423,10 +435,13 @@ test.describe('Interactive Rebase - Command Verification', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: null,
     });
   });
@@ -468,10 +483,13 @@ test.describe('Interactive Rebase - Injected Error on Execute', () => {
     await setupOpenRepository(page);
 
     await injectCommandMock(page, {
-      get_rebase_commits: [
+      get_rebase_commits: {
+        commits: [
         { oid: 'abc123', shortId: 'abc123', summary: 'First commit', author: 'Test', timestamp: Date.now() / 1000 },
         { oid: 'def456', shortId: 'def456', summary: 'Second commit', author: 'Test', timestamp: Date.now() / 1000 - 3600 },
-      ],
+        ],
+        mergeCount: 0,
+      },
       execute_interactive_rebase: null,
     });
   });

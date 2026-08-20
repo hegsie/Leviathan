@@ -231,6 +231,7 @@ import type {
   Stash,
   StashShowResult,
   RebaseCommit,
+  RebasePlan,
   RebaseState,
   RebaseTodo,
   RebaseTodoEntry,
@@ -1284,8 +1285,8 @@ export async function abortRebase(
 export async function getRebaseCommits(
   path: string,
   onto: string,
-): Promise<CommandResult<RebaseCommit[]>> {
-  return invokeCommand<RebaseCommit[]>("get_rebase_commits", { path, onto });
+): Promise<CommandResult<RebasePlan>> {
+  return invokeCommand<RebasePlan>("get_rebase_commits", { path, onto });
 }
 
 /** Is `oid` reachable from HEAD? Gates the reword/amend rebase route. */

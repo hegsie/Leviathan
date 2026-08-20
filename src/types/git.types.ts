@@ -160,6 +160,20 @@ export interface RebaseCommit {
   action: string;
 }
 
+/**
+ * The commits `git rebase -i` would list for a range, plus how many merge
+ * commits the range contained.
+ *
+ * Merges are omitted from the todo, but the count must reach the UI: replaying
+ * a plan over a range containing merges flattens the topology and rewrites the
+ * merged-in side commits.
+ */
+export interface RebasePlan {
+  commits: RebaseCommit[];
+  /** Merge commits in the range, excluded from `commits`. */
+  mergeCount: number;
+}
+
 export type RebaseAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
 
 /**
