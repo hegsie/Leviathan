@@ -280,25 +280,60 @@ pub async fn generate_ssh_key(
     })
 }
 
+/// Which host to connect to, and the success banner to expect from it.
+///
+/// The canonical SaaS hosts are matched EXACTLY. Matching on `contains` and then
+/// rewriting the target sent `github.mycompany.com` or `gitlab.internal.io` to
+/// the public servers instead: the test passed against a machine the user never
+/// named (their personal key works on github.com), while the result panel still
+/// displayed the host they typed. Anything else is contacted as entered.
+fn resolve_ssh_target(host: &str) -> (String, &'static str) {
+    let trimmed = host.trim().trim_end_matches('/');
+    // Compare on the host part so "git@github.com" resolves like "github.com".
+    let bare = trimmed.rsplit('@').next().unwrap_or(trimmed);
+
+    let expected_pattern = match bare.to_ascii_lowercase().as_str() {
+        "github.com" | "ssh.github.com" => "successfully authenticated",
+        "gitlab.com" => "welcome to gitlab",
+        "bitbucket.org" => "logged in as",
+        _ => "",
+    };
+
+    let ssh_host = if trimmed.contains('@') {
+        trimmed.to_string()
+    } else {
+        format!("git@{}", trimmed)
+    };
+
+    (ssh_host, expected_pattern)
+}
+
+/// Whether an `ssh -T` result means authentication succeeded.
+///
+/// `expected_pattern` is empty for hosts with no known banner, and
+/// `contains("")` is ALWAYS true — so every custom host reported success no
+/// matter what ssh said, including "Permission denied (publickey)" and
+/// "Connection refused". Those hosts now rest on ssh's exit status, which is
+/// non-zero for both.
+fn ssh_test_succeeded(message: &str, expected_pattern: &str, status_success: bool) -> bool {
+    let lower = message.to_lowercase();
+
+    if !expected_pattern.is_empty() && lower.contains(expected_pattern) {
+        return true;
+    }
+
+    // The known banners are still accepted from any host: a GitHub Enterprise or
+    // self-hosted GitLab answers with the same wording as the SaaS original.
+    lower.contains("successfully authenticated")
+        || lower.contains("welcome to gitlab")
+        || lower.contains("logged in as")
+        || status_success
+}
+
 /// Test SSH connection to a host
 #[command]
 pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
-    // Common git hosts and their SSH test commands
-    let (ssh_host, expected_pattern): (String, &str) = if host.contains("github") {
-        ("git@github.com".to_string(), "successfully authenticated")
-    } else if host.contains("gitlab") {
-        ("git@gitlab.com".to_string(), "Welcome to GitLab")
-    } else if host.contains("bitbucket") {
-        ("git@bitbucket.org".to_string(), "logged in as")
-    } else {
-        // For custom hosts, just try to connect
-        let ssh_host = if host.contains('@') {
-            host.clone()
-        } else {
-            format!("git@{}", host)
-        };
-        (ssh_host, "")
-    };
+    let (ssh_host, expected_pattern) = resolve_ssh_target(&host);
 
     // Run ssh -T to test connection
     let output = create_command("ssh")
@@ -324,11 +359,7 @@ pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
     };
 
     // GitHub returns exit code 1 even on success, so check the message
-    let success = message.to_lowercase().contains(expected_pattern)
-        || message.contains("successfully authenticated")
-        || message.contains("Welcome")
-        || message.contains("logged in as")
-        || output.status.success();
+    let success = ssh_test_succeeded(&message, expected_pattern, output.status.success());
 
     // Try to extract username from the message
     let username = if message.contains("Hi ") {
@@ -457,6 +488,106 @@ pub async fn delete_ssh_key(key_name: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SSH connection test targeting and verdict ────────────────────────────
+
+    /// A self-hosted host must be contacted as entered.
+    ///
+    /// `host.contains("github")` matched github.mycompany.com and then replaced
+    /// the target with git@github.com, so the test ran against the PUBLIC server
+    /// while the result panel showed the enterprise host. A pass there proves
+    /// only that the user's key works on github.com.
+    #[test]
+    fn test_self_hosted_hosts_are_not_redirected_to_the_saas_servers() {
+        for host in [
+            "github.mycompany.com",
+            "gitlab.internal.io",
+            "bitbucket.corp.example",
+            "git.example.com",
+        ] {
+            let (target, _) = resolve_ssh_target(host);
+            assert_eq!(
+                target,
+                format!("git@{}", host),
+                "{} must be contacted as entered",
+                host
+            );
+        }
+    }
+
+    /// The canonical hosts still resolve to their known banner.
+    #[test]
+    fn test_canonical_hosts_keep_their_expected_banner() {
+        assert_eq!(
+            resolve_ssh_target("github.com"),
+            ("git@github.com".to_string(), "successfully authenticated")
+        );
+        assert_eq!(
+            resolve_ssh_target("gitlab.com"),
+            ("git@gitlab.com".to_string(), "welcome to gitlab")
+        );
+        assert_eq!(
+            resolve_ssh_target("bitbucket.org"),
+            ("git@bitbucket.org".to_string(), "logged in as")
+        );
+        // An explicit user resolves the same way and is preserved.
+        assert_eq!(
+            resolve_ssh_target("git@github.com"),
+            ("git@github.com".to_string(), "successfully authenticated")
+        );
+        // A self-hosted host gets no banner to match on.
+        assert_eq!(resolve_ssh_target("github.mycompany.com").1, "");
+    }
+
+    /// With no known banner, expected_pattern is "" — and contains("") is
+    /// ALWAYS true, so every custom host reported success no matter what ssh
+    /// said. A green "Connection Successful" over "Permission denied" defeats
+    /// the entire purpose of the test.
+    #[test]
+    fn test_custom_host_failures_are_reported_as_failures() {
+        for failure in [
+            "git@git.example.com: Permission denied (publickey).",
+            "ssh: connect to host git.example.com port 22: Connection refused",
+            "Host key verification failed.",
+            "ssh: Could not resolve hostname git.example.com",
+        ] {
+            assert!(
+                !ssh_test_succeeded(failure, "", false),
+                "should have failed: {}",
+                failure
+            );
+        }
+    }
+
+    /// A custom host that genuinely authenticates still passes.
+    #[test]
+    fn test_custom_host_success_is_reported_as_success() {
+        // ssh exiting 0 is the only signal a bannerless host gives.
+        assert!(ssh_test_succeeded("", "", true));
+        // A self-hosted GitHub Enterprise answers with the SaaS wording.
+        assert!(ssh_test_succeeded(
+            "Hi alice! You've successfully authenticated, but GitHub does not provide shell access.",
+            "",
+            false
+        ));
+        // ...as does a self-hosted GitLab.
+        assert!(ssh_test_succeeded("Welcome to GitLab, @alice!", "", false));
+    }
+
+    /// The canonical hosts keep working: GitHub exits 1 even on success.
+    #[test]
+    fn test_canonical_host_success_survives_a_nonzero_exit() {
+        assert!(ssh_test_succeeded(
+            "Hi alice! You've successfully authenticated, but GitHub does not provide shell access.",
+            "successfully authenticated",
+            false
+        ));
+        assert!(!ssh_test_succeeded(
+            "git@github.com: Permission denied (publickey).",
+            "successfully authenticated",
+            false
+        ));
+    }
 
     // ==========================================================================
     // SshKey Struct Tests
