@@ -356,10 +356,27 @@ export class LvCreateTagDialog extends LitElement {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && !e.shiftKey && this.canCreate) {
-      e.preventDefault();
-      this.handleCreate();
-    }
+    if (e.key !== 'Enter' || !this.canCreate) return;
+
+    // Inside the message textarea, Enter inserts a newline.
+    //
+    // This handler is bound on the whole form, so a plain Enter submitted from
+    // anywhere. An annotated tag message is exactly the multi-line case — the
+    // placeholder invites "Release notes or description..." — and canCreate is
+    // already true once the name and first line exist. So pressing Enter to
+    // start line two created the tag with a one-line message, with nothing
+    // hinting that Shift+Enter was required, and the tag may be pushed before
+    // the user notices.
+    //
+    // Ctrl/Cmd+Enter still submits from the textarea, matching the commit
+    // message editors elsewhere in the app.
+    const inTextarea = (e.target as HTMLElement | null)?.tagName === 'TEXTAREA';
+    if (inTextarea && !(e.ctrlKey || e.metaKey)) return;
+
+    if (e.shiftKey) return;
+
+    e.preventDefault();
+    this.handleCreate();
   }
 
   private handleModalClose(): void {
