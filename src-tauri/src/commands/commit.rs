@@ -1618,39 +1618,75 @@ mod tests {
     /// delta.status() was never Renamed, renamed_from was never set, and the
     /// walk stopped at the rename: history before it was invisible, which is
     /// the one thing the option exists to provide.
+    /// Commit the current index at an EXPLICIT time.
+    ///
+    /// The rename tests need timestamps that deliberately disagree with
+    /// topology. With wall-clock times every commit lands in the same second in
+    /// commit order, so `Sort::TIME` alone already produces the right order and
+    /// the tests would pass even with `Sort::TOPOLOGICAL` removed — proving
+    /// nothing about the walk they exist to cover.
+    fn commit_index_at(repo: &TestRepo, message: &str, seconds: i64) -> git2::Oid {
+        let git_repo = repo.repo();
+        let mut index = git_repo.index().unwrap();
+        index.write().unwrap();
+        let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let when = git2::Time::new(seconds, 0);
+        let sig = git2::Signature::new("Test User", "test@example.com", &when).unwrap();
+        let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+        git_repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Write a file, stage it, and commit at an explicit time.
+    fn commit_file_at(repo: &TestRepo, message: &str, file: &str, body: &str, seconds: i64) {
+        std::fs::write(repo.path.join(file), body).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index.add_path(std::path::Path::new(file)).unwrap();
+            index.write().unwrap();
+        }
+        commit_index_at(repo, message, seconds);
+    }
+
+    /// Stage a rename and commit it at an explicit time.
+    fn commit_rename_at(repo: &TestRepo, from: &str, to: &str, message: &str, seconds: i64) {
+        std::fs::rename(repo.path.join(from), repo.path.join(to)).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(std::path::Path::new(from)).unwrap();
+            index.add_path(std::path::Path::new(to)).unwrap();
+            index.write().unwrap();
+        }
+        commit_index_at(repo, message, seconds);
+    }
+
     #[tokio::test]
     async fn test_get_file_history_follows_a_rename() {
         let repo = TestRepo::with_initial_commit();
-        repo.create_commit("Add original", &[("old-name.txt", "line one\n")]);
-        repo.create_commit("Edit original", &[("old-name.txt", "line one\nline two\n")]);
 
-        // Rename with identical content, so it is unambiguously a rename.
-        {
-            std::fs::rename(
-                repo.path.join("old-name.txt"),
-                repo.path.join("new-name.txt"),
-            )
-            .unwrap();
-            let git_repo = repo.repo();
-            let mut index = git_repo.index().unwrap();
-            index
-                .remove_path(std::path::Path::new("old-name.txt"))
-                .unwrap();
-            index
-                .add_path(std::path::Path::new("new-name.txt"))
-                .unwrap();
-            index.write().unwrap();
-            let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
-            let sig = git_repo.signature().unwrap();
-            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo
-                .commit(Some("HEAD"), &sig, &sig, "Rename it", &tree, &[&parent])
-                .unwrap();
-        }
-
-        repo.create_commit(
+        // Timestamps chosen to DISAGREE with topology: the rename is older than
+        // its own parent. Under a TIME-only walk the parent would be visited
+        // first — before the path is known to have changed — so this ordering
+        // is what makes the test able to fail.
+        commit_file_at(&repo, "Add original", "old-name.txt", "line one\n", 1_000);
+        commit_file_at(
+            &repo,
+            "Edit original",
+            "old-name.txt",
+            "line one\nline two\n",
+            3_000,
+        );
+        // Renamed with identical content, so it is unambiguously a rename.
+        commit_rename_at(&repo, "old-name.txt", "new-name.txt", "Rename it", 2_000);
+        commit_file_at(
+            &repo,
             "Edit after rename",
-            &[("new-name.txt", "line one\nline two\nline three\n")],
+            "new-name.txt",
+            "line one\nline two\nline three\n",
+            4_000,
         );
 
         let following = get_file_history(
@@ -1681,30 +1717,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_file_history_without_following_stops_at_the_rename() {
         let repo = TestRepo::with_initial_commit();
-        repo.create_commit("Add original", &[("old-name.txt", "line one\n")]);
 
-        {
-            std::fs::rename(
-                repo.path.join("old-name.txt"),
-                repo.path.join("new-name.txt"),
-            )
-            .unwrap();
-            let git_repo = repo.repo();
-            let mut index = git_repo.index().unwrap();
-            index
-                .remove_path(std::path::Path::new("old-name.txt"))
-                .unwrap();
-            index
-                .add_path(std::path::Path::new("new-name.txt"))
-                .unwrap();
-            index.write().unwrap();
-            let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
-            let sig = git_repo.signature().unwrap();
-            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
-            git_repo
-                .commit(Some("HEAD"), &sig, &sig, "Rename it", &tree, &[&parent])
-                .unwrap();
-        }
+        // Same topology-inconsistent timestamps as the following test, so the
+        // two differ only in the flag under test.
+        commit_file_at(&repo, "Add original", "old-name.txt", "line one\n", 3_000);
+        commit_rename_at(&repo, "old-name.txt", "new-name.txt", "Rename it", 2_000);
 
         let not_following = get_file_history(
             repo.path_str(),
