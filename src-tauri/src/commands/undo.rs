@@ -53,14 +53,40 @@ fn parse_checkout_source(message: &str) -> Option<String> {
     }
 }
 
+/// The ref HEAD currently points at: `refs/heads/<branch>` when attached, and
+/// `HEAD` itself when detached.
+fn head_ref_name(repo: &git2::Repository) -> Option<String> {
+    // Reference::name() is Result-wrapped in this git2 binding, not Option.
+    repo.head().ok()?.name().ok().map(|n| n.to_string())
+}
+
 /// Record a marker in repo config so `redo_last_action` can distinguish an
 /// app-performed undo from a user-initiated reset. `redo_target` is the state
 /// redo should restore (HEAD before the undo); `undo_head` is HEAD immediately
 /// after the undo, used to detect whether anything changed since.
+///
+/// The ref HEAD was on is recorded alongside them, because an OID alone does not
+/// identify a branch: any number of branches can sit on the same commit. Undo on
+/// `main`, create a branch at the undo point and switch to it — exactly what a
+/// cautious user does before experimenting — and a redo would otherwise pass the
+/// OID check and reset that OTHER branch to the redo target.
 fn set_redo_marker(repo: &git2::Repository, redo_target: &str, undo_head: &str) {
     if let Ok(mut cfg) = repo.config() {
         let _ = cfg.set_str("leviathan.redotarget", redo_target);
         let _ = cfg.set_str("leviathan.redohead", undo_head);
+        match head_ref_name(repo) {
+            // A mixed reset does not change which ref HEAD points at, so reading
+            // it after the undo names the ref the undo actually moved.
+            Some(name) => {
+                let _ = cfg.set_str("leviathan.redoref", &name);
+            }
+            // Without a recorded ref, redo_last_action refuses rather than
+            // falling back to the OID-only check that lets it hit the wrong
+            // branch. Remove any stale value so it cannot be inherited.
+            None => {
+                let _ = cfg.remove("leviathan.redoref");
+            }
+        }
     }
 }
 
@@ -68,6 +94,7 @@ fn clear_redo_marker(repo: &git2::Repository) {
     if let Ok(mut cfg) = repo.config() {
         let _ = cfg.remove("leviathan.redotarget");
         let _ = cfg.remove("leviathan.redohead");
+        let _ = cfg.remove("leviathan.redoref");
     }
 }
 
@@ -457,12 +484,13 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
 
     // Read the app-undo marker. Absent marker => the last action was not an
     // app undo, so there is nothing to redo.
-    let (redo_target, undo_head) = {
+    let (redo_target, undo_head, undo_ref) = {
         let cfg = repo.config()?;
         let target = cfg.get_string("leviathan.redotarget").ok();
         let head = cfg.get_string("leviathan.redohead").ok();
+        let reference = cfg.get_string("leviathan.redoref").ok();
         match (target, head) {
-            (Some(t), Some(h)) if !t.is_empty() && !h.is_empty() => (t, h),
+            (Some(t), Some(h)) if !t.is_empty() && !h.is_empty() => (t, h, reference),
             _ => {
                 return Err(LeviathanError::OperationFailed(
                     "Nothing to redo: the last action was not an undo.".to_string(),
@@ -479,6 +507,20 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
         .and_then(|h| h.target())
         .map(|o| o.to_string());
     if current_head.as_deref() != Some(undo_head.as_str()) {
+        return Err(LeviathanError::OperationFailed(
+            "Nothing to redo: the repository has changed since the last undo.".to_string(),
+        ));
+    }
+
+    // The OID matching is not enough on its own: branches share commits, so the
+    // check above passes just as happily on a DIFFERENT branch that happens to
+    // point at the undo position. The reset below moves whatever ref HEAD is on,
+    // so redo must be on the same ref the undo moved. A marker with no recorded
+    // ref (written before this was tracked) is treated as stale for the same
+    // reason — the marker only ever spans a single undo/redo pair, so refusing
+    // costs at most one redo and never resets a branch the undo never touched.
+    let current_ref = head_ref_name(&repo);
+    if undo_ref.is_none() || current_ref != undo_ref {
         return Err(LeviathanError::OperationFailed(
             "Nothing to redo: the repository has changed since the last undo.".to_string(),
         ));
@@ -788,6 +830,101 @@ mod tests {
         let result = redo_last_action(repo.path_str()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Nothing to redo"));
+    }
+
+    /// Tip of a local branch, for asserting that a ref did or did not move.
+    fn branch_tip(repo: &TestRepo, name: &str) -> git2::Oid {
+        repo.repo()
+            .find_branch(name, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .target()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_redo_is_refused_on_a_different_branch_at_the_same_commit() {
+        // Branching at the undo point before experimenting is exactly what a
+        // cautious user does. The redo marker's OID check cannot tell that
+        // branch apart from the one the undo moved — both point at the same
+        // commit — so redo would reset a branch it never touched.
+        let repo = TestRepo::with_initial_commit();
+        let first_oid = repo.head_oid();
+
+        repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+
+        undo_last_action(repo.path_str()).await.unwrap();
+        assert_eq!(repo.head_oid(), first_oid);
+
+        let default_branch = repo.current_branch();
+        repo.create_branch("experiment");
+        repo.checkout_branch("experiment");
+
+        let result = redo_last_action(repo.path_str()).await;
+
+        assert!(
+            result.is_err(),
+            "redo must refuse on a branch the undo never moved"
+        );
+        assert_eq!(
+            branch_tip(&repo, "experiment"),
+            first_oid,
+            "the branch the user switched to must not be reset by redo"
+        );
+        assert_eq!(
+            branch_tip(&repo, &default_branch),
+            first_oid,
+            "the undone branch must be left for a redo on that branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redo_is_refused_on_a_detached_head_at_the_same_commit() {
+        // Same hole, reached by detaching instead of branching.
+        let repo = TestRepo::with_initial_commit();
+        let first_oid = repo.head_oid();
+
+        repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+        undo_last_action(repo.path_str()).await.unwrap();
+
+        let default_branch = repo.current_branch();
+        repo.repo().set_head_detached(first_oid).unwrap();
+
+        let result = redo_last_action(repo.path_str()).await;
+
+        assert!(result.is_err(), "redo must refuse on a detached HEAD");
+        assert_eq!(
+            branch_tip(&repo, &default_branch),
+            first_oid,
+            "the undone branch must not move while HEAD is detached"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redo_still_fires_on_the_undone_branch_when_a_sibling_shares_the_commit() {
+        // The refusal keys on the ref, not on whether other branches exist: a
+        // sibling sitting on the same commit must not block a legitimate redo.
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_commit("Second commit", &[("file2.txt", "content2")]);
+        let second_oid = repo.head_oid();
+
+        undo_last_action(repo.path_str()).await.unwrap();
+        let first_oid = repo.head_oid();
+
+        // A sibling at the undo point, but the user stays where they were.
+        repo.create_branch("experiment");
+
+        redo_last_action(repo.path_str())
+            .await
+            .expect("redo on the branch the undo moved must still work");
+
+        assert_eq!(repo.head_oid(), second_oid, "redo must restore the commit");
+        assert_eq!(
+            branch_tip(&repo, "experiment"),
+            first_oid,
+            "the sibling branch must be untouched by the redo"
+        );
     }
 
     #[tokio::test]
