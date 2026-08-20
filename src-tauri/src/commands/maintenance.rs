@@ -490,7 +490,12 @@ pub async fn run_gc(
     }
 
     if let Some(prune_date) = prune {
-        cmd.arg("--prune").arg(prune_date);
+        // Stuck form. `--prune` takes an OPTIONAL argument, so the two-token
+        // form leaves the date as a stray positional and git exits with a usage
+        // error — making every call that supplied RunGcCommand.prune fail with
+        // "Garbage collection failed: usage: git gc ...". The legacy
+        // run_garbage_collection command above already does it this way.
+        cmd.arg(format!("--prune={}", prune_date));
     }
 
     // Run the command
@@ -945,6 +950,40 @@ mod tests {
         assert!(result.is_ok());
         let gc_result = result.unwrap();
         assert!(gc_result.success);
+    }
+
+    /// `git gc --prune` takes an OPTIONAL argument, so the date must be in
+    /// stuck form. Passing it as a separate token leaves it as a stray
+    /// positional and git exits with a usage error, so every caller supplying
+    /// RunGcCommand.prune got "Garbage collection failed: usage: git gc ...".
+    #[tokio::test]
+    async fn test_run_gc_with_prune_date_succeeds() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = run_gc(repo.path_str(), None, Some("now".to_string()), None).await;
+
+        let gc_result = result.expect("gc with a prune date should not error");
+        assert!(
+            gc_result.success,
+            "gc with a prune date failed: {:?}",
+            gc_result.message
+        );
+        assert!(
+            !gc_result.message.contains("usage: git gc"),
+            "git rejected the prune argument: {:?}",
+            gc_result.message
+        );
+    }
+
+    /// A relative date, the other form the API documents.
+    #[tokio::test]
+    async fn test_run_gc_with_relative_prune_date_succeeds() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = run_gc(repo.path_str(), None, Some("2.weeks.ago".to_string()), None).await;
+
+        let gc_result = result.expect("gc with a relative prune date should not error");
+        assert!(gc_result.success, "gc failed: {:?}", gc_result.message);
     }
 
     #[tokio::test]
