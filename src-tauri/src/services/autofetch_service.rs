@@ -179,11 +179,22 @@ async fn perform_fetch(repo_path: &str, token: Option<String>) -> Result<RemoteS
         let repo =
             git2::Repository::open(&path).map_err(|e| format!("Failed to open repo: {}", e))?;
 
-        // Get the default remote (usually origin)
-        let remote_name = "origin";
+        // Fetch the remote the CURRENT BRANCH tracks, not a hard-coded "origin".
+        //
+        // remote.rs's resolve_pull_target exists precisely because "origin" is
+        // an assumption: `git clone -o upstream`, Gerrit checkouts, and remotes
+        // renamed through this app's own Remote dialog all break it, and every
+        // cycle then failed with a persistent "auto-fetch failed" warning.
+        //
+        // The quieter failure mattered more. In the fork workflow — origin is
+        // your fork, the branch tracks upstream/main — fetching origin and then
+        // computing ahead/behind against the never-updated upstream tracking ref
+        // reported SUCCESS, so the badge and the "remote has N new commits"
+        // toast were stale while looking fresh.
+        let remote_name = tracked_remote(&repo);
 
         let mut remote = repo
-            .find_remote(remote_name)
+            .find_remote(&remote_name)
             .map_err(|e| format!("Failed to find remote: {}", e))?;
 
         // Use the shared credentials helper (reads from OS keyring via `security` CLI
@@ -206,9 +217,52 @@ async fn perform_fetch(repo_path: &str, token: Option<String>) -> Result<RemoteS
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// The remote the current branch tracks, falling back to "origin".
+///
+/// Mirrors what resolve_pull_target does for an explicit pull, so the
+/// background loop fetches the same remote the foreground would.
+fn tracked_remote(repo: &git2::Repository) -> String {
+    const DEFAULT_REMOTE: &str = "origin";
+
+    let Ok(head) = repo.head() else {
+        return DEFAULT_REMOTE.to_string();
+    };
+
+    if !head.is_branch() {
+        return DEFAULT_REMOTE.to_string();
+    }
+
+    let Ok(refname) = head.name() else {
+        return DEFAULT_REMOTE.to_string();
+    };
+
+    repo.branch_upstream_remote(refname)
+        .ok()
+        .and_then(|buf| buf.as_str().ok().map(|s| s.to_string()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| DEFAULT_REMOTE.to_string())
+}
+
 /// Get remote status (ahead/behind counts)
 fn get_remote_status_internal(repo: &git2::Repository) -> Result<RemoteStatus, String> {
     let head = repo.head().map_err(|e| format!("No HEAD: {}", e))?;
+
+    // A detached HEAD has no branch, so it has no upstream to compare against —
+    // that is "nothing to report", not a failure.
+    //
+    // shorthand() returns the literal "HEAD" when detached, so find_branch
+    // missed and perform_fetch returned Err AFTER the network fetch had already
+    // succeeded. The loop then reported success:false and the user got
+    // "auto-fetch failed — Branch not found" simply for checking out a commit
+    // or a tag, which is a routine way to inspect history in this app.
+    if !head.is_branch() {
+        return Ok(RemoteStatus {
+            ahead: 0,
+            behind: 0,
+            has_upstream: false,
+            upstream_name: None,
+        });
+    }
 
     let branch_name = head
         .shorthand()
@@ -263,6 +317,128 @@ pub fn create_autofetch_state() -> AutoFetchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestRepo;
+
+    /// A detached HEAD has no branch and therefore no upstream. Reporting that
+    /// as an ERROR made auto-fetch return failure AFTER the network fetch had
+    /// already succeeded, so checking out a commit or a tag — a routine way to
+    /// inspect history here — produced "auto-fetch failed — Branch not found".
+    #[test]
+    fn test_remote_status_on_detached_head_is_not_an_error() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.set_head_detached(head_oid).unwrap();
+        assert!(!repo.head().unwrap().is_branch(), "HEAD should be detached");
+
+        let status = get_remote_status_internal(&repo).expect("detached HEAD must not error");
+
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+        assert!(!status.has_upstream);
+        assert!(status.upstream_name.is_none());
+    }
+
+    /// Auto-fetch must follow the branch's own upstream, the way an explicit
+    /// pull does. Hard-coding "origin" broke `git clone -o upstream` and
+    /// renamed remotes outright, and silently reported stale counts in the fork
+    /// workflow (origin = your fork, branch tracks upstream/main).
+    #[test]
+    fn test_tracked_remote_follows_the_branch_upstream() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        let branch = test_repo.current_branch();
+
+        // Two remotes; the branch tracks the one that is NOT origin.
+        repo.remote("origin", "https://example.com/fork.git")
+            .unwrap();
+        repo.remote("upstream", "https://example.com/canonical.git")
+            .unwrap();
+
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.reference(
+            &format!("refs/remotes/upstream/{}", branch),
+            head_commit.id(),
+            true,
+            "test",
+        )
+        .unwrap();
+
+        let mut local = repo.find_branch(&branch, git2::BranchType::Local).unwrap();
+        local
+            .set_upstream(Some(&format!("upstream/{}", branch)))
+            .unwrap();
+
+        assert_eq!(tracked_remote(&repo), "upstream");
+    }
+
+    /// The call site must USE the tracked remote, not just be able to compute
+    /// it: testing tracked_remote() alone leaves perform_fetch's one-line
+    /// substitution unverified.
+    ///
+    /// Uses a local path as the remote, so this exercises the real fetch with no
+    /// network. The repository deliberately has NO "origin": with the remote
+    /// hard-coded, find_remote("origin") fails and the fetch errors.
+    #[tokio::test]
+    async fn test_perform_fetch_uses_the_tracked_remote_not_origin() {
+        let upstream = TestRepo::with_initial_commit();
+        let consumer = TestRepo::with_initial_commit();
+        let branch = consumer.current_branch();
+
+        {
+            let repo = consumer.repo();
+            // Only "upstream" exists — no "origin" anywhere.
+            repo.remote("upstream", &upstream.path.to_string_lossy())
+                .unwrap();
+            assert!(repo.find_remote("origin").is_err(), "origin must not exist");
+
+            let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.reference(
+                &format!("refs/remotes/upstream/{}", branch),
+                head_commit.id(),
+                true,
+                "test",
+            )
+            .unwrap();
+
+            let mut local = repo.find_branch(&branch, git2::BranchType::Local).unwrap();
+            local
+                .set_upstream(Some(&format!("upstream/{}", branch)))
+                .unwrap();
+        }
+
+        let result = perform_fetch(&consumer.path_str(), None).await;
+
+        assert!(
+            result.is_ok(),
+            "auto-fetch must follow the branch's upstream remote, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// With no upstream configured, "origin" remains the sensible default.
+    #[test]
+    fn test_tracked_remote_falls_back_to_origin() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        repo.remote("origin", "https://example.com/repo.git")
+            .unwrap();
+
+        assert_eq!(tracked_remote(&repo), "origin");
+    }
+
+    /// A detached HEAD has no upstream to consult, so the default applies
+    /// rather than a panic or an empty remote name.
+    #[test]
+    fn test_tracked_remote_on_detached_head_falls_back_to_origin() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.set_head_detached(head_oid).unwrap();
+
+        assert_eq!(tracked_remote(&repo), "origin");
+    }
 
     #[test]
     fn test_stagger_offset_is_deterministic() {
