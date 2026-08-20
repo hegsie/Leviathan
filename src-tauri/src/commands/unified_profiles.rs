@@ -544,17 +544,57 @@ pub async fn get_assigned_unified_profile(path: String) -> Result<Option<Unified
 #[command]
 pub async fn assign_unified_profile_to_repository(path: String, profile_id: String) -> Result<()> {
     let mut config = load_unified_profiles_config()?;
-
-    // Verify the profile exists
-    if config.get_profile(&profile_id).is_none() {
-        return Err(LeviathanError::OperationFailed(
-            "Profile not found".to_string(),
-        ));
-    }
-
-    config.assign_profile(path, profile_id);
+    assign_and_apply(&mut config, path, profile_id)?;
     save_unified_profiles_config(&config)?;
     Ok(())
+}
+
+/// Record the assignment AND write the profile's identity into the repository's
+/// git config.
+///
+/// These must happen together. The dashboard renders the assigned profile's
+/// name/email/signing key as the repository's commit identity, so recording only
+/// the mapping meant a user who assigned "Work" to five repositories saw
+/// work@example.com on every card and then committed with their old global
+/// identity — nothing ever reconciled the two.
+///
+/// Takes the config by reference so the pairing is testable without the global
+/// on-disk profile store.
+fn assign_and_apply(
+    config: &mut UnifiedProfilesConfig,
+    path: String,
+    profile_id: String,
+) -> Result<()> {
+    let profile = config
+        .get_profile(&profile_id)
+        .ok_or_else(|| LeviathanError::OperationFailed("Profile not found".to_string()))?
+        .clone();
+
+    // Applied BEFORE the assignment is recorded: if git config cannot be
+    // written, the mapping must not claim an identity the repository does not
+    // have.
+    apply_profile_git_config(Path::new(&path), &profile)?;
+
+    config.assign_profile(path, profile_id);
+    Ok(())
+}
+
+/// Clear the local git identity a profile wrote to a repository.
+///
+/// The mirror of `apply_profile_git_config`: it unsets exactly the five keys
+/// that function writes, so the repository falls back to the global identity it
+/// would have used had no profile ever been assigned. Unsetting a key that is
+/// not set is not an error in git, and is not treated as one here.
+fn clear_profile_git_config(repo_path: &Path) {
+    for key in [
+        "user.name",
+        "user.email",
+        "user.signingkey",
+        "gpg.format",
+        "commit.gpgsign",
+    ] {
+        let _ = run_git_config(Some(repo_path), &["--local", "--unset", key]);
+    }
 }
 
 /// Remove profile assignment from a repository
@@ -563,6 +603,19 @@ pub async fn unassign_unified_profile_from_repository(path: String) -> Result<()
     let mut config = load_unified_profiles_config()?;
     config.unassign_profile(&path);
     save_unified_profiles_config(&config)?;
+
+    // Assigning a profile WRITES the identity into .git/config, so unassigning
+    // has to take it back out. Dropping only the mapping left the repository
+    // committing as the profile the UI no longer showed — and with its
+    // commit.gpgsign and signing key still in force. The divergence is silent
+    // and survives restarts, because .git/config is the thing git actually
+    // reads.
+    //
+    // Done AFTER the mapping is saved: the identity is recoverable by
+    // re-assigning, but a mapping left behind for an identity that is gone
+    // would keep claiming an identity the repository does not have.
+    clear_profile_git_config(Path::new(&path));
+
     Ok(())
 }
 
@@ -1284,6 +1337,130 @@ mod tests {
         // OpenPGP-style key IDs are not SSH.
         assert_eq!(detect_gpg_format("ABCDEF1234567890"), None);
         assert_eq!(detect_gpg_format(""), None);
+    }
+
+    /// Assigning a profile must WRITE the identity, not just record a mapping.
+    ///
+    /// The dashboard shows the assigned profile's name/email as the repository's
+    /// commit identity. While assignment only stored the mapping, a user could
+    /// bulk-assign "Work" to five repositories, see work@example.com on every
+    /// card, and then commit as whoever their global identity named.
+    #[test]
+    fn test_assign_writes_git_identity_not_just_the_mapping() {
+        let repo = TestRepo::with_initial_commit();
+        let repo_path = repo.path_str();
+
+        let profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        let profile_id = profile.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile);
+
+        assign_and_apply(&mut config, repo_path.clone(), profile_id.clone())
+            .expect("assignment should succeed");
+
+        // The mapping is recorded...
+        assert_eq!(
+            config.repository_assignments.get(&repo_path),
+            Some(&profile_id)
+        );
+
+        // ...and the repository actually commits as that identity.
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.name"]
+            )
+            .unwrap(),
+            "Alice Work"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.email"]
+            )
+            .unwrap(),
+            "alice@work.example"
+        );
+    }
+
+    /// Unassigning must TAKE BACK the identity assignment wrote.
+    ///
+    /// Dropping only the mapping left the repository committing as the profile
+    /// the UI no longer showed, with its signing key and commit.gpgsign still in
+    /// force — a silent divergence that survives restarts, because .git/config
+    /// is what git actually reads.
+    #[test]
+    fn test_unassign_clears_the_identity_assignment_wrote() {
+        let repo = TestRepo::with_initial_commit();
+
+        let mut profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        profile.signing_key = Some("ssh-ed25519 AAAAC3Nz".to_string());
+        let profile_id = profile.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile);
+        assign_and_apply(&mut config, repo.path_str(), profile_id)
+            .expect("assignment should succeed");
+
+        // Every key assignment writes is present...
+        for key in [
+            "user.name",
+            "user.email",
+            "user.signingkey",
+            "gpg.format",
+            "commit.gpgsign",
+        ] {
+            // `git config --get` on a missing key exits 1 with no output, which
+            // run_git_config maps to Ok(""), so presence means a NON-EMPTY value.
+            assert!(
+                !run_git_config(Some(repo.path.as_path()), &["--local", "--get", key])
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{} should be set after assignment",
+                key
+            );
+        }
+
+        clear_profile_git_config(repo.path.as_path());
+
+        // ...and every one of them is gone afterwards, so the repository falls
+        // back to the global identity it would have used all along.
+        for key in [
+            "user.name",
+            "user.email",
+            "user.signingkey",
+            "gpg.format",
+            "commit.gpgsign",
+        ] {
+            assert!(
+                run_git_config(Some(repo.path.as_path()), &["--local", "--get", key])
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{} must not survive unassignment",
+                key
+            );
+        }
+    }
+
+    /// An unknown profile must not be recorded as an assignment.
+    #[test]
+    fn test_assign_unknown_profile_records_nothing() {
+        let repo = TestRepo::with_initial_commit();
+        let mut config = UnifiedProfilesConfig::default();
+
+        let result = assign_and_apply(&mut config, repo.path_str(), "no-such-profile".to_string());
+
+        assert!(result.is_err());
+        assert!(config.repository_assignments.is_empty());
     }
 
     #[test]
