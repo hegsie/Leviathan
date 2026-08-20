@@ -38,6 +38,16 @@ async function contextMenuOver(hit: RefLabelHit | null): Promise<CustomEvent[]> 
   const el = await fixture<LvGraphCanvas>(html`<lv-graph-canvas></lv-graph-canvas>`);
   await el.updateComplete;
 
+  // firstUpdated() is async and awaits updateComplete BEFORE it creates the
+  // renderer and attaches the contextmenu listener, so one tick is not enough:
+  // the stub below could land on an undefined renderer, or the event could be
+  // dispatched before anything is listening. Wait for the renderer to exist.
+  const deadline = Date.now() + 2000;
+  while (!(el as any).renderer) {
+    if (Date.now() > deadline) throw new Error('renderer was never created');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
   (el as any).renderer.getRefLabelAtPoint = () => hit;
 
   const events: CustomEvent[] = [];
