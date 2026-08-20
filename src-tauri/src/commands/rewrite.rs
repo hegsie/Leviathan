@@ -213,6 +213,63 @@ fn clear_sequencer_state(repo: &git2::Repository) {
     let _ = std::fs::remove_file(repo.path().join(CHERRY_PICK_SEQUENCE_HEAD));
 }
 
+/// Drop the sequencer sidecar when a hard error left no cherry-pick in progress.
+///
+/// The sidecar is written before the first pick so an abort can rewind the whole
+/// range — including when the sequence stops on an already-applied (empty) pick,
+/// which returns `Err` while deliberately leaving CHERRY_PICK_HEAD in place.
+/// But an error that leaves NO cherry-pick in progress leaves nothing to abort,
+/// and the files then outlive the operation entirely: a later, unrelated
+/// cherry-pick that conflicts would have its abort read this stale
+/// CHERRY_PICK_SEQUENCE_HEAD and rewind the branch past commits the aborted
+/// operation never touched, silently discarding committed work.
+fn clear_sequencer_state_if_not_in_progress(repo: &git2::Repository) {
+    if !repo.path().join("CHERRY_PICK_HEAD").exists() {
+        clear_sequencer_state(repo);
+    }
+}
+
+/// Resolve every commit in a cherry-pick sequence, refusing the whole sequence
+/// if any of them cannot be picked.
+///
+/// git validates the set before applying any of it. Discovering at commit 4 of 6
+/// that the user multi-selected a merge commit — easy to do in the graph — and
+/// erroring out there leaves three picks already committed and a half-applied
+/// range nobody asked for. Checking first means the sequence either starts or
+/// does not.
+fn resolve_sequence<'repo>(
+    repo: &'repo git2::Repository,
+    commit_oids: &[String],
+) -> Result<Vec<git2::Commit<'repo>>> {
+    let mut commits = Vec::with_capacity(commit_oids.len());
+
+    for commit_oid in commit_oids {
+        let oid = git2::Oid::from_str(commit_oid)
+            .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
+        let commit = repo
+            .find_commit(oid)
+            .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
+
+        // Same refusals cherry_pick_one makes, hoisted ahead of the first pick.
+        if commit.parent_count() == 0 {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Cannot cherry-pick root commit {}",
+                commit.id()
+            )));
+        }
+        if commit.parent_count() > 1 {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Commit {} is a merge but no mainline parent was given; refusing to cherry-pick a merge commit without an explicit mainline.",
+                commit.id()
+            )));
+        }
+
+        commits.push(commit);
+    }
+
+    Ok(commits)
+}
+
 /// Cherry-pick a commit onto the current branch
 ///
 /// Options:
@@ -432,21 +489,30 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
             .filter(|l| !l.is_empty())
             .collect();
 
-        for (i, oid_str) in remaining.iter().enumerate() {
-            let oid = git2::Oid::from_str(oid_str)
-                .map_err(|_| LeviathanError::CommitNotFound(oid_str.clone()))?;
-            let commit = repo
-                .find_commit(oid)
-                .map_err(|_| LeviathanError::CommitNotFound(oid_str.clone()))?;
+        // Check the remainder before resuming it, for the same reason the
+        // initial range is checked: stopping partway leaves picks applied that
+        // no abort path accounts for.
+        let commits = match resolve_sequence(&repo, &remaining) {
+            Ok(commits) => commits,
+            Err(e) => {
+                clear_sequencer_state_if_not_in_progress(&repo);
+                return Err(e);
+            }
+        };
 
-            match cherry_pick_one(&repo, &commit)? {
-                Some(c) => last = c,
-                None => {
+        for (i, commit) in commits.iter().enumerate() {
+            match cherry_pick_one(&repo, commit) {
+                Ok(Some(c)) => last = c,
+                Ok(None) => {
                     // Conflict again: persist the not-yet-applied remainder so
                     // the next continue resumes from here.
                     let still: Vec<String> = remaining.iter().skip(i + 1).cloned().collect();
                     std::fs::write(&seq_path, still.join("\n"))?;
                     return Err(LeviathanError::CherryPickConflict);
+                }
+                Err(e) => {
+                    clear_sequencer_state_if_not_in_progress(&repo);
+                    return Err(e);
                 }
             }
         }
@@ -724,6 +790,11 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
         ));
     }
 
+    // Resolve and check the whole set before touching the repository, so a
+    // commit the sequence was never going to accept is refused with nothing
+    // applied rather than partway through.
+    let commits = resolve_sequence(&repo, &commit_oids)?;
+
     // Record the HEAD the sequence starts from so an abort mid-sequence can
     // rewind to it (matching git's return-to-pre-sequence-HEAD on --abort).
     // Persist it up front: a mid-range pick can stop not only on a conflict but
@@ -739,22 +810,20 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
 
     let mut results = Vec::new();
 
-    for (i, commit_oid) in commit_oids.iter().enumerate() {
-        let oid = git2::Oid::from_str(commit_oid)
-            .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
-        let commit = repo
-            .find_commit(oid)
-            .map_err(|_| LeviathanError::CommitNotFound(commit_oid.clone()))?;
-
-        match cherry_pick_one(&repo, &commit)? {
-            Some(new_commit) => results.push(new_commit),
-            None => {
+    for (i, commit) in commits.iter().enumerate() {
+        match cherry_pick_one(&repo, commit) {
+            Ok(Some(new_commit)) => results.push(new_commit),
+            Ok(None) => {
                 // Conflict: persist the not-yet-applied commits and the
                 // pre-sequence HEAD so continue/abort behave like git's
                 // sequencer.
                 let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
                 write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
                 return Err(LeviathanError::CherryPickConflict);
+            }
+            Err(e) => {
+                clear_sequencer_state_if_not_in_progress(&repo);
+                return Err(e);
             }
         }
     }
@@ -1548,6 +1617,12 @@ pub async fn cherry_pick_from_branch(
     // Reverse so we apply oldest first
     commit_oids.reverse();
 
+    // The tip of a branch can easily be — or sit above — a merge commit, so
+    // check the whole set before applying any of it rather than stopping partway
+    // through with picks already committed.
+    let commit_oids: Vec<String> = commit_oids.iter().map(|o| o.to_string()).collect();
+    let commits = resolve_sequence(&repo, &commit_oids)?;
+
     // Record the pre-sequence HEAD for abort rewind. Persist it up front so an
     // abort can rewind the whole range even when the sequence stops on an
     // already-applied (empty) pick, which returns Err before the conflict
@@ -1561,19 +1636,17 @@ pub async fn cherry_pick_from_branch(
     // Cherry-pick each commit
     let mut results = Vec::new();
 
-    for (i, oid) in commit_oids.iter().enumerate() {
-        let commit = repo.find_commit(*oid)?;
-
-        match cherry_pick_one(&repo, &commit)? {
-            Some(new_commit) => results.push(new_commit),
-            None => {
-                let remaining: Vec<String> = commit_oids
-                    .iter()
-                    .skip(i + 1)
-                    .map(|o| o.to_string())
-                    .collect();
+    for (i, commit) in commits.iter().enumerate() {
+        match cherry_pick_one(&repo, commit) {
+            Ok(Some(new_commit)) => results.push(new_commit),
+            Ok(None) => {
+                let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
                 write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
                 return Err(LeviathanError::CherryPickConflict);
+            }
+            Err(e) => {
+                clear_sequencer_state_if_not_in_progress(&repo);
+                return Err(e);
             }
         }
     }
@@ -2084,6 +2157,193 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let result = cherry_pick_range(repo.path_str(), vec![]).await;
         assert!(result.is_err());
+    }
+
+    /// Record a merge commit on the current branch with `other_oid` as its
+    /// second parent. The tree is HEAD's, because the only property the
+    /// cherry-pick refusals care about is `parent_count() > 1`.
+    fn commit_merge(repo: &TestRepo, message: &str, other_oid: git2::Oid) -> git2::Oid {
+        let git = repo.repo();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        let other = git.find_commit(other_oid).unwrap();
+        let tree = head.tree().unwrap();
+        let sig = git.signature().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head, &other])
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_refuses_merge_before_applying_anything() {
+        // Multi-selecting a range that happens to contain a merge commit is easy
+        // in the graph. git checks the whole set first and refuses; applying the
+        // earlier picks and only then discovering the merge leaves a half-applied
+        // range the user never asked for.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side_oid = repo.create_commit("Side work", &[("side.txt", "side")]);
+
+        repo.checkout_branch(&default_branch);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let commit1 = repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let merge_oid = commit_merge(&repo, "Merge side", side_oid);
+
+        repo.checkout_branch(&default_branch);
+        let head_before = repo.head_oid();
+
+        let result = cherry_pick_range(
+            repo.path_str(),
+            vec![commit1.to_string(), merge_oid.to_string()],
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a range containing a merge must be refused"
+        );
+        assert_eq!(
+            repo.head_oid(),
+            head_before,
+            "the refusal must leave the branch where it was; the leading pick \
+             must not have been applied"
+        );
+        assert!(
+            !repo.path.join("file1.txt").exists(),
+            "no commit in the range may be applied when the range is refused"
+        );
+        assert!(
+            !repo.repo().path().join(CHERRY_PICK_SEQUENCE_HEAD).exists(),
+            "a refused range must not leave sequencer state behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refused_range_does_not_rewind_a_later_unrelated_abort() {
+        // The damage the stale sidecar causes: nothing clears
+        // CHERRY_PICK_SEQUENCE_HEAD on a hard error, so the next cherry-pick the
+        // user aborts rewinds the branch to a HEAD from the earlier, unrelated
+        // operation — silently discarding everything committed since.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side_oid = repo.create_commit("Side work", &[("side.txt", "side")]);
+
+        // A commit that will conflict with the later work on the default branch.
+        repo.checkout_branch(&default_branch);
+        repo.create_branch("other");
+        repo.checkout_branch("other");
+        let conflicting = repo.create_commit("Other README", &[("README.md", "theirs\n")]);
+
+        repo.checkout_branch(&default_branch);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let commit1 = repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let merge_oid = commit_merge(&repo, "Merge side", side_oid);
+
+        // A range that stops on the merge.
+        repo.checkout_branch(&default_branch);
+        let _ = cherry_pick_range(
+            repo.path_str(),
+            vec![commit1.to_string(), merge_oid.to_string()],
+        )
+        .await;
+
+        // Later, unrelated work the user commits and expects to keep.
+        let later_work = repo.create_commit("Later work", &[("README.md", "ours\n")]);
+
+        // An ordinary single cherry-pick that conflicts, which the user aborts.
+        let conflict = cherry_pick(repo.path_str(), conflicting.to_string(), None, None).await;
+        assert!(
+            conflict.is_err(),
+            "the pick must conflict for this to be an abort"
+        );
+        abort_cherry_pick(repo.path_str())
+            .await
+            .expect("aborting the conflicted pick must succeed");
+
+        assert_eq!(
+            repo.head_oid(),
+            later_work,
+            "aborting an unrelated cherry-pick must rewind only that pick; \
+             sequencer state from the earlier refused range must not survive to \
+             rewind the branch past committed work"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_conflict_still_records_sequencer_state() {
+        // The counterpart to clearing on hard errors: a conflict stop DOES leave
+        // a cherry-pick in progress, and abort needs the pre-sequence HEAD to
+        // rewind the picks already applied.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let commit1 = repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let commit2 = repo.create_commit("Conflicting", &[("README.md", "theirs\n")]);
+
+        repo.checkout_branch(&default_branch);
+        let pre_range_head = repo.create_commit("Ours", &[("README.md", "ours\n")]);
+
+        let result = cherry_pick_range(
+            repo.path_str(),
+            vec![commit1.to_string(), commit2.to_string()],
+        )
+        .await;
+
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+        assert!(
+            repo.repo().path().join(CHERRY_PICK_SEQUENCE_HEAD).exists(),
+            "a conflict stop must keep the sequence head so abort can rewind"
+        );
+
+        abort_cherry_pick(repo.path_str())
+            .await
+            .expect("abort must succeed");
+        assert_eq!(
+            repo.head_oid(),
+            pre_range_head,
+            "abort must rewind the leading pick the range already applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_pick_mid_range_keeps_sequencer_state_for_abort() {
+        // An empty pick returns Err but deliberately leaves CHERRY_PICK_HEAD in
+        // place, so there IS something to abort and the sequence head must
+        // survive to rewind the picks already applied.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let commit1 = repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let commit2 = repo.create_commit("Commit 2", &[("file2.txt", "content2")]);
+
+        repo.checkout_branch(&default_branch);
+        // Apply commit2 first so the range's second pick has nothing left to do.
+        cherry_pick(repo.path_str(), commit2.to_string(), None, None)
+            .await
+            .expect("the priming pick must succeed");
+
+        let result = cherry_pick_range(
+            repo.path_str(),
+            vec![commit1.to_string(), commit2.to_string()],
+        )
+        .await;
+
+        assert!(result.is_err(), "an already-applied pick is an empty stop");
+        assert!(
+            repo.repo().path().join(CHERRY_PICK_SEQUENCE_HEAD).exists(),
+            "an empty stop leaves a cherry-pick in progress, so the sequence \
+             head must survive for abort to rewind the applied picks"
+        );
     }
 
     #[tokio::test]
