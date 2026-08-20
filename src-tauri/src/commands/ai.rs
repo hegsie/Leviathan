@@ -638,10 +638,15 @@ fn truncate_content(content: &str, max_chars: usize) -> &str {
     if content.len() <= max_chars {
         return content;
     }
-    // Find a newline before the max_chars boundary
-    match content[..max_chars].rfind('\n') {
-        Some(pos) => &content[..pos],
-        None => &content[..max_chars],
+    // Cut on a char boundary first: max_chars is a BYTE count, and slicing a
+    // &str mid-character panics. Both this slice and the rfind slice below used
+    // the raw index, so a large diff containing any non-ASCII text could kill
+    // the command task.
+    let head = crate::services::ai::truncate_at_char_boundary(content, max_chars);
+    // Prefer a line boundary within that.
+    match head.rfind('\n') {
+        Some(pos) => &head[..pos],
+        None => head,
     }
 }
 
@@ -720,6 +725,35 @@ fn get_staged_diff(repo_path: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// truncate_content takes a BYTE limit and used it as a slice index twice.
+    /// A staged diff over the limit containing non-ASCII text would panic the
+    /// command task, so "Generate commit message" / "Vibe Check" died outright
+    /// for that user whenever their diff was large.
+    #[test]
+    fn test_truncate_content_does_not_panic_on_multibyte_input() {
+        // No newlines, so the line-boundary path cannot rescue the cut.
+        let content = "é".repeat(500);
+        assert_eq!(content.len(), 1000);
+
+        for max in [1, 7, 99, 501, 999] {
+            let out = truncate_content(&content, max);
+            assert!(out.len() <= max);
+            assert!(content.starts_with(out));
+        }
+    }
+
+    /// Emoji land on 4-byte boundaries — the same hazard, one step wider.
+    #[test]
+    fn test_truncate_content_handles_emoji_and_keeps_line_boundaries() {
+        let content = format!("first line\n{}\nlast", "🎉".repeat(100));
+
+        let out = truncate_content(&content, 50);
+        assert!(out.len() <= 50);
+        assert!(content.starts_with(out));
+        // Still prefers a line boundary when one is available within the limit.
+        assert_eq!(out, "first line");
+    }
 
     // ========================================================================
     // get_staged_diff Tests
