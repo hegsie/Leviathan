@@ -74,6 +74,22 @@ fn git_command(repo_path: &Path) -> std::process::Command {
 }
 
 /// Helper to run git commands
+/// Whether git's output announces the culprit.
+///
+/// git prints "<sha> is the first <term> commit", where <term> is the session's
+/// BAD term — "bad" by default, whatever `--term-new` named otherwise. Matching
+/// the literal "is the first bad commit" therefore missed the completion of
+/// every custom-term session, so the one result a bisect exists to produce came
+/// back as an error. Matched term-independently here because this helper runs
+/// every bisect command and has no session context of its own.
+fn announces_culprit(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_once("is the first ")
+            .map(|(_, rest)| rest.split_whitespace().nth(1) == Some("commit"))
+            .unwrap_or(false)
+    })
+}
+
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     let output = git_command(repo_path)
         .args(args)
@@ -92,9 +108,7 @@ fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
         // Everything else (e.g. swapped good/bad: "Some good revs are not
         // ancestors of the bad rev.") is a real failure and must surface as an error.
         let combined = format!("{}\n{}", stdout, stderr);
-        if combined.contains("We cannot bisect more")
-            || combined.contains("is the first bad commit")
-        {
+        if combined.contains("We cannot bisect more") || announces_culprit(&combined) {
             Ok(stdout.trim().to_string())
         } else {
             let message = if stderr.trim().is_empty() {
@@ -721,16 +735,84 @@ mod tests {
     async fn test_bisect_good_and_bad_still_work_with_default_terms() {
         let repo = TestRepo::with_initial_commit();
         let good_oid = repo.head_oid().to_string();
-        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
-        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        // Enough commits that the range still has somewhere to go after the
+        // first step — with a three-commit history the session finishes
+        // immediately and there is no second step left to exercise.
+        for i in 2..=8 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(&format!("file{}.txt", i), "content")],
+            );
+        }
         let bad_oid = repo.head_oid().to_string();
 
         bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
             .await
             .unwrap();
 
-        assert!(bisect_bad(repo.path_str(), None).await.is_ok());
+        assert!(
+            bisect_bad(repo.path_str(), None).await.is_ok(),
+            "marking bad must work on a default-term session"
+        );
+        assert!(
+            bisect_good(repo.path_str(), None).await.is_ok(),
+            "marking good must work too — the name says both"
+        );
         bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// Reaching the culprit in a custom-term session must be a RESULT, not an
+    /// error.
+    ///
+    /// git announces it as "is the first <term> commit". run_git_command
+    /// whitelisted the literal "is the first bad commit" among the non-zero
+    /// exits it lets through, so in a custom-term session the announcement fell
+    /// through to the error arm — the commands used the right terms and the one
+    /// answer a bisect exists to produce still came back as a failure.
+    #[tokio::test]
+    async fn test_custom_term_bisect_reports_the_culprit_rather_than_failing() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        let culprit = repo.create_commit("The bad one", &[("bug.txt", "boom")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        run_git_command(
+            repo.path.as_path(),
+            &["bisect", "start", "--term-new=broken", "--term-old=working"],
+        )
+        .expect("start a custom-term bisect");
+        run_git_command(repo.path.as_path(), &["bisect", "broken", &bad_oid]).unwrap();
+
+        // Marking the parent good narrows it to a single commit, so git
+        // announces the culprit right here.
+        let result = bisect_good(repo.path_str(), Some(good_oid))
+            .await
+            .expect("reaching the culprit must not be reported as a failure");
+
+        let found = result.culprit.expect("the culprit must be reported");
+        assert_eq!(
+            found.oid,
+            culprit.to_string(),
+            "the reported culprit must be the commit that introduced the bug"
+        );
+
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// The term-independent match accepts any term, and nothing else.
+    #[test]
+    fn test_announces_culprit_matches_any_term() {
+        assert!(announces_culprit("abc123 is the first bad commit"));
+        assert!(announces_culprit("abc123 is the first broken commit"));
+        assert!(announces_culprit(
+            "some preamble\nabc123 is the first regressed commit\nmore"
+        ));
+        // Not a culprit announcement.
+        assert!(!announces_culprit(
+            "Some good revs are not ancestors of the bad rev."
+        ));
+        assert!(!announces_culprit("is the first thing you should know"));
+        assert!(!announces_culprit(""));
     }
 
     #[tokio::test]
