@@ -608,10 +608,43 @@ export async function searchCommits(
   });
 }
 
+/**
+ * Whether HEAD is already on its upstream, so amending would rewrite history
+ * other people may already have.
+ *
+ * A failure to find out answers false: the check exists to add a warning, and
+ * a broken check must not become a wall in front of an ordinary local amend.
+ */
+async function amendWouldRewritePublishedHistory(path: string): Promise<boolean> {
+  const result = await invokeCommand<boolean>("is_head_published", { path });
+  return result.success && result.data === true;
+}
+
 export async function createCommit(
   path: string,
   args: CreateCommitCommand,
 ): Promise<CommandResult<Commit>> {
+  // Amend rewrites HEAD. When HEAD is already published, that rewrites history
+  // the remote and everyone else already has: the branch and its upstream
+  // diverge, the next push is rejected, and the only way on is a force push
+  // that discards whatever anyone based on that commit.
+  //
+  // No amend surface said so — not the commit panel's Amend checkbox, not the
+  // graph's Quick Amend, not the reword-HEAD route. The confirm goes HERE, at
+  // the one call all three share, so none of them can be forgotten.
+  if (args.amend && (await amendWouldRewritePublishedHistory(path))) {
+    const proceed = await showConfirm(
+      "Amend a pushed commit?",
+      "This commit is already on the remote. Amending replaces it, so your " +
+        "branch and its upstream will diverge and the next push will be " +
+        "rejected until you force push — which discards any work others based " +
+        "on it.\n\nAmend anyway?",
+      "warning",
+    );
+    if (!proceed) {
+      return { success: false, error: { code: "CANCELLED", message: "Amend cancelled" } };
+    }
+  }
   return invokeCommand<Commit>("create_commit", { path, ...args });
 }
 

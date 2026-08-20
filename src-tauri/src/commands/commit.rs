@@ -846,6 +846,57 @@ async fn amend_commit_with_git_cli(
     })
 }
 
+/// Whether HEAD has already been published to its upstream.
+///
+/// Amending rewrites HEAD. When the commit being rewritten is already on the
+/// remote, that rewrites PUBLISHED history: the branch and its upstream
+/// diverge, the next push is rejected, and the only way forward is a force
+/// push — which discards whatever anyone else based on that commit. None of
+/// the amend surfaces said so, so this is what lets them ask first.
+///
+/// True only when the branch has an upstream AND that upstream contains HEAD.
+/// A branch with no upstream, an unborn HEAD, a detached HEAD, or an upstream
+/// that does not yet have this commit are all safe to amend, and all answer
+/// false — the check must never invent a warning for an ordinary local commit.
+#[command]
+pub async fn is_head_published(path: String) -> Result<bool> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    let Ok(head) = repo.head() else {
+        return Ok(false); // Unborn HEAD: nothing to amend yet.
+    };
+    if repo.head_detached().unwrap_or(false) {
+        return Ok(false); // No upstream to diverge from.
+    }
+    let Some(head_oid) = head.target() else {
+        return Ok(false);
+    };
+    let Ok(branch_name) = head.shorthand() else {
+        return Ok(false);
+    };
+
+    let Ok(branch) = repo.find_branch(branch_name, git2::BranchType::Local) else {
+        return Ok(false);
+    };
+    // An upstream that is configured but pruned resolves to Err here, and that
+    // is the right answer: with no remote-tracking ref there is nothing local
+    // that can show the commit was published.
+    let Ok(upstream) = branch.upstream() else {
+        return Ok(false);
+    };
+    let Some(upstream_oid) = upstream.get().target() else {
+        return Ok(false);
+    };
+
+    if upstream_oid == head_oid {
+        return Ok(true);
+    }
+    // The upstream having moved PAST head still means head is published.
+    Ok(repo
+        .graph_descendant_of(upstream_oid, head_oid)
+        .unwrap_or(false))
+}
+
 /// Get the full commit message for a commit
 #[command]
 pub async fn get_commit_message(path: String, oid: String) -> Result<String> {
@@ -1716,6 +1767,142 @@ mod tests {
 
         let after = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(before, after, "HEAD must not move");
+    }
+
+    /// Amending a commit that is already on the remote must be detectable.
+    ///
+    /// Amend rewrites HEAD; when HEAD is published that rewrites history the
+    /// remote already has, so the branch and its upstream diverge and the next
+    /// push is rejected until someone force pushes. No amend surface warned,
+    /// because nothing could tell.
+    #[tokio::test]
+    async fn test_is_head_published_detects_a_pushed_head() {
+        let repo = TestRepo::with_initial_commit();
+        let branch = repo.current_branch();
+        let tip = repo.create_commit("Published", &[("a.txt", "a")]);
+
+        // set_upstream needs a real remote to resolve its fetch refspec; the
+        // URL is never contacted.
+        repo.add_remote("origin", "/nonexistent/origin.git");
+
+        // Stand up a remote-tracking ref at the same commit, with upstream
+        // config — exactly the state a push leaves behind.
+        {
+            let git_repo = repo.repo();
+            git_repo
+                .reference(
+                    &format!("refs/remotes/origin/{}", branch),
+                    tip,
+                    true,
+                    "test",
+                )
+                .unwrap();
+            let mut local = git_repo
+                .find_branch(&branch, git2::BranchType::Local)
+                .unwrap();
+            local
+                .set_upstream(Some(&format!("origin/{}", branch)))
+                .unwrap();
+        }
+
+        assert!(
+            is_head_published(repo.path_str()).await.unwrap(),
+            "a commit sitting on its upstream is published"
+        );
+    }
+
+    /// An upstream that has moved PAST head still means head was published.
+    #[tokio::test]
+    async fn test_is_head_published_when_the_upstream_is_ahead() {
+        let repo = TestRepo::with_initial_commit();
+        let branch = repo.current_branch();
+        let published = repo.create_commit("Published", &[("a.txt", "a")]);
+        let remote_only = repo.create_commit("Remote moved on", &[("b.txt", "b")]);
+        repo.add_remote("origin", "/nonexistent/origin.git");
+
+        {
+            let git_repo = repo.repo();
+            git_repo
+                .reference(
+                    &format!("refs/remotes/origin/{}", branch),
+                    remote_only,
+                    true,
+                    "test",
+                )
+                .unwrap();
+            let mut local = git_repo
+                .find_branch(&branch, git2::BranchType::Local)
+                .unwrap();
+            local
+                .set_upstream(Some(&format!("origin/{}", branch)))
+                .unwrap();
+            // Move the local branch back to the published commit.
+            git_repo
+                .reference(&format!("refs/heads/{}", branch), published, true, "test")
+                .unwrap();
+            git_repo
+                .set_head(&format!("refs/heads/{}", branch))
+                .unwrap();
+        }
+
+        assert!(
+            is_head_published(repo.path_str()).await.unwrap(),
+            "an upstream that contains head means head is published"
+        );
+    }
+
+    /// The ordinary case must NOT warn.
+    ///
+    /// A local-only commit, a branch with no upstream at all, and an unpushed
+    /// commit ahead of its upstream are all safe to amend. Warning on those
+    /// would train the user to click through the one warning that matters.
+    #[tokio::test]
+    async fn test_is_head_published_is_false_for_unpublished_work() {
+        // No upstream configured at all.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Local only", &[("a.txt", "a")]);
+        assert!(
+            !is_head_published(repo.path_str()).await.unwrap(),
+            "a branch with no upstream has nothing published"
+        );
+
+        // Upstream configured, but head is AHEAD of it.
+        let repo = TestRepo::with_initial_commit();
+        let branch = repo.current_branch();
+        let published = repo.create_commit("Published", &[("a.txt", "a")]);
+        repo.add_remote("origin", "/nonexistent/origin.git");
+        {
+            let git_repo = repo.repo();
+            git_repo
+                .reference(
+                    &format!("refs/remotes/origin/{}", branch),
+                    published,
+                    true,
+                    "test",
+                )
+                .unwrap();
+            let mut local = git_repo
+                .find_branch(&branch, git2::BranchType::Local)
+                .unwrap();
+            local
+                .set_upstream(Some(&format!("origin/{}", branch)))
+                .unwrap();
+        }
+        repo.create_commit("Not pushed yet", &[("b.txt", "b")]);
+        assert!(
+            !is_head_published(repo.path_str()).await.unwrap(),
+            "an unpushed commit is safe to amend"
+        );
+    }
+
+    /// A detached HEAD has no upstream to diverge from.
+    #[tokio::test]
+    async fn test_is_head_published_is_false_when_detached() {
+        let repo = TestRepo::with_initial_commit();
+        let tip = repo.create_commit("Second", &[("a.txt", "a")]);
+        repo.repo().set_head_detached(tip).unwrap();
+
+        assert!(!is_head_published(repo.path_str()).await.unwrap());
     }
 
     /// An empty INITIAL commit must be refused too.
