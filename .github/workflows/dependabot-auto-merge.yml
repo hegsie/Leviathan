@@ -9,6 +9,12 @@ name: Dependabot auto-merge
 # Reacting to a finished workflow run instead makes CI passing the trigger, and
 # the job re-checks the whole check list before merging.
 #
+# The hourly sweep is the safety net. A `workflow_run` trigger has to name the
+# workflows it waits for, so any workflow missing from that list could finish
+# last and leave a pull request green but unmerged forever. The sweep considers
+# every open Dependabot pull request, so a missing trigger or a dropped webhook
+# costs an hour rather than wedging the queue.
+#
 # It also keeps the writable token away from Dependabot's branch contents:
 # nothing here checks out the pull request, only the policy from the base branch.
 #
@@ -17,11 +23,18 @@ name: Dependabot auto-merge
 
 on:
   workflow_run:
+    # Every workflow that runs against a pull request. CodeQL is configured
+    # through GitHub's default setup, so it has no file in this directory.
     workflows:
       - CI
       - Build & Release
+      - CodeQL
     types:
       - completed
+  schedule:
+    # Off the hour, so this is not queued behind everything else that runs at :00.
+    - cron: '17 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -39,9 +52,11 @@ jobs:
     name: Auto-merge
     runs-on: ubuntu-latest
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request' &&
-      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'pull_request' &&
+        startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+      )
 
     steps:
       - name: Check out the merge policy from the base branch
@@ -51,7 +66,7 @@ jobs:
           sparse-checkout: .github/scripts
           persist-credentials: false
 
-      - name: Merge if the policy allows it
+      - name: Merge whatever the policy allows
         uses: actions/github-script@v7
         with:
           # A PAT or App token is only needed if the repository later gates
