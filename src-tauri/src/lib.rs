@@ -300,6 +300,7 @@ pub fn run() {
             commands::commit::amend_commit,
             commands::commit::amend_commit_message,
             commands::commit::get_commit_message,
+            commands::commit::is_head_published,
             commands::commit::edit_commit_date,
             commands::commit::reword_commit,
             commands::commit::search_commits,
