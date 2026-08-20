@@ -652,7 +652,12 @@ export class LvBlameView extends CodeRenderMixin(LitElement) {
                     <div class="commit-bottom-row">
                       <span class="author-name" style="color: ${authorColor}">${group.authorName}</span>
                       <span>•</span>
-                      <span class="commit-date">${formatRelativeTime(group.timestamp * 1000)}</span>
+                      <!-- Seconds, not milliseconds: formatRelativeTime does the
+                           *1000 itself. Converting here too made every diff
+                           hugely negative, so "seconds < 60" always won and
+                           every blame group read "just now" — contradicting the
+                           tooltip above, which formats the same value correctly. -->
+                      <span class="commit-date">${formatRelativeTime(group.timestamp)}</span>
                     </div>
                   </div>
                 </div>
