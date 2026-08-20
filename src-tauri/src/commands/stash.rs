@@ -556,8 +556,15 @@ mod tests {
         // Create and commit a tracked file
         setup_tracked_file(&repo, "file.txt", "original content");
 
-        // Modify and stash
-        repo.create_file("file.txt", "modified content");
+        // Modify and stash.
+        //
+        // The edit must change the file's SIZE. "modified content" is the same
+        // 16 bytes as "original content", and the write lands in the same
+        // timestamp granularity bucket as the index git just wrote — the
+        // racily-clean case, where a same-size edit can be judged unchanged by
+        // stat alone. The stash then captured nothing and this test failed on
+        // `files.len()` with 0, on CI only and only sometimes.
+        repo.create_file("file.txt", "modified content, now a different length");
         create_stash(repo.path_str(), Some("Show test".to_string()), None)
             .await
             .unwrap();
