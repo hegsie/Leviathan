@@ -649,6 +649,30 @@ fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<Stri
     Ok(())
 }
 
+/// Whether a branch has an upstream CONFIGURED, per branch.<name>.remote and
+/// branch.<name>.merge — the two keys git itself treats as the upstream.
+///
+/// Read from config rather than resolved via `Branch::upstream()`, which fails
+/// both when no upstream is configured AND when a configured one no longer
+/// resolves — a remote-tracking ref that has since been pruned, or a remote
+/// removed from the repository. Treating those alike silently re-pointed a
+/// deliberately-configured upstream at whatever remote the user happened to
+/// push to next, which is exactly what leaving established upstreams alone is
+/// supposed to prevent.
+fn upstream_is_configured(repo: &git2::Repository, branch_name: &str) -> bool {
+    let Ok(config) = repo.config() else {
+        return false;
+    };
+    let is_set = |key: String| {
+        config
+            .get_string(&key)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    };
+    is_set(format!("branch.{}.remote", branch_name))
+        && is_set(format!("branch.{}.merge", branch_name))
+}
+
 /// Push one branch to a remote, and record the upstream when the branch has
 /// none.
 ///
@@ -727,8 +751,8 @@ pub(crate) fn push_branch(
     // push to a second remote never re-points the upstream.
     let branch_lacks_upstream = repo
         .find_branch(&branch_name, git2::BranchType::Local)
-        .map(|b| b.upstream().is_err())
-        .unwrap_or(false);
+        .is_ok()
+        && !upstream_is_configured(&repo, &branch_name);
     let should_set_upstream = set_upstream_val || branch_lacks_upstream;
 
     if use_force_with_lease || use_push_tags {
@@ -2158,6 +2182,68 @@ mod tests {
             upstream_of(&repo, "feature").as_deref(),
             Some("origin/feature"),
             "the push that published the branch must set its upstream"
+        );
+    }
+
+    /// A configured upstream survives even when its remote-tracking ref is gone.
+    ///
+    /// `Branch::upstream()` fails BOTH when no upstream is configured and when a
+    /// configured one no longer resolves — a pruned remote-tracking ref, or a
+    /// removed remote. Treating those alike silently re-pointed a deliberate
+    /// upstream at whatever remote the user pushed to next, which is exactly
+    /// what leaving established upstreams alone is meant to prevent.
+    #[test]
+    fn test_push_keeps_a_configured_upstream_whose_tracking_ref_is_gone() {
+        let (repo, _bare) = repo_with_bare_origin();
+        let fork = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(fork.path()).unwrap();
+        repo.add_remote("fork", &fork.path().to_string_lossy());
+
+        let branch = repo.current_branch();
+        push_branch(
+            &repo.path_str(),
+            Some("fork".to_string()),
+            Some(branch.clone()),
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("first push should succeed");
+        assert_eq!(
+            upstream_of(&repo, &branch).as_deref(),
+            Some(format!("fork/{}", branch).as_str())
+        );
+
+        // The remote-tracking ref is pruned — the CONFIG still names fork.
+        {
+            let git_repo = repo.repo();
+            let mut tracking = git_repo
+                .find_reference(&format!("refs/remotes/fork/{}", branch))
+                .expect("tracking ref should exist");
+            tracking.delete().expect("prune the tracking ref");
+        }
+
+        push_branch(
+            &repo.path_str(),
+            Some("origin".to_string()),
+            Some(branch.clone()),
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("second push should succeed");
+
+        let config = repo.repo().config().unwrap();
+        assert_eq!(
+            config
+                .get_string(&format!("branch.{}.remote", branch))
+                .unwrap(),
+            "fork",
+            "a pruned tracking ref must not re-point a configured upstream"
         );
     }
 
