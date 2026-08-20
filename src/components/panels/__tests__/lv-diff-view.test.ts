@@ -1040,6 +1040,114 @@ describe('lv-diff-view', () => {
       expect(patchLines).to.include('+new\r');
     });
 
+    // A hunk with BOTH a selected and an unselected change of each kind — the
+    // shape that made partial unstaging fail on every mixed hunk.
+    function mixedHunk() {
+      return makeDiffHunk({
+        header: '@@ -1,4 +1,4 @@',
+        oldStart: 1,
+        oldLines: 4,
+        newStart: 1,
+        newLines: 4,
+        lines: [
+          makeDiffLine({ content: 'ctx\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'del-sel\n', origin: 'deletion', oldLineNo: 2, newLineNo: null }),
+          makeDiffLine({ content: 'del-unsel\n', origin: 'deletion', oldLineNo: 3, newLineNo: null }),
+          makeDiffLine({ content: 'add-sel\n', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+          makeDiffLine({ content: 'add-unsel\n', origin: 'addition', oldLineNo: null, newLineNo: 3 }),
+        ],
+      });
+    }
+
+    async function viewWithMixedHunk(): Promise<LvDiffView> {
+      const el = await bareView();
+      (el as unknown as { file: unknown }).file = makeStatusEntry({ path: 'f.txt' });
+      (el as unknown as { diff: unknown }).diff = makeDiffFile({
+        path: 'f.txt',
+        hunks: [mixedHunk()],
+      });
+      // Select the deletion at index 1 and the addition at index 3.
+      (el as unknown as { selectedLines: Set<string> }).selectedLines = new Set(['0-1', '0-3']);
+      return el;
+    }
+
+    type PatchBuilder = { buildSelectedLinesPatch: (d?: 'stage' | 'unstage') => string };
+
+    it('staging keeps an unselected deletion as context and omits an unselected addition', async () => {
+      const el = await viewWithMixedHunk();
+      const patch = (el as unknown as PatchBuilder).buildSelectedLinesPatch('stage');
+      const lines = patch.split('\n');
+
+      expect(lines).to.include('-del-sel');
+      expect(lines).to.include('+add-sel');
+      // Still in the index, so it is context on both sides.
+      expect(lines).to.include(' del-unsel');
+      // Not in the index yet, so it must not appear at all.
+      expect(lines.some((l) => l.includes('add-unsel'))).to.be.false;
+    });
+
+    it('unstaging omits an unselected deletion and keeps an unselected addition as context', async () => {
+      const el = await viewWithMixedHunk();
+      const patch = (el as unknown as PatchBuilder).buildSelectedLinesPatch('unstage');
+      const lines = patch.split('\n');
+
+      expect(lines).to.include('-del-sel');
+      expect(lines).to.include('+add-sel');
+      // The deletion is already in the index, so this line is NOT there —
+      // emitting it as context makes the reverse apply reject the patch.
+      expect(
+        lines.some((l) => l.includes('del-unsel')),
+        'an unselected deletion must not appear in an unstage patch',
+      ).to.be.false;
+      // The addition IS in the index and is staying, so it is context.
+      expect(lines).to.include(' add-unsel');
+    });
+
+    it('unstageSelectedLines sends an unstage-shaped patch to the backend', async () => {
+      // The direction must be wired at the CALL SITE, not just supported by the
+      // builder: unstage_hunk reverse-applies the patch, so a patch built with
+      // the staging transformation is rejected for every mixed hunk.
+      const el = await viewWithMixedHunk();
+      (el as unknown as { repositoryPath: string }).repositoryPath = '/test/repo';
+
+      clearHistory();
+      mockInvoke = () => Promise.resolve(null);
+      await (el as unknown as { unstageSelectedLines: () => Promise<void> }).unstageSelectedLines();
+
+      const calls = findCommands('unstage_hunk');
+      expect(calls.length, 'unstage_hunk should have been invoked').to.equal(1);
+
+      const args = calls[0].args as Record<string, unknown>;
+      const payload = (args?.args ?? args) as Record<string, unknown>;
+      const patch = String(payload.patch ?? payload.patchText ?? '');
+      const lines = patch.split('\n');
+
+      expect(
+        lines.some((l) => l.includes('del-unsel')),
+        'the patch sent to unstage_hunk still used the staging transformation',
+      ).to.be.false;
+      expect(lines).to.include(' add-unsel');
+    });
+
+    it('hunk header counts match the emitted lines in both directions', async () => {
+      const countFor = (patch: string) => {
+        const lines = patch.split('\n');
+        const header = lines.find((l) => l.startsWith('@@'))!;
+        const m = /@@ -\d+,(\d+) \+\d+,(\d+) @@/.exec(header)!;
+        const body = lines.slice(lines.indexOf(header) + 1).filter((l) => l.length > 0);
+        const oldSide = body.filter((l) => l.startsWith(' ') || l.startsWith('-')).length;
+        const newSide = body.filter((l) => l.startsWith(' ') || l.startsWith('+')).length;
+        return { declaredOld: Number(m[1]), declaredNew: Number(m[2]), oldSide, newSide };
+      };
+
+      for (const direction of ['stage', 'unstage'] as const) {
+        const el = await viewWithMixedHunk();
+        const c = countFor((el as unknown as PatchBuilder).buildSelectedLinesPatch(direction));
+        expect(c.declaredOld, `${direction}: old count`).to.equal(c.oldSide);
+        expect(c.declaredNew, `${direction}: new count`).to.equal(c.newSide);
+      }
+    });
+
     it('buildSelectedLinesPatch emits "\\ No newline at end of file" markers', async () => {
       const el = await bareView();
       // Mirrors libgit2 output for a file whose last line lacks a trailing
