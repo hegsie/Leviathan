@@ -667,7 +667,18 @@ export class LvTagList extends LitElement {
 
 
     try {
-      const result = await gitService.checkoutWithAutoStash(repoPath, tag.name);
+      // Fully-qualified, not the bare tag name.
+      //
+      // The backend resolvers try find_branch(ref_name, Local) FIRST and only
+      // fall back to revparse_single. So a bare name that a branch also uses —
+      // routine with names like "release" or "v2" — checked out the BRANCH,
+      // attached at its tip, which can be a completely different commit. The
+      // user had just confirmed a "detached HEAD" warning, and the app reported
+      // success with no hint that it had checked out something else.
+      //
+      // This also restores git's own disambiguation, which prefers
+      // refs/tags/<name> over refs/heads/<name>.
+      const result = await gitService.checkoutWithAutoStash(repoPath, `refs/tags/${tag.name}`);
 
       if (result.success && result.data?.success) {
         const data = result.data;
