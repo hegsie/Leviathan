@@ -165,9 +165,23 @@ impl CommitIndex {
 
             let oid_str = oid.to_string();
 
-            // Stop when we hit a known commit
+            // SKIP a known commit — do not stop.
+            //
+            // The walk is TIME-sorted across every ref, so the newest commit
+            // anywhere is visited first. That is almost always a local commit
+            // this index already has, and breaking there ended the walk
+            // immediately. Commits that arrived on OTHER refs with older
+            // timestamps — the normal case after a fetch, where upstream work
+            // predates your latest local commit — were never indexed at all,
+            // so search silently could not find them until a full rebuild.
+            //
+            // Skipping instead of stopping means the walk enumerates the whole
+            // history each refresh. Known commits cost only a hash lookup, and
+            // correctness here is worth more than the walk: an index that
+            // quietly lacks the commits you just fetched is worse than a slower
+            // refresh.
             if self.oid_map.contains_key(&oid_str) {
-                break;
+                continue;
             }
 
             let commit = match repo.find_commit(oid) {
@@ -290,6 +304,77 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let index = CommitIndex::build(&repo.path_str()).unwrap();
         assert!(!index.is_empty());
+    }
+
+    /// A fetched commit older than the newest local one must still be indexed.
+    ///
+    /// The walk is TIME-sorted across every ref, so the newest commit anywhere
+    /// is visited first — almost always a local commit already in the index.
+    /// Breaking there ended the walk immediately, and commits that arrived on
+    /// other refs with older timestamps (the normal case after a fetch, where
+    /// upstream work predates your latest local commit) were never indexed.
+    /// Search then silently could not find them until a full rebuild.
+    #[test]
+    fn test_update_incremental_indexes_older_commits_on_other_refs() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // A local commit with a NEW timestamp, indexed first.
+        let local_tip = commit_at(&test_repo, "Local latest", "local.txt", 2_000_000_000);
+        let mut index = CommitIndex::build(&test_repo.path_str()).unwrap();
+        assert!(index.oid_map.contains_key(&local_tip.to_string()));
+
+        // A commit that arrives on another ref with an OLDER timestamp, the way
+        // a fetch delivers upstream work committed before your latest local one.
+        let fetched = commit_at(&test_repo, "Fetched upstream work", "up.txt", 1_000_000_000);
+        {
+            let repo = test_repo.repo();
+            repo.reference("refs/remotes/origin/main", fetched, true, "test")
+                .unwrap();
+        }
+
+        let added = index.update_incremental(&test_repo.path_str()).unwrap();
+
+        assert!(
+            index.oid_map.contains_key(&fetched.to_string()),
+            "a fetched commit older than the local tip must be indexed, \
+             otherwise search cannot find what was just fetched"
+        );
+        assert!(added >= 1, "the refresh must report the commit it added");
+    }
+
+    /// A refresh with nothing new must add nothing.
+    #[test]
+    fn test_update_incremental_adds_nothing_when_unchanged() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Second", &[("a.txt", "a")]);
+
+        let mut index = CommitIndex::build(&test_repo.path_str()).unwrap();
+        let before = index.len();
+
+        assert_eq!(
+            index.update_incremental(&test_repo.path_str()).unwrap(),
+            0,
+            "skipping known commits must not re-add them"
+        );
+        assert_eq!(index.len(), before, "the index must not grow or duplicate");
+    }
+
+    /// Commit on a detached side ref with an explicit timestamp.
+    fn commit_at(repo: &TestRepo, message: &str, file: &str, seconds: i64) -> git2::Oid {
+        let git_repo = repo.repo();
+        std::fs::write(repo.path.join(file), "content").unwrap();
+        let mut index = git_repo.index().unwrap();
+        index.add_path(std::path::Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
+
+        let when = git2::Time::new(seconds, 0);
+        let sig = git2::Signature::new("Test User", "test@example.com", &when).unwrap();
+        let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+
+        git_repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap()
     }
 
     #[test]
