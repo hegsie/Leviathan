@@ -167,10 +167,16 @@ fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<Opt
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
+    // git cherry-pick preserves the ORIGINAL author and records the current
+    // user as committer at the current time. git2's signature is
+    // commit(update_ref, author, committer, ..) — passing them the other way
+    // round credits the picker as author and back-dates the committer time to
+    // the original commit, which also breaks the max(author, committer) graph
+    // ordering.
     let new_oid = repo.commit(
         Some("HEAD"),
-        &signature,
         &commit.author(),
+        &signature,
         commit.message().unwrap_or(""),
         &tree,
         &[&head],
@@ -330,10 +336,12 @@ pub async fn cherry_pick(
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
+    // Original author preserved, current user recorded as committer — see
+    // cherry_pick_one for why the argument order matters.
     let new_oid = repo.commit(
         Some("HEAD"),
-        &signature,
         &commit.author(),
+        &signature,
         commit.message().unwrap_or(""),
         &tree,
         &[&head],
@@ -393,10 +401,12 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
 
+    // Original author preserved, current user recorded as committer — see
+    // cherry_pick_one for why the argument order matters.
     let new_oid = repo.commit(
         Some("HEAD"),
-        &signature,
         &original_commit.author(),
+        &signature,
         original_commit.message().unwrap_or(""),
         &tree,
         &[&head],
@@ -1965,23 +1975,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_cherry_pick_preserves_author() {
-        // Test that cherry-pick preserves the original author
+        // `git cherry-pick` keeps the ORIGINAL author and records the picker as
+        // committer at pick time.
+        //
+        // The author must differ from the repo signature for this to mean
+        // anything: TestRepo::create_commit passes repo.signature() as BOTH
+        // author and committer, so a swap of the two is invisible against a
+        // commit it creates and the assertion passes either way.
         let test_repo = TestRepo::with_initial_commit();
+        let default_branch = test_repo.current_branch();
 
-        // Create a feature branch and add a commit
         test_repo.create_branch("feature");
         test_repo.checkout_branch("feature");
-        let feature_commit_oid =
-            test_repo.create_commit("Feature commit", &[("feature.txt", "content")]);
 
-        // Get original author info
-        let repo = test_repo.repo();
-        let original_commit = repo.find_commit(feature_commit_oid).unwrap();
-        let original_author = original_commit.author();
+        const ORIGINAL_TIME: i64 = 1_000_000_000;
+        let feature_commit_oid = {
+            let repo = test_repo.repo();
+            test_repo.create_file("feature.txt", "content");
+            test_repo.stage_file("feature.txt");
 
-        // Switch back to main and cherry-pick
-        test_repo.checkout_branch("main");
-        let result = cherry_pick(
+            let mut index = repo.index().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+
+            let author = git2::Signature::new(
+                "Original Author",
+                "original@example.com",
+                &git2::Time::new(ORIGINAL_TIME, 0),
+            )
+            .unwrap();
+            let committer = repo.signature().unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+
+            repo.commit(
+                Some("HEAD"),
+                &author,
+                &committer,
+                "Feature commit",
+                &tree,
+                &[&parent],
+            )
+            .unwrap()
+        };
+
+        test_repo.checkout_branch(&default_branch);
+        cherry_pick(
             test_repo.path_str(),
             feature_commit_oid.to_string(),
             None,
@@ -1990,9 +2028,23 @@ mod tests {
         .await
         .unwrap();
 
-        // Verify author is preserved
-        assert_eq!(result.author.name, original_author.name().unwrap());
-        assert_eq!(result.author.email, original_author.email().unwrap());
+        let repo = test_repo.repo();
+        let picked = repo.head().unwrap().peel_to_commit().unwrap();
+        let local = repo.signature().unwrap();
+
+        // Author carried over from the original commit, timestamp included.
+        assert_eq!(picked.author().name().unwrap(), "Original Author");
+        assert_eq!(picked.author().email().unwrap(), "original@example.com");
+        assert_eq!(picked.author().when().seconds(), ORIGINAL_TIME);
+
+        // Committer is whoever performed the pick, stamped at pick time.
+        assert_eq!(picked.committer().name().unwrap(), local.name().unwrap());
+        assert_eq!(picked.committer().email().unwrap(), local.email().unwrap());
+        assert!(
+            picked.committer().when().seconds() > ORIGINAL_TIME,
+            "committer time must be the cherry-pick time, not the original commit's; \
+             back-dating it breaks max(author, committer) graph ordering"
+        );
     }
 
     #[tokio::test]
