@@ -960,8 +960,19 @@ mod tests {
     async fn test_run_gc_with_prune_date_succeeds() {
         let repo = TestRepo::with_initial_commit();
 
+        // An unreachable loose object: nothing refers to it, so "--prune=now"
+        // must collect it. Asserting on the object rather than on git's wording
+        // proves the date REACHED git as the option's value — a stray positional
+        // is rejected outright, and any other misuse leaves the blob behind.
+        let dangling = repo
+            .repo()
+            .blob(b"unreachable content")
+            .expect("write a dangling blob");
+
         let result = run_gc(repo.path_str(), None, Some("now".to_string()), None).await;
 
+        // A usage error comes back as Err carrying git's message, so this is
+        // where a rejected argument surfaces.
         let gc_result = result.expect("gc with a prune date should not error");
         assert!(
             gc_result.success,
@@ -969,9 +980,8 @@ mod tests {
             gc_result.message
         );
         assert!(
-            !gc_result.message.contains("usage: git gc"),
-            "git rejected the prune argument: {:?}",
-            gc_result.message
+            repo.repo().find_blob(dangling).is_err(),
+            "--prune=now must collect an unreachable object"
         );
     }
 
