@@ -57,11 +57,11 @@ function findCommands(name: string): Array<{ command: string; args?: unknown }> 
   return invokeHistory.filter((h) => h.command === name);
 }
 
-function setupDefaultMocks(commits = mockCommits): void {
+function setupDefaultMocks(commits = mockCommits, mergeCount = 0): void {
   mockInvoke = async (command: string) => {
     switch (command) {
       case 'get_rebase_commits':
-        return commits;
+        return { commits, mergeCount };
       case 'execute_interactive_rebase':
         return undefined;
       default:
@@ -514,7 +514,7 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_rebase_commits':
-            return mockCommits;
+            return { commits: mockCommits, mergeCount: 0 };
           case 'execute_interactive_rebase':
             return new Promise((resolve) => { resolveExec = resolve; });
           default:
@@ -551,7 +551,7 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_rebase_commits':
-            return mockCommits;
+            return { commits: mockCommits, mergeCount: 0 };
           case 'execute_interactive_rebase':
             return new Promise((resolve) => { resolveExec = resolve; });
           default:
@@ -681,7 +681,7 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_rebase_commits':
-            return mockCommits;
+            return { commits: mockCommits, mergeCount: 0 };
           case 'execute_interactive_rebase':
             throw new Error('Rebase failed: conflicts detected');
           default:
@@ -709,7 +709,7 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_rebase_commits':
-            return mockCommits;
+            return { commits: mockCommits, mergeCount: 0 };
           case 'execute_interactive_rebase':
             // Tauri serializes Rust errors as objects, caught by invokeCommand
             throw { code: 'REBASE_CONFLICT', message: 'Conflict during rebase' };
@@ -739,7 +739,7 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_rebase_commits':
-            return mockCommits;
+            return { commits: mockCommits, mergeCount: 0 };
           case 'execute_interactive_rebase':
             throw { code: 'REBASE_CONFLICT', message: 'Conflict during rebase' };
           default:
@@ -962,6 +962,60 @@ describe('lv-interactive-rebase-dialog (fixture)', () => {
       const warning = el.shadowRoot!.querySelector('.warning-message');
       expect(warning, 'the user is told why').to.not.be.null;
       expect(warning!.textContent).to.contain('cannot be reworded by rebase');
+    });
+
+    it('refuses a reword when the range contains merge commits', async () => {
+      // The unguarded case: merges ABOVE the target. They are omitted from the
+      // plan, so it reads as a clean linear list — but replaying it flattens the
+      // merge topology and rewrites the merged-in side commits, from a gesture
+      // that promised only to change one commit message.
+      setupDefaultMocks(mockCommits, 2);
+      const el = await createDialog();
+      await el.open('main', { rewordCommitOid: 'aaa1111111111' });
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start.disabled, 'a reword must not arm a topology-flattening rebase').to.equal(true);
+
+      const warning = el.shadowRoot!.querySelector('.warning-message');
+      expect(warning, 'the user is told why').to.not.be.null;
+      expect(warning!.textContent).to.contain('2 merge');
+      expect(warning!.textContent).to.contain('flatten');
+    });
+
+    it('warns but still allows a deliberately started rebase over merges', async () => {
+      // Opened WITHOUT a reword target: the user chose an interactive rebase, so
+      // it proceeds — but the excluded merges must be visible, not silent.
+      setupDefaultMocks(mockCommits, 1);
+      const el = await createDialog();
+      await el.open('main');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const warning = el.shadowRoot!.querySelector('.warning-message');
+      expect(warning, 'excluded merges must be surfaced').to.not.be.null;
+      expect(warning!.textContent).to.contain('1 merge');
+
+      const start = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+        /start rebase/i.test(b.textContent ?? '')
+      ) as HTMLButtonElement;
+      expect(start.disabled, 'a deliberate rebase is still allowed').to.equal(false);
+    });
+
+    it('shows no merge warning when the range has none', async () => {
+      setupDefaultMocks(mockCommits, 0);
+      const el = await createDialog();
+      await el.open('main');
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.warning-message')).to.be.null;
     });
 
     it('arms the rebase normally when the reword target IS in the plan', async () => {

@@ -497,6 +497,8 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private warning = '';
   /** Set when open() was given a reword target the loaded plan does not contain. */
   @state() private rewordTargetMissing = false;
+  /** Merge commits in the rebase range; they are excluded from the plan. */
+  @state() private mergeCountInRange = 0;
   @state() private draggedIndex: number | null = null;
   @state() private dropTargetIndex: number | null = null;
   @state() private showPreview = true;
@@ -574,6 +576,23 @@ export class LvInteractiveRebaseDialog extends LitElement {
           'rewritten here. Merge commits cannot be reworded by rebase.';
         return;
       }
+
+      // Merges ABOVE the target are the unguarded case. The plan omits them, so
+      // it reads as a clean linear list, but replaying it flattens the merge
+      // topology and rewrites the merged-in side commits — a destructive
+      // history rewrite from a gesture that promised to change one commit
+      // message. Refuse, the same way an unrebaseable target is refused.
+      if (this.mergeCountInRange > 0) {
+        this.rewordTargetMissing = true;
+        this.warning =
+          `This commit cannot be reworded here: the range contains ` +
+          `${this.mergeCountInRange} merge ` +
+          `${this.mergeCountInRange === 1 ? 'commit' : 'commits'}, and rebasing ` +
+          `would flatten ${this.mergeCountInRange === 1 ? 'it' : 'them'} and ` +
+          `rewrite the merged-in commits. Reword it from an interactive rebase ` +
+          `you start deliberately instead.`;
+        return;
+      }
       this.commits = this.commits.map((c) =>
         c.oid === options.rewordCommitOid
           ? { ...c, action: 'reword' as RebaseAction, newMessage: this.fullMessage(c) }
@@ -609,6 +628,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.error = '';
     this.warning = '';
     this.rewordTargetMissing = false;
+    this.mergeCountInRange = 0;
     this.draggedIndex = null;
     this.dropTargetIndex = null;
     this.showPreview = true;
@@ -624,10 +644,14 @@ export class LvInteractiveRebaseDialog extends LitElement {
       const result = await gitService.getRebaseCommits(this.pinnedRepoPath, this.onto);
 
       if (result.success) {
-        this.commits = (result.data || []).map(c => ({
+        this.commits = (result.data?.commits ?? []).map(c => ({
           ...c,
           action: 'pick' as RebaseAction,
         }));
+        // Merges are excluded from the todo, so a range containing them yields
+        // a plan that LOOKS linear while the history is not. Replaying it
+        // flattens the topology and rewrites the merged-in side commits.
+        this.mergeCountInRange = result.data?.mergeCount ?? 0;
       } else {
         this.error = result.error?.message ?? 'Failed to load commits';
       }
@@ -1222,6 +1246,15 @@ export class LvInteractiveRebaseDialog extends LitElement {
             </div>
           </div>
 
+          ${this.mergeCountInRange > 0 && !this.rewordTargetMissing
+            ? html`<div class="warning-message">
+                This range contains ${this.mergeCountInRange} merge
+                ${this.mergeCountInRange === 1 ? 'commit' : 'commits'}, which are not
+                listed below. Rebasing will flatten
+                ${this.mergeCountInRange === 1 ? 'it' : 'them'} and rewrite the
+                commits that were merged in.
+              </div>`
+            : nothing}
           ${this.warning
             ? html`<div class="warning-message">${this.warning}</div>`
             : nothing}
