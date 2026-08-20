@@ -447,7 +447,36 @@ export class LvCommandPalette extends LitElement {
         .map(({ cmd }) => cmd);
     }
 
+    // Display order IS array order.
+    //
+    // renderCommands() groups rows by category, but keyboard selection, click,
+    // and hover all index into this array. Whenever categories interleave — the
+    // default view puts a 'navigation' entry among the actions, and a scored
+    // query interleaves every category — the two orders diverged, so from the
+    // first category boundary onward each row ran a DIFFERENT command than the
+    // one it displayed. The list includes "Clean working directory" and "Run
+    // Garbage Collection", so that could destroy work from a benign-looking row.
+    this.filteredCommands = this.groupByCategory(this.filteredCommands);
+
     this.selectedIndex = 0;
+  }
+
+  /**
+   * Stable-partition commands by category, preserving the first-appearance
+   * order of both the categories and the commands within each — the exact
+   * grouping renderCommands() applies.
+   */
+  private groupByCategory(commands: PaletteCommand[]): PaletteCommand[] {
+    const grouped = new Map<string, PaletteCommand[]>();
+    for (const cmd of commands) {
+      const existing = grouped.get(cmd.category);
+      if (existing) {
+        existing.push(cmd);
+      } else {
+        grouped.set(cmd.category, [cmd]);
+      }
+    }
+    return [...grouped.values()].flat();
   }
 
 
