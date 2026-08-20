@@ -169,17 +169,6 @@ pub async fn merge(
             let commit_message =
                 message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
 
-            // git runs commit-msg for an automatic merge commit (after
-            // pre-merge-commit); the hook may rewrite the message or veto it. Like
-            // pre-merge-commit, a veto leaves the merge resumable, so run it before
-            // the cleanup-guarded commit closure. (A squash merge records no merge
-            // commit, so no hook — matching `git merge --squash`.)
-            let commit_message = if squash.unwrap_or(false) {
-                commit_message
-            } else {
-                crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?
-            };
-
             // Route signed commits through the git CLI, exactly as commit_merge
             // does for a conflicted merge.
             //
@@ -194,10 +183,27 @@ pub async fn merge(
             // MERGE_HEAD and the merged index are already on disk here, so
             // `git commit -S` records the correct two-parent merge commit (or, for
             // a squash, the single-parent commit after the helper clears the merge
-            // metadata) and runs the remaining hooks natively.
+            // metadata) and runs the hooks natively.
+            //
+            // This is deliberately BEFORE the commit-msg hook below: `git commit`
+            // runs commit-msg itself, so running it here as well would fire the
+            // hook twice for one merge — a Change-Id or ticket-prefix hook would
+            // stamp the message twice, and a counting/notifying one would double
+            // its effect. commit_merge takes the same route for the same reason.
             if crate::commands::commit::should_sign_commit(&path, None)? {
                 break 'merge_body Some((commit_message, squash.unwrap_or(false)));
             }
+
+            // git runs commit-msg for an automatic merge commit (after
+            // pre-merge-commit); the hook may rewrite the message or veto it. Like
+            // pre-merge-commit, a veto leaves the merge resumable, so run it before
+            // the cleanup-guarded commit closure. (A squash merge records no merge
+            // commit, so no hook — matching `git merge --squash`.)
+            let commit_message = if squash.unwrap_or(false) {
+                commit_message
+            } else {
+                crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?
+            };
 
             let result = (|| -> Result<()> {
                 let signature = repo.signature()?;
@@ -263,9 +269,16 @@ pub async fn merge(
 
         // `git commit -S` clears the merge state itself, so there is no
         // cleanup_state here — the same shape commit_merge uses.
+        //
+        // The merge commit is already recorded at this point, so a failure to
+        // reopen the repository must not be reported as a failed merge: the user
+        // would be told the merge failed and asked to retry one that already
+        // happened. post-merge is advisory (run_hook_noblock never blocks), so
+        // it is simply skipped.
         if !is_squash {
-            let repo = git2::Repository::open(Path::new(&path))?;
-            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            if let Ok(repo) = git2::Repository::open(Path::new(&path)) {
+                crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            }
         }
     }
 
@@ -3749,6 +3762,47 @@ mod tests {
         assert!(
             git_repo.path().join("MERGE_HEAD").exists(),
             "a failed signed merge must leave MERGE_HEAD so it can be retried or aborted"
+        );
+    }
+
+    /// A signed merge must run commit-msg exactly ONCE.
+    ///
+    /// The signed path hands the merge to `git commit -S`, which runs commit-msg
+    /// itself. Running our own `run_commit_msg_hook` first as well fired the hook
+    /// twice for a single merge: a Change-Id or ticket-prefix hook stamps the
+    /// message twice, and a hook that counts or notifies does it twice over.
+    ///
+    /// The merge is failed at the signing step by a bogus gpg.program — hooks run
+    /// before the commit object is signed, so the count is unaffected.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_signed_merge_runs_commit_msg_hook_once() {
+        let repo = TestRepo::with_initial_commit();
+        setup_cleanly_mergeable_branches(&repo);
+
+        let counter = std::path::Path::new(&repo.path_str()).join("commit-msg-runs");
+        repo.install_hook(
+            "commit-msg",
+            &format!("#!/bin/sh\necho run >> \"{}\"\n", counter.display()),
+        );
+
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("commit.gpgsign", true).unwrap();
+            config
+                .set_str("gpg.program", "/nonexistent/definitely-not-real-gpg")
+                .unwrap();
+        }
+
+        let _ = merge(repo.path_str(), "feature".to_string(), None, None, None).await;
+
+        let runs = std::fs::read_to_string(&counter)
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        assert_eq!(
+            runs, 1,
+            "commit-msg must run once for one merge, not once per code path"
         );
     }
 
