@@ -725,6 +725,41 @@ fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
         .collect()
 }
 
+/// Join a command's stdout and stderr into one searchable block.
+///
+/// Concatenating them directly runs the last line of stdout into the first line
+/// of stderr whenever stdout does not end in a newline — and git does not always
+/// end it with one. The line that gets mangled is exactly the kind being matched
+/// here (`error: could not apply ...`), so the separator is not cosmetic.
+fn join_output(stdout: &str, stderr: &str) -> String {
+    if stdout.is_empty() {
+        return stderr.to_string();
+    }
+    if stderr.is_empty() {
+        return stdout.to_string();
+    }
+    if stdout.ends_with('\n') {
+        format!("{}{}", stdout, stderr)
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    }
+}
+
+/// The commit a stopped rebase could not apply, from
+/// `error: could not apply <sha> <summary>`.
+///
+/// Best-effort and cosmetic: git translates this line, so a localized git
+/// yields None and the conflict is reported without a commit summary — which is
+/// what the field held for every conflict before.
+fn stopped_commit_summary(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("error: could not apply ")?;
+        let (_sha, summary) = rest.split_once(' ')?;
+        let summary = summary.trim();
+        (!summary.is_empty()).then(|| summary.to_string())
+    })
+}
+
 /// Preview a rebase by running it in a temporary worktree (ghost rebase)
 #[command]
 pub async fn preview_rebase(
@@ -782,28 +817,44 @@ pub async fn preview_rebase(
         })?;
 
     let mut conflicts = Vec::new();
+    // A failure that is NOT a conflict — a dirty worktree, an unknown ref. The
+    // preview cannot be computed then, and must not be reported as "clean".
+    let mut preview_failure: Option<String> = None;
 
     if !rebase_output.status.success() {
-        let stderr = String::from_utf8_lossy(&rebase_output.stderr);
+        let combined = join_output(
+            &String::from_utf8_lossy(&rebase_output.stdout),
+            &String::from_utf8_lossy(&rebase_output.stderr),
+        );
+        let commit_summary = stopped_commit_summary(&combined).unwrap_or_default();
 
-        // Parse conflict file paths from stderr
-        for line in stderr.lines() {
-            if line.contains("CONFLICT") {
-                // Extract file path from conflict message
-                if let Some(path_start) = line.rfind("in ") {
-                    let file_path = line[path_start + 3..].trim().to_string();
-                    conflicts.push(PredictedConflict {
-                        file_path,
-                        commit_summary: String::new(),
-                    });
-                } else if let Some(path_start) = line.rfind("Merge conflict in ") {
-                    let file_path = line[path_start + 18..].trim().to_string();
-                    conflicts.push(PredictedConflict {
-                        file_path,
-                        commit_summary: String::new(),
-                    });
-                }
+        // Ask the index which paths are unmerged rather than parsing conflict
+        // messages. Those messages go to STDOUT, not the stderr this read — so
+        // the scan matched nothing and the preview reported a clean rebase for
+        // every conflicting one, the exact opposite of what it exists to say.
+        // They are also translated, so an English-only scan would have found
+        // nothing on a localized git even with the right stream.
+        let unmerged = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&temp_path)
+            .args(["diff", "--name-only", "--diff-filter=U", "-z"])
+            .output()
+            .ok();
+
+        if let Some(out) = unmerged {
+            for file_path in String::from_utf8_lossy(&out.stdout)
+                .split('\0')
+                .filter(|s| !s.is_empty())
+            {
+                conflicts.push(PredictedConflict {
+                    file_path: file_path.to_string(),
+                    commit_summary: commit_summary.clone(),
+                });
             }
+        }
+
+        if conflicts.is_empty() {
+            preview_failure = Some(combined.trim().to_string());
         }
 
         // Abort the failed rebase in the worktree
@@ -841,7 +892,20 @@ pub async fn preview_rebase(
 
     // The temp dir will be cleaned up when temp_dir is dropped
 
-    let conflicting_commits = conflicts.len();
+    // Reported only after the worktree is removed, so a failed preview does not
+    // strand a worktree registration in the user's repository.
+    if let Some(message) = preview_failure {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Could not preview the rebase: {}",
+            message
+        )));
+    }
+
+    // The ghost rebase stops at the FIRST commit it cannot apply, so one stop is
+    // all it can observe. `conflicts.len()` is a count of FILES, and using it
+    // here reported more conflicting commits than the rebase even has whenever
+    // one commit touched several conflicting files.
+    let conflicting_commits = usize::from(!conflicts.is_empty());
     let clean_commits = total_commits.saturating_sub(conflicting_commits);
 
     Ok(RebasePreview {
@@ -3681,6 +3745,136 @@ mod tests {
         repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
         repo.checkout_branch(&initial_branch);
         repo.create_commit("Main change", &[("shared.txt", "main content")]);
+    }
+
+    // ── Ghost-rebase preview ─────────────────────────────────────────────────
+
+    /// The preview must actually predict the conflict it exists to predict.
+    ///
+    /// It scanned only stderr for "CONFLICT", and git prints those lines to
+    /// STDOUT — so `conflicts` was always empty and every conflicting rebase was
+    /// reported as `conflictingCommits: 0, cleanCommits: totalCommits`. A user
+    /// asking "will this rebase be clean?" was told yes, always.
+    #[tokio::test]
+    async fn test_preview_rebase_reports_the_conflicting_file() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let preview = preview_rebase(repo.path_str(), "feature".to_string())
+            .await
+            .expect("preview should succeed even though the rebase conflicts");
+
+        assert_eq!(
+            preview.conflicts.len(),
+            1,
+            "the conflicting file must be named: {:?}",
+            preview.conflicts
+        );
+        assert_eq!(preview.conflicts[0].file_path, "shared.txt");
+        assert_eq!(
+            preview.conflicting_commits, 1,
+            "the rebase stops on one commit"
+        );
+        assert!(
+            preview.clean_commits < preview.total_commits,
+            "a conflicting commit cannot also be counted clean"
+        );
+
+        // The ghost worktree must not outlive the preview.
+        let worktrees = repo.repo().worktrees().unwrap();
+        assert_eq!(worktrees.len(), 0, "the temp worktree must be removed");
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "the preview must not touch the user's own repository state"
+        );
+    }
+
+    /// Control: a rebase that applies cleanly reports no conflicts.
+    #[tokio::test]
+    async fn test_preview_rebase_reports_a_clean_rebase() {
+        // Branches that touch different files, so the rebase replays cleanly.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add base", &[("base.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature file", &[("feature.txt", "feature")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main file", &[("main.txt", "main")]);
+
+        let preview = preview_rebase(repo.path_str(), "feature".to_string())
+            .await
+            .expect("a clean preview should succeed");
+
+        assert!(preview.conflicts.is_empty());
+        assert_eq!(preview.conflicting_commits, 0);
+        assert_eq!(preview.clean_commits, preview.total_commits);
+    }
+
+    /// A rebase that fails for a reason other than a conflict must not be
+    /// reported as a clean rebase — there is nothing to say about it.
+    #[tokio::test]
+    async fn test_preview_rebase_errors_when_the_target_does_not_exist() {
+        let repo = TestRepo::with_initial_commit();
+        setup_conflicting_branches(&repo);
+
+        let result = preview_rebase(repo.path_str(), "no-such-branch".to_string()).await;
+        assert!(
+            result.is_err(),
+            "an unknown target must not come back as a clean preview"
+        );
+
+        let worktrees = repo.repo().worktrees().unwrap();
+        assert_eq!(
+            worktrees.len(),
+            0,
+            "a failed preview must still remove its worktree"
+        );
+    }
+
+    /// stdout and stderr must not run together.
+    ///
+    /// git does not always terminate stdout with a newline, and a direct
+    /// concatenation then glues the last stdout line onto the first stderr line
+    /// — which is precisely the `error: could not apply ...` line being matched.
+    #[test]
+    fn test_join_output_separates_streams_without_doubling_newlines() {
+        // No trailing newline on stdout: a separator must be inserted, or the
+        // stderr line stops being matchable.
+        let joined = join_output(
+            "CONFLICT (content): Merge conflict in shared.txt",
+            "error: could not apply 1a2b3c4... Main change\n",
+        );
+        assert_eq!(
+            stopped_commit_summary(&joined).as_deref(),
+            Some("Main change"),
+            "joined output must keep the error line on its own line: {:?}",
+            joined
+        );
+
+        // Already newline-terminated: no blank line is introduced.
+        assert_eq!(join_output("out\n", "err\n"), "out\nerr\n");
+
+        // Either side empty: pass the other through untouched.
+        assert_eq!(join_output("", "err"), "err");
+        assert_eq!(join_output("out", ""), "out");
+    }
+
+    #[test]
+    fn test_stopped_commit_summary_reads_the_stopped_commit() {
+        let output = "Auto-merging shared.txt\n\
+             CONFLICT (content): Merge conflict in shared.txt\n\
+             error: could not apply 1a2b3c4... Main change\n\
+             hint: Resolve all conflicts manually\n";
+        assert_eq!(
+            stopped_commit_summary(output).as_deref(),
+            Some("Main change")
+        );
+
+        // A localized or otherwise unrecognised output yields no summary rather
+        // than a wrong one.
+        assert_eq!(stopped_commit_summary("KONFLIKT irgendwo\n"), None);
     }
 
     #[tokio::test]
