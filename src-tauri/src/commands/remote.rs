@@ -649,6 +649,136 @@ fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<Stri
     Ok(())
 }
 
+/// Push one branch to a remote, and record the upstream when the branch has
+/// none.
+///
+/// Extracted from `push` so it can be TESTED: `push` takes a Tauri
+/// `AppHandle`, so the whole body — remote resolution, the force-push branch
+/// rule, the git2/CLI split and the upstream bookkeeping — was unreachable
+/// from a unit test.
+///
+/// Returns the remote and branch actually pushed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_branch(
+    path_for_task: &str,
+    requested_remote: Option<String>,
+    branch_for_task: Option<String>,
+    force_val: bool,
+    use_force_with_lease: bool,
+    use_push_tags: bool,
+    set_upstream_val: bool,
+    token: Option<String>,
+) -> Result<(String, String)> {
+    let repo = git2::Repository::open(Path::new(path_for_task))?;
+
+    // Resolve the remote from the branch's upstream, then the sole
+    // remote, before falling back to "origin". Hard-coding origin
+    // failed outright on `git clone -o upstream`, on a Gerrit
+    // checkout, and on any remote the app's own Remote dialog
+    // renamed — with no remote selector on Push anywhere in the UI,
+    // the user's only recovery was to rename it back.
+    let remote_for_task = resolve_push_remote(&repo, requested_remote.clone());
+
+    repo.find_remote(&remote_for_task)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
+
+    let branch_name = if let Some(ref b) = branch_for_task {
+        b.clone()
+    } else {
+        let head = repo.head()?;
+        head.shorthand().unwrap_or("main").to_string()
+    };
+
+    // A `preventForcePush` rule was stored and read by nothing —
+    // only `preventDeletion` was ever enforced, so the field was
+    // decorative while the app grew a one-click Force Push action
+    // on the push-rejection toast. Checked here, in the command, for
+    // the same reason deletion is: every surface reaches this path,
+    // and none of them load the rules themselves.
+    //
+    // Propagated rather than defaulted, like delete_branch: a
+    // protection that fails open is worse than none.
+    if force_val || use_force_with_lease {
+        let rules = crate::commands::branch_rules::load_rules(Path::new(&path_for_task))?;
+        if crate::commands::branch_rules::is_force_push_prevented(&rules, &branch_name) {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Branch \"{}\" is protected by a branch rule and cannot be \
+                         force-pushed. Remove the rule first.",
+                branch_name
+            )));
+        }
+    }
+
+    // Give a branch that has no upstream one from the push that
+    // published it, the way `git push -u` and every mainstream
+    // client do on a first push.
+    //
+    // No push surface in this app passes set_upstream — not the
+    // toolbar, not the dashboard, not force push — so after the
+    // routine "create branch → commit → Push" the branch was left
+    // untracked: no tracking arrow in the sidebar, no ahead/behind
+    // badge ever, pulls falling back to name-matching instead of
+    // real tracking, and the cleanup dialog later flagging it as
+    // "No upstream configured — may contain unmerged work". The
+    // only cure was a Set Upstream context-menu item the user had
+    // to know to look for.
+    //
+    // Branches that already track something are left alone, so a
+    // push to a second remote never re-points the upstream.
+    let branch_lacks_upstream = repo
+        .find_branch(&branch_name, git2::BranchType::Local)
+        .map(|b| b.upstream().is_err())
+        .unwrap_or(false);
+    let should_set_upstream = set_upstream_val || branch_lacks_upstream;
+
+    if use_force_with_lease || use_push_tags {
+        push_via_cli(
+            path_for_task,
+            &remote_for_task,
+            &branch_name,
+            force_val,
+            use_force_with_lease,
+            use_push_tags,
+            should_set_upstream,
+            token,
+        )?;
+    } else {
+        // Run pre-push like canonical git — the git2 push path
+        // otherwise bypasses it. A non-zero exit aborts the push.
+        crate::commands::hooks::run_pre_push_branch(&repo, &remote_for_task, &branch_name)?;
+
+        let mut git_remote = repo
+            .find_remote(&remote_for_task)
+            .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
+
+        let mut push_opts = credentials_service::get_push_options(token);
+
+        let refspec = if force_val {
+            format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+        } else {
+            format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
+        };
+
+        git_remote.push(&[&refspec], Some(&mut push_opts))?;
+
+        if should_set_upstream {
+            let upstream_name = format!("{}/{}", remote_for_task, branch_name);
+            let recorded = repo
+                .find_branch(&branch_name, git2::BranchType::Local)
+                .and_then(|mut b| b.set_upstream(Some(&upstream_name)));
+
+            // The commits are on the remote either way. An explicit
+            // "Set Upstream" must still report its own failure, but
+            // the automatic first-push case must not turn a landed
+            // push into a red "Push failed" the user would retry.
+            if set_upstream_val {
+                recorded?;
+            }
+        }
+    }
+
+    Ok((remote_for_task, branch_name))
+}
 /// Push to remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -686,96 +816,20 @@ pub async fn push(
 
         // git2/git-CLI push is blocking network I/O; offload so the runtime
         // stays responsive during slow remotes.
-        let (remote_name_returned, branch_name_returned) =
-            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
-                let repo = git2::Repository::open(Path::new(&path_for_task))?;
-
-                // Resolve the remote from the branch's upstream, then the sole
-                // remote, before falling back to "origin". Hard-coding origin
-                // failed outright on `git clone -o upstream`, on a Gerrit
-                // checkout, and on any remote the app's own Remote dialog
-                // renamed — with no remote selector on Push anywhere in the UI,
-                // the user's only recovery was to rename it back.
-                let remote_for_task = resolve_push_remote(&repo, requested_remote.clone());
-
-                repo.find_remote(&remote_for_task)
-                    .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
-
-                let branch_name = if let Some(ref b) = branch_for_task {
-                    b.clone()
-                } else {
-                    let head = repo.head()?;
-                    head.shorthand().unwrap_or("main").to_string()
-                };
-
-                // A `preventForcePush` rule was stored and read by nothing —
-                // only `preventDeletion` was ever enforced, so the field was
-                // decorative while the app grew a one-click Force Push action
-                // on the push-rejection toast. Checked here, in the command, for
-                // the same reason deletion is: every surface reaches this path,
-                // and none of them load the rules themselves.
-                //
-                // Propagated rather than defaulted, like delete_branch: a
-                // protection that fails open is worse than none.
-                if force_val || use_force_with_lease {
-                    let rules =
-                        crate::commands::branch_rules::load_rules(Path::new(&path_for_task))?;
-                    if crate::commands::branch_rules::is_force_push_prevented(&rules, &branch_name)
-                    {
-                        return Err(LeviathanError::OperationFailed(format!(
-                            "Branch \"{}\" is protected by a branch rule and cannot be \
-                             force-pushed. Remove the rule first.",
-                            branch_name
-                        )));
-                    }
-                }
-
-                if use_force_with_lease || use_push_tags {
-                    push_via_cli(
-                        &path_for_task,
-                        &remote_for_task,
-                        &branch_name,
-                        force_val,
-                        use_force_with_lease,
-                        use_push_tags,
-                        set_upstream_val,
-                        token,
-                    )?;
-                } else {
-                    // Run pre-push like canonical git — the git2 push path
-                    // otherwise bypasses it. A non-zero exit aborts the push.
-                    crate::commands::hooks::run_pre_push_branch(
-                        &repo,
-                        &remote_for_task,
-                        &branch_name,
-                    )?;
-
-                    let mut git_remote = repo
-                        .find_remote(&remote_for_task)
-                        .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
-
-                    let mut push_opts = credentials_service::get_push_options(token);
-
-                    let refspec = if force_val {
-                        format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
-                    } else {
-                        format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
-                    };
-
-                    git_remote.push(&[&refspec], Some(&mut push_opts))?;
-
-                    if set_upstream_val {
-                        let mut local_branch =
-                            repo.find_branch(&branch_name, git2::BranchType::Local)?;
-                        let upstream_name = format!("{}/{}", remote_for_task, branch_name);
-                        local_branch.set_upstream(Some(&upstream_name))?;
-                    }
-                }
-
-                Ok((remote_for_task, branch_name))
-            })
-            .await
-            .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
+        let (remote_name_returned, branch_name_returned) = tokio::task::spawn_blocking(move || {
+            push_branch(
+                &path_for_task,
+                requested_remote,
+                branch_for_task,
+                force_val,
+                use_force_with_lease,
+                use_push_tags,
+                set_upstream_val,
+                token,
+            )
+        })
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
 
         // Emit success event
         let mut message = format!(
@@ -2050,6 +2104,105 @@ mod tests {
         assert_eq!(
             origin_repo.refname_to_id("refs/heads/main").unwrap(),
             alice_oid
+        );
+    }
+
+    // ---- first push sets upstream tracking ----
+
+    /// A repo with a local bare "origin" it can really push to.
+    fn repo_with_bare_origin() -> (TestRepo, tempfile::TempDir) {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        (repo, bare)
+    }
+
+    /// The upstream a branch tracks, as "<remote>/<branch>".
+    fn upstream_of(repo: &TestRepo, branch: &str) -> Option<String> {
+        let git_repo = repo.repo();
+        let local = git_repo.find_branch(branch, git2::BranchType::Local).ok()?;
+        let upstream = local.upstream().ok()?;
+        upstream.name().ok().flatten().map(|s| s.to_string())
+    }
+
+    /// Publishing a branch must leave it tracking the remote it was published
+    /// to, the way `git push -u` does.
+    ///
+    /// No push surface passes set_upstream, so after "create branch → commit →
+    /// Push" the branch was left untracked: no tracking arrow, no ahead/behind
+    /// badge ever, pulls falling back to name-matching, and the cleanup dialog
+    /// later calling it "No upstream configured — may contain unmerged work".
+    #[test]
+    fn test_first_push_sets_upstream() {
+        let (repo, _bare) = repo_with_bare_origin();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature work", &[("feature.txt", "content")]);
+
+        assert_eq!(upstream_of(&repo, "feature"), None, "no upstream yet");
+
+        push_branch(
+            &repo.path_str(),
+            None,
+            Some("feature".to_string()),
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("push should succeed");
+
+        assert_eq!(
+            upstream_of(&repo, "feature").as_deref(),
+            Some("origin/feature"),
+            "the push that published the branch must set its upstream"
+        );
+    }
+
+    /// A branch that already tracks something keeps tracking it: pushing to a
+    /// second remote must not re-point the upstream behind the user's back.
+    #[test]
+    fn test_push_does_not_repoint_an_existing_upstream() {
+        let (repo, _bare) = repo_with_bare_origin();
+        let fork = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(fork.path()).unwrap();
+        repo.add_remote("fork", &fork.path().to_string_lossy());
+
+        let branch = repo.current_branch();
+        push_branch(
+            &repo.path_str(),
+            Some("origin".to_string()),
+            Some(branch.clone()),
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("first push should succeed");
+        assert_eq!(
+            upstream_of(&repo, &branch).as_deref(),
+            Some(format!("origin/{}", branch).as_str())
+        );
+
+        push_branch(
+            &repo.path_str(),
+            Some("fork".to_string()),
+            Some(branch.clone()),
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .expect("second push should succeed");
+
+        assert_eq!(
+            upstream_of(&repo, &branch).as_deref(),
+            Some(format!("origin/{}", branch).as_str()),
+            "an established upstream must survive a push to another remote"
         );
     }
 
