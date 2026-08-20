@@ -456,7 +456,19 @@ pub async fn create_commit(
             .ok()
             .and_then(|h| h.peel_to_commit().ok())
             .map(|c| c.tree_id());
-        if head_tree_id == Some(tree_oid) {
+        let nothing_staged = match head_tree_id {
+            Some(head_tree_id) => head_tree_id == tree_oid,
+            // Unborn HEAD: there is no parent tree to compare against, so
+            // "nothing staged" means the index itself is empty. Comparing
+            // against a None head tree could never match, which let the very
+            // first commit in a repository be created empty — `git commit`
+            // refuses that one too.
+            None => repo
+                .find_tree(tree_oid)
+                .map(|t| t.is_empty())
+                .unwrap_or(false),
+        };
+        if nothing_staged {
             return Err(LeviathanError::OperationFailed(
                 "No staged changes to commit".to_string(),
             ));
@@ -1679,6 +1691,63 @@ mod tests {
 
         let after = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(before, after, "HEAD must not move");
+    }
+
+    /// An empty INITIAL commit must be refused too.
+    ///
+    /// On an unborn HEAD there is no parent tree, so the head-tree comparison
+    /// had nothing to match and every first commit was allowed through — even
+    /// with an empty index. `git commit` refuses that one as well.
+    #[tokio::test]
+    async fn test_create_commit_refuses_an_empty_initial_commit() {
+        let repo = TestRepo::new();
+
+        let err = create_commit(
+            repo.path_str(),
+            "Initial commit".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("an empty initial commit must be refused");
+        assert!(
+            err.to_string().contains("No staged changes"),
+            "unexpected error: {}",
+            err
+        );
+
+        assert!(
+            repo.repo().head().is_err(),
+            "HEAD must still be unborn — no commit was created"
+        );
+    }
+
+    /// Control: a real initial commit still works on an unborn HEAD.
+    #[tokio::test]
+    async fn test_create_commit_allows_a_real_initial_commit() {
+        let repo = TestRepo::new();
+        std::fs::write(repo.path.join("first.txt"), "content").unwrap();
+        repo.stage_file("first.txt");
+
+        create_commit(
+            repo.path_str(),
+            "Initial commit".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an initial commit with staged content must succeed");
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("Initial commit"));
+        assert_eq!(head.parent_count(), 0, "the initial commit has no parents");
     }
 
     /// Control: with something staged, the same call still commits.
