@@ -49,186 +49,224 @@ pub async fn merge(
     squash: Option<bool>,
     message: Option<String>,
 ) -> Result<()> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    // The repository lives inside this block so it is dropped before any await:
+    // git2::Repository is not Send, and a Tauri command's future must be. The
+    // block yields the signed commit to perform, if one is needed.
+    let signed_merge: Option<(String, bool)> = 'merge_body: {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Like git's pre-merge checks: refuse to start a merge while another
-    // operation is in progress, with an actionable message (instead of the
-    // misleading libgit2 "uncommitted change would be overwritten" error).
-    match repo.state() {
-        git2::RepositoryState::Clean => {}
-        git2::RepositoryState::Merge => {
-            return Err(LeviathanError::OperationFailed(
-                "You have not concluded your merge (MERGE_HEAD exists). \
+        // Like git's pre-merge checks: refuse to start a merge while another
+        // operation is in progress, with an actionable message (instead of the
+        // misleading libgit2 "uncommitted change would be overwritten" error).
+        match repo.state() {
+            git2::RepositoryState::Clean => {}
+            git2::RepositoryState::Merge => {
+                return Err(LeviathanError::OperationFailed(
+                    "You have not concluded your merge (MERGE_HEAD exists). \
                  Resolve the conflicts and commit, or abort the merge, before merging again."
-                    .to_string(),
-            ));
-        }
-        state => {
-            return Err(LeviathanError::OperationFailed(format!(
-                "Cannot merge: another operation is in progress ({:?}). \
+                        .to_string(),
+                ));
+            }
+            state => {
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Cannot merge: another operation is in progress ({:?}). \
                  Complete or abort it first.",
-                state
-            )));
+                    state
+                )));
+            }
         }
-    }
 
-    // Find the commit to merge
-    let reference = repo
-        .find_reference(&format!("refs/heads/{}", source_ref))
-        .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", source_ref)))
-        .or_else(|_| repo.find_reference(&source_ref))?;
+        // Find the commit to merge
+        let reference = repo
+            .find_reference(&format!("refs/heads/{}", source_ref))
+            .or_else(|_| repo.find_reference(&format!("refs/remotes/{}", source_ref)))
+            .or_else(|_| repo.find_reference(&source_ref))?;
 
-    let annotated_commit = repo.reference_to_annotated_commit(&reference)?;
-    let (analysis, _preference) = repo.merge_analysis(&[&annotated_commit])?;
+        let annotated_commit = repo.reference_to_annotated_commit(&reference)?;
+        let (analysis, _preference) = repo.merge_analysis(&[&annotated_commit])?;
 
-    if analysis.is_up_to_date() {
-        return Ok(());
-    }
+        if analysis.is_up_to_date() {
+            return Ok(());
+        }
 
-    if analysis.is_fast_forward() && !no_ff.unwrap_or(false) && !squash.unwrap_or(false) {
-        // Fast-forward merge. Check out the target tree SAFELY first — git
-        // aborts a merge that would overwrite local changes or untracked
-        // files — and only move the branch ref once the checkout succeeded.
-        let target_oid = annotated_commit.id();
-        let target_commit = repo.find_commit(target_oid)?;
-        let head = repo.head()?;
-        let refname = head
-            .name()
-            .ok()
-            .ok_or_else(|| LeviathanError::InvalidReference)?;
+        if analysis.is_fast_forward() && !no_ff.unwrap_or(false) && !squash.unwrap_or(false) {
+            // Fast-forward merge. Check out the target tree SAFELY first — git
+            // aborts a merge that would overwrite local changes or untracked
+            // files — and only move the branch ref once the checkout succeeded.
+            let target_oid = annotated_commit.id();
+            let target_commit = repo.find_commit(target_oid)?;
+            let head = repo.head()?;
+            let refname = head
+                .name()
+                .ok()
+                .ok_or_else(|| LeviathanError::InvalidReference)?;
 
-        // Collect the conflicting paths so the error can name them, like
-        // git's "Your local changes to the following files ..." message.
-        let conflict_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-        let notify_paths = std::rc::Rc::clone(&conflict_paths);
-        let mut checkout = git2::build::CheckoutBuilder::new();
-        checkout
-            .notify_on(git2::CheckoutNotificationType::CONFLICT)
-            .notify(move |_why, path, _baseline, _target, _workdir| {
-                if let Some(p) = path {
-                    notify_paths.borrow_mut().push(p.display().to_string());
-                }
-                true
-            });
+            // Collect the conflicting paths so the error can name them, like
+            // git's "Your local changes to the following files ..." message.
+            let conflict_paths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+            let notify_paths = std::rc::Rc::clone(&conflict_paths);
+            let mut checkout = git2::build::CheckoutBuilder::new();
+            checkout
+                .notify_on(git2::CheckoutNotificationType::CONFLICT)
+                .notify(move |_why, path, _baseline, _target, _workdir| {
+                    if let Some(p) = path {
+                        notify_paths.borrow_mut().push(p.display().to_string());
+                    }
+                    true
+                });
 
-        match repo.checkout_tree(target_commit.as_object(), Some(&mut checkout)) {
-            Ok(()) => {}
-            Err(e) if e.code() == git2::ErrorCode::Conflict => {
-                let files = conflict_paths.borrow().join(", ");
-                return Err(LeviathanError::OperationFailed(if files.is_empty() {
-                    "Your local changes would be overwritten by merge. \
+            match repo.checkout_tree(target_commit.as_object(), Some(&mut checkout)) {
+                Ok(()) => {}
+                Err(e) if e.code() == git2::ErrorCode::Conflict => {
+                    let files = conflict_paths.borrow().join(", ");
+                    return Err(LeviathanError::OperationFailed(if files.is_empty() {
+                        "Your local changes would be overwritten by merge. \
                      Commit or stash them before you merge."
-                        .to_string()
-                } else {
-                    format!(
-                        "Your local changes to the following files would be \
+                            .to_string()
+                    } else {
+                        format!(
+                            "Your local changes to the following files would be \
                          overwritten by merge: {}. Commit or stash them before you merge.",
-                        files
-                    )
-                }));
+                            files
+                        )
+                    }));
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
-        }
 
-        let mut reference = repo.find_reference(refname)?;
-        reference.set_target(target_oid, "Fast-forward merge")?;
+            let mut reference = repo.find_reference(refname)?;
+            reference.set_target(target_oid, "Fast-forward merge")?;
 
-        // git runs post-merge after a fast-forward merge too (flag 0 = not a
-        // squash merge). Non-blocking.
-        crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
-    } else {
-        // Normal or squash merge. Once repo.merge() succeeds the index/working
-        // tree is in MERGING state; any subsequent failure must reset that
-        // state so the user isn't stuck with a half-merged repo.
-        repo.merge(&[&annotated_commit], None, None)?;
-
-        // A conflict is the expected "user must resolve" path; the UI drives a
-        // conflict-resolution flow that needs MERGE_HEAD intact (and
-        // `abort_merge` to undo), so return before any cleanup.
-        if repo.index()?.has_conflicts() {
-            return Err(LeviathanError::MergeConflict);
-        }
-
-        // git runs pre-merge-commit before creating the automatic merge commit,
-        // but a non-zero exit does NOT abort the merge — git leaves
-        // MERGE_HEAD/MERGE_MSG in place ("Not committing merge; use 'git commit'
-        // to complete the merge"). So on a veto, return WITHOUT cleanup_state,
-        // keeping the merge resumable via commit_merge and abortable via
-        // abort_merge. (A squash merge records no merge commit, so no hook.)
-        if !squash.unwrap_or(false) {
-            crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
-        }
-
-        // Default to the MERGE_MSG libgit2 wrote during repo.merge() — git's
-        // canonical auto-message ("Merge branch 'feature'") — with '#' comment
-        // lines stripped, like `git commit` does.
-        let commit_message = message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
-
-        // git runs commit-msg for an automatic merge commit (after
-        // pre-merge-commit); the hook may rewrite the message or veto it. Like
-        // pre-merge-commit, a veto leaves the merge resumable, so run it before
-        // the cleanup-guarded commit closure. (A squash merge records no merge
-        // commit, so no hook — matching `git merge --squash`.)
-        let commit_message = if squash.unwrap_or(false) {
-            commit_message
+            // git runs post-merge after a fast-forward merge too (flag 0 = not a
+            // squash merge). Non-blocking.
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
         } else {
-            crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?
-        };
+            // Normal or squash merge. Once repo.merge() succeeds the index/working
+            // tree is in MERGING state; any subsequent failure must reset that
+            // state so the user isn't stuck with a half-merged repo.
+            repo.merge(&[&annotated_commit], None, None)?;
 
-        let result = (|| -> Result<()> {
-            let signature = repo.signature()?;
-            let head = repo.head()?.peel_to_commit()?;
-            let tree_oid = repo.index()?.write_tree()?;
-            let tree = repo.find_tree(tree_oid)?;
-
-            if squash.unwrap_or(false) {
-                repo.commit(
-                    Some("HEAD"),
-                    &signature,
-                    &signature,
-                    &commit_message,
-                    &tree,
-                    &[&head],
-                )?;
-            } else {
-                let source_commit = repo.find_commit(annotated_commit.id())?;
-                repo.commit(
-                    Some("HEAD"),
-                    &signature,
-                    &signature,
-                    &commit_message,
-                    &tree,
-                    &[&head, &source_commit],
-                )?;
-
-                // post-merge after the merge commit (flag 0 = not a squash).
-                crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            // A conflict is the expected "user must resolve" path; the UI drives a
+            // conflict-resolution flow that needs MERGE_HEAD intact (and
+            // `abort_merge` to undo), so return before any cleanup.
+            if repo.index()?.has_conflicts() {
+                return Err(LeviathanError::MergeConflict);
             }
-            Ok(())
-        })();
 
-        // Leave MERGE_HEAD/MERGE_MSG in place on a commit-phase failure.
-        //
-        // cleanup_state() only UNLINKS the state files — it does not touch the
-        // index or the working tree, both of which repo.merge() has already
-        // filled with the fully merged result. So calling it here removed the
-        // only marker that makes the merge resumable and abortable while
-        // leaving the merge itself applied: repo.state() went Clean, the
-        // operation banner vanished, abort_merge refused with "there is no
-        // merge to abort", and the whole inter-branch diff sat staged under a
-        // toast reading "Merge failed". Committing that by hand produces a
-        // single-parent commit, so the source branch is still not an ancestor
-        // of HEAD — and the later force-delete escalation then discards commits
-        // that only LOOK duplicated.
-        //
-        // Canonical git leaves MERGE_HEAD on any failure after the merge, which
-        // is why commit_merge_signed one function away goes to the trouble of
-        // snapshotting and restoring it. Reachable with no user.name/user.email
-        // configured (repo.signature() is called raw), or on index.lock
-        // contention from a terminal, or a disk-full write_tree.
-        result?;
+            // git runs pre-merge-commit before creating the automatic merge commit,
+            // but a non-zero exit does NOT abort the merge — git leaves
+            // MERGE_HEAD/MERGE_MSG in place ("Not committing merge; use 'git commit'
+            // to complete the merge"). So on a veto, return WITHOUT cleanup_state,
+            // keeping the merge resumable via commit_merge and abortable via
+            // abort_merge. (A squash merge records no merge commit, so no hook.)
+            if !squash.unwrap_or(false) {
+                crate::commands::hooks::run_hook_blocking(&repo, "pre-merge-commit", &[], None)?;
+            }
 
-        repo.cleanup_state()?;
+            // Default to the MERGE_MSG libgit2 wrote during repo.merge() — git's
+            // canonical auto-message ("Merge branch 'feature'") — with '#' comment
+            // lines stripped, like `git commit` does.
+            let commit_message =
+                message.unwrap_or_else(|| default_merge_message(&repo, &source_ref));
+
+            // git runs commit-msg for an automatic merge commit (after
+            // pre-merge-commit); the hook may rewrite the message or veto it. Like
+            // pre-merge-commit, a veto leaves the merge resumable, so run it before
+            // the cleanup-guarded commit closure. (A squash merge records no merge
+            // commit, so no hook — matching `git merge --squash`.)
+            let commit_message = if squash.unwrap_or(false) {
+                commit_message
+            } else {
+                crate::commands::hooks::run_commit_msg_hook(&repo, &commit_message)?
+            };
+
+            // Route signed commits through the git CLI, exactly as commit_merge
+            // does for a conflicted merge.
+            //
+            // Without this, commit.gpgsign was honoured only when the merge happened
+            // to CONFLICT (and was therefore concluded via commit_merge). The same
+            // gesture produced a signed merge commit or an unsigned one depending
+            // purely on whether the branches touched the same lines — and on a repo
+            // that enforces signed commits, the unsigned ones are rejected on push
+            // or show as unverified, with nothing to explain why only some merges
+            // fail.
+            //
+            // MERGE_HEAD and the merged index are already on disk here, so
+            // `git commit -S` records the correct two-parent merge commit (or, for
+            // a squash, the single-parent commit after the helper clears the merge
+            // metadata) and runs the remaining hooks natively.
+            if crate::commands::commit::should_sign_commit(&path, None)? {
+                break 'merge_body Some((commit_message, squash.unwrap_or(false)));
+            }
+
+            let result = (|| -> Result<()> {
+                let signature = repo.signature()?;
+                let head = repo.head()?.peel_to_commit()?;
+                let tree_oid = repo.index()?.write_tree()?;
+                let tree = repo.find_tree(tree_oid)?;
+
+                if squash.unwrap_or(false) {
+                    repo.commit(
+                        Some("HEAD"),
+                        &signature,
+                        &signature,
+                        &commit_message,
+                        &tree,
+                        &[&head],
+                    )?;
+                } else {
+                    let source_commit = repo.find_commit(annotated_commit.id())?;
+                    repo.commit(
+                        Some("HEAD"),
+                        &signature,
+                        &signature,
+                        &commit_message,
+                        &tree,
+                        &[&head, &source_commit],
+                    )?;
+
+                    // post-merge after the merge commit (flag 0 = not a squash).
+                    crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+                }
+                Ok(())
+            })();
+
+            // Leave MERGE_HEAD/MERGE_MSG in place on a commit-phase failure.
+            //
+            // cleanup_state() only UNLINKS the state files — it does not touch the
+            // index or the working tree, both of which repo.merge() has already
+            // filled with the fully merged result. So calling it here removed the
+            // only marker that makes the merge resumable and abortable while
+            // leaving the merge itself applied: repo.state() went Clean, the
+            // operation banner vanished, abort_merge refused with "there is no
+            // merge to abort", and the whole inter-branch diff sat staged under a
+            // toast reading "Merge failed". Committing that by hand produces a
+            // single-parent commit, so the source branch is still not an ancestor
+            // of HEAD — and the later force-delete escalation then discards commits
+            // that only LOOK duplicated.
+            //
+            // Canonical git leaves MERGE_HEAD on any failure after the merge, which
+            // is why commit_merge_signed one function away goes to the trouble of
+            // snapshotting and restoring it. Reachable with no user.name/user.email
+            // configured (repo.signature() is called raw), or on index.lock
+            // contention from a terminal, or a disk-full write_tree.
+            result?;
+
+            repo.cleanup_state()?;
+        }
+
+        None
+    };
+
+    if let Some((commit_message, is_squash)) = signed_merge {
+        commit_merge_signed(&path, &commit_message, is_squash).await?;
+
+        // `git commit -S` clears the merge state itself, so there is no
+        // cleanup_state here — the same shape commit_merge uses.
+        if !is_squash {
+            let repo = git2::Repository::open(Path::new(&path))?;
+            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+        }
     }
 
     Ok(())
@@ -3659,6 +3697,82 @@ mod tests {
             msg
         );
         assert_eq!(head.summary().unwrap(), Some("Merge branch 'feature'"));
+    }
+
+    /// Branches that touch different files, so the merge completes cleanly and
+    /// never routes through the conflict path.
+    fn setup_cleanly_mergeable_branches(repo: &TestRepo) {
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add base", &[("base.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature file", &[("feature.txt", "feature")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main file", &[("main.txt", "main")]);
+    }
+
+    /// A CLEAN merge must honour commit.gpgsign, exactly as a conflicted one
+    /// does.
+    ///
+    /// merge() created the merge commit with repo.commit(), which cannot sign,
+    /// while a conflicted merge finishes through commit_merge and does sign. So
+    /// the same gesture produced a signed or unsigned merge commit depending
+    /// purely on whether the branches happened to touch the same lines. On a
+    /// repo that enforces signed commits the unsigned ones are rejected on push
+    /// or show as unverified, with nothing to explain why only some fail.
+    ///
+    /// Signing is asserted by its failure: with a bogus gpg.program the merge
+    /// must now FAIL, which it can only do if it went through `git commit -S`.
+    /// Before the fix it silently succeeded with an unsigned commit.
+    #[tokio::test]
+    async fn test_clean_merge_is_signed_when_gpgsign_enabled() {
+        let repo = TestRepo::with_initial_commit();
+        setup_cleanly_mergeable_branches(&repo);
+
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("commit.gpgsign", true).unwrap();
+            config
+                .set_str("gpg.program", "/nonexistent/definitely-not-real-gpg")
+                .unwrap();
+        }
+
+        let result = merge(repo.path_str(), "feature".to_string(), None, None, None).await;
+        assert!(
+            result.is_err(),
+            "a clean merge must go through the signing path, so bogus signing config must fail it"
+        );
+
+        // The merge stays resumable rather than being half-applied and forgotten.
+        let git_repo = repo.repo();
+        assert!(
+            git_repo.path().join("MERGE_HEAD").exists(),
+            "a failed signed merge must leave MERGE_HEAD so it can be retried or aborted"
+        );
+    }
+
+    /// Control: with signing off, a clean merge still completes normally and
+    /// records a two-parent merge commit.
+    #[tokio::test]
+    async fn test_clean_merge_without_signing_still_succeeds() {
+        let repo = TestRepo::with_initial_commit();
+        setup_cleanly_mergeable_branches(&repo);
+
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("commit.gpgsign", false).unwrap();
+        }
+
+        merge(repo.path_str(), "feature".to_string(), None, None, None)
+            .await
+            .expect("clean merge should succeed");
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 2, "a merge commit has two parents");
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
     }
 
     #[tokio::test]
