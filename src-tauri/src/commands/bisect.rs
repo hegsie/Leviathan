@@ -348,20 +348,42 @@ pub async fn bisect_start(
     })
 }
 
+/// The terms this bisect session was started with.
+///
+/// A session started with `--term-new`/`--term-old` (say "broken"/"working")
+/// REJECTS the literal `git bisect bad`: git dies with "Invalid command: you're
+/// currently in a broken/working bisect". get_bisect_status already reads these
+/// terms, so the dialog happily showed such a session as in progress while its
+/// Good and Bad buttons could not advance it at all — including a session the
+/// user started in their own terminal.
+fn session_terms(repo_path: &Path) -> (String, String) {
+    match git_dir(repo_path) {
+        Some(dir) => read_bisect_terms(&dir),
+        None => ("bad".to_string(), "good".to_string()),
+    }
+}
+
+/// git announces the culprit using the session's own bad term.
+fn culprit_marker(term_bad: &str) -> String {
+    format!("is the first {} commit", term_bad)
+}
+
 /// Mark the current commit (or specified commit) as bad
 #[command]
 pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectStepResult> {
     let repo_path = Path::new(&path);
 
+    let (term_bad, _) = session_terms(repo_path);
+
     let args: Vec<&str> = match &commit {
-        Some(c) => vec!["bisect", "bad", c.as_str()],
-        None => vec!["bisect", "bad"],
+        Some(c) => vec!["bisect", term_bad.as_str(), c.as_str()],
+        None => vec!["bisect", term_bad.as_str()],
     };
 
     let output = run_git_command(repo_path, &args)?;
 
     // Check if we found the culprit
-    let culprit = if output.contains("is the first bad commit") {
+    let culprit = if output.contains(&culprit_marker(&term_bad)) {
         // Parse the culprit commit info
         parse_culprit_from_output(&output)
     } else {
@@ -382,15 +404,18 @@ pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectSt
 pub async fn bisect_good(path: String, commit: Option<String>) -> Result<BisectStepResult> {
     let repo_path = Path::new(&path);
 
+    let (term_bad, term_good) = session_terms(repo_path);
+
     let args: Vec<&str> = match &commit {
-        Some(c) => vec!["bisect", "good", c.as_str()],
-        None => vec!["bisect", "good"],
+        Some(c) => vec!["bisect", term_good.as_str(), c.as_str()],
+        None => vec!["bisect", term_good.as_str()],
     };
 
     let output = run_git_command(repo_path, &args)?;
 
-    // Check if we found the culprit
-    let culprit = if output.contains("is the first bad commit") {
+    // Marking good is what usually NARROWS the range to the culprit, so this
+    // handler needs the bad term to recognise the announcement just as much.
+    let culprit = if output.contains(&culprit_marker(&term_bad)) {
         parse_culprit_from_output(&output)
     } else {
         None
@@ -642,6 +667,69 @@ mod tests {
         assert!(bad_result.is_ok());
 
         // Reset for cleanup
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// A session started with custom terms must still be advanceable.
+    ///
+    /// get_bisect_status already reads BISECT_TERMS, so the dialog shows such a
+    /// session as in progress — including one the user started in their own
+    /// terminal. But the handlers ran the literal `git bisect bad`/`good`,
+    /// which git REJECTS in a custom-term session ("Invalid command: you're
+    /// currently in a broken/working bisect"). The user could see the session
+    /// and could not advance it at all.
+    #[tokio::test]
+    async fn test_bisect_good_and_bad_honour_custom_terms() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        repo.create_commit("Commit 4", &[("file4.txt", "content 4")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        // Start the session the way a terminal user would, with custom terms.
+        run_git_command(
+            repo.path.as_path(),
+            &["bisect", "start", "--term-new=broken", "--term-old=working"],
+        )
+        .expect("start a custom-term bisect");
+        run_git_command(repo.path.as_path(), &["bisect", "broken", &bad_oid])
+            .expect("mark the bad end");
+        run_git_command(repo.path.as_path(), &["bisect", "working", &good_oid])
+            .expect("mark the good end");
+
+        // The dialog shows this session, so its buttons must work on it.
+        let bad_result = bisect_bad(repo.path_str(), None).await;
+        assert!(
+            bad_result.is_ok(),
+            "marking bad must use the session's term: {:?}",
+            bad_result.err()
+        );
+
+        let good_result = bisect_good(repo.path_str(), None).await;
+        assert!(
+            good_result.is_ok(),
+            "marking good must use the session's term: {:?}",
+            good_result.err()
+        );
+
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// The default-term session keeps working unchanged.
+    #[tokio::test]
+    async fn test_bisect_good_and_bad_still_work_with_default_terms() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        assert!(bisect_bad(repo.path_str(), None).await.is_ok());
         bisect_reset(repo.path_str()).await.unwrap();
     }
 
