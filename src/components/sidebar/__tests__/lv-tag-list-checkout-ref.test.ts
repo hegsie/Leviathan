@@ -117,14 +117,16 @@ describe('lv-tag-list checkout targets the tag ref', () => {
     expect(payload.refName).to.equal('refs/tags/release');
   });
 
-  it('does not double-qualify a name that already looks like a ref', async () => {
+  // A tag name may carry its own slashes (`release/2.0`, `nightly/2026-01-01`).
+  // Those are part of the name, so the prefix goes in front of the whole thing
+  // rather than being spliced into it.
+  it('qualifies a nested tag name in one piece', async () => {
     const el = await createComponent();
-    await checkoutTag(el, 'v1.0.0');
+    await checkoutTag(el, 'release/2.0');
 
     const call = invokeCalls.find((c) => c.command === 'checkout_with_autostash');
     const args = call!.args as Record<string, unknown>;
     const payload = (args?.args ?? args) as Record<string, unknown>;
-    expect(payload.refName).to.equal('refs/tags/v1.0.0');
-    expect(String(payload.refName).startsWith('refs/tags/refs/')).to.be.false;
+    expect(payload.refName).to.equal('refs/tags/release/2.0');
   });
 });
