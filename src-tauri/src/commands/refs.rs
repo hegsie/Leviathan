@@ -129,10 +129,10 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
     // app itself offers, and made "Jump to HEAD" a no-op. Emit HEAD itself.
     //
     // Guarded on a resolved HEAD rather than swallowing the error: the ordinary
-    // reason head_detached() has nothing to say is an unborn HEAD, and that
-    // already shows up as `head: None` above. Anything else is a real
-    // repository problem, and silently returning no HEAD marker would present
-    // it as an attached checkout.
+    // reason head_detached() has nothing to say is an unborn HEAD, and the
+    // local `head` binding above is already None in that case. Anything else is
+    // a real repository problem, and silently returning no HEAD marker would
+    // present it as an attached checkout.
     if let Some(head_ref) = head.as_ref() {
         if repo.head_detached()? {
             if let Some(oid) = head_ref.target() {

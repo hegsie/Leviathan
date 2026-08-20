@@ -2237,7 +2237,15 @@ export class LvGraphCanvas extends LitElement {
       const canvasY = e.clientY - rect.top;
 
       const refLabelHit = this.renderer.getRefLabelAtPoint(canvasX, canvasY);
-      if (refLabelHit && refLabelHit.refType !== 'pullRequest') {
+      // A detached HEAD is a STATE, not a ref you can act on. Its label reads
+      // "HEAD (detached)", which names no ref, so letting it through opened the
+      // branch/tag menu offering Checkout, Delete, Merge and Rename against a
+      // name git would reject.
+      if (
+        refLabelHit &&
+        refLabelHit.refType !== 'pullRequest' &&
+        refLabelHit.refType !== 'detachedHead'
+      ) {
         // Dispatch ref context menu event for branches and tags
         this.dispatchEvent(
           new CustomEvent('ref-context-menu', {
