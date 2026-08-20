@@ -846,6 +846,29 @@ pub async fn get_branch_tracking_info(path: String, branch: String) -> Result<Br
 /// If `checkout` is true (the default), the working directory is switched to the new branch.
 #[command]
 pub async fn create_orphan_branch(path: String, name: String, checkout: bool) -> Result<()> {
+    // `git checkout --orphan` is the only way to start an orphan branch, and it
+    // ALWAYS switches to it. That is not a limitation of this command: an
+    // unborn branch has no ref until its first commit, so there is nothing to
+    // create and leave behind.
+    //
+    // checkout=false used to run `git checkout -` afterwards to switch back,
+    // and that never worked — `--orphan` writes no HEAD reflog entry, so
+    // `@{-1}` does not resolve and git fails with "pathspec '-' did not match
+    // any file(s) known to git". The command returned an error AND left HEAD on
+    // the unborn orphan, where repo.head() fails for the whole app: the graph,
+    // the branch list and the status panel all go blank — after the user
+    // explicitly asked NOT to switch.
+    //
+    // Refused up front, so the repository is never touched.
+    if !checkout {
+        return Err(LeviathanError::OperationFailed(
+            "An orphan branch has no commits, so it is not a branch until its first commit is \
+             made — git cannot create one without switching to it. Check it out, make the first \
+             commit, then switch back."
+                .to_string(),
+        ));
+    }
+
     let mut args = vec!["checkout", "--orphan"];
     let name_ref = name.as_str();
     args.push(name_ref);
@@ -864,31 +887,6 @@ pub async fn create_orphan_branch(path: String, name: String, checkout: bool) ->
             "Git checkout --orphan failed: {}",
             stderr
         )));
-    }
-
-    // If checkout is false, switch back to the previous branch
-    if !checkout {
-        // We need to get back to the previous HEAD
-        // git checkout --orphan always switches to the new branch,
-        // so we use git checkout - to go back
-        let back_output = crate::utils::create_command("git")
-            .current_dir(&path)
-            .args(["checkout", "-"])
-            .output()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!(
-                    "Failed to switch back to previous branch: {}",
-                    e
-                ))
-            })?;
-
-        if !back_output.status.success() {
-            let stderr = String::from_utf8_lossy(&back_output.stderr);
-            return Err(LeviathanError::OperationFailed(format!(
-                "Failed to switch back to previous branch: {}",
-                stderr
-            )));
-        }
     }
 
     Ok(())
@@ -2032,43 +2030,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_create_orphan_branch_with_checkout() {
-        let repo = TestRepo::with_initial_commit();
-
-        let result = create_orphan_branch(repo.path_str(), "orphan-branch".to_string(), true).await;
-        // On CI, git CLI may not be available or behave differently.
-        // Only check the branch name if the command succeeded.
-        if result.is_ok() {
-            // After `git checkout --orphan`, HEAD points to an unborn branch.
-            // git2's repo.head() will fail because there's no commit on the orphan branch yet.
-            // Read the HEAD file directly to verify the branch name.
-            let head_content =
-                std::fs::read_to_string(repo.path.join(".git").join("HEAD")).unwrap();
-            assert!(
-                head_content.contains("refs/heads/orphan-branch"),
-                "HEAD should point to orphan-branch, got: {}",
-                head_content.trim()
-            );
-        }
-        // If git CLI is not available or fails, we don't fail the test
-        // since the production code requires external git
-    }
-
-    #[tokio::test]
-    async fn test_create_orphan_branch_without_checkout() {
-        let repo = TestRepo::with_initial_commit();
-        let original_branch = repo.current_branch();
-
-        let result =
-            create_orphan_branch(repo.path_str(), "orphan-no-checkout".to_string(), false).await;
-        // On CI, git CLI may not be available or behave differently.
-        if result.is_ok() {
-            // Should be back on the original branch
-            assert_eq!(repo.current_branch(), original_branch);
-        }
-    }
-
     /// Creating the local branch must happen BEFORE the working tree is
     /// rewritten.
     ///
@@ -2155,6 +2116,60 @@ mod tests {
             repo.find_branch("feature", git2::BranchType::Local)
                 .is_err(),
             "a failed checkout must not leave the local branch behind"
+        );
+    }
+
+    /// Asking for an orphan branch WITHOUT checking it out must not strand HEAD.
+    ///
+    /// `git checkout --orphan` always switches, and it writes no HEAD reflog
+    /// entry — so the old `git checkout -` to switch back failed with
+    /// "pathspec '-' did not match any file(s) known to git". The command
+    /// returned an error AND left HEAD on the unborn orphan, where repo.head()
+    /// fails for the whole app: graph, branch list and status all go blank,
+    /// after the user explicitly asked NOT to switch.
+    #[tokio::test]
+    async fn test_create_orphan_branch_without_checkout_leaves_head_alone() {
+        let test_repo = TestRepo::with_initial_commit();
+        let original = test_repo.current_branch();
+
+        let err = create_orphan_branch(test_repo.path_str(), "docs".to_string(), false)
+            .await
+            .expect_err("an orphan branch cannot be created without switching to it");
+        assert!(
+            err.to_string().contains("first commit"),
+            "the refusal must explain why, got: {}",
+            err
+        );
+
+        // The repository is untouched: still on the original branch, with a
+        // resolvable HEAD, and no half-made orphan anywhere.
+        let repo = test_repo.repo();
+        assert!(repo.head().is_ok(), "HEAD must still resolve");
+        assert_eq!(repo.head().unwrap().shorthand().unwrap(), original);
+        assert!(repo.find_branch("docs", git2::BranchType::Local).is_err());
+    }
+
+    /// Checking it out is the supported route, and still works.
+    #[tokio::test]
+    async fn test_create_orphan_branch_with_checkout_switches_to_it() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        create_orphan_branch(test_repo.path_str(), "gh-pages".to_string(), true)
+            .await
+            .expect("creating and checking out an orphan branch must work");
+
+        // An unborn branch: HEAD names it symbolically but it has no commit
+        // yet, which is exactly what an orphan is before its first commit.
+        let repo = test_repo.repo();
+        let head_ref = repo.find_reference("HEAD").unwrap();
+        assert_eq!(
+            head_ref.symbolic_target().unwrap().unwrap(),
+            "refs/heads/gh-pages",
+            "HEAD must name the new orphan branch"
+        );
+        assert!(
+            repo.head().is_err(),
+            "the orphan is unborn until its first commit"
         );
     }
 

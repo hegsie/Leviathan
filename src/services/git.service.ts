@@ -439,7 +439,12 @@ export async function createBranch(
 }
 
 /**
- * Create an orphan branch (a branch with no parent commits)
+ * Create an orphan branch (a branch with no parent commits).
+ *
+ * `checkout` must be true. An orphan branch has no commits, so it is not a ref
+ * until its first commit is made — git cannot create one without switching to
+ * it, and the backend refuses `checkout: false` rather than stranding HEAD on
+ * an unborn branch.
  */
 export async function createOrphanBranch(
   path: string,

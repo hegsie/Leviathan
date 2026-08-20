@@ -658,14 +658,22 @@ describe('git.service - Branch operations', () => {
       expect(result.success).to.be.true;
     });
 
-    it('invokes create_orphan_branch without checkout', async () => {
-      mockInvoke = () => Promise.resolve(null);
+    // checkout:false is refused by the backend — an orphan branch is not a ref
+    // until its first commit, so git cannot create one without switching to it.
+    // The service still forwards the flag; the refusal is the backend's.
+    it('forwards checkout:false, which the backend refuses', async () => {
+      mockInvoke = () =>
+        Promise.reject({
+          code: 'OPERATION_FAILED',
+          message: 'An orphan branch has no commits, so it is not a branch until its first commit',
+        });
 
       const result = await createOrphanBranch('/test/repo', { name: 'docs', checkout: false });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.name).to.equal('docs');
       expect(args.checkout).to.be.false;
-      expect(result.success).to.be.true;
+      expect(result.success).to.be.false;
+      expect(result.error?.message).to.contain('first commit');
     });
 
     it('handles error when orphan branch already exists', async () => {
