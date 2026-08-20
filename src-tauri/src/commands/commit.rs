@@ -424,20 +424,42 @@ pub async fn create_commit(
 
     let commit_oid = if amend.unwrap_or(false) {
         let head_commit = repo.head()?.peel_to_commit()?;
-        let parent_ids: Vec<git2::Oid> = head_commit.parent_ids().collect();
-        let parents: Vec<git2::Commit> = parent_ids
-            .iter()
-            .filter_map(|id| repo.find_commit(*id).ok())
-            .collect();
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
-        repo.commit(
+        // `git commit --amend` PRESERVES the original author identity and author
+        // date; only `--reset-author` changes them. An explicitly supplied
+        // author date still applies, on top of the original identity.
+        //
+        // The signed path (`git commit --amend` via the CLI) and amend_commit
+        // both already preserve the author, so rebuilding it from
+        // repo.signature() here also made the result depend on whether
+        // commit.gpgsign happened to be enabled.
+        let amend_author: git2::Signature<'_> = if author_date.is_some() {
+            let original = head_commit.author();
+            signature_with_date(
+                original.name().ok().unwrap_or("Unknown"),
+                original.email().ok().unwrap_or(""),
+                author_date.as_deref(),
+            )?
+        } else {
+            head_commit.author()
+        };
+
+        // Commit::amend, not repo.commit(Some("HEAD"), .., parents).
+        //
+        // libgit2 validates that the updated ref's current tip IS the new
+        // commit's first parent. An amend replaces the tip, so that check can
+        // never pass and this path failed outright with "current tip is not the
+        // first parent" — meaning amend from the commit panel was broken for
+        // every repository without commit.gpgsign enabled. Commit::amend
+        // performs the replacement libgit2 expects and carries the original
+        // parents over unchanged.
+        head_commit.amend(
             Some("HEAD"),
-            &author_sig,
-            &committer_sig,
-            &message,
-            &tree,
-            &parent_refs,
+            Some(&amend_author),
+            Some(&committer_sig),
+            None,
+            Some(&message),
+            Some(&tree),
         )?
     } else {
         let mut parents: Vec<git2::Commit> = repo
@@ -583,20 +605,23 @@ pub async fn amend_commit_message(path: String, message: String) -> Result<Commi
     let tree = head_commit.tree()?;
     let signature = repo.signature()?;
 
-    let parent_ids: Vec<git2::Oid> = head_commit.parent_ids().collect();
-    let parents: Vec<git2::Commit> = parent_ids
-        .iter()
-        .filter_map(|id| repo.find_commit(*id).ok())
-        .collect();
-    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-
-    let new_oid = repo.commit(
+    // A reword changes only the message. Passing the fresh signature as AUTHOR
+    // as well re-attributed the commit to whoever reworded it and reset the
+    // author date to now — which also reorders it in date-sorted history views.
+    // git preserves the author across a reword; only the committer changes.
+    //
+    // Commit::amend, not repo.commit(Some("HEAD"), .., parents): libgit2 checks
+    // that the updated ref's tip is the new commit's first parent, which a
+    // reword never satisfies, so that call failed with "current tip is not the
+    // first parent". Commit::amend performs the replacement and carries the
+    // original parents over unchanged.
+    let new_oid = head_commit.amend(
         Some("HEAD"),
-        &signature,
-        &signature,
-        &message,
-        &tree,
-        &parent_refs,
+        Some(&head_commit.author()),
+        Some(&signature),
+        None,
+        Some(&message),
+        Some(&tree),
     )?;
 
     crate::commands::hooks::run_hook_noblock(&repo, "post-commit", &[]);
@@ -1963,6 +1988,165 @@ mod tests {
 
         let result = get_commit_message(repo.path_str(), fake_oid).await;
         assert!(result.is_err());
+    }
+
+    /// Amending through create_commit must actually succeed.
+    ///
+    /// The commit panel sends {message, amend} to create_commit, which took the
+    /// git2 path whenever commit.gpgsign was off. That path called
+    /// repo.commit(Some("HEAD"), .., parents-of-HEAD), and libgit2 rejects it
+    /// because the ref's tip is not the new commit's first parent — so amend
+    /// failed outright with "current tip is not the first parent" for every
+    /// repository without signing enabled.
+    #[tokio::test]
+    async fn test_unsigned_amend_replaces_head_instead_of_failing() {
+        let test_repo = TestRepo::with_initial_commit();
+        let first = test_repo.head_oid();
+        test_repo.create_commit("Second", &[("a.txt", "content")]);
+        let before = test_repo.head_oid();
+
+        let result = create_commit(
+            test_repo.path_str(),
+            "Amended second".to_string(),
+            Some(true),
+            Some(false), // unsigned: the git2 path
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "unsigned amend must succeed, got: {:?}",
+            result.err()
+        );
+
+        let repo = test_repo.repo();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+
+        assert_eq!(head.message().unwrap().trim(), "Amended second");
+        assert_ne!(head.id(), before, "amend must replace the tip");
+        assert_eq!(head.parent_count(), 1, "the original parent is preserved");
+        assert_eq!(head.parent_id(0).unwrap(), first);
+    }
+
+    /// `git commit --amend` preserves the ORIGINAL author identity and author
+    /// date; only `--reset-author` changes them.
+    ///
+    /// The commit panel sends only message+amend, so every amend through it
+    /// silently re-attributed the commit to the current user and reset its
+    /// author date to now — and only when commit.gpgsign was OFF, since the
+    /// signed path shells out to `git commit --amend`, which gets it right.
+    #[tokio::test]
+    async fn test_amend_preserves_the_original_author() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        const ORIGINAL_TIME: i64 = 1_000_000_000;
+        {
+            let repo = test_repo.repo();
+            test_repo.create_file("a.txt", "content");
+            test_repo.stage_file("a.txt");
+
+            let mut index = repo.index().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+
+            let author = git2::Signature::new(
+                "Original Author",
+                "original@example.com",
+                &git2::Time::new(ORIGINAL_TIME, 0),
+            )
+            .unwrap();
+            let committer = repo.signature().unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+
+            repo.commit(
+                Some("HEAD"),
+                &author,
+                &committer,
+                "Original message",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        create_commit(
+            test_repo.path_str(),
+            "Amended message".to_string(),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let repo = test_repo.repo();
+        let amended = repo.head().unwrap().peel_to_commit().unwrap();
+        let local = repo.signature().unwrap();
+
+        assert_eq!(amended.message().unwrap().trim(), "Amended message");
+
+        // Author untouched, timestamp included.
+        assert_eq!(amended.author().name().unwrap(), "Original Author");
+        assert_eq!(amended.author().email().unwrap(), "original@example.com");
+        assert_eq!(amended.author().when().seconds(), ORIGINAL_TIME);
+
+        // Committer is whoever performed the amend.
+        assert_eq!(amended.committer().name().unwrap(), local.name().unwrap());
+    }
+
+    /// A reword changes the message and nothing else. Passing the fresh
+    /// signature as author re-attributed a colleague's commit to whoever
+    /// reworded it, and the new author date reordered it in date-sorted views.
+    #[tokio::test]
+    async fn test_reword_head_preserves_the_original_author() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        const ORIGINAL_TIME: i64 = 1_000_000_000;
+        {
+            let repo = test_repo.repo();
+            test_repo.create_file("b.txt", "content");
+            test_repo.stage_file("b.txt");
+
+            let mut index = repo.index().unwrap();
+            let tree_oid = index.write_tree().unwrap();
+            let tree = repo.find_tree(tree_oid).unwrap();
+
+            let author = git2::Signature::new(
+                "Colleague",
+                "colleague@example.com",
+                &git2::Time::new(ORIGINAL_TIME, 0),
+            )
+            .unwrap();
+            let committer = repo.signature().unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+
+            repo.commit(
+                Some("HEAD"),
+                &author,
+                &committer,
+                "Typo in mesage",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        }
+
+        amend_commit_message(test_repo.path_str(), "Fix typo in message".to_string())
+            .await
+            .unwrap();
+
+        let repo = test_repo.repo();
+        let reworded = repo.head().unwrap().peel_to_commit().unwrap();
+
+        assert_eq!(reworded.message().unwrap().trim(), "Fix typo in message");
+        assert_eq!(reworded.author().name().unwrap(), "Colleague");
+        assert_eq!(reworded.author().email().unwrap(), "colleague@example.com");
+        assert_eq!(reworded.author().when().seconds(), ORIGINAL_TIME);
     }
 
     #[tokio::test]
