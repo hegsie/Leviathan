@@ -33,7 +33,7 @@
     "@vaadin/router": "^2.0.1",
     "lit": "^3.3.3",
     "shiki": "^4.4.2",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@open-wc/testing": "^5.0.0",
@@ -44,12 +44,12 @@
     "@web/test-runner": "^1.0.0",
     "@web/test-runner-playwright": "^1.0.0",
     "eslint": "^10.8.0",
-    "globals": "^17.7.0",
+    "globals": "^17.11.0",
     "playwright-core": "1.62.1",
     "prettier": "^3.9.6",
     "sharp": "^0.35.3",
     "typescript": "^6.0.0",
-    "typescript-eslint": "^8.66.0",
+    "typescript-eslint": "^8.67.0",
     "vite": "^8.2.1"
   },
   "overrides": {
