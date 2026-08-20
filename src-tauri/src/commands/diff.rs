@@ -989,6 +989,20 @@ pub async fn get_image_versions(
         // For commit diff, get from commit tree
         let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
         get_blob_base64(&repo, &commit.tree()?, &file_path)
+    } else if is_staged {
+        // The staged diff is HEAD vs INDEX, so "after" is the index blob — not
+        // the file on disk.
+        //
+        // Reading from disk meant that staging an image and then editing it
+        // again showed the newer worktree pixels as the staged content: the user
+        // commits believing the image on screen is what will be committed, and
+        // it is not. The text path (diff_tree_to_index) reads the index, so the
+        // image view also contradicted the text view for the same file.
+        repo.index()
+            .ok()
+            .and_then(|index| index.get_path(Path::new(&file_path), 0))
+            .and_then(|entry| repo.find_blob(entry.id).ok())
+            .map(|blob| STANDARD.encode(blob.content()))
     } else {
         // For working directory changes, read from disk
         let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
@@ -1022,6 +1036,68 @@ fn get_blob_base64(repo: &git2::Repository, tree: &git2::Tree, file_path: &str) 
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// The staged image diff must show the INDEX blob, not the file on disk.
+    ///
+    /// The staged diff is HEAD vs index. Reading "after" from disk meant that
+    /// staging an image and then editing it again displayed the newer worktree
+    /// pixels as the staged content — the user commits believing the image on
+    /// screen is what will be committed, and it is not. The text path
+    /// (diff_tree_to_index) reads the index, so the image view also contradicted
+    /// the text view for the same file.
+    #[tokio::test]
+    async fn test_staged_image_diff_shows_the_index_blob() {
+        // PNG magic bytes are enough: nothing here parses the image.
+        const COMMITTED: &[u8] = b"\x89PNG\r\n\x1a\ncommitted-pixels";
+        const STAGED: &[u8] = b"\x89PNG\r\n\x1a\nstaged-pixels";
+        const WORKTREE: &[u8] = b"\x89PNG\r\n\x1a\nworktree-pixels-newer";
+
+        let repo = TestRepo::with_initial_commit();
+        let img = repo.path.join("logo.png");
+
+        std::fs::write(&img, COMMITTED).unwrap();
+        repo.stage_file("logo.png");
+        repo.create_commit("Add image", &[]);
+
+        // Stage a second version, then keep editing the file on disk.
+        std::fs::write(&img, STAGED).unwrap();
+        repo.stage_file("logo.png");
+        std::fs::write(&img, WORKTREE).unwrap();
+
+        let staged_view =
+            get_image_versions(repo.path_str(), "logo.png".to_string(), Some(true), None)
+                .await
+                .unwrap();
+
+        let decode = |b64: &Option<String>| {
+            use base64::Engine;
+            STANDARD.decode(b64.as_ref().expect("image data")).unwrap()
+        };
+
+        assert_eq!(
+            decode(&staged_view.new_data),
+            STAGED,
+            "staged 'after' must be the index blob, not the newer worktree file"
+        );
+        assert_eq!(
+            decode(&staged_view.old_data),
+            COMMITTED,
+            "staged 'before' is the committed blob"
+        );
+
+        // The unstaged view is the mirror: index -> worktree.
+        let unstaged_view =
+            get_image_versions(repo.path_str(), "logo.png".to_string(), Some(false), None)
+                .await
+                .unwrap();
+
+        assert_eq!(decode(&unstaged_view.old_data), STAGED);
+        assert_eq!(
+            decode(&unstaged_view.new_data),
+            WORKTREE,
+            "the unstaged view still reads the working tree"
+        );
+    }
 
     #[tokio::test]
     async fn test_get_diff_no_changes() {
