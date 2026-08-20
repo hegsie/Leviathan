@@ -397,6 +397,9 @@ pub async fn analyze_staged_changes(
             findings: vec![],
             summary: "No staged changes".to_string(),
             risk_level: RiskLevel::Low,
+            // Nothing to analyse, so nothing failed.
+            ai_analysis_ran: true,
+            ai_error: None,
         });
     }
 
@@ -407,14 +410,26 @@ pub async fn analyze_staged_changes(
     let truncated = truncate_content(&diff, MAX_DIFF_BYTES);
     let service = state.read().await;
 
-    if let Ok(response) = service
+    // Both failure arms used to be dropped on the floor. A provider that had
+    // stopped since the availability check, a missing model, a dead network or
+    // an unparseable response all left the command returning success with only
+    // the regex secret findings — rendered as a completed check reading "No
+    // issues found". The user was told their staged changes had been reviewed
+    // when nothing had reviewed them.
+    let ai_error = match service
         .generate_text(VIBE_CHECK_PROMPT, truncated, Some(1000))
         .await
     {
-        if let Ok(ai_analysis) = parse_vibe_check_response(&response) {
-            findings.extend(ai_analysis.findings);
-        }
-    }
+        Ok(response) => match parse_vibe_check_response(&response) {
+            Ok(ai_analysis) => {
+                findings.extend(ai_analysis.findings);
+                None
+            }
+            Err(e) => Some(format!("could not read the model's response: {}", e)),
+        },
+        Err(e) => Some(e.to_string()),
+    };
+    let ai_analysis_ran = ai_error.is_none();
 
     let risk_level = if findings
         .iter()
@@ -430,7 +445,7 @@ pub async fn analyze_staged_changes(
         RiskLevel::Low
     };
 
-    let summary = if findings.is_empty() {
+    let found = if findings.is_empty() {
         "No issues found".to_string()
     } else {
         format!(
@@ -439,11 +454,20 @@ pub async fn analyze_staged_changes(
             if findings.len() == 1 { "" } else { "s" }
         )
     };
+    // Say what was actually checked. "No issues found" over a failed AI pass
+    // is the false assurance this exists to prevent.
+    let summary = if ai_analysis_ran {
+        found
+    } else {
+        format!("{} (secret scan only — AI analysis failed)", found)
+    };
 
     Ok(StagedAnalysis {
         findings,
         summary,
         risk_level,
+        ai_analysis_ran,
+        ai_error,
     })
 }
 
@@ -1026,6 +1050,21 @@ mod tests {
         assert!(result.is_ok());
         let analysis = result.unwrap();
         assert_eq!(analysis.findings.len(), 1);
+    }
+
+    /// The model's JSON does not carry the reporting fields, and must not have
+    /// to.
+    ///
+    /// StagedAnalysis is both the command's RESULT type and the shape the
+    /// model's response is parsed into. Adding a required field to it would
+    /// make every model response fail to parse — taking down the AI pass, which
+    /// is exactly the failure those fields exist to report.
+    #[test]
+    fn test_parse_vibe_check_tolerates_a_response_without_the_reporting_fields() {
+        let response = r#"{"findings": [], "summary": "No issues", "riskLevel": "low"}"#;
+        let analysis = parse_vibe_check_response(response)
+            .expect("a model response without the reporting fields must still parse");
+        assert!(analysis.findings.is_empty());
     }
 
     #[test]

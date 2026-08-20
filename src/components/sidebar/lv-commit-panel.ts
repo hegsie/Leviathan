@@ -335,6 +335,17 @@ export class LvCommitPanel extends LitElement {
 
       .vibe-summary:hover { background: var(--color-bg-hover); }
 
+      /* A failed AI pass leaves the regex secret scan alone, and saying so is
+         the whole point — a clean-looking result over a check that never ran
+         is worse than no check. */
+      .vibe-ai-warning {
+        padding: 6px 8px;
+        border-top: 1px solid var(--color-border);
+        color: var(--color-warning);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
       .risk-badge {
         padding: 1px 6px;
         border-radius: 8px;
@@ -1391,6 +1402,12 @@ export class LvCommitPanel extends LitElement {
                 <span class="risk-badge ${this.vibeCheckResult.riskLevel}">${this.vibeCheckResult.riskLevel}</span>
                 <span>${this.vibeCheckResult.summary}</span>
               </div>
+              ${this.vibeCheckResult.aiAnalysisRan === false ? html`
+                <div class="vibe-ai-warning" role="status">
+                  AI analysis did not run, so only the secret scan was
+                  performed${this.vibeCheckResult.aiError ? html`: ${this.vibeCheckResult.aiError}` : nothing}
+                </div>
+              ` : nothing}
               ${this.showVibeDetails && this.vibeCheckResult.findings.length > 0 ? html`
                 <div class="findings-list">
                   ${this.vibeCheckResult.findings.map(f => html`
