@@ -127,16 +127,24 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
     // graph's getHeadOid() returned undefined. That silently dropped the
     // lane-0 mainline pinning, left no HEAD marker anywhere on a checkout the
     // app itself offers, and made "Jump to HEAD" a no-op. Emit HEAD itself.
-    if repo.head_detached().unwrap_or(false) {
-        if let Some(oid) = head.as_ref().and_then(|h| h.target()) {
-            refs_map.entry(oid.to_string()).or_default().push(RefInfo {
-                name: "HEAD".to_string(),
-                shorthand: "HEAD (detached)".to_string(),
-                ref_type: RefType::DetachedHead,
-                is_head: true,
-                is_annotated: None,
-                tag_message: None,
-            });
+    //
+    // Guarded on a resolved HEAD rather than swallowing the error: the ordinary
+    // reason head_detached() has nothing to say is an unborn HEAD, and that
+    // already shows up as `head: None` above. Anything else is a real
+    // repository problem, and silently returning no HEAD marker would present
+    // it as an attached checkout.
+    if let Some(head_ref) = head.as_ref() {
+        if repo.head_detached()? {
+            if let Some(oid) = head_ref.target() {
+                refs_map.entry(oid.to_string()).or_default().push(RefInfo {
+                    name: "HEAD".to_string(),
+                    shorthand: "HEAD (detached)".to_string(),
+                    ref_type: RefType::DetachedHead,
+                    is_head: true,
+                    is_annotated: None,
+                    tag_message: None,
+                });
+            }
         }
     }
 
