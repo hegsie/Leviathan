@@ -1819,12 +1819,20 @@ export class LvGitHubDialog extends LitElement {
     openExternalUrl(url);
   }
 
+  /// The badge to show for a pull request.
+  ///
+  /// GitHub's REST API reports a MERGED pull request with `state: "closed"` —
+  /// merged-ness lives in `merged_at`, which the backend already carries all
+  /// the way here. Reading only `state` gave every merged PR the red "closed"
+  /// badge, saying the work was abandoned when it had actually landed. The
+  /// `.pr-state.merged` style existed and nothing could ever reach it.
+  ///
+  /// `draft` is only meaningful while the PR is open: GitHub leaves the flag
+  /// set on a draft that was closed without merging, so checking it first would
+  /// label a dead PR "draft" forever.
   private getPrState(pr: PullRequestSummary): string {
-    if (pr.draft) return 'draft';
-    if (pr.state === 'closed') {
-      // Check if merged based on URL pattern (GitHub PRs have /pull/N for open, merged shows differently)
-      return 'closed';
-    }
+    if (pr.draft && pr.state === 'open') return 'draft';
+    if (pr.mergedAt) return 'merged';
     return pr.state;
   }
 
