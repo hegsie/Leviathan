@@ -659,6 +659,26 @@ fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
         .collect()
 }
 
+/// Join a command's stdout and stderr into one searchable block.
+///
+/// Concatenating them directly runs the last line of stdout into the first line
+/// of stderr whenever stdout does not end in a newline — and git does not always
+/// end it with one. The line that gets mangled is exactly the kind being matched
+/// here (`error: could not apply ...`), so the separator is not cosmetic.
+fn join_output(stdout: &str, stderr: &str) -> String {
+    if stdout.is_empty() {
+        return stderr.to_string();
+    }
+    if stderr.is_empty() {
+        return stdout.to_string();
+    }
+    if stdout.ends_with('\n') {
+        format!("{}{}", stdout, stderr)
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    }
+}
+
 /// The commit a stopped rebase could not apply, from
 /// `error: could not apply <sha> <summary>`.
 ///
@@ -736,10 +756,9 @@ pub async fn preview_rebase(
     let mut preview_failure: Option<String> = None;
 
     if !rebase_output.status.success() {
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&rebase_output.stdout),
-            String::from_utf8_lossy(&rebase_output.stderr)
+        let combined = join_output(
+            &String::from_utf8_lossy(&rebase_output.stdout),
+            &String::from_utf8_lossy(&rebase_output.stderr),
         );
         let commit_summary = stopped_commit_summary(&combined).unwrap_or_default();
 
@@ -3658,6 +3677,34 @@ mod tests {
             0,
             "a failed preview must still remove its worktree"
         );
+    }
+
+    /// stdout and stderr must not run together.
+    ///
+    /// git does not always terminate stdout with a newline, and a direct
+    /// concatenation then glues the last stdout line onto the first stderr line
+    /// — which is precisely the `error: could not apply ...` line being matched.
+    #[test]
+    fn test_join_output_separates_streams_without_doubling_newlines() {
+        // No trailing newline on stdout: a separator must be inserted, or the
+        // stderr line stops being matchable.
+        let joined = join_output(
+            "CONFLICT (content): Merge conflict in shared.txt",
+            "error: could not apply 1a2b3c4... Main change\n",
+        );
+        assert_eq!(
+            stopped_commit_summary(&joined).as_deref(),
+            Some("Main change"),
+            "joined output must keep the error line on its own line: {:?}",
+            joined
+        );
+
+        // Already newline-terminated: no blank line is introduced.
+        assert_eq!(join_output("out\n", "err\n"), "out\nerr\n");
+
+        // Either side empty: pass the other through untouched.
+        assert_eq!(join_output("", "err"), "err");
+        assert_eq!(join_output("out", ""), "out");
     }
 
     #[test]
