@@ -597,7 +597,47 @@ pub async fn checkout(path: String, ref_name: String, force: Option<bool>) -> Re
                     return Err(e.into());
                 }
 
-                repo.set_head(&branch_ref)?;
+                // Moving HEAD is the LAST thing that can fail, and by then the
+                // working tree already holds the remote tip. Returning there
+                // left HEAD naming the old branch over the other branch's
+                // content: the whole inter-branch diff reads as uncommitted
+                // work, and committing it writes the other branch's tree onto
+                // this one — the exact corruption creating the ref early is
+                // meant to prevent, just one step later. Reachable through a
+                // HEAD.lock left by a crashed process or a concurrent git.
+                //
+                // So put the tree back, then drop the ref, and report the
+                // original failure.
+                //
+                // The restore is `force()`, and has to be: the files to undo
+                // now differ from HEAD, so a `safe()` checkout reads them as
+                // local modifications and refuses to touch the very files it
+                // needs to revert. That is safe here only because the checkout
+                // above ran `safe()` and SUCCEEDED — which means no tracked
+                // file carried a conflicting local edit, so everything this
+                // reverts is content we just wrote ourselves. Untracked files
+                // are not touched either way.
+                if let Err(e) = repo.set_head(&branch_ref) {
+                    let restored = repo
+                        .head()
+                        .and_then(|h| h.peel_to_commit())
+                        .and_then(|prev| {
+                            let mut restore = git2::build::CheckoutBuilder::new();
+                            restore.force();
+                            repo.checkout_tree(prev.as_object(), Some(&mut restore))
+                        })
+                        .is_ok();
+                    let _ = new_branch.delete();
+
+                    if !restored {
+                        return Err(LeviathanError::OperationFailed(format!(
+                            "Could not switch to {}: {}. The working tree still holds \
+                             {}'s content — check it out again to recover.",
+                            local_name, e, remote_name
+                        )));
+                    }
+                    return Err(e.into());
+                }
             }
         } else {
             // Couldn't parse remote name, detach HEAD
@@ -2031,6 +2071,63 @@ mod tests {
         );
 
         // No half-created branch left behind.
+        assert!(
+            repo.find_branch("feature", git2::BranchType::Local)
+                .is_err(),
+            "a failed checkout must not leave the local branch behind"
+        );
+    }
+
+    /// A set_head failure must not leave the tree on one branch and HEAD on
+    /// another.
+    ///
+    /// Moving HEAD is the last step that can fail, and by then checkout_tree
+    /// has already written the remote tip into the working tree. Returning
+    /// there left the whole inter-branch diff reading as uncommitted work, and
+    /// committing it would write the other branch's tree onto the current one.
+    /// A HEAD.lock — left by a crashed process or a concurrent git — is the way
+    /// in, and is exactly what this test uses.
+    #[tokio::test]
+    async fn test_failed_set_head_restores_the_tree_and_drops_the_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Adds shared.txt", &[("shared.txt", "base")]);
+        let original_branch = test_repo.current_branch();
+
+        // A "remote" branch whose tip changes shared.txt.
+        test_repo.create_branch("staging-for-remote");
+        test_repo.checkout_branch("staging-for-remote");
+        let remote_tip = test_repo.create_commit("Remote edit", &[("shared.txt", "remote")]);
+        test_repo.checkout_branch(&original_branch);
+        test_repo.create_remote_branch("feature", remote_tip);
+
+        // Block the HEAD update, leaving checkout_tree as the only step that
+        // gets to run.
+        let head_lock = test_repo.path.join(".git").join("HEAD.lock");
+        std::fs::write(&head_lock, b"").expect("create HEAD.lock");
+
+        let result = checkout(test_repo.path_str(), "origin/feature".to_string(), None).await;
+        assert!(
+            result.is_err(),
+            "a blocked HEAD update must fail the checkout"
+        );
+
+        std::fs::remove_file(&head_lock).ok();
+
+        let repo = test_repo.repo();
+
+        // HEAD never moved...
+        assert_eq!(repo.head().unwrap().shorthand().unwrap(), original_branch);
+
+        // ...so the working tree must not be holding the other branch's content.
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("shared.txt")).unwrap(),
+            "base",
+            "the working tree was left on the remote branch's content while HEAD \
+             stayed put — the whole diff would read as uncommitted work"
+        );
+
+        // And no half-created branch is left to make a retry take the
+        // "local branch exists" path.
         assert!(
             repo.find_branch("feature", git2::BranchType::Local)
                 .is_err(),
