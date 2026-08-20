@@ -272,6 +272,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::repository::open_repository,
             commands::repository::clone_repository,
+            commands::repository::cancel_clone,
             commands::repository::init_repository,
             commands::repository::get_repository_info,
             commands::repository::get_clone_filter_info,

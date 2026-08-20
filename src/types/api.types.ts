@@ -33,6 +33,7 @@ export interface CloneRepositoryCommand {
   depth?: number;
   filter?: string;
   singleBranch?: boolean;
+  timeoutSecs?: number;
 }
 
 export interface InitRepositoryCommand {

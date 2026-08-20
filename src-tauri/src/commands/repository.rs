@@ -1,7 +1,7 @@
 //! Repository command handlers
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::{command, AppHandle, Emitter};
 
@@ -157,6 +157,25 @@ fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>
     }
 }
 
+/// Set when the user cancels an in-flight clone.
+///
+/// A single flag is sufficient: the clone dialog runs one clone at a time and
+/// blocks further input while it is in flight. Cleared at the start of every
+/// clone so a stale cancellation cannot kill the next one.
+static CLONE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Request cancellation of the in-flight clone.
+///
+/// Without this a clone against an unreachable host, a hung connection, or an
+/// SSH remote waiting on interactive auth left the modal permanently locked —
+/// Cancel was disabled and Escape/overlay dismissal was refused, so restarting
+/// the app was the only way out.
+#[command]
+pub async fn cancel_clone() -> Result<()> {
+    CLONE_CANCELLED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Clone a repository with progress reporting
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -172,6 +191,9 @@ pub async fn clone_repository(
     single_branch: Option<bool>,
     timeout_secs: Option<u64>,
 ) -> Result<Repository> {
+    // A cancellation requested against a previous clone must not kill this one.
+    CLONE_CANCELLED.store(false, Ordering::SeqCst);
+
     validate_clone_url(&url)?;
     // `--branch` and `--filter` consume the next argv as their value, so a
     // value starting with `-` is not a flag injection today. We reject them
@@ -249,12 +271,92 @@ pub async fn clone_repository(
                 cmd.arg(&effective_url);
                 cmd.arg(&dest_path);
 
-                let output = cmd.output().map_err(|e| {
+                // Spawned rather than run to completion so a cancel can kill it.
+                // stderr is drained on its own thread: git clone writes progress
+                // there, and leaving a piped stream unread deadlocks the child
+                // once the pipe buffer fills on a large clone.
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::piped());
+
+                let mut child = cmd.spawn().map_err(|e| {
                     LeviathanError::Custom(format!("Failed to execute git command: {}", e))
                 })?;
 
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr_pipe = child.stderr.take();
+                let stderr_reader = std::thread::spawn(move || {
+                    use std::io::Read;
+                    // Bytes, not read_to_string: git may emit a non-UTF-8 path or
+                    // remote message, and read_to_string aborts on the first
+                    // invalid sequence — leaving the pipe undrained (the very
+                    // deadlock this thread exists to prevent) and the error lost.
+                    let mut buf = Vec::new();
+                    if let Some(mut pipe) = stderr_pipe {
+                        let _ = pipe.read_to_end(&mut buf);
+                    }
+                    String::from_utf8_lossy(&buf).into_owned()
+                });
+
+                enum CloneOutcome {
+                    Finished(std::process::ExitStatus),
+                    Cancelled,
+                    TimedOut,
+                    WaitFailed(String),
+                }
+
+                // The timeout is enforced HERE as well as by the outer
+                // tokio::time::timeout. That one only drops the future — this
+                // blocking task, and the git process it spawned, would keep
+                // running unattended after the caller gave up.
+                let deadline = timeout_secs
+                    .filter(|secs| *secs > 0)
+                    .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+
+                let outcome = loop {
+                    if CLONE_CANCELLED.load(Ordering::Relaxed) {
+                        break CloneOutcome::Cancelled;
+                    }
+
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        break CloneOutcome::TimedOut;
+                    }
+
+                    match child.try_wait() {
+                        Ok(Some(status)) => break CloneOutcome::Finished(status),
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        Err(e) => break CloneOutcome::WaitFailed(e.to_string()),
+                    }
+                };
+
+                // Single exit path for every abnormal outcome: kill the child,
+                // join the drain thread, and clear the partial destination.
+                // Returning early from any of these without killing would leave
+                // an orphaned git process still writing into that directory.
+                let status = match outcome {
+                    CloneOutcome::Finished(status) => status,
+                    abnormal => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = stderr_reader.join();
+                        let _ = std::fs::remove_dir_all(&dest_path);
+
+                        return Err(match abnormal {
+                            CloneOutcome::Cancelled => {
+                                LeviathanError::Custom("Clone cancelled".to_string())
+                            }
+                            CloneOutcome::TimedOut => LeviathanError::OperationTimeout(
+                                "Clone operation timed out".to_string(),
+                            ),
+                            CloneOutcome::WaitFailed(e) => {
+                                LeviathanError::Custom(format!("Failed to wait for git: {}", e))
+                            }
+                            CloneOutcome::Finished(_) => unreachable!("handled above"),
+                        });
+                    }
+                };
+
+                let stderr = stderr_reader.join().unwrap_or_default();
+
+                if !status.success() {
                     return Err(LeviathanError::Custom(format!(
                         "git clone failed: {}",
                         stderr.trim()
@@ -312,6 +414,12 @@ pub async fn clone_repository(
             })
         } else {
             // Full clone: use git2 RepoBuilder with progress callbacks
+            //
+            // Declared out here, not inside the blocking closure: the error arm
+            // below needs it, and libgit2 reports a deadline abort as the same
+            // generic error a user cancellation produces.
+            let timed_out = Arc::new(AtomicBool::new(false));
+            let timed_out_cb = Arc::clone(&timed_out);
             let result = tokio::task::spawn_blocking(move || {
                 let mut builder = git2::build::RepoBuilder::new();
 
@@ -335,7 +443,25 @@ pub async fn clone_repository(
                 let last_percent_clone = Arc::clone(&last_percent);
                 let app_clone = app_for_progress;
 
+                let deadline = timeout_secs
+                    .filter(|secs| *secs > 0)
+                    .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
+
                 callbacks.transfer_progress(move |stats| {
+                    // Returning false aborts the transfer — the only cancellation
+                    // point libgit2 offers.
+                    if CLONE_CANCELLED.load(Ordering::Relaxed) {
+                        return false;
+                    }
+
+                    // Same reason the CLI path polls its own deadline: the outer
+                    // tokio::time::timeout only drops the future, so without this
+                    // the transfer keeps running after the caller gave up.
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        timed_out_cb.store(true, Ordering::Relaxed);
+                        return false;
+                    }
+
                     let total = stats.total_objects();
                     let received = stats.received_objects();
                     let indexed = stats.indexed_objects();
@@ -383,7 +509,30 @@ pub async fn clone_repository(
             .await
             .map_err(|e| LeviathanError::Custom(format!("Clone task failed: {}", e)))?;
 
-            let repo = result?;
+            let repo = match result {
+                Ok(repo) => repo,
+                Err(e) => {
+                    // libgit2 surfaces a cancelled transfer as a generic error;
+                    // report it as the cancellation it was and clear the partial
+                    // checkout so a retry does not hit an occupied destination.
+                    if CLONE_CANCELLED.load(Ordering::Relaxed) {
+                        let _ = std::fs::remove_dir_all(Path::new(&path));
+                        return Err(LeviathanError::Custom("Clone cancelled".to_string()));
+                    }
+                    // A deadline abort leaves exactly the same partial checkout
+                    // a cancellation does, and reported it as a bare libgit2
+                    // error with the directory still on disk — so the retry the
+                    // message invites failed at "destination already exists",
+                    // with nothing saying the first attempt had timed out.
+                    if timed_out.load(Ordering::Relaxed) {
+                        let _ = std::fs::remove_dir_all(Path::new(&path));
+                        return Err(LeviathanError::OperationTimeout(
+                            "Clone operation timed out".to_string(),
+                        ));
+                    }
+                    return Err(e.into());
+                }
+            };
 
             // git runs post-checkout after a clone checks out the initial
             // working tree (old-ref = all-zeros, flag = 1). The shallow/CLI
