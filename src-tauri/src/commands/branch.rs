@@ -858,6 +858,18 @@ pub struct CheckoutWithStashResult {
     pub message: String,
 }
 
+/// Delete a local branch created by an in-progress checkout that then failed.
+///
+/// Best effort: the caller is already returning an error the user needs to see,
+/// and a failure to clean up must not replace it.
+fn rollback_created_branch(repo: &git2::Repository, name: Option<&str>) {
+    if let Some(name) = name {
+        if let Ok(mut branch) = repo.find_branch(name, git2::BranchType::Local) {
+            let _ = branch.delete();
+        }
+    }
+}
+
 /// Checkout a branch with automatic stash handling
 /// 1. If there are uncommitted changes, stash them
 /// 2. Perform the checkout
@@ -1037,6 +1049,11 @@ pub async fn checkout_with_autostash(
     // the tree already at the target commit — popping the auto-stash over the
     // wrong tree while HEAD still named the old branch. Failing here leaves the
     // working tree untouched, so the restore lands on the tree it came from.
+    // Records a branch created by THIS call, so a later failure can roll it back
+    // the way checkout() does. Without it a failing checkout_tree left the new
+    // tracking branch behind, making a failed checkout non-transactional.
+    let mut created_branch: Option<String> = None;
+
     if is_remote_branch {
         let local_name = if let Some(pos) = ref_name.find('/') {
             &ref_name[pos + 1..]
@@ -1053,6 +1070,7 @@ pub async fn checkout_with_autostash(
                     Ok(mut new_branch) => {
                         // Best effort: tracking config must not abort the checkout.
                         let _ = new_branch.set_upstream(Some(&ref_name));
+                        created_branch = Some(local_name.to_string());
                         None
                     }
                     Err(e) => Some(format!(
@@ -1083,6 +1101,11 @@ pub async fn checkout_with_autostash(
     }; // obj dropped here
 
     if let Some(msg) = checkout_error {
+        // Roll back a branch this call created. The checkout failed, so the ref
+        // must not outlive it — otherwise a retry sees a branch that already
+        // exists and silently takes the "local branch exists" path instead.
+        rollback_created_branch(&repo, created_branch.as_deref());
+
         // Restore the auto-stash now the checkout has failed.
         //
         // Resolved by oid rather than verified at index 0: `git stash push`
@@ -1146,6 +1169,7 @@ pub async fn checkout_with_autostash(
     // the tree is at the target commit, HEAD is not, and the raw set_head
     // error says nothing about where the user's changes went.
     if let Err(err) = set_head_result {
+        rollback_created_branch(&repo, created_branch.as_deref());
         return Err(autostash_failure(
             &mut repo,
             stashed,
@@ -1993,10 +2017,16 @@ mod tests {
 
         // Index untouched: nothing staged against HEAD.
         let statuses = repo.statuses(None).unwrap();
+        // Every staged bit, not just new/modified/deleted: a rewritten tree can
+        // also stage renames and typechanges, which would slip past a narrower
+        // check and let this assertion pass over a dirty index.
+        let staged = git2::Status::INDEX_NEW
+            | git2::Status::INDEX_MODIFIED
+            | git2::Status::INDEX_DELETED
+            | git2::Status::INDEX_RENAMED
+            | git2::Status::INDEX_TYPECHANGE;
         assert!(
-            statuses.iter().all(|s| !s.status().is_index_new()
-                && !s.status().is_index_modified()
-                && !s.status().is_index_deleted()),
+            statuses.iter().all(|s| !s.status().intersects(staged)),
             "failed checkout left staged changes in the index"
         );
 
@@ -2005,6 +2035,64 @@ mod tests {
             repo.find_branch("feature", git2::BranchType::Local)
                 .is_err(),
             "a failed checkout must not leave the local branch behind"
+        );
+    }
+
+    /// A branch created by checkout_with_autostash must not survive a failed
+    /// checkout.
+    ///
+    /// Creating the ref before checkout_tree is what keeps a failure from
+    /// corrupting the tree, but it also means a later checkout_tree failure
+    /// would leave the branch behind — non-transactional, and inconsistent with
+    /// checkout(), which rolls its ref back. A retry would then see the branch
+    /// already exists and silently take the "local branch exists" path.
+    #[tokio::test]
+    async fn test_failed_autostash_checkout_rolls_back_the_created_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Adds shared.txt", &[("shared.txt", "base")]);
+        let original_branch = test_repo.current_branch();
+
+        // The "remote" changes shared.txt, so switching to it must rewrite that
+        // file in the working tree.
+        test_repo.create_branch("staging-for-remote");
+        test_repo.checkout_branch("staging-for-remote");
+        let remote_tip = test_repo.create_commit("Remote edit", &[("shared.txt", "remote")]);
+        test_repo.checkout_branch(&original_branch);
+
+        {
+            let repo = test_repo.repo();
+            repo.reference(
+                "refs/remotes/origin/feature",
+                remote_tip,
+                true,
+                "test remote branch",
+            )
+            .unwrap();
+        }
+
+        // Uncommitted local edit to that same file, with auto-stash OFF: nothing
+        // moves it out of the way, so the safe checkout_tree refuses rather than
+        // discarding the user's work — a failure that lands AFTER the branch has
+        // been created.
+        test_repo.create_file("shared.txt", "local edit");
+
+        let result = checkout_with_autostash(
+            test_repo.path_str(),
+            "origin/feature".to_string(),
+            Some(false),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "checkout must fail rather than discard an uncommitted local edit"
+        );
+
+        let repo = test_repo.repo();
+        assert_eq!(test_repo.current_branch(), original_branch);
+        assert!(
+            repo.find_branch("feature", git2::BranchType::Local)
+                .is_err(),
+            "a failed checkout must not leave the branch it created behind"
         );
     }
 
