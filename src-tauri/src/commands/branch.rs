@@ -497,16 +497,24 @@ fn auto_stash_index(repo: &mut git2::Repository, stash_oid: Option<git2::Oid>) -
     found
 }
 
-pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
+/// The name of the operation a repository state represents, or None when the
+/// repository is Clean. Used to say WHICH operation is in the way.
+pub(crate) fn in_progress_operation(state: git2::RepositoryState) -> Option<&'static str> {
     use git2::RepositoryState::*;
-    let what = match repo.state() {
-        Clean => return Ok(()),
-        Merge => "merge",
-        Revert | RevertSequence => "revert",
-        CherryPick | CherryPickSequence => "cherry-pick",
-        Bisect => "bisect",
-        Rebase | RebaseInteractive | RebaseMerge => "rebase",
-        ApplyMailbox | ApplyMailboxOrRebase => "patch application",
+    match state {
+        Clean => None,
+        Merge => Some("merge"),
+        Revert | RevertSequence => Some("revert"),
+        CherryPick | CherryPickSequence => Some("cherry-pick"),
+        Bisect => Some("bisect"),
+        Rebase | RebaseInteractive | RebaseMerge => Some("rebase"),
+        ApplyMailbox | ApplyMailboxOrRebase => Some("patch application"),
+    }
+}
+
+pub(crate) fn ensure_checkoutable(repo: &git2::Repository) -> Result<()> {
+    let Some(what) = in_progress_operation(repo.state()) else {
+        return Ok(());
     };
     Err(LeviathanError::OperationFailed(format!(
         "Cannot switch branches while a {} is in progress. Finish or abort it first.",
