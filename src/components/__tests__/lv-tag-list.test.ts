@@ -431,7 +431,7 @@ describe('lv-tag-list', () => {
       expect(tagsChangedFired).to.be.true;
     });
 
-    it('checkout tag calls checkout_with_autostash with tag name', async () => {
+    it('checkout tag calls checkout_with_autostash with the qualified tag ref', async () => {
       const el = await renderTagList();
 
       // Find the tag item for v2.1.0
@@ -455,7 +455,14 @@ describe('lv-tag-list', () => {
 
       const checkoutCalls = findCommands('checkout_with_autostash');
       expect(checkoutCalls.length).to.equal(1);
-      expect(checkoutCalls[0].args).to.deep.include({ path: REPO_PATH, refName: 'v2.1.0' });
+      // Fully qualified, not the bare name: the backend resolvers try
+      // find_branch() before revparse_single(), so a bare name checks out a
+      // same-named BRANCH when one exists — at a potentially different commit,
+      // right after the user confirmed a "detached HEAD" warning.
+      expect(checkoutCalls[0].args).to.deep.include({
+        path: REPO_PATH,
+        refName: 'refs/tags/v2.1.0',
+      });
     });
   });
 
