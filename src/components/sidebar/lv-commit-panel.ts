@@ -1293,7 +1293,10 @@ export class LvCommitPanel extends LitElement {
         setTimeout(() => {
           this.success = null;
         }, 3000);
-      } else {
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A declined confirm — the pushed-amend warning, or the network gate —
+        // is the user's own decision, already accounted for. Showing it in the
+        // red error banner reports their click back to them as a failure.
         this.error = result.error?.message ?? 'Failed to create commit';
       }
     } catch (err) {

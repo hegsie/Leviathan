@@ -642,7 +642,10 @@ export async function createCommit(
       "warning",
     );
     if (!proceed) {
-      return { success: false, error: { code: "CANCELLED", message: "Amend cancelled" } };
+      // The SAME shape a declined network gate returns, so isNetworkGateRefusal
+      // recognises it and callers do not report the user's own choice back to
+      // them as a failure.
+      return { success: false, error: { code: "CANCELLED", message: "Cancelled" } };
     }
   }
   return invokeCommand<Commit>("create_commit", { path, ...args });

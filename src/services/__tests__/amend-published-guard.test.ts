@@ -12,8 +12,6 @@
  * forgotten.
  */
 
-type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
-
 let cbId = 0;
 let published = false;
 const invoked: Array<{ command: string; args: unknown }> = [];
@@ -40,7 +38,7 @@ let confirmAnswer = true;
 let confirmCalls = 0;
 
 import { expect } from '@open-wc/testing';
-import { createCommit } from '../git.service.ts';
+import { createCommit, isNetworkGateRefusal } from '../git.service.ts';
 
 const REPO = '/test/repo';
 
@@ -79,6 +77,22 @@ describe('amending a published commit', () => {
 
     expect(confirmCalls, 'rewriting published history must be confirmed').to.equal(1);
     expect(ranCreateCommit(), 'confirming proceeds').to.be.true;
+  });
+
+  // The commit panel assigns result.error.message straight into its red error
+  // banner. A declined confirm is the user's own decision, so it must carry the
+  // shape isNetworkGateRefusal recognises — otherwise declining the warning
+  // reports their own click back to them as a failure.
+  it('declines with the refusal shape callers already suppress', async () => {
+    published = true;
+    confirmAnswer = false;
+    const result = await createCommit(REPO, { message: 'x', amend: true });
+
+    expect(result.error?.code).to.equal('CANCELLED');
+    expect(
+      isNetworkGateRefusal(result.error),
+      'a decline must be recognised as a refusal, not reported as an error',
+    ).to.be.true;
   });
 
   it('does not amend when the user declines', async () => {
