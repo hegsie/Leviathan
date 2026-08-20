@@ -499,6 +499,109 @@ export class LvReflogDialog extends LitElement {
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }
 
+  /**
+   * The ref a "checkout: moving from X to Y" entry landed on, if this entry is
+   * a checkout.
+   *
+   * Reflog entries record HEAD movements, so a checkout entry's oid is the tip
+   * of the branch that was switched TO. Resetting onto it is not "going back
+   * there" — it repoints the CURRENT branch at another branch's commit.
+   */
+  private checkoutTarget(entry: ReflogEntry): string | null {
+    if (entry.action !== 'checkout') return null;
+    const match = /moving from\s+(\S+)\s+to\s+(\S+)/.exec(entry.message);
+    return match ? match[2] : null;
+  }
+
+  /**
+   * Switch to the branch a checkout entry moved to — what "go back to that
+   * state" means for a checkout, and what `git switch -` does.
+   *
+   * Routing these through a reset instead moved the current branch's ref to the
+   * other branch's commit, orphaning every commit past the merge base (and,
+   * with Hard, overwriting the working tree with the other branch's content).
+   */
+  private async handleSwitchTo(entry: ReflogEntry): Promise<void> {
+    const target = this.checkoutTarget(entry);
+    if (!target || this.resetting) return;
+
+    // The repo the dialog was OPENED on, like the reset path uses.
+    // `repositoryPath` is live-bound to the active tab, so reading it here ran
+    // the checkout against whatever repo the user switched to while the dialog
+    // was up — a switch to a branch name that means something different there.
+    const repoPath = this.pinnedRepoPath;
+    if (!repoPath) return;
+
+    this.resetting = true;
+    if (!tryAcquireRefOp(repoPath)) {
+      this.resetting = false;
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
+    try {
+      const result = await gitService.checkoutWithAutoStash(repoPath, target);
+      if (result.success && result.data?.success) {
+        const data = result.data;
+        // The switch auto-stashes, so it can land with the user's changes still
+        // shelved or in conflict. Reporting a bare "Switched to X" hid that:
+        // the work looked lost, with the only clue in a stash entry nobody was
+        // told about. Same reporting the branch and tag lists give.
+        if (data.stashed && data.stashConflict) {
+          showToast(`Switched to ${target} — stash conflicts need resolution`, 'warning');
+          this.dispatchEvent(
+            new CustomEvent('open-conflict-dialog', {
+              bubbles: true,
+              composed: true,
+              // Auto-stash is pop semantics: drop it once resolved. Identified
+              // by oid, not position — another surface can push a stash in
+              // between and renumber the list.
+              detail: {
+                operationType: 'stash',
+                stashOid: data.stashOid ?? null,
+                stashIndex: 0,
+                dropStashOnComplete: true,
+                repositoryPath: repoPath,
+              },
+            }),
+          );
+        } else if (data.stashed && !data.stashApplied) {
+          showToast(data.message, 'warning');
+        } else if (data.stashed) {
+          showToast(
+            data.message,
+            data.message.includes('staged status was not preserved') ? 'warning' : 'info',
+          );
+        } else {
+          showToast(`Switched to ${target}`, 'success');
+        }
+        // Same event the reset path emits, so the host refreshes the repo the
+        // switch ran on even if the user changed tabs during the IPC await.
+        this.dispatchEvent(
+          new CustomEvent('undo-complete', {
+            detail: { entry: null, mode: 'checkout', repositoryPath: repoPath },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        this.close();
+      } else {
+        showToast(
+          result.error?.message ?? result.data?.message ?? `Failed to switch to ${target}`,
+          'error',
+        );
+      }
+    } catch (err) {
+      showToast(
+        `Failed to switch to ${target}: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
+    } finally {
+      this.resetting = false;
+      releaseRefOp(repoPath);
+    }
+  }
+
   private async handleReset(entry: ReflogEntry, mode: 'soft' | 'mixed' | 'hard'): Promise<void> {
     if (this.resetting) return;
     // Claimed BEFORE the confirm, not after. Unlike the context-menu surfaces —
@@ -532,6 +635,16 @@ export class LvReflogDialog extends LitElement {
       `This branch will point at ${entry.shortId}. Any commit no longer reachable ` +
       `from it is recoverable only through the reflog.`;
 
+    // A checkout entry belongs to a DIFFERENT branch, so resetting onto it
+    // moves the current branch to that branch's commit. "This branch will
+    // point at <oid>" is true but does not say whose commit that is.
+    const checkoutTarget = this.checkoutTarget(entry);
+    const crossBranchNote = checkoutTarget
+      ? `\n\nThis entry is a checkout of "${checkoutTarget}", not a state of the ` +
+        `current branch. Resetting moves the current branch onto that commit. To ` +
+        `go back to "${checkoutTarget}", close this and use Switch instead.`
+      : '';
+
     const modeNote =
       mode === 'hard'
         ? 'All uncommitted changes are also discarded permanently — those are not in the reflog and cannot be recovered.'
@@ -543,7 +656,7 @@ export class LvReflogDialog extends LitElement {
 
     const confirmed = await showConfirm(
       titles[mode],
-      `Reset to ${entry.shortId}?\n\n${droppedNote}\n\n${modeNote}`,
+      `Reset to ${entry.shortId}?\n\n${droppedNote}${crossBranchNote}\n\n${modeNote}`,
       'warning'
     );
     if (!confirmed) {
@@ -620,6 +733,14 @@ export class LvReflogDialog extends LitElement {
     const entry = this.contextMenu.entry;
     if (!entry) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
+
+    // For a checkout entry, "go back there" is a switch — a reset would move
+    // the current branch onto another branch's commit.
+    if (this.checkoutTarget(entry)) {
+      void this.handleSwitchTo(entry);
+      return;
+    }
+
     this.handleReset(entry, 'mixed');
   }
 
@@ -670,7 +791,20 @@ export class LvReflogDialog extends LitElement {
           </div>
         </div>
 
-        ${!isCurrent ? html`
+        ${!isCurrent && this.checkoutTarget(entry) ? html`
+          <div class="entry-actions">
+            <button
+              class="reset-btn"
+              @click=${(e: Event) => { e.stopPropagation(); this.handleSwitchTo(entry); }}
+              ?disabled=${this.resetting || this.repositoryBusy}
+              title="Switch back to ${this.checkoutTarget(entry)}"
+            >
+              Switch to ${this.checkoutTarget(entry)}
+            </button>
+          </div>
+        ` : nothing}
+
+        ${!isCurrent && !this.checkoutTarget(entry) ? html`
           <div class="entry-actions">
             <button
               class="reset-btn"
