@@ -287,6 +287,38 @@ fn fast_forward_to(repo: &git2::Repository, refname: &str, target_oid: git2::Oid
     Ok(())
 }
 
+/// Whether `git pull` should rebase, mirroring git's own precedence.
+///
+/// `branch.<name>.rebase` overrides `pull.rebase`. Both accept more than a
+/// boolean: `interactive`, `merges` and `preserve` all mean "rebase", and git
+/// treats an unrecognised value as unset rather than an error, so an unusable
+/// value falls through to the next level instead of failing the pull.
+fn pull_should_rebase(repo: &git2::Repository, branch_name: &str) -> bool {
+    fn interpret(raw: &str) -> Option<bool> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" | "interactive" | "merges" | "preserve" => Some(true),
+            "false" | "no" | "off" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    let Ok(config) = repo.config() else {
+        return false;
+    };
+
+    if let Ok(raw) = config.get_string(&format!("branch.{}.rebase", branch_name)) {
+        if let Some(value) = interpret(&raw) {
+            return value;
+        }
+    }
+
+    config
+        .get_string("pull.rebase")
+        .ok()
+        .and_then(|raw| interpret(&raw))
+        .unwrap_or(false)
+}
+
 /// Which remote to fetch, and which remote-tracking ref to merge, for a pull.
 ///
 /// Asks git rather than rebuilding "<remote>/<shorthand>". The rebuilt form was
@@ -470,7 +502,6 @@ pub async fn pull(
         // the right answer when the caller did not name a remote — see below.
         let requested_remote = remote.clone();
         let branch_for_task = branch.clone();
-        let rebase_val = rebase.unwrap_or(false);
 
         // Whole pull is git2 / blocking network I/O. Run it on a blocking
         // thread so the Tokio runtime stays responsive.
@@ -514,6 +545,16 @@ pub async fn pull(
                         .map_err(|_| LeviathanError::InvalidReference)?
                         .to_string();
                     (head.shorthand().unwrap_or("main").to_string(), refname)
+                };
+
+                // Honour the repository's own pull strategy when the caller
+                // did not force one. Defaulting to merge meant a user with
+                // pull.rebase=true — a very common setting — silently got a
+                // merge commit from every diverged pull, the opposite of what
+                // `git pull` does in their terminal.
+                let rebase_val = match rebase {
+                    Some(explicit) => explicit,
+                    None => pull_should_rebase(&repo, &branch_name),
                 };
 
                 let (effective_remote, remote_ref) = resolve_pull_target(
@@ -1317,6 +1358,90 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- pull strategy comes from git config ----
+
+    /// Sets a config value on the repo and reads back what pull would do.
+    fn rebase_decision(repo: &TestRepo, keys: &[(&str, &str)], branch: &str) -> bool {
+        let git_repo = repo.repo();
+        {
+            let mut config = git_repo.config().unwrap();
+            for (key, value) in keys {
+                config.set_str(key, value).unwrap();
+            }
+        }
+        pull_should_rebase(&git_repo, branch)
+    }
+
+    /// Defaulting to merge meant a user with pull.rebase=true silently got a
+    /// merge commit from every diverged pull — the opposite of what `git pull`
+    /// does in their terminal.
+    #[test]
+    fn test_pull_rebase_config_is_honoured() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(rebase_decision(&repo, &[("pull.rebase", "true")], "main"));
+    }
+
+    /// Absent config means merge, git's default.
+    #[test]
+    fn test_pull_defaults_to_merge_without_config() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(!pull_should_rebase(&repo.repo(), "main"));
+    }
+
+    /// branch.<name>.rebase overrides pull.rebase, in both directions.
+    #[test]
+    fn test_branch_rebase_overrides_pull_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(rebase_decision(
+            &repo,
+            &[("pull.rebase", "false"), ("branch.main.rebase", "true")],
+            "main"
+        ));
+
+        let repo = TestRepo::with_initial_commit();
+        assert!(!rebase_decision(
+            &repo,
+            &[("pull.rebase", "true"), ("branch.main.rebase", "false")],
+            "main"
+        ));
+    }
+
+    /// The override is per branch: another branch's setting must not apply.
+    #[test]
+    fn test_branch_rebase_does_not_leak_to_other_branches() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(!rebase_decision(
+            &repo,
+            &[("branch.feature.rebase", "true")],
+            "main"
+        ));
+    }
+
+    /// git accepts more than a boolean here, and all of these mean rebase.
+    #[test]
+    fn test_non_boolean_rebase_values_mean_rebase() {
+        for value in ["interactive", "merges", "preserve"] {
+            let repo = TestRepo::with_initial_commit();
+            assert!(
+                rebase_decision(&repo, &[("pull.rebase", value)], "main"),
+                "pull.rebase={} should rebase",
+                value
+            );
+        }
+    }
+
+    /// An unrecognised value is treated as unset rather than failing the pull,
+    /// and must fall through to the next level.
+    #[test]
+    fn test_unrecognised_branch_value_falls_through_to_pull_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(rebase_decision(
+            &repo,
+            &[("pull.rebase", "true"), ("branch.main.rebase", "nonsense")],
+            "main"
+        ));
+    }
 
     // ---- fast-forward pull must not overwrite uncommitted work ----
 
