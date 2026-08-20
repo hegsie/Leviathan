@@ -35,6 +35,33 @@ const mockEntry: ReflogEntry = {
   index: 0,
 } as unknown as ReflogEntry;
 
+
+/** A "checkout: moving from X to Y" reflog entry. */
+function checkoutEntry(from: string, to: string): ReflogEntry {
+  return {
+    oid: 'feed0000beef',
+    shortId: 'feed000',
+    index: 1,
+    action: 'checkout',
+    message: `checkout: moving from ${from} to ${to}`,
+    timestamp: Math.floor(Date.now() / 1000),
+    author: 'T',
+  } as unknown as ReflogEntry;
+}
+
+/** An ordinary commit entry, which SHOULD still offer a reset. */
+function commitEntry(): ReflogEntry {
+  return {
+    oid: 'cafe0000babe',
+    shortId: 'cafe000',
+    index: 2,
+    action: 'commit',
+    message: 'commit: work',
+    timestamp: Math.floor(Date.now() / 1000),
+    author: 'T',
+  } as unknown as ReflogEntry;
+}
+
 describe('lv-reflog-dialog', () => {
   beforeEach(() => {
     uiStore.setState({ toasts: [] });
@@ -162,5 +189,81 @@ describe('lv-reflog-dialog', () => {
     ).to.be.true;
 
     resetRefOpLocks();
+  });
+
+  // ── Checkout entries must switch, not reset ──────────────────────────────
+  describe('checkout entries', () => {
+    async function dialogWith(entries: ReflogEntry[]): Promise<LvReflogDialog> {
+      const el = await fixture<LvReflogDialog>(
+        html`<lv-reflog-dialog .repositoryPath=${'/test/repo'}></lv-reflog-dialog>`
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).entries = entries;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).loading = false;
+      await el.updateComplete;
+      return el;
+    }
+
+    it('offers Switch instead of a reset on a checkout entry', async () => {
+      // A "checkout: moving from main to feature" entry records ANOTHER
+      // branch's tip. Resetting onto it repoints the current branch there and
+      // orphans its commits — the opposite of "go back to that state".
+      const el = await dialogWith([checkoutEntry('main', 'feature')]);
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.entry-actions button')).map(
+        (b) => b.textContent!.trim()
+      );
+
+      expect(labels.join(' | ')).to.contain('Switch to feature');
+      expect(labels, 'a checkout entry must not offer a hard reset').to.not.include('Hard');
+      expect(labels, 'a checkout entry must not offer an "Undo" reset').to.not.include('Undo');
+    });
+
+    it('still offers Undo and Hard on an ordinary commit entry', async () => {
+      const el = await dialogWith([commitEntry()]);
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.entry-actions button')).map(
+        (b) => b.textContent!.trim()
+      );
+
+      expect(labels).to.include('Undo');
+      expect(labels).to.include('Hard');
+    });
+
+    it('checks out the target branch rather than resetting', async () => {
+      const calls: string[] = [];
+      mockInvoke = async (command: string) => {
+        calls.push(command);
+        if (command === 'checkout_with_autostash') {
+          return {
+            success: true,
+            stashed: false,
+            stashApplied: false,
+            stashConflict: false,
+            stashOid: null,
+            message: 'Switched',
+          };
+        }
+        return null;
+      };
+
+      const el = await dialogWith([checkoutEntry('main', 'feature')]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleSwitchTo(checkoutEntry('main', 'feature'));
+
+      expect(calls).to.include('checkout_with_autostash');
+      expect(calls, 'a switch must never reset the branch').to.not.include('reset_to_reflog');
+    });
+
+    it('parses the target only from checkout entries', async () => {
+      const el = await dialogWith([]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const target = (e: ReflogEntry) => (el as any).checkoutTarget(e);
+
+      expect(target(checkoutEntry('main', 'feature'))).to.equal('feature');
+      expect(target(checkoutEntry('feature', 'release/2.0'))).to.equal('release/2.0');
+      expect(target(commitEntry()), 'a commit entry is not a checkout').to.be.null;
+    });
   });
 });
