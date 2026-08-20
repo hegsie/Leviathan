@@ -377,6 +377,27 @@ fn session_terms(repo_path: &Path) -> (String, String) {
     }
 }
 
+/// Join stdout and stderr into one block, adding a separator only when one is
+/// missing.
+///
+/// An unconditional "\n" between them inserts a blank line whenever stdout
+/// already ends in one — which it usually does. The parser tolerates that, but
+/// the output is also shown to the user as the step's message, so the blank
+/// line is real noise for no gain.
+fn join_streams(stdout: &str, stderr: &str) -> String {
+    if stdout.is_empty() {
+        return stderr.to_string();
+    }
+    if stderr.is_empty() {
+        return stdout.to_string();
+    }
+    if stdout.ends_with('\n') {
+        format!("{}{}", stdout, stderr)
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    }
+}
+
 /// Run a bisect STEP and return stdout and stderr together.
 ///
 /// Which stream git announces the culprit on, and whether it exits zero doing
@@ -392,7 +413,7 @@ fn run_bisect_step(repo_path: &Path, args: &[&str]) -> Result<String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}\n{}", stdout, stderr);
+    let combined = join_streams(&stdout, &stderr);
 
     if output.status.success()
         || combined.contains("We cannot bisect more")
@@ -855,6 +876,29 @@ mod tests {
     fn test_parse_culprit_returns_none_without_an_announcement() {
         assert!(parse_culprit_from_output("Bisecting: 3 revisions left").is_none());
         assert!(parse_culprit_from_output("").is_none());
+    }
+
+    /// Joining the streams must not introduce a blank line.
+    #[test]
+    fn test_join_streams_adds_a_separator_only_when_needed() {
+        assert_eq!(join_streams("out\n", "err\n"), "out\nerr\n");
+        assert_eq!(join_streams("out", "err"), "out\nerr");
+        assert_eq!(join_streams("", "err"), "err");
+        assert_eq!(join_streams("out\n", ""), "out\n");
+    }
+
+    /// git rejects a multi-word bisect term, so the matcher need not handle one.
+    ///
+    /// Checked against git directly:
+    ///     $ git bisect start --term-new="very broken" --term-old=working
+    ///     error: 'very broken' is not a valid term
+    /// A session with such a term cannot exist, so requiring a single word
+    /// after "is the first " costs nothing.
+    #[test]
+    fn test_announces_culprit_handles_the_terms_git_actually_allows() {
+        assert!(announces_culprit("abc123 is the first bad commit"));
+        assert!(announces_culprit("abc123 is the first broken commit"));
+        assert!(announces_culprit("abc123 is the first regressed commit"));
     }
 
     /// The term-independent match accepts any term, and nothing else.
