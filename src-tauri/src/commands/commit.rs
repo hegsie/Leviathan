@@ -1554,31 +1554,37 @@ pub async fn get_file_history(
                 .any(|d| d.status() == git2::Delta::Added || d.status() == git2::Delta::Renamed);
             file_modified = diff.deltas().count() > 0;
 
+            // `if let Ok`, not an early `continue`: the filtered diff has
+            // already established the file was touched by this commit. Skipping
+            // the iteration on a failed diff dropped the commit from the
+            // history entirely — losing a real entry to report a rename we
+            // could not look for. Without the unfiltered diff we simply do not
+            // detect a rename here, and the walk stops following the path,
+            // which is the old behaviour rather than a missing commit.
             if introduced_here {
-                let mut unfiltered =
-                    match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-                let mut find_opts = git2::DiffFindOptions::new();
-                find_opts.renames(true);
-                find_opts.copies(false);
-                let _ = unfiltered.find_similar(Some(&mut find_opts));
+                if let Ok(mut unfiltered) =
+                    repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+                {
+                    let mut find_opts = git2::DiffFindOptions::new();
+                    find_opts.renames(true);
+                    find_opts.copies(false);
+                    let _ = unfiltered.find_similar(Some(&mut find_opts));
 
-                for delta in unfiltered.deltas() {
-                    if delta.status() != git2::Delta::Renamed {
-                        continue;
-                    }
-                    let is_ours = delta
-                        .new_file()
-                        .path()
-                        .is_some_and(|p| p.to_string_lossy() == current_path);
-                    if is_ours {
-                        file_modified = true;
-                        if let Some(old_file) = delta.old_file().path() {
-                            renamed_from = Some(old_file.to_string_lossy().to_string());
+                    for delta in unfiltered.deltas() {
+                        if delta.status() != git2::Delta::Renamed {
+                            continue;
                         }
-                        break;
+                        let is_ours = delta
+                            .new_file()
+                            .path()
+                            .is_some_and(|p| p.to_string_lossy() == current_path);
+                        if is_ours {
+                            file_modified = true;
+                            if let Some(old_file) = delta.old_file().path() {
+                                renamed_from = Some(old_file.to_string_lossy().to_string());
+                            }
+                            break;
+                        }
                     }
                 }
             }
