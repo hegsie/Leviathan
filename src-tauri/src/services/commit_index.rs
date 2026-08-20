@@ -21,6 +21,29 @@ pub struct IndexedCommit {
 }
 
 /// In-memory commit index for a repository
+/// Ceiling on how many commits an index holds, shared by the full build and the
+/// incremental refresh so one cannot outgrow the other.
+const MAX_INDEXED_COMMITS: usize = 100_000;
+
+/// The index is kept newest-first by author date.
+///
+/// This is not cosmetic: `search` scans in stored order and returns the first
+/// `limit` matches, so the ORDER IS THE RANKING. Anything that disturbs it
+/// changes which results a capped search returns.
+fn sort_newest_first(commits: &mut [IndexedCommit]) {
+    commits.sort_by_key(|c| std::cmp::Reverse(c.author_date));
+}
+
+/// Rebuild the oid -> position map. Positions are only meaningful against the
+/// vector they were built from, so this runs after anything that reorders it.
+fn index_by_oid(commits: &[IndexedCommit]) -> HashMap<String, usize> {
+    commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.oid.clone(), i))
+        .collect()
+}
+
 pub struct CommitIndex {
     commits: Vec<IndexedCommit>,
     oid_map: HashMap<String, usize>,
@@ -39,7 +62,7 @@ impl CommitIndex {
 
         let mut commits = Vec::new();
         let mut oid_map = HashMap::new();
-        let max_commits = 100_000;
+        let max_commits = MAX_INDEXED_COMMITS;
 
         for oid_result in revwalk {
             if commits.len() >= max_commits {
@@ -76,6 +99,11 @@ impl CommitIndex {
             oid_map.insert(oid_str, commits.len());
             commits.push(indexed);
         }
+
+        // State the ordering rather than inheriting it from the walk, so the
+        // incremental path has something definite to preserve.
+        sort_newest_first(&mut commits);
+        let oid_map = index_by_oid(&commits);
 
         Ok(Self {
             commits,
@@ -165,9 +193,23 @@ impl CommitIndex {
 
             let oid_str = oid.to_string();
 
-            // Stop when we hit a known commit
+            // SKIP a known commit — do not stop.
+            //
+            // The walk is TIME-sorted across every ref, so the newest commit
+            // anywhere is visited first. That is almost always a local commit
+            // this index already has, and breaking there ended the walk
+            // immediately. Commits that arrived on OTHER refs with older
+            // timestamps — the normal case after a fetch, where upstream work
+            // predates your latest local commit — were never indexed at all,
+            // so search silently could not find them until a full rebuild.
+            //
+            // Skipping instead of stopping means the walk enumerates the whole
+            // history each refresh. Known commits cost only a hash lookup, and
+            // correctness here is worth more than the walk: an index that
+            // quietly lacks the commits you just fetched is worse than a slower
+            // refresh.
             if self.oid_map.contains_key(&oid_str) {
-                break;
+                continue;
             }
 
             let commit = match repo.find_commit(oid) {
@@ -195,19 +237,25 @@ impl CommitIndex {
         let count = new_commits.len();
 
         if count > 0 {
-            // Update oid_map indices for existing commits (shift by count)
-            for value in self.oid_map.values_mut() {
-                *value += count;
-            }
+            // MERGE and re-sort — do not prepend.
+            //
+            // Prepending assumed everything new was newer than everything
+            // known, which was true only while the walk stopped at the first
+            // known commit. Now that it continues, the new commits are mostly
+            // BACKFILL: fetched work older than the local tip. Putting those at
+            // the front broke the newest-first order that search() relies on —
+            // it returns the first `limit` matches it finds, so the order is
+            // the ranking, and a fetch could bury recent commits behind old
+            // ones.
+            self.commits.append(&mut new_commits);
+            sort_newest_first(&mut self.commits);
 
-            // Add new commits to the front
-            for (i, commit) in new_commits.iter().enumerate() {
-                self.oid_map.insert(commit.oid.clone(), i);
-            }
-
-            // Prepend new commits
-            new_commits.append(&mut self.commits);
-            self.commits = new_commits;
+            // Same ceiling build() applies. Without it an index built from a
+            // shallow or partial history could grow past the cap now that the
+            // walk enumerates everything; the oldest go first, matching how
+            // build() truncates.
+            self.commits.truncate(MAX_INDEXED_COMMITS);
+            self.oid_map = index_by_oid(&self.commits);
         }
 
         self.repo_path = repo_path.to_string();
@@ -290,6 +338,133 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let index = CommitIndex::build(&repo.path_str()).unwrap();
         assert!(!index.is_empty());
+    }
+
+    /// A fetched commit older than the newest local one must still be indexed.
+    ///
+    /// The walk is TIME-sorted across every ref, so the newest commit anywhere
+    /// is visited first — almost always a local commit already in the index.
+    /// Breaking there ended the walk immediately, and commits that arrived on
+    /// other refs with older timestamps (the normal case after a fetch, where
+    /// upstream work predates your latest local commit) were never indexed.
+    /// Search then silently could not find them until a full rebuild.
+    #[test]
+    fn test_update_incremental_indexes_older_commits_on_other_refs() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        // A local commit with a NEW timestamp, indexed first.
+        let local_tip = commit_at(&test_repo, "Local latest", "local.txt", 2_000_000_000);
+        let mut index = CommitIndex::build(&test_repo.path_str()).unwrap();
+        assert!(index.oid_map.contains_key(&local_tip.to_string()));
+
+        // A commit that arrives on another ref with an OLDER timestamp, the way
+        // a fetch delivers upstream work committed before your latest local one.
+        let fetched = commit_at(&test_repo, "Fetched upstream work", "up.txt", 1_000_000_000);
+        {
+            let repo = test_repo.repo();
+            repo.reference("refs/remotes/origin/main", fetched, true, "test")
+                .unwrap();
+        }
+
+        let added = index.update_incremental(&test_repo.path_str()).unwrap();
+
+        assert!(
+            index.oid_map.contains_key(&fetched.to_string()),
+            "a fetched commit older than the local tip must be indexed, \
+             otherwise search cannot find what was just fetched"
+        );
+        assert!(added >= 1, "the refresh must report the commit it added");
+    }
+
+    /// Backfilled commits must not jump the queue.
+    ///
+    /// search() scans in stored order and returns the first `limit` matches, so
+    /// the order IS the ranking. The old code prepended everything new, which
+    /// was only right while the walk stopped at the first known commit. Once it
+    /// continues, the new commits are mostly fetched work OLDER than the local
+    /// tip — putting those at the front buried recent commits behind them, so a
+    /// capped search returned the wrong set after every fetch.
+    #[test]
+    fn test_update_incremental_keeps_the_index_newest_first() {
+        let test_repo = TestRepo::with_initial_commit();
+
+        let newest = commit_at(&test_repo, "Local latest", "local.txt", 2_000_000_000);
+        let mut index = CommitIndex::build(&test_repo.path_str()).unwrap();
+
+        // Arrives on another ref, older than the local tip — what a fetch brings.
+        let older = commit_at(&test_repo, "Fetched older work", "up.txt", 1_500_000_000);
+        {
+            let repo = test_repo.repo();
+            repo.reference("refs/remotes/origin/main", older, true, "test")
+                .unwrap();
+        }
+
+        index.update_incremental(&test_repo.path_str()).unwrap();
+
+        let positions: Vec<usize> = [newest, older]
+            .iter()
+            .map(|oid| {
+                *index
+                    .oid_map
+                    .get(&oid.to_string())
+                    .expect("both commits must be indexed")
+            })
+            .collect();
+        assert!(
+            positions[0] < positions[1],
+            "the newer local commit must still rank ahead of the older fetched \
+             one — search returns the first matches it finds"
+        );
+
+        // The stored order itself must be non-increasing by date.
+        let dates: Vec<i64> = index.commits.iter().map(|c| c.author_date).collect();
+        let mut sorted = dates.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(dates, sorted, "the index must stay newest-first");
+
+        // And the position map must agree with the vector it describes.
+        for (i, commit) in index.commits.iter().enumerate() {
+            assert_eq!(
+                index.oid_map.get(&commit.oid),
+                Some(&i),
+                "oid_map must point at the right position after a re-sort"
+            );
+        }
+    }
+
+    /// A refresh with nothing new must add nothing.
+    #[test]
+    fn test_update_incremental_adds_nothing_when_unchanged() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Second", &[("a.txt", "a")]);
+
+        let mut index = CommitIndex::build(&test_repo.path_str()).unwrap();
+        let before = index.len();
+
+        assert_eq!(
+            index.update_incremental(&test_repo.path_str()).unwrap(),
+            0,
+            "skipping known commits must not re-add them"
+        );
+        assert_eq!(index.len(), before, "the index must not grow or duplicate");
+    }
+
+    /// Commit on the current branch with an explicit timestamp.
+    fn commit_at(repo: &TestRepo, message: &str, file: &str, seconds: i64) -> git2::Oid {
+        let git_repo = repo.repo();
+        std::fs::write(repo.path.join(file), "content").unwrap();
+        let mut index = git_repo.index().unwrap();
+        index.add_path(std::path::Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
+
+        let when = git2::Time::new(seconds, 0);
+        let sig = git2::Signature::new("Test User", "test@example.com", &when).unwrap();
+        let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+
+        git_repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap()
     }
 
     #[test]
