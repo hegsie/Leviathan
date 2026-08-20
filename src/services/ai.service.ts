@@ -175,6 +175,11 @@ export interface StagedAnalysis {
   findings: AnalysisFinding[];
   summary: string;
   riskLevel: RiskLevel;
+  /** Whether the AI half of the check ran and parsed. False means the result
+   *  is the regex secret scan alone. */
+  aiAnalysisRan: boolean;
+  /** Why the AI pass did not run, when it did not. */
+  aiError: string | null;
 }
 
 export interface GeneratedPrDescription {

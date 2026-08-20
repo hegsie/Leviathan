@@ -262,6 +262,23 @@ pub struct StagedAnalysis {
     pub findings: Vec<AnalysisFinding>,
     pub summary: String,
     pub risk_level: RiskLevel,
+    /// Whether the AI half of the check actually ran and parsed.
+    ///
+    /// `serde(default)`: this same struct is what the MODEL's JSON is parsed
+    /// into, and the model does not report on its own liveness. Without the
+    /// default a missing field would fail the parse and take the AI pass down
+    /// with it — the very failure this field exists to report.
+    ///
+    /// The regex secret scan always runs; the AI pass can fail (provider
+    /// stopped after the availability check, model missing, network down,
+    /// unparseable response). Both failures used to be discarded, so a check
+    /// that had done nothing but grep for secrets still reported "No issues
+    /// found" — false assurance that a review had happened.
+    #[serde(default)]
+    pub ai_analysis_ran: bool,
+    /// Why the AI pass did not run, when it did not.
+    #[serde(default)]
+    pub ai_error: Option<String>,
 }
 
 /// Generated PR description result
