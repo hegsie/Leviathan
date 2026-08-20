@@ -1,0 +1,64 @@
+name: Dependabot auto-merge
+
+# Merges a Dependabot pull request once every check on it has passed.
+#
+# This runs on `workflow_run` rather than `pull_request` on purpose. GitHub's
+# native auto-merge (`gh pr merge --auto`) only waits for CI when the base
+# branch has required status checks configured; `main` has no protection rules,
+# so that route would merge Dependabot pull requests the moment they opened.
+# Reacting to a finished workflow run instead makes CI passing the trigger, and
+# the job re-checks the whole check list before merging.
+#
+# It also keeps the writable token away from Dependabot's branch contents:
+# nothing here checks out the pull request, only the policy from the base branch.
+#
+# The decision logic lives in .github/scripts/dependabot-auto-merge.mjs and
+# .github/scripts/dependabot-policy.mjs, which are unit tested in CI.
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Build & Release
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One merge at a time, so two pull requests cannot race each other into a
+# lockfile conflict.
+concurrency:
+  group: dependabot-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    # Keep in step with SELF_CHECK_NAME in .github/scripts/dependabot-auto-merge.mjs.
+    name: Auto-merge
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+
+    steps:
+      - name: Check out the merge policy from the base branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Merge if the policy allows it
+        uses: actions/github-script@v7
+        with:
+          # A PAT or App token is only needed if the repository later gates
+          # merges behind rules the built-in token cannot satisfy.
+          github-token: ${{ secrets.DEPENDABOT_AUTOMERGE_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const { run } = await import(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/dependabot-auto-merge.mjs`
+            );
+            await run({ github, context, core });

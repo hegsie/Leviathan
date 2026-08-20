@@ -42,6 +42,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Explicit path because Node's test runner skips dot-directories.
+      - name: Test workflow scripts
+        run: node --test .github/scripts/*.test.mjs
+
   lint-backend:
     name: Lint Backend
     runs-on: ubuntu-22.04
