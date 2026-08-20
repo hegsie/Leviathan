@@ -50,6 +50,19 @@ pub async fn get_remote_status(path: String) -> Result<RemoteStatus> {
             .head()
             .map_err(|e| LeviathanError::OperationFailed(format!("No HEAD: {}", e)))?;
 
+        // Detached HEAD has no branch, so there is no upstream to compare
+        // against — report "no upstream" rather than failing. shorthand()
+        // returns the literal "HEAD" when detached, so find_branch missed and
+        // this errored for anyone inspecting a commit or tag.
+        if !head.is_branch() {
+            return Ok(RemoteStatus {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+                upstream_name: None,
+            });
+        }
+
         let branch_name = head
             .shorthand()
             .map_err(|_| LeviathanError::OperationFailed("Invalid branch name".to_string()))?;
@@ -99,6 +112,26 @@ pub async fn get_remote_status(path: String) -> Result<RemoteStatus> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The command surface must degrade on a detached HEAD too, not error —
+    /// same defect as the background loop's get_remote_status_internal.
+    #[tokio::test]
+    async fn test_get_remote_status_detached_head_reports_no_upstream() {
+        let test_repo = TestRepo::with_initial_commit();
+        {
+            let repo = test_repo.repo();
+            let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+            repo.set_head_detached(oid).unwrap();
+        }
+
+        let status = get_remote_status(test_repo.path_str())
+            .await
+            .expect("detached HEAD must not error");
+
+        assert!(!status.has_upstream);
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+    }
     use super::*;
     use crate::test_utils::TestRepo;
 
