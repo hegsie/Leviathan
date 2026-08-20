@@ -11,6 +11,8 @@ const workflow = (file) =>
 const AUTO_MERGE_YML = workflow('dependabot-auto-merge.yml');
 
 const HEAD_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+/** An earlier push on the same branch. */
+const STALE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 function dependabotCommit({ name = 'glob', version = '0.3.4', updateType = 'patch' } = {}) {
   return [
@@ -28,7 +30,13 @@ function dependabotCommit({ name = 'glob', version = '0.3.4', updateType = 'patc
   ].join('\n');
 }
 
-const green = (name) => ({ name, event: 'pull_request', status: 'completed', conclusion: 'success' });
+const green = (name, head_sha = HEAD_SHA) => ({
+  name,
+  head_sha,
+  event: 'pull_request',
+  status: 'completed',
+  conclusion: 'success',
+});
 
 /**
  * Builds a world where everything is in order, so each test can break exactly
@@ -182,14 +190,29 @@ test('refuses a pull request aimed somewhere other than the default branch', asy
 });
 
 test('waits for a workflow that is still running', async () => {
-  h.state.workflowRuns.push({ name: 'CodeQL', event: 'pull_request', status: 'in_progress', conclusion: null });
+  h.state.workflowRuns.push({
+    name: 'CodeQL',
+    head_sha: HEAD_SHA,
+    event: 'pull_request',
+    status: 'in_progress',
+    conclusion: null,
+  });
 
   assert.match(only(await run(h)).reason, /waiting on CodeQL \(in_progress\)/);
   assert.equal(h.calls.merged.length, 0);
 });
 
 test('refuses when a workflow other than the trigger failed', async () => {
-  h.state.workflowRuns = [green('CI'), { name: 'Build & Release', event: 'pull_request', status: 'completed', conclusion: 'failure' }];
+  h.state.workflowRuns = [
+    green('CI'),
+    {
+      name: 'Build & Release',
+      head_sha: HEAD_SHA,
+      event: 'pull_request',
+      status: 'completed',
+      conclusion: 'failure',
+    },
+  ];
 
   assert.match(only(await run(h)).reason, /Build & Release \(failure\)/);
   assert.equal(h.calls.merged.length, 0);
@@ -203,9 +226,29 @@ test('refuses a commit that no workflow has registered a run for yet', async () 
   assert.equal(h.calls.merged.length, 0);
 });
 
+test('a green run on another commit does not stand in for this one', async () => {
+  // The dangerous direction: readiness satisfied by a commit nobody tested.
+  h.state.workflowRuns = [green('CI', STALE_SHA), green('Build & Release', STALE_SHA)];
+
+  assert.match(only(await run(h)).reason, /no workflow runs have registered/);
+  assert.equal(h.calls.merged.length, 0);
+});
+
+test('runs superseded by a later push do not block forever', async () => {
+  // ci.yml cancels superseded runs, so an earlier commit routinely leaves a
+  // cancelled run and an in-progress one behind.
+  h.state.workflowRuns.push(
+    { name: 'CI', head_sha: STALE_SHA, event: 'pull_request', status: 'completed', conclusion: 'cancelled' },
+    { name: 'Build & Release', head_sha: STALE_SHA, event: 'pull_request', status: 'in_progress', conclusion: null },
+  );
+
+  assert.equal(only(await run(h)).merged, true);
+});
+
 test('ignores workflow runs that are not the pull request\'s own checks', async () => {
   h.state.workflowRuns.push({
     name: 'Dependabot Updates',
+    head_sha: HEAD_SHA,
     event: 'dynamic',
     status: 'completed',
     conclusion: 'failure',
@@ -218,6 +261,7 @@ test('ignores its own workflow run and its own check run', async () => {
   // Guards the deadlock where the job waits for a check that is itself.
   h.state.workflowRuns.push({
     name: 'Dependabot auto-merge',
+    head_sha: HEAD_SHA,
     event: 'pull_request',
     status: 'in_progress',
     conclusion: null,
@@ -228,7 +272,13 @@ test('ignores its own workflow run and its own check run', async () => {
 });
 
 test('treats neutral and skipped results as passing', async () => {
-  h.state.workflowRuns.push({ name: 'Optional', event: 'pull_request', status: 'completed', conclusion: 'skipped' });
+  h.state.workflowRuns.push({
+    name: 'Optional',
+    head_sha: HEAD_SHA,
+    event: 'pull_request',
+    status: 'completed',
+    conclusion: 'skipped',
+  });
   h.state.checkRuns.push({ name: 'E2E Tests', status: 'completed', conclusion: 'skipped' });
 
   assert.equal(only(await run(h)).merged, true);

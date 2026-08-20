@@ -159,7 +159,14 @@ async function checksAreGreen({ github, owner, repo, sha }) {
     per_page: 100,
   });
   const relevant = runs.filter(
-    (workflowRun) => workflowRun.name !== SELF_WORKFLOW_NAME && PR_EVENTS.has(workflowRun.event),
+    (workflowRun) =>
+      // Scope to this commit here rather than trusting the `head_sha` query
+      // parameter. This is the predicate the whole safety argument rests on,
+      // and it also drops the superseded runs an earlier push left behind,
+      // which are frequently cancelled or still in progress.
+      workflowRun.head_sha === sha &&
+      workflowRun.name !== SELF_WORKFLOW_NAME &&
+      PR_EVENTS.has(workflowRun.event),
   );
 
   if (relevant.length === 0) {
