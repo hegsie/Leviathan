@@ -176,14 +176,14 @@ Rules:
 Diff:
 "#;
 
-/// Maximum diff length to send to the AI provider
-pub const MAX_DIFF_CHARS: usize = 12000;
+/// Maximum diff size, in BYTES, to send to the AI provider.
+pub const MAX_DIFF_BYTES: usize = 12000;
 
-/// Maximum conflict context length to send to the AI provider
-pub const MAX_CONFLICT_CONTEXT_CHARS: usize = 16000;
+/// Maximum conflict context size, in BYTES, to send to the AI provider.
+pub const MAX_CONFLICT_CONTEXT_BYTES: usize = 16000;
 
-/// Maximum commit text length to send for changelog generation
-pub const MAX_CHANGELOG_CHARS: usize = 24000;
+/// Maximum commit text size, in BYTES, to send for changelog generation.
+pub const MAX_CHANGELOG_BYTES: usize = 24000;
 
 /// Generated changelog result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,10 +784,10 @@ impl AiService {
         // per-file truncation internally and needs all files for good summaries)
         let truncated_diff = if provider_type == AiProviderType::LocalInference {
             diff
-        } else if diff.len() > MAX_DIFF_CHARS {
+        } else if diff.len() > MAX_DIFF_BYTES {
             format!(
                 "{}...\n[Diff truncated for length]",
-                truncate_at_char_boundary(&diff, MAX_DIFF_CHARS)
+                truncate_at_char_boundary(&diff, MAX_DIFF_BYTES)
             )
         } else {
             diff

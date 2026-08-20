@@ -8,7 +8,7 @@ use crate::services::ai::{
     ConflictExplanation, ConflictResolutionSuggestion, FindingCategory, GeneratedChangelog,
     GeneratedCommitMessage, GeneratedPrDescription, ReflogMatch, RiskLevel, Severity,
     StagedAnalysis, CHANGELOG_PROMPT, COMMIT_SPLIT_PROMPT, CONFLICT_EXPLAIN_PROMPT,
-    CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_CHARS, MAX_CONFLICT_CONTEXT_CHARS, MAX_DIFF_CHARS,
+    CONFLICT_RESOLUTION_PROMPT, MAX_CHANGELOG_BYTES, MAX_CONFLICT_CONTEXT_BYTES, MAX_DIFF_BYTES,
     PR_DESCRIPTION_PROMPT, REFLOG_MATCH_PROMPT, VIBE_CHECK_PROMPT,
 };
 use tauri::{command, State};
@@ -138,7 +138,7 @@ pub async fn suggest_conflict_resolution(
 
     // Add surrounding context if available
     if let Some(ref before) = context_before {
-        let truncated = truncate_content(before, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        let truncated = truncate_content(before, MAX_CONFLICT_CONTEXT_BYTES / 4);
         if !truncated.is_empty() {
             user_prompt.push_str(&format!(
                 "Context before the conflict:\n```\n{}\n```\n\n",
@@ -149,7 +149,7 @@ pub async fn suggest_conflict_resolution(
 
     // Add base content if available
     if let Some(ref base) = base_content {
-        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_BYTES / 4);
         if !truncated.is_empty() {
             user_prompt.push_str(&format!(
                 "Base (common ancestor):\n```\n{}\n```\n\n",
@@ -159,8 +159,8 @@ pub async fn suggest_conflict_resolution(
     }
 
     // Add ours and theirs
-    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
-    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_BYTES / 3);
+    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_BYTES / 3);
 
     user_prompt.push_str(&format!(
         "Ours (current branch):\n```\n{}\n```\n\n",
@@ -172,7 +172,7 @@ pub async fn suggest_conflict_resolution(
     ));
 
     if let Some(ref after) = context_after {
-        let truncated = truncate_content(after, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        let truncated = truncate_content(after, MAX_CONFLICT_CONTEXT_BYTES / 4);
         if !truncated.is_empty() {
             user_prompt.push_str(&format!(
                 "\nContext after the conflict:\n```\n{}\n```\n",
@@ -211,7 +211,7 @@ pub async fn generate_changelog(
     }
 
     // Truncate if too long
-    let truncated = truncate_content(&commits_text, MAX_CHANGELOG_CHARS);
+    let truncated = truncate_content(&commits_text, MAX_CHANGELOG_BYTES);
 
     let service = state.read().await;
     let response = service
@@ -249,7 +249,7 @@ pub async fn explain_conflict(
     }
 
     if let Some(ref base) = base_content {
-        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_CHARS / 4);
+        let truncated = truncate_content(base, MAX_CONFLICT_CONTEXT_BYTES / 4);
         if !truncated.is_empty() {
             user_prompt.push_str(&format!(
                 "Base (common ancestor):\n```\n{}\n```\n\n",
@@ -258,8 +258,8 @@ pub async fn explain_conflict(
         }
     }
 
-    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
-    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_CHARS / 3);
+    let ours_truncated = truncate_content(&ours_content, MAX_CONFLICT_CONTEXT_BYTES / 3);
+    let theirs_truncated = truncate_content(&theirs_content, MAX_CONFLICT_CONTEXT_BYTES / 3);
 
     user_prompt.push_str(&format!(
         "Ours (current branch):\n```\n{}\n```\n\n",
@@ -404,7 +404,7 @@ pub async fn analyze_staged_changes(
     let mut findings = detect_secrets(&diff);
 
     // AI analysis for complexity and quality
-    let truncated = truncate_content(&diff, MAX_DIFF_CHARS);
+    let truncated = truncate_content(&diff, MAX_DIFF_BYTES);
     let service = state.read().await;
 
     if let Ok(response) = service
@@ -469,7 +469,7 @@ pub async fn generate_pr_description(
     let stats = get_diff_stats(&repo_path, &base_ref, &head_ref)?;
 
     let user_prompt = format!("{}\n\nDiff statistics:\n{}", commits_text, stats);
-    let truncated = truncate_content(&user_prompt, MAX_CHANGELOG_CHARS);
+    let truncated = truncate_content(&user_prompt, MAX_CHANGELOG_BYTES);
 
     // Replace {title} placeholder in prompt
     let system_prompt = PR_DESCRIPTION_PROMPT.replace("{title}", &title);
@@ -511,7 +511,7 @@ pub async fn suggest_commit_splits(
         });
     }
 
-    let truncated = truncate_content(&diff, MAX_DIFF_CHARS);
+    let truncated = truncate_content(&diff, MAX_DIFF_BYTES);
 
     let service = state.read().await;
     let response = service
@@ -633,16 +633,16 @@ fn strip_code_fences(s: &str) -> &str {
     }
 }
 
-/// Truncate content to a maximum character length at a line boundary
-fn truncate_content(content: &str, max_chars: usize) -> &str {
-    if content.len() <= max_chars {
+/// Truncate content to at most `max_bytes`, preferring a line boundary.
+///
+/// The limit is a BYTE count, and slicing a `&str` mid-character panics. Both
+/// this slice and the rfind slice below used the raw index, so a large diff
+/// containing any non-ASCII text could kill the command task.
+fn truncate_content(content: &str, max_bytes: usize) -> &str {
+    if content.len() <= max_bytes {
         return content;
     }
-    // Cut on a char boundary first: max_chars is a BYTE count, and slicing a
-    // &str mid-character panics. Both this slice and the rfind slice below used
-    // the raw index, so a large diff containing any non-ASCII text could kill
-    // the command task.
-    let head = crate::services::ai::truncate_at_char_boundary(content, max_chars);
+    let head = crate::services::ai::truncate_at_char_boundary(content, max_bytes);
     // Prefer a line boundary within that.
     match head.rfind('\n') {
         Some(pos) => &head[..pos],
