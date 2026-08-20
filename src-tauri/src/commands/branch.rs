@@ -843,7 +843,10 @@ pub async fn get_branch_tracking_info(path: String, branch: String) -> Result<Br
 ///
 /// Uses `git checkout --orphan <name>` to create a branch that has no history.
 /// This is useful for creating documentation branches, GitHub Pages branches, etc.
-/// If `checkout` is true (the default), the working directory is switched to the new branch.
+///
+/// `checkout` MUST be true. An orphan branch is not a ref until its first
+/// commit, so git cannot create one without switching to it — `false` is
+/// refused rather than half-performed. See the body for why.
 #[command]
 pub async fn create_orphan_branch(path: String, name: String, checkout: bool) -> Result<()> {
     // `git checkout --orphan` is the only way to start an orphan branch, and it
@@ -2163,6 +2166,9 @@ mod tests {
         let repo = test_repo.repo();
         let head_ref = repo.find_reference("HEAD").unwrap();
         assert_eq!(
+            // Two unwraps, deliberately: this git2 version returns
+            // Result<Option<&str>>, not Option<&str>. One unwrap leaves an
+            // Option that will not compare to &str.
             head_ref.symbolic_target().unwrap().unwrap(),
             "refs/heads/gh-pages",
             "HEAD must name the new orphan branch"
