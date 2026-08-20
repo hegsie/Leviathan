@@ -154,6 +154,55 @@ describe('lv-clone-dialog cancellation', () => {
       .not.be.undefined;
   });
 
+  // The success path leaves isCloning set across a 500ms close delay so a
+  // second clone cannot start into the same destination. The footer button and
+  // the modal-close handler both routed to cancellation while it was set, so a
+  // FINISHED clone still offered "Cancel Clone" — and Escape or the x fired a
+  // cancel request for an operation that had already succeeded.
+  it('stops offering to cancel once the clone has succeeded', async () => {
+    await startClone(el);
+
+    finishClone?.(
+      Promise.resolve({ path: '/tmp/clone-target', name: 'repo', currentBranch: null }),
+    );
+    await flush();
+    await el.updateComplete;
+
+    expect(cancelButton(el).textContent!.trim(), 'a finished clone is not cancellable').to.equal(
+      'Cancel',
+    );
+
+    invoked.length = 0;
+    cancelButton(el).click();
+    await flush();
+    await el.updateComplete;
+    expect(
+      invoked.some((c) => c.command === 'cancel_clone'),
+      'clicking Cancel after success must not cancel the finished clone',
+    ).to.be.false;
+  });
+
+  it('does not cancel a succeeded clone when the modal is dismissed', async () => {
+    await startClone(el);
+
+    finishClone?.(
+      Promise.resolve({ path: '/tmp/clone-target', name: 'repo', currentBranch: null }),
+    );
+    await flush();
+    await el.updateComplete;
+
+    invoked.length = 0;
+    const modal = el.shadowRoot!.querySelector('lv-modal')!;
+    modal.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
+    await flush();
+    await el.updateComplete;
+
+    expect(
+      invoked.some((c) => c.command === 'cancel_clone'),
+      'dismissing after success must not cancel the finished clone',
+    ).to.be.false;
+  });
+
   it('releases the dialog once the cancelled clone returns', async () => {
     await startClone(el);
     cancelButton(el).click();

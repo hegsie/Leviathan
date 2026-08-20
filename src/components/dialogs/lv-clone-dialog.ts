@@ -184,6 +184,17 @@ export class LvCloneDialog extends LitElement {
   @state() private filter: string | null = null;
   @state() private singleBranch = false;
   @state() private isCloning = false;
+  /**
+   * The clone SUCCEEDED and the dialog is in its brief close delay.
+   *
+   * `isCloning` stays true across that delay (clearing it would re-enable the
+   * Clone button and let a second clone start into the same destination), but
+   * the footer button and the modal-close handler both route to cancellation
+   * while it is set — so for those 500ms a finished clone still offered
+   * "Cancel Clone", and Escape or the × fired a cancel request for an
+   * operation that had already succeeded and been added to the store.
+   */
+  @state() private isComplete = false;
   /** Set while a cancellation request is in flight, so Cancel cannot be spammed. */
   @state() private isCancelling = false;
   @state() private progress = 0;
@@ -213,6 +224,7 @@ export class LvCloneDialog extends LitElement {
     // the rest of the session after the first successful clone.
     this.isCloning = false;
     this.isCancelling = false;
+    this.isComplete = false;
     this.cleanupListener();
   }
 
@@ -230,6 +242,7 @@ export class LvCloneDialog extends LitElement {
     this.depth = null;
     this.isCloning = false;
     this.isCancelling = false;
+    this.isComplete = false;
     this.progress = 0;
     this.progressText = '';
     this.error = '';
@@ -341,6 +354,7 @@ export class LvCloneDialog extends LitElement {
       if (result.success && result.data) {
         this.progress = 100;
         this.progressText = 'Clone complete!';
+        this.isComplete = true;
 
         // Add the repository to the store
         const store = repositoryStore.getState();
@@ -378,7 +392,7 @@ export class LvCloneDialog extends LitElement {
     // Previously this simply refused to close, and since the clone had no
     // cancellation and no timeout, a hung clone locked the modal for the life of
     // the app.
-    if (this.isCloning) {
+    if (this.isCloning && !this.isComplete) {
       this.modal.open = true;
       void this.handleCancelClone();
       return;
@@ -526,10 +540,12 @@ export class LvCloneDialog extends LitElement {
         <div slot="footer">
           <button
             class="btn btn-secondary"
-            @click=${this.isCloning ? this.handleCancelClone : this.close}
+            @click=${this.isCloning && !this.isComplete ? this.handleCancelClone : this.close}
             ?disabled=${this.isCancelling}
           >
-            ${this.isCloning ? (this.isCancelling ? 'Cancelling…' : 'Cancel Clone') : 'Cancel'}
+            ${this.isCloning && !this.isComplete
+              ? (this.isCancelling ? 'Cancelling…' : 'Cancel Clone')
+              : 'Cancel'}
           </button>
           <button
             class="btn btn-primary"

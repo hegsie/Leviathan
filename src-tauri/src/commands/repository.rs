@@ -414,6 +414,12 @@ pub async fn clone_repository(
             })
         } else {
             // Full clone: use git2 RepoBuilder with progress callbacks
+            //
+            // Declared out here, not inside the blocking closure: the error arm
+            // below needs it, and libgit2 reports a deadline abort as the same
+            // generic error a user cancellation produces.
+            let timed_out = Arc::new(AtomicBool::new(false));
+            let timed_out_cb = Arc::clone(&timed_out);
             let result = tokio::task::spawn_blocking(move || {
                 let mut builder = git2::build::RepoBuilder::new();
 
@@ -452,6 +458,7 @@ pub async fn clone_repository(
                     // tokio::time::timeout only drops the future, so without this
                     // the transfer keeps running after the caller gave up.
                     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        timed_out_cb.store(true, Ordering::Relaxed);
                         return false;
                     }
 
@@ -511,6 +518,17 @@ pub async fn clone_repository(
                     if CLONE_CANCELLED.load(Ordering::Relaxed) {
                         let _ = std::fs::remove_dir_all(Path::new(&path));
                         return Err(LeviathanError::Custom("Clone cancelled".to_string()));
+                    }
+                    // A deadline abort leaves exactly the same partial checkout
+                    // a cancellation does, and reported it as a bare libgit2
+                    // error with the directory still on disk — so the retry the
+                    // message invites failed at "destination already exists",
+                    // with nothing saying the first attempt had timed out.
+                    if timed_out.load(Ordering::Relaxed) {
+                        let _ = std::fs::remove_dir_all(Path::new(&path));
+                        return Err(LeviathanError::OperationTimeout(
+                            "Clone operation timed out".to_string(),
+                        ));
                     }
                     return Err(e.into());
                 }
