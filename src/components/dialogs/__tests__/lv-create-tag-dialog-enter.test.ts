@@ -40,11 +40,11 @@ async function armedDialog(): Promise<LvCreateTagDialog> {
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 20));
 
-  (el as any).tagName_ = 'v1.0.0';
   (el as any).name = 'v1.0.0';
   (el as any).message = 'First line of the release notes';
-  (el as any).annotated = true;
+  (el as any).isAnnotated = true;
   await el.updateComplete;
+  expect((el as any).canCreate, 'the dialog must be armed to submit').to.be.true;
   return el;
 }
 
@@ -58,6 +58,13 @@ function pressEnter(target: Element, init: KeyboardEventInit = {}): KeyboardEven
   });
   target.dispatchEvent(event);
   return event;
+}
+
+/** handleCreate is async and not awaited by the key handler. */
+async function waitForCreateTag(): Promise<void> {
+  for (let i = 0; i < 50 && !invokeCalls.some((c) => c.command === 'create_tag'); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
 describe('lv-create-tag-dialog Enter handling', () => {
@@ -89,8 +96,16 @@ describe('lv-create-tag-dialog Enter handling', () => {
 
     const event = pressEnter(textarea, { ctrlKey: true });
     await el.updateComplete;
+    await waitForCreateTag();
 
     expect(event.defaultPrevented, 'Ctrl+Enter is the deliberate submit').to.be.true;
+    // preventDefault alone would still pass with submission broken, and a
+    // shortcut that swallows the key without creating the tag is worse than no
+    // shortcut at all.
+    expect(
+      invokeCalls.some((c) => c.command === 'create_tag'),
+      'Ctrl+Enter must actually create the tag',
+    ).to.be.true;
   });
 
   it('still submits on Enter from the name input', async () => {
@@ -99,10 +114,15 @@ describe('lv-create-tag-dialog Enter handling', () => {
 
     const event = pressEnter(input);
     await el.updateComplete;
+    await waitForCreateTag();
 
     expect(
       event.defaultPrevented,
       'Enter from a single-line field still means submit',
+    ).to.be.true;
+    expect(
+      invokeCalls.some((c) => c.command === 'create_tag'),
+      'Enter from the name input must actually create the tag',
     ).to.be.true;
   });
 });
