@@ -176,14 +176,14 @@ Rules:
 Diff:
 "#;
 
-/// Maximum diff length to send to the AI provider
-pub const MAX_DIFF_CHARS: usize = 12000;
+/// Maximum diff size, in BYTES, to send to the AI provider.
+pub const MAX_DIFF_BYTES: usize = 12000;
 
-/// Maximum conflict context length to send to the AI provider
-pub const MAX_CONFLICT_CONTEXT_CHARS: usize = 16000;
+/// Maximum conflict context size, in BYTES, to send to the AI provider.
+pub const MAX_CONFLICT_CONTEXT_BYTES: usize = 16000;
 
-/// Maximum commit text length to send for changelog generation
-pub const MAX_CHANGELOG_CHARS: usize = 24000;
+/// Maximum commit text size, in BYTES, to send for changelog generation.
+pub const MAX_CHANGELOG_BYTES: usize = 24000;
 
 /// Generated changelog result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,10 +784,10 @@ impl AiService {
         // per-file truncation internally and needs all files for good summaries)
         let truncated_diff = if provider_type == AiProviderType::LocalInference {
             diff
-        } else if diff.len() > MAX_DIFF_CHARS {
+        } else if diff.len() > MAX_DIFF_BYTES {
             format!(
                 "{}...\n[Diff truncated for length]",
-                &diff[..MAX_DIFF_CHARS]
+                truncate_at_char_boundary(&diff, MAX_DIFF_BYTES)
             )
         } else {
             diff
@@ -901,6 +901,26 @@ impl AiService {
 /// Global AI service state
 pub type AiState = Arc<RwLock<AiService>>;
 
+/// Truncate at or before `max_bytes` without splitting a UTF-8 character.
+///
+/// Slicing a `&str` at a byte index that is not a char boundary panics. The
+/// truncation limits here are byte counts, so any diff or commit log over the
+/// limit that contains non-ASCII text — comments, names, emoji, all routine in
+/// real repositories — could land the cut mid-character and kill the command
+/// task outright, leaving "Generate commit message" and "Vibe Check" dead for
+/// that user whenever their diff was large.
+pub(crate) fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Create the AI service state
 pub fn create_ai_state(config_dir: PathBuf) -> AiState {
     Arc::new(RwLock::new(AiService::new(config_dir)))
@@ -908,6 +928,41 @@ pub fn create_ai_state(config_dir: PathBuf) -> AiState {
 
 #[cfg(test)]
 mod tests {
+
+    /// Truncation limits are BYTE counts, but slicing a &str at a byte index
+    /// that is not a char boundary panics. A diff over the limit containing any
+    /// non-ASCII text — comments, names, emoji, all routine — could land the cut
+    /// mid-character and kill the command task.
+    #[test]
+    fn test_truncate_at_char_boundary_never_splits_a_character() {
+        // é is two bytes, so every odd cut inside the string is mid-character.
+        let s = "ééééééééé";
+        assert_eq!(s.len(), 18);
+
+        for max in 0..=s.len() {
+            let out = truncate_at_char_boundary(s, max);
+            assert!(out.len() <= max, "must not exceed the limit");
+            assert!(s.starts_with(out), "must be a prefix");
+            // Round-tripping through chars proves it is valid UTF-8 at the cut.
+            assert_eq!(out.chars().count() * 2, out.len());
+        }
+    }
+
+    #[test]
+    fn test_truncate_at_char_boundary_handles_wide_characters() {
+        // A 4-byte emoji: a cut anywhere inside it must fall back to before it.
+        let s = "ab🎉cd";
+        assert_eq!(truncate_at_char_boundary(s, 3), "ab");
+        assert_eq!(truncate_at_char_boundary(s, 4), "ab");
+        assert_eq!(truncate_at_char_boundary(s, 5), "ab");
+        assert_eq!(truncate_at_char_boundary(s, 6), "ab🎉");
+    }
+
+    #[test]
+    fn test_truncate_at_char_boundary_returns_short_input_unchanged() {
+        assert_eq!(truncate_at_char_boundary("abc", 10), "abc");
+        assert_eq!(truncate_at_char_boundary("abc", 3), "abc");
+    }
     use super::*;
 
     #[test]

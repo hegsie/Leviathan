@@ -432,10 +432,15 @@ fn extract_file_diffs(diff: &str) -> Vec<FileDiff> {
     // Truncate each file's content to keep batches within model context.
     // Each batch has ~3 files, and the model has ~8192 tokens (~32K chars).
     // Budget ~2000 chars per file to leave room for the prompt template.
-    let max_chars_per_file = if files.len() > 10 { 1500 } else { 2500 };
+    let max_bytes_per_file = if files.len() > 10 { 1500 } else { 2500 };
     for file in &mut files {
-        if file.content.len() > max_chars_per_file {
-            file.content = file.content[..max_chars_per_file].to_string();
+        if file.content.len() > max_bytes_per_file {
+            // On a char boundary: the budget is a BYTE count, and slicing a
+            // &str mid-character panics — which killed the whole local-model
+            // summary for any diff carrying non-ASCII text.
+            file.content =
+                crate::services::ai::truncate_at_char_boundary(&file.content, max_bytes_per_file)
+                    .to_string();
             file.content.push_str("\n[truncated]");
         }
     }
@@ -1246,6 +1251,33 @@ diff --git a/src/b.rs b/src/b.rs
     fn test_extract_file_diffs_empty() {
         let files = extract_file_diffs("");
         assert!(files.is_empty());
+    }
+
+    /// The per-file budget is a BYTE count, so a multi-byte character sitting
+    /// across it panicked — killing the local-model commit summary for any diff
+    /// with an accent, a CJK identifier or an emoji in it, which is routine.
+    #[test]
+    fn test_extract_file_diffs_truncates_multibyte_content_without_panicking() {
+        // 'é' is two bytes, so the 2500-byte cut lands mid-character for one of
+        // these lengths whatever the header adds.
+        for pad in 0..4 {
+            let body = format!("{}{}", "a".repeat(pad), "é".repeat(4000));
+            let diff = format!(
+                "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+{}",
+                body
+            );
+
+            let files = extract_file_diffs(&diff);
+            assert_eq!(files.len(), 1);
+            assert!(
+                files[0].content.ends_with("\n[truncated]"),
+                "oversized content must be truncated"
+            );
+            assert!(
+                files[0].content.len() <= 2500 + "\n[truncated]".len(),
+                "truncation must respect the budget"
+            );
+        }
     }
 
     #[test]
