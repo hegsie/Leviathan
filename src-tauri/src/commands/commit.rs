@@ -342,6 +342,26 @@ pub async fn create_commit(
     let is_allow_empty = allow_empty.unwrap_or(false);
     let has_custom_dates = author_date.is_some() || committer_date.is_some();
 
+    // git refuses `git commit --amend` mid-operation ("You are in the middle of
+    // a merge -- cannot amend."), and nothing here did.
+    //
+    // With the Amend box ticked during a merge, the git2 path rewrote the
+    // PRE-merge HEAD using its pre-merge parents: MERGE_HEAD never became a
+    // parent, and cleanup_state() only runs on the non-amend branch. The result
+    // was an ordinary commit with the merged branch's changes baked in, the
+    // merge silently dropped from the history, and the repository still in
+    // MERGING state with the banner stuck on. Checked before the CLI dispatch
+    // so signed and allow-empty amends refuse with the same message.
+    if amend.unwrap_or(false) {
+        let state = git2::Repository::open(Path::new(&path))?.state();
+        if let Some(what) = crate::commands::branch::in_progress_operation(state) {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Cannot amend while a {} is in progress. Finish or abort it first.",
+                what
+            )));
+        }
+    }
+
     // Check if we need to sign via git CLI
     let should_sign = should_sign_commit(&path, sign_commit)?;
 
@@ -421,6 +441,39 @@ pub async fn create_commit(
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
+
+    // `git commit` refuses a commit that changes nothing unless --allow-empty,
+    // and this path never checked. The only guard was the frontend's staged
+    // COUNT, which goes stale the moment anything unstages outside the app — a
+    // terminal, another tool, watcher lag — so pressing Commit then wrote a
+    // no-op commit into history with no warning at all.
+    //
+    // Not applied mid-merge: concluding a merge whose result happens to match
+    // HEAD's tree is a legitimate commit, and git allows that one too.
+    if !amend.unwrap_or(false) && merge_oids.is_empty() {
+        let head_tree_id = repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .map(|c| c.tree_id());
+        let nothing_staged = match head_tree_id {
+            Some(head_tree_id) => head_tree_id == tree_oid,
+            // Unborn HEAD: there is no parent tree to compare against, so
+            // "nothing staged" means the index itself is empty. Comparing
+            // against a None head tree could never match, which let the very
+            // first commit in a repository be created empty — `git commit`
+            // refuses that one too.
+            None => repo
+                .find_tree(tree_oid)
+                .map(|t| t.is_empty())
+                .unwrap_or(false),
+        };
+        if nothing_staged {
+            return Err(LeviathanError::OperationFailed(
+                "No staged changes to commit".to_string(),
+            ));
+        }
+    }
 
     let commit_oid = if amend.unwrap_or(false) {
         let head_commit = repo.head()?.peel_to_commit()?;
@@ -1631,6 +1684,188 @@ mod tests {
         let summaries: Vec<&str> = commits.iter().map(|c| c.summary.as_str()).collect();
         assert!(summaries.contains(&"Side commit"));
         assert!(summaries.contains(&"Main commit"));
+    }
+
+    /// Committing with nothing staged must refuse, as `git commit` does.
+    ///
+    /// The only guard was the frontend's staged COUNT, and it goes stale the
+    /// moment something unstages outside the app — a terminal, another tool,
+    /// watcher lag. Pressing Commit then wrote a no-op commit into history with
+    /// no warning at all.
+    #[tokio::test]
+    async fn test_create_commit_refuses_when_nothing_is_staged() {
+        let repo = TestRepo::with_initial_commit();
+        let before = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
+
+        let err = create_commit(
+            repo.path_str(),
+            "Nothing to see here".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("an empty commit must be refused");
+        assert!(
+            err.to_string().contains("No staged changes"),
+            "unexpected error: {}",
+            err
+        );
+
+        let after = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(before, after, "HEAD must not move");
+    }
+
+    /// An empty INITIAL commit must be refused too.
+    ///
+    /// On an unborn HEAD there is no parent tree, so the head-tree comparison
+    /// had nothing to match and every first commit was allowed through — even
+    /// with an empty index. `git commit` refuses that one as well.
+    #[tokio::test]
+    async fn test_create_commit_refuses_an_empty_initial_commit() {
+        let repo = TestRepo::new();
+
+        let err = create_commit(
+            repo.path_str(),
+            "Initial commit".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("an empty initial commit must be refused");
+        assert!(
+            err.to_string().contains("No staged changes"),
+            "unexpected error: {}",
+            err
+        );
+
+        assert!(
+            repo.repo().head().is_err(),
+            "HEAD must still be unborn — no commit was created"
+        );
+    }
+
+    /// Control: a real initial commit still works on an unborn HEAD.
+    #[tokio::test]
+    async fn test_create_commit_allows_a_real_initial_commit() {
+        let repo = TestRepo::new();
+        std::fs::write(repo.path.join("first.txt"), "content").unwrap();
+        repo.stage_file("first.txt");
+
+        create_commit(
+            repo.path_str(),
+            "Initial commit".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an initial commit with staged content must succeed");
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("Initial commit"));
+        assert_eq!(head.parent_count(), 0, "the initial commit has no parents");
+    }
+
+    /// Control: with something staged, the same call still commits.
+    #[tokio::test]
+    async fn test_create_commit_still_commits_staged_changes() {
+        let repo = TestRepo::with_initial_commit();
+        std::fs::write(repo.path.join("new.txt"), "content").unwrap();
+        repo.stage_file("new.txt");
+
+        create_commit(
+            repo.path_str(),
+            "Add new.txt".to_string(),
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a commit with staged changes must succeed");
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("Add new.txt"));
+    }
+
+    /// Amending mid-merge must refuse, as `git commit --amend` does
+    /// ("You are in the middle of a merge -- cannot amend.").
+    ///
+    /// The git2 amend branch rewrote the PRE-merge HEAD with its pre-merge
+    /// parents, so MERGE_HEAD never became a parent and cleanup_state() — which
+    /// only runs on the non-amend branch — never ran. The merge was silently
+    /// dropped from the history while the repository stayed MERGING with the
+    /// merged branch's changes baked into an ordinary commit.
+    #[tokio::test]
+    async fn test_create_commit_refuses_to_amend_mid_merge() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        let merge_result = crate::commands::merge::merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+        assert!(merge_result.is_err(), "expected merge conflict");
+
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let head_before = repo.repo().head().unwrap().peel_to_commit().unwrap().id();
+
+        let err = create_commit(
+            repo.path_str(),
+            "Amended mid-merge".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("amending mid-merge must be refused");
+        assert!(
+            err.to_string().contains("Cannot amend while a merge"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The merge is still there to finish or abort, and HEAD is untouched.
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Merge);
+        assert!(git_repo.path().join("MERGE_HEAD").exists());
+        assert_eq!(
+            git_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_before,
+            "the pre-merge HEAD must not have been rewritten"
+        );
     }
 
     #[tokio::test]
