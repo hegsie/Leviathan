@@ -564,6 +564,27 @@ export class LvBranchList extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private expandedGroups = new Set<string>(['local', 'local-ungrouped']);
+  /**
+   * Groups the user deliberately collapsed, keyed by repository.
+   *
+   * loadBranches auto-expands every group it finds, and it runs after every
+   * mutation and every refresh event — so without a record of intent, a
+   * collapsed group re-opened on the user's very next action.
+   *
+   * Keyed per repo because this component is REUSED across tabs (the panel
+   * rebinds `repositoryPath` rather than remounting): a bare group id let
+   * collapsing `local-feature` in one repository hold the same-named group shut
+   * in every other one.
+   */
+  private collapsedGroups = new Set<string>();
+
+  /** Collapse intent is per repository, so the group id alone is not the key. */
+  private collapseKey(groupId: string): string {
+    // NUL cannot occur in a path or a ref name, so the two parts cannot run
+    // together into another repository's key.
+    return `${this.repositoryPath}\u0000${groupId}`;
+  }
+
   @state() private contextMenu: ContextMenuState = { visible: false, x: 0, y: 0, branch: null };
   @state() private draggingBranch: Branch | null = null;
   @state() private dropTargetBranch: Branch | null = null;
@@ -882,9 +903,13 @@ export class LvBranchList extends LitElement {
 
       // Auto-expand prefix groups that have branches
       const newExpandedGroups = new Set(this.expandedGroups);
+      // The always-present groups are re-derived too, so their state follows
+      // the repository being shown rather than the last one.
+      this.autoExpandGroup(newExpandedGroups, 'local');
+      this.autoExpandGroup(newExpandedGroups, 'local-ungrouped');
       for (const prefix of sortedPrefixes) {
         if (prefix !== null) {
-          newExpandedGroups.add(`local-${prefix}`);
+          this.autoExpandGroup(newExpandedGroups, `local-${prefix}`);
         }
       }
       this.expandedGroups = newExpandedGroups;
@@ -936,11 +961,12 @@ export class LvBranchList extends LitElement {
           branches: prefixMap.get(prefix)!.sort((a, b) => a.shorthand.localeCompare(b.shorthand)),
         }));
 
-        // Auto-expand remote groups and prefix subgroups
-        this.expandedGroups.add(`remote-${name}`);
+        // Auto-expand remote groups and prefix subgroups the user has not
+        // deliberately collapsed.
+        this.autoExpandGroup(this.expandedGroups, `remote-${name}`);
         for (const prefix of sortedPrefixes) {
           if (prefix !== null) {
-            this.expandedGroups.add(`remote-${name}-${prefix}`);
+            this.autoExpandGroup(this.expandedGroups, `remote-${name}-${prefix}`);
           }
         }
 
@@ -977,10 +1003,33 @@ export class LvBranchList extends LitElement {
   private toggleGroup(groupId: string): void {
     if (this.expandedGroups.has(groupId)) {
       this.expandedGroups.delete(groupId);
+      // Remembered so the next load does not auto-expand it again. loadBranches
+      // runs after every checkout, delete, rename, merge and rebase, and on
+      // every repository-refresh event, so without this a collapsed group
+      // snapped back open the moment the user did anything.
+      this.collapsedGroups.add(this.collapseKey(groupId));
     } else {
       this.expandedGroups.add(groupId);
+      this.collapsedGroups.delete(this.collapseKey(groupId));
     }
     this.requestUpdate();
+  }
+
+  /**
+   * Expand a group only if the user has never collapsed it.
+   *
+   * New groups still open by default; a group the user deliberately closed
+   * stays closed across refreshes.
+   */
+  private autoExpandGroup(groups: Set<string>, groupId: string): void {
+    if (this.collapsedGroups.has(this.collapseKey(groupId))) {
+      // Collapsed HERE — and expandedGroups may still hold this id from the
+      // repository the user was looking at a moment ago, since the panel
+      // rebinds this component rather than remounting it.
+      groups.delete(groupId);
+    } else {
+      groups.add(groupId);
+    }
   }
 
   private handleCreateBranch(): void {
@@ -1498,7 +1547,18 @@ export class LvBranchList extends LitElement {
         await this.loadBranches();
         this.dispatchBranchesChanged(repoPath);
       } else {
-        showToast(`Failed to set upstream: ${upstreamResult.error?.message ?? 'Unknown error'}`, 'error');
+        // The branch EXISTS at this point — only the upstream config failed.
+        // Skipping the refresh left the sidebar and graph without a branch the
+        // repository already has, and the obvious recovery (clicking "Track
+        // this branch" again) then failed at createBranch with "branch already
+        // exists" and never reached the upstream step: a dead end.
+        showToast(
+          `Created ${localName} but failed to set upstream: ` +
+            `${upstreamResult.error?.message ?? 'Unknown error'}`,
+          'warning',
+        );
+        await this.loadBranches();
+        this.dispatchBranchesChanged(repoPath);
       }
     } catch (err) {
       showToast(`Failed to track branch: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
