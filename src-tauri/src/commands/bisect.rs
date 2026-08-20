@@ -445,7 +445,7 @@ pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectSt
 pub async fn bisect_good(path: String, commit: Option<String>) -> Result<BisectStepResult> {
     let repo_path = Path::new(&path);
 
-    let (term_bad, term_good) = session_terms(repo_path);
+    let (_, term_good) = session_terms(repo_path);
 
     let args: Vec<&str> = match &commit {
         Some(c) => vec!["bisect", term_good.as_str(), c.as_str()],
