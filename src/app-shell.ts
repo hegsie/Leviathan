@@ -151,7 +151,20 @@ export class AppShell extends LitElement {
         left: 16px;
         z-index: 10000;
         padding: 8px 16px;
+        background: var(--color-accent);
+        color: white;
+        text-decoration: none;
+        border-radius: 0 0 6px 6px;
+        font-size: 14px;
+      }
 
+      /* Top level, NOT nested in .skip-link. The rule above was left unclosed,
+         so under CSS nesting — which the WebView2 and WKWebView engines Tauri
+         uses both support — these compiled to a descendant selector under
+         .skip-link and matched nothing: the bar is a SIBLING of the skip link,
+         not a descendant. The global progress indicator was invisible for
+         every long-running operation, and the skip link lost its own colours
+         to boot, since its declarations were stranded after the keyframes. */
       .global-loading-bar {
         position: fixed;
         top: 0;
@@ -176,12 +189,6 @@ export class AppShell extends LitElement {
         0% { transform: translateX(-100%); }
         50% { transform: translateX(150%); }
         100% { transform: translateX(350%); }
-      }
-        background: var(--color-accent);
-        color: white;
-        text-decoration: none;
-        border-radius: 0 0 6px 6px;
-        font-size: 14px;
       }
 
       .skip-link:focus {
