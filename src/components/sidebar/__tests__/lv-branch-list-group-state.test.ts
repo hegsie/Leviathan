@@ -122,6 +122,50 @@ describe('lv-branch-list group collapse state', () => {
       'new groups open by default',
     ).to.be.true;
   });
+
+  // The panel REBINDS `repositoryPath` on a tab switch rather than remounting
+  // this component, so collapse intent recorded under a bare group id held the
+  // same-named group shut in every other repository the user opened.
+  it('does not carry a collapse into another repository', async () => {
+    const el = await createList();
+
+    (el as any).toggleGroup('local-feature');
+    await el.updateComplete;
+    expect((el as any).expandedGroups.has('local-feature'), 'collapsed in repo A').to.be.false;
+
+    // User switches tabs; the same component now shows another repository.
+    el.repositoryPath = '/test/other-repo';
+    await el.updateComplete;
+    await (el as any).loadBranches();
+    await el.updateComplete;
+
+    expect(
+      (el as any).expandedGroups.has('local-feature'),
+      'a group collapsed in repo A must still open by default in repo B',
+    ).to.be.true;
+  });
+
+  it('remembers the collapse when the user comes back to that repository', async () => {
+    const el = await createList();
+
+    (el as any).toggleGroup('local-feature');
+    await el.updateComplete;
+
+    el.repositoryPath = '/test/other-repo';
+    await el.updateComplete;
+    await (el as any).loadBranches();
+    await el.updateComplete;
+
+    el.repositoryPath = REPO_PATH;
+    await el.updateComplete;
+    await (el as any).loadBranches();
+    await el.updateComplete;
+
+    expect(
+      (el as any).expandedGroups.has('local-feature'),
+      'returning to repo A must find the group as the user left it',
+    ).to.be.false;
+  });
 });
 
 describe('lv-branch-list track remote branch', () => {
