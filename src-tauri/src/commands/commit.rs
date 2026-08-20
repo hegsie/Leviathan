@@ -1471,7 +1471,15 @@ pub async fn get_file_history(
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let mut revwalk = repo.revwalk()?;
-    revwalk.set_sorting(git2::Sort::TIME)?;
+    // TOPOLOGICAL as well as TIME. Following a rename rewrites current_path
+    // when the walk REACHES the renaming commit, so every commit before the
+    // rename must be visited after it. Sorting by time alone does not
+    // guarantee that — commits made within the same second (a scripted commit,
+    // a rebase, an import) tie, and a tie can put the renaming commit last, by
+    // which point the pre-rename history has already been tested against the
+    // new name and discarded. Topological order makes children precede parents
+    // no matter what the timestamps say.
+    revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
 
     // Start from HEAD
     let head = repo
@@ -1530,31 +1538,46 @@ pub async fn get_file_history(
         let mut renamed_from: Option<String> = None;
 
         if should_follow {
-            // Check for renames with find_similar
-            let mut diff_with_renames = diff;
-            let mut find_opts = git2::DiffFindOptions::new();
-            find_opts.renames(true);
-            find_opts.copies(false);
-            let _ = diff_with_renames.find_similar(Some(&mut find_opts));
+            // The pathspec above filters deltas at diff-GENERATION time, so at
+            // the commit that renamed old -> current this diff holds only the
+            // Added(current) half. find_similar had no Deleted(old) to pair it
+            // with, delta.status() was therefore never Renamed, renamed_from
+            // was never set, and the walk stopped dead at the rename — the one
+            // thing follow_renames exists to get past.
+            //
+            // Detect the modification from the cheap filtered diff, then pay
+            // for an UNFILTERED diff only where a rename could actually be
+            // hiding: the commit that introduces the path. That is once per
+            // rename, not once per commit.
+            let introduced_here = diff
+                .deltas()
+                .any(|d| d.status() == git2::Delta::Added || d.status() == git2::Delta::Renamed);
+            file_modified = diff.deltas().count() > 0;
 
-            for delta in diff_with_renames.deltas() {
-                if let Some(new_file) = delta.new_file().path() {
-                    if new_file.to_string_lossy() == current_path {
-                        file_modified = true;
+            if introduced_here {
+                let mut unfiltered =
+                    match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                let mut find_opts = git2::DiffFindOptions::new();
+                find_opts.renames(true);
+                find_opts.copies(false);
+                let _ = unfiltered.find_similar(Some(&mut find_opts));
 
-                        // Check if this was a rename
-                        if delta.status() == git2::Delta::Renamed {
-                            if let Some(old_file) = delta.old_file().path() {
-                                renamed_from = Some(old_file.to_string_lossy().to_string());
-                            }
-                        }
-                        break;
+                for delta in unfiltered.deltas() {
+                    if delta.status() != git2::Delta::Renamed {
+                        continue;
                     }
-                }
-                // Also check old file path for renames
-                if let Some(old_file) = delta.old_file().path() {
-                    if old_file.to_string_lossy() == current_path {
+                    let is_ours = delta
+                        .new_file()
+                        .path()
+                        .is_some_and(|p| p.to_string_lossy() == current_path);
+                    if is_ours {
                         file_modified = true;
+                        if let Some(old_file) = delta.old_file().path() {
+                            renamed_from = Some(old_file.to_string_lossy().to_string());
+                        }
                         break;
                     }
                 }
@@ -1580,6 +1603,119 @@ pub async fn get_file_history(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// follow_renames must actually follow the rename.
+    ///
+    /// The per-commit diff was built with a pathspec, which filters deltas at
+    /// diff-GENERATION time — so at the renaming commit the diff held only the
+    /// Added(new) half and find_similar had no Deleted(old) to pair it with.
+    /// delta.status() was never Renamed, renamed_from was never set, and the
+    /// walk stopped at the rename: history before it was invisible, which is
+    /// the one thing the option exists to provide.
+    #[tokio::test]
+    async fn test_get_file_history_follows_a_rename() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add original", &[("old-name.txt", "line one\n")]);
+        repo.create_commit("Edit original", &[("old-name.txt", "line one\nline two\n")]);
+
+        // Rename with identical content, so it is unambiguously a rename.
+        {
+            std::fs::rename(
+                repo.path.join("old-name.txt"),
+                repo.path.join("new-name.txt"),
+            )
+            .unwrap();
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index
+                .remove_path(std::path::Path::new("old-name.txt"))
+                .unwrap();
+            index
+                .add_path(std::path::Path::new("new-name.txt"))
+                .unwrap();
+            index.write().unwrap();
+            let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = git_repo.signature().unwrap();
+            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo
+                .commit(Some("HEAD"), &sig, &sig, "Rename it", &tree, &[&parent])
+                .unwrap();
+        }
+
+        repo.create_commit(
+            "Edit after rename",
+            &[("new-name.txt", "line one\nline two\nline three\n")],
+        );
+
+        let following = get_file_history(
+            repo.path_str(),
+            "new-name.txt".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let summaries: Vec<String> = following.iter().map(|c| c.summary.clone()).collect();
+
+        assert!(
+            summaries.iter().any(|s| s == "Add original"),
+            "history before the rename must be reachable, got {:?}",
+            summaries
+        );
+        assert!(
+            summaries.iter().any(|s| s == "Edit original"),
+            "edits under the old name must be reachable, got {:?}",
+            summaries
+        );
+        assert!(summaries.iter().any(|s| s == "Rename it"));
+        assert!(summaries.iter().any(|s| s == "Edit after rename"));
+    }
+
+    /// With following OFF, the history stops at the rename — as asked.
+    #[tokio::test]
+    async fn test_get_file_history_without_following_stops_at_the_rename() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add original", &[("old-name.txt", "line one\n")]);
+
+        {
+            std::fs::rename(
+                repo.path.join("old-name.txt"),
+                repo.path.join("new-name.txt"),
+            )
+            .unwrap();
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index
+                .remove_path(std::path::Path::new("old-name.txt"))
+                .unwrap();
+            index
+                .add_path(std::path::Path::new("new-name.txt"))
+                .unwrap();
+            index.write().unwrap();
+            let tree = git_repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = git_repo.signature().unwrap();
+            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+            git_repo
+                .commit(Some("HEAD"), &sig, &sig, "Rename it", &tree, &[&parent])
+                .unwrap();
+        }
+
+        let not_following = get_file_history(
+            repo.path_str(),
+            "new-name.txt".to_string(),
+            None,
+            Some(false),
+        )
+        .await
+        .unwrap();
+        let summaries: Vec<String> = not_following.iter().map(|c| c.summary.clone()).collect();
+
+        assert!(
+            !summaries.iter().any(|s| s == "Add original"),
+            "not following must not reach past the rename, got {:?}",
+            summaries
+        );
+    }
 
     #[tokio::test]
     async fn test_commit_history_all_branches_pagination_and_total() {
