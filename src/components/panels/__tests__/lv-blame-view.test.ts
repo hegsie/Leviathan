@@ -46,6 +46,27 @@ async function renderBlame(): Promise<LvBlameView> {
   return el;
 }
 
+/** A blame result whose single group is `secondsAgo` old. */
+function blameResultAged(secondsAgo: number) {
+  const timestamp = Math.floor(Date.now() / 1000) - secondsAgo;
+  return {
+    path: 'src/main.ts',
+    lines: [
+      {
+        lineNumber: 1,
+        content: 'const a = 1;',
+        commitOid: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        commitShortId: 'deadbee',
+        authorName: 'Alice',
+        authorEmail: 'alice@example.com',
+        timestamp,
+        summary: 'Add a',
+        isBoundary: false,
+      },
+    ],
+  };
+}
+
 describe('lv-blame-view', () => {
   beforeEach(() => {
     uiStore.setState({ toasts: [] });
@@ -87,6 +108,58 @@ describe('lv-blame-view', () => {
 
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'error' && /copy hash/i.test(t.message))).to.be.true;
+    });
+  });
+
+  // ── Relative dates ───────────────────────────────────────────────────────
+  describe('commit age', () => {
+    it('shows a real age for an old commit, not "just now"', async () => {
+      // BlameLine.timestamp is Unix SECONDS, and formatRelativeTime multiplies
+      // by 1000 itself. Passing milliseconds made every diff hugely negative, so
+      // "seconds < 60" always won and every group read "just now" — defeating
+      // the whole point of blame.
+      const threeYears = 3 * 365 * 24 * 60 * 60;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_file_blame') return blameResultAged(threeYears);
+        return null;
+      };
+
+      const el = await renderBlame();
+      const date = el.shadowRoot!.querySelector('.commit-date');
+      expect(date, 'a blame group should render').to.not.be.null;
+
+      const text = date!.textContent!.trim();
+      expect(text, `a three-year-old commit rendered as "${text}"`).to.not.equal('just now');
+      expect(text, 'should read as years old').to.match(/\b3\s*y(ears?)?\b/);
+    });
+
+    it('still says "just now" for a commit made seconds ago', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_file_blame') return blameResultAged(5);
+        return null;
+      };
+
+      const el = await renderBlame();
+      const date = el.shadowRoot!.querySelector('.commit-date');
+      expect(date!.textContent!.trim()).to.equal('just now');
+    });
+
+    it('agrees with the tooltip on the same group', async () => {
+      const oneYear = 365 * 24 * 60 * 60;
+      mockInvoke = async (command: string) => {
+        if (command === 'get_file_blame') return blameResultAged(oneYear);
+        return null;
+      };
+
+      const el = await renderBlame();
+      const info = el.shadowRoot!.querySelector('.group-info')!;
+      const tooltipYear = new Date(Date.now() - oneYear * 1000).getFullYear();
+
+      // The tooltip always formatted the timestamp correctly; the header did not.
+      expect(info.getAttribute('title')).to.contain(String(tooltipYear));
+      expect(el.shadowRoot!.querySelector('.commit-date')!.textContent!.trim()).to.not.equal(
+        'just now',
+      );
     });
   });
 });
