@@ -256,8 +256,13 @@ pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConn
     // "disconnected" the next time the dialog opens.
     let token = match token {
         Some(t) if !t.is_empty() => t,
-        _ => match github_app_installation_token().await {
-            Ok(Some(app_token)) => {
+        // An error here is NOT the same as "no App configured". A corrupt
+        // config or a failed mint is actionable, and folding it into
+        // connected:false would hide the reason — something the user-token path
+        // never does. Propagate it and report disconnected only when there is
+        // genuinely no App to fall back to.
+        _ => match github_app_installation_token().await? {
+            Some(app_token) => {
                 // /user is a user-scoped endpoint an installation token cannot
                 // reach, so report the installation itself as the connection.
                 return Ok(GitHubConnectionStatus {
@@ -266,7 +271,7 @@ pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConn
                     scopes: vec!["app-installation".to_string()],
                 });
             }
-            _ => {
+            None => {
                 return Ok(GitHubConnectionStatus {
                     connected: false,
                     user: None,
