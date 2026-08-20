@@ -23,6 +23,7 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import { uiStore } from '../../../stores/ui.store.ts';
+import type { BlameResult } from '../../../types/git.types.ts';
 import type { LvBlameView } from '../lv-blame-view.ts';
 import '../lv-blame-view.ts';
 
@@ -47,7 +48,7 @@ async function renderBlame(): Promise<LvBlameView> {
 }
 
 /** A blame result whose single group is `secondsAgo` old. */
-function blameResultAged(secondsAgo: number) {
+function blameResultAged(secondsAgo: number): BlameResult {
   const timestamp = Math.floor(Date.now() / 1000) - secondsAgo;
   return {
     path: 'src/main.ts',
@@ -64,6 +65,7 @@ function blameResultAged(secondsAgo: number) {
         isBoundary: false,
       },
     ],
+    totalLines: 1,
   };
 }
 
@@ -153,10 +155,17 @@ describe('lv-blame-view', () => {
 
       const el = await renderBlame();
       const info = el.shadowRoot!.querySelector('.group-info')!;
-      const tooltipYear = new Date(Date.now() - oneYear * 1000).getFullYear();
+
+      // Compared against the component's OWN formatting rather than a bare year
+      // string: toLocaleString() can render digits in a non-Latin numbering
+      // system depending on the environment's locale, which would make a
+      // String(year) check flaky.
+      const shownTimestamp = (el as unknown as { groups: Array<{ timestamp: number }> })
+        .groups[0].timestamp;
+      const expectedTooltipDate = new Date(shownTimestamp * 1000).toLocaleString();
 
       // The tooltip always formatted the timestamp correctly; the header did not.
-      expect(info.getAttribute('title')).to.contain(String(tooltipYear));
+      expect(info.getAttribute('title')).to.contain(expectedTooltipDate);
       expect(el.shadowRoot!.querySelector('.commit-date')!.textContent!.trim()).to.not.equal(
         'just now',
       );
