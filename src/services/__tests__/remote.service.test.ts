@@ -23,6 +23,7 @@ import {
   renameRemote,
   setRemoteUrl,
   fetch,
+  fetchInBackground,
   pull,
   push,
   pushToMultipleRemotes,
@@ -267,6 +268,28 @@ describe('git.service - Remote operations', () => {
       await fetch({ path: '/test/repo', remote: 'upstream', silent: true });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.remote).to.equal('upstream');
+    });
+
+    // The window-focus refresh runs this same backend command, and the
+    // backend's success event is toasted by setupRemoteOperationListeners. So
+    // with fetch-on-focus enabled, "Fetched from origin" appeared every single
+    // time the user alt-tabbed back into the app — exactly the noise the
+    // background fetch is documented to avoid.
+    it('marks a background fetch quiet so it does not toast', async () => {
+      mockInvoke = () => Promise.resolve(null);
+
+      await fetchInBackground('/test/repo');
+      expect(lastInvokedCommand).to.equal('fetch');
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.quiet, 'the background fetch must suppress the success event').to.be.true;
+    });
+
+    it('leaves a user-initiated fetch loud', async () => {
+      mockInvoke = () => Promise.resolve(null);
+
+      await fetch({ path: '/test/repo', silent: true });
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.quiet, 'a fetch the user asked for still reports itself').to.not.be.true;
     });
 
     it('supports prune option', async () => {
