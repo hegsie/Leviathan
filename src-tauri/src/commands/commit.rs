@@ -1534,7 +1534,7 @@ pub async fn get_file_history(
             };
 
         // Check if file was modified in this commit
-        let mut file_modified = false;
+        let mut file_modified;
         let mut renamed_from: Option<String> = None;
 
         if should_follow {
