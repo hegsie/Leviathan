@@ -74,6 +74,22 @@ fn git_command(repo_path: &Path) -> std::process::Command {
 }
 
 /// Helper to run git commands
+/// Whether git's output announces the culprit.
+///
+/// git prints "<sha> is the first <term> commit", where <term> is the session's
+/// BAD term — "bad" by default, whatever `--term-new` named otherwise. Matching
+/// the literal "is the first bad commit" therefore missed the completion of
+/// every custom-term session, so the one result a bisect exists to produce came
+/// back as an error. Matched term-independently here because this helper runs
+/// every bisect command and has no session context of its own.
+fn announces_culprit(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.split_once("is the first ")
+            .map(|(_, rest)| rest.split_whitespace().nth(1) == Some("commit"))
+            .unwrap_or(false)
+    })
+}
+
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
     let output = git_command(repo_path)
         .args(args)
@@ -92,9 +108,7 @@ fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
         // Everything else (e.g. swapped good/bad: "Some good revs are not
         // ancestors of the bad rev.") is a real failure and must surface as an error.
         let combined = format!("{}\n{}", stdout, stderr);
-        if combined.contains("We cannot bisect more")
-            || combined.contains("is the first bad commit")
-        {
+        if combined.contains("We cannot bisect more") || announces_culprit(&combined) {
             Ok(stdout.trim().to_string())
         } else {
             let message = if stderr.trim().is_empty() {
@@ -348,20 +362,90 @@ pub async fn bisect_start(
     })
 }
 
+/// The terms this bisect session was started with.
+///
+/// A session started with `--term-new`/`--term-old` (say "broken"/"working")
+/// REJECTS the literal `git bisect bad`: git dies with "Invalid command: you're
+/// currently in a broken/working bisect". get_bisect_status already reads these
+/// terms, so the dialog happily showed such a session as in progress while its
+/// Good and Bad buttons could not advance it at all — including a session the
+/// user started in their own terminal.
+fn session_terms(repo_path: &Path) -> (String, String) {
+    match git_dir(repo_path) {
+        Some(dir) => read_bisect_terms(&dir),
+        None => ("bad".to_string(), "good".to_string()),
+    }
+}
+
+/// Join stdout and stderr into one block, adding a separator only when one is
+/// missing.
+///
+/// An unconditional "\n" between them inserts a blank line whenever stdout
+/// already ends in one — which it usually does. The parser tolerates that, but
+/// the output is also shown to the user as the step's message, so the blank
+/// line is real noise for no gain.
+fn join_streams(stdout: &str, stderr: &str) -> String {
+    if stdout.is_empty() {
+        return stderr.to_string();
+    }
+    if stderr.is_empty() {
+        return stdout.to_string();
+    }
+    if stdout.ends_with('\n') {
+        format!("{}{}", stdout, stderr)
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    }
+}
+
+/// Run a bisect STEP and return stdout and stderr together.
+///
+/// Which stream git announces the culprit on, and whether it exits zero doing
+/// so, both vary by git version — 2.43 exits zero with the summary on stdout;
+/// CI's 2.55 does not, which is how a test that passed locally went red there.
+/// The step handlers care only about the text, so they get both streams and
+/// stop depending on either choice.
+fn run_bisect_step(repo_path: &Path, args: &[&str]) -> Result<String> {
+    let output = git_command(repo_path)
+        .args(args)
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = join_streams(&stdout, &stderr);
+
+    if output.status.success()
+        || combined.contains("We cannot bisect more")
+        || announces_culprit(&combined)
+    {
+        Ok(combined.trim().to_string())
+    } else {
+        let message = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        Err(LeviathanError::OperationFailed(message.to_string()))
+    }
+}
+
 /// Mark the current commit (or specified commit) as bad
 #[command]
 pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectStepResult> {
     let repo_path = Path::new(&path);
 
+    let (term_bad, _) = session_terms(repo_path);
+
     let args: Vec<&str> = match &commit {
-        Some(c) => vec!["bisect", "bad", c.as_str()],
-        None => vec!["bisect", "bad"],
+        Some(c) => vec!["bisect", term_bad.as_str(), c.as_str()],
+        None => vec!["bisect", term_bad.as_str()],
     };
 
-    let output = run_git_command(repo_path, &args)?;
+    let output = run_bisect_step(repo_path, &args)?;
 
     // Check if we found the culprit
-    let culprit = if output.contains("is the first bad commit") {
+    let culprit = if announces_culprit(&output) {
         // Parse the culprit commit info
         parse_culprit_from_output(&output)
     } else {
@@ -382,15 +466,18 @@ pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectSt
 pub async fn bisect_good(path: String, commit: Option<String>) -> Result<BisectStepResult> {
     let repo_path = Path::new(&path);
 
+    let (_, term_good) = session_terms(repo_path);
+
     let args: Vec<&str> = match &commit {
-        Some(c) => vec!["bisect", "good", c.as_str()],
-        None => vec!["bisect", "good"],
+        Some(c) => vec!["bisect", term_good.as_str(), c.as_str()],
+        None => vec!["bisect", term_good.as_str()],
     };
 
-    let output = run_git_command(repo_path, &args)?;
+    let output = run_bisect_step(repo_path, &args)?;
 
-    // Check if we found the culprit
-    let culprit = if output.contains("is the first bad commit") {
+    // Marking good is what usually NARROWS the range to the culprit, so this
+    // handler must recognise the announcement just as much as marking bad.
+    let culprit = if announces_culprit(&output) {
         parse_culprit_from_output(&output)
     } else {
         None
@@ -457,16 +544,18 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
     //     commit message
 
     let lines: Vec<&str> = output.lines().collect();
-    if lines.is_empty() {
-        return None;
-    }
 
-    // First line contains the commit hash
-    let first_line = lines[0];
-    let oid = first_line.split_whitespace().next()?.to_string();
+    // FIND the announcing line rather than assuming it is line 0. It is not
+    // always first: git may put it on stderr, so combined output can lead with
+    // stdout, and the term in it is the session's, not always "bad".
+    let announce_at = lines.iter().position(|l| announces_culprit(l))?;
+    let oid = lines[announce_at].split_whitespace().next()?.to_string();
 
-    // Find Author line
-    let author_line = lines.iter().find(|l| l.trim().starts_with("Author:"))?;
+    // Find the Author line AFTER the announcement, so anything printed before
+    // it cannot be mistaken for the culprit's.
+    let author_line = lines[announce_at..]
+        .iter()
+        .find(|l| l.trim().starts_with("Author:"))?;
     let author_part = author_line.trim().strip_prefix("Author:")?.trim();
 
     // Parse "Name <email>"
@@ -643,6 +732,189 @@ mod tests {
 
         // Reset for cleanup
         bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// A session started with custom terms must still be advanceable.
+    ///
+    /// get_bisect_status already reads BISECT_TERMS, so the dialog shows such a
+    /// session as in progress — including one the user started in their own
+    /// terminal. But the handlers ran the literal `git bisect bad`/`good`,
+    /// which git REJECTS in a custom-term session ("Invalid command: you're
+    /// currently in a broken/working bisect"). The user could see the session
+    /// and could not advance it at all.
+    #[tokio::test]
+    async fn test_bisect_good_and_bad_honour_custom_terms() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        repo.create_commit("Commit 2", &[("file2.txt", "content 2")]);
+        repo.create_commit("Commit 3", &[("file3.txt", "content 3")]);
+        repo.create_commit("Commit 4", &[("file4.txt", "content 4")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        // Start the session the way a terminal user would, with custom terms.
+        run_git_command(
+            repo.path.as_path(),
+            &["bisect", "start", "--term-new=broken", "--term-old=working"],
+        )
+        .expect("start a custom-term bisect");
+        run_git_command(repo.path.as_path(), &["bisect", "broken", &bad_oid])
+            .expect("mark the bad end");
+        run_git_command(repo.path.as_path(), &["bisect", "working", &good_oid])
+            .expect("mark the good end");
+
+        // The dialog shows this session, so its buttons must work on it.
+        let bad_result = bisect_bad(repo.path_str(), None).await;
+        assert!(
+            bad_result.is_ok(),
+            "marking bad must use the session's term: {:?}",
+            bad_result.err()
+        );
+
+        let good_result = bisect_good(repo.path_str(), None).await;
+        assert!(
+            good_result.is_ok(),
+            "marking good must use the session's term: {:?}",
+            good_result.err()
+        );
+
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// The default-term session keeps working unchanged.
+    #[tokio::test]
+    async fn test_bisect_good_and_bad_still_work_with_default_terms() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        // Enough commits that the range still has somewhere to go after the
+        // first step — with a three-commit history the session finishes
+        // immediately and there is no second step left to exercise.
+        for i in 2..=8 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(&format!("file{}.txt", i), "content")],
+            );
+        }
+        let bad_oid = repo.head_oid().to_string();
+
+        bisect_start(repo.path_str(), Some(bad_oid), Some(good_oid))
+            .await
+            .unwrap();
+
+        assert!(
+            bisect_bad(repo.path_str(), None).await.is_ok(),
+            "marking bad must work on a default-term session"
+        );
+        assert!(
+            bisect_good(repo.path_str(), None).await.is_ok(),
+            "marking good must work too — the name says both"
+        );
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// Reaching the culprit in a custom-term session must be a RESULT, not an
+    /// error.
+    ///
+    /// git announces it as "is the first <term> commit". run_git_command
+    /// whitelisted the literal "is the first bad commit" among the non-zero
+    /// exits it lets through, so in a custom-term session the announcement fell
+    /// through to the error arm — the commands used the right terms and the one
+    /// answer a bisect exists to produce still came back as a failure.
+    #[tokio::test]
+    async fn test_custom_term_bisect_reports_the_culprit_rather_than_failing() {
+        let repo = TestRepo::with_initial_commit();
+        let good_oid = repo.head_oid().to_string();
+        let culprit = repo.create_commit("The bad one", &[("bug.txt", "boom")]);
+        let bad_oid = repo.head_oid().to_string();
+
+        run_git_command(
+            repo.path.as_path(),
+            &["bisect", "start", "--term-new=broken", "--term-old=working"],
+        )
+        .expect("start a custom-term bisect");
+        run_git_command(repo.path.as_path(), &["bisect", "broken", &bad_oid]).unwrap();
+
+        // Marking the parent good narrows it to a single commit, so git
+        // announces the culprit right here.
+        let result = bisect_good(repo.path_str(), Some(good_oid))
+            .await
+            .expect("reaching the culprit must not be reported as a failure");
+
+        let found = result.culprit.expect("the culprit must be reported");
+        assert_eq!(
+            found.oid,
+            culprit.to_string(),
+            "the reported culprit must be the commit that introduced the bug"
+        );
+
+        bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// The culprit must be found wherever the announcement sits.
+    ///
+    /// The parser used to take line 0 as the announcement. git may print it on
+    /// stderr — so in combined output it can follow stdout rather than lead —
+    /// and the term in it is the session's, not always "bad". CI's git 2.55
+    /// exposed exactly this after it passed on 2.43 locally.
+    #[test]
+    fn test_parse_culprit_finds_the_announcement_anywhere() {
+        let stderr_first = "Bisecting: 0 revisions left to test after this\n\
+             abc123def is the first broken commit\n\
+             commit abc123def\n\
+             Author: Alice <alice@example.com>\n\
+             Date:   Mon Jan 1 00:00:00 2026 +0000\n\
+             \n    Broke the thing\n";
+
+        let culprit = parse_culprit_from_output(stderr_first)
+            .expect("the announcement is not on line 0, and must still be found");
+        assert_eq!(culprit.oid, "abc123def");
+        assert_eq!(culprit.author, "Alice");
+        assert_eq!(culprit.email, "alice@example.com");
+    }
+
+    /// Output with no announcement yields no culprit.
+    #[test]
+    fn test_parse_culprit_returns_none_without_an_announcement() {
+        assert!(parse_culprit_from_output("Bisecting: 3 revisions left").is_none());
+        assert!(parse_culprit_from_output("").is_none());
+    }
+
+    /// Joining the streams must not introduce a blank line.
+    #[test]
+    fn test_join_streams_adds_a_separator_only_when_needed() {
+        assert_eq!(join_streams("out\n", "err\n"), "out\nerr\n");
+        assert_eq!(join_streams("out", "err"), "out\nerr");
+        assert_eq!(join_streams("", "err"), "err");
+        assert_eq!(join_streams("out\n", ""), "out\n");
+    }
+
+    /// git rejects a multi-word bisect term, so the matcher need not handle one.
+    ///
+    /// Checked against git directly:
+    ///     $ git bisect start --term-new="very broken" --term-old=working
+    ///     error: 'very broken' is not a valid term
+    /// A session with such a term cannot exist, so requiring a single word
+    /// after "is the first " costs nothing.
+    #[test]
+    fn test_announces_culprit_handles_the_terms_git_actually_allows() {
+        assert!(announces_culprit("abc123 is the first bad commit"));
+        assert!(announces_culprit("abc123 is the first broken commit"));
+        assert!(announces_culprit("abc123 is the first regressed commit"));
+    }
+
+    /// The term-independent match accepts any term, and nothing else.
+    #[test]
+    fn test_announces_culprit_matches_any_term() {
+        assert!(announces_culprit("abc123 is the first bad commit"));
+        assert!(announces_culprit("abc123 is the first broken commit"));
+        assert!(announces_culprit(
+            "some preamble\nabc123 is the first regressed commit\nmore"
+        ));
+        // Not a culprit announcement.
+        assert!(!announces_culprit(
+            "Some good revs are not ancestors of the bad rev."
+        ));
+        assert!(!announces_culprit("is the first thing you should know"));
+        assert!(!announces_culprit(""));
     }
 
     #[tokio::test]
