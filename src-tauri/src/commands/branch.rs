@@ -31,6 +31,20 @@ pub async fn get_branches(path: String) -> Result<Vec<Branch>> {
         let reference = branch.get();
 
         let is_remote = branch_type == git2::BranchType::Remote;
+
+        // Skip the remote's symbolic HEAD pointer (refs/remotes/origin/HEAD),
+        // which every clone has.
+        //
+        // It is a pointer at the remote's default branch, not a branch of its
+        // own: `git branch -r` renders it as "origin/HEAD -> origin/main" and
+        // never offers it for checkout. Listing it produced a row named
+        // "origin/HEAD" with an empty target oid and no timestamp — a symbolic
+        // ref has no direct target — and checking that row out derived the
+        // local branch name "HEAD", which libgit2 rejects as invalid.
+        if is_remote && reference.kind() == Some(git2::ReferenceType::Symbolic) {
+            continue;
+        }
+
         let is_head = head
             .as_ref()
             .map(|h| h.name() == reference.name())
@@ -1272,6 +1286,64 @@ pub async fn checkout_with_autostash(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// refs/remotes/origin/HEAD is a pointer at the remote's default branch,
+    /// not a branch of its own.
+    ///
+    /// Every clone has it. Listing it gave the UI a row named "origin/HEAD"
+    /// with an empty target oid and no timestamp (a symbolic ref has no direct
+    /// target), and checking that row out derived the local branch name "HEAD",
+    /// which libgit2 rejects as an invalid branch name. `git branch -r` renders
+    /// it as "origin/HEAD -> origin/main" and never offers it for checkout.
+    #[tokio::test]
+    async fn test_get_branches_omits_the_remote_symbolic_head() {
+        let test_repo = TestRepo::with_initial_commit();
+        let default_branch = test_repo.current_branch();
+
+        {
+            let repo = test_repo.repo();
+            let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+
+            // A real remote-tracking branch, plus the symbolic HEAD pointer a
+            // clone would create alongside it.
+            repo.reference(
+                &format!("refs/remotes/origin/{}", default_branch),
+                head_commit.id(),
+                true,
+                "test remote branch",
+            )
+            .unwrap();
+            repo.reference_symbolic(
+                "refs/remotes/origin/HEAD",
+                &format!("refs/remotes/origin/{}", default_branch),
+                true,
+                "test remote head",
+            )
+            .unwrap();
+        }
+
+        let branches = get_branches(test_repo.path_str()).await.unwrap();
+
+        assert!(
+            !branches.iter().any(|b| b.name == "origin/HEAD"),
+            "origin/HEAD must not be offered as a checkoutable branch: {:?}",
+            branches.iter().map(|b| &b.name).collect::<Vec<_>>()
+        );
+
+        // The branch it points at is still listed.
+        assert!(
+            branches
+                .iter()
+                .any(|b| b.name == format!("origin/{}", default_branch)),
+            "the real remote branch must still be listed"
+        );
+
+        // Nothing else lost a target oid along the way.
+        assert!(
+            branches.iter().all(|b| !b.target_oid.is_empty()),
+            "every listed branch should resolve to a commit"
+        );
+    }
 
     #[tokio::test]
     async fn test_get_branches_empty_repo() {
