@@ -1517,7 +1517,28 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * 2. Include context lines around selected lines
    * 3. Adjust line numbers in hunk headers
    */
-  private buildSelectedLinesPatch(): string {
+  /**
+   * Build a patch containing only the selected lines.
+   *
+   * The transformations for the unselected lines differ by direction, because
+   * staging applies the patch FORWARD to the index while unstaging
+   * reverse-applies it (see unstage_hunk -> apply_patch_to_index(.., true)).
+   * A patch reverse-applies cleanly only when its NEW side matches the index.
+   *
+   * Staging (unstaged diff, index -> worktree):
+   *   unselected deletion -> context  (the line still exists in the index)
+   *   unselected addition -> omitted  (it is not in the index yet)
+   *
+   * Unstaging (staged diff, HEAD -> index) is the mirror image:
+   *   unselected deletion -> omitted  (the line is NOT in the index)
+   *   unselected addition -> context  (the line IS in the index and stays)
+   *
+   * Using the staging transformation for both is why unstaging a subset of
+   * lines failed on every hunk that had other changes: an unselected deletion
+   * emitted as context claimed a line the index does not have, and a dropped
+   * unselected addition broke contiguity against the index.
+   */
+  private buildSelectedLinesPatch(direction: 'stage' | 'unstage' = 'stage'): string {
     if (!this.diff || !this.file || this.selectedLines.size === 0) return '';
 
     const filePath = this.file.path;
@@ -1603,25 +1624,37 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             // Include this deletion in the patch
             hunkPatchLines.push('-' + content);
             oldLineCount++;
-          } else {
-            // Unselected deletions become context lines in the patch.
-            // This is correct for partial staging: the line remains in the index
-            // (not staged for deletion) while the working tree still shows it as deleted.
-            // The next diff will continue to show it as a deletion that can be staged.
+            lastContentEmitted = true;
+          } else if (direction === 'stage') {
+            // The line still exists in the index (its deletion is not being
+            // staged), so it is context on both sides.
             hunkPatchLines.push(' ' + content);
             oldLineCount++;
             newLineCount++;
+            lastContentEmitted = true;
+          } else {
+            // Unstaging: the deletion is already in the index, so this line is
+            // absent from the index. Emitting it as context would claim a line
+            // the index does not have and the reverse apply would reject the
+            // whole patch.
+            lastContentEmitted = false;
           }
-          lastContentEmitted = true;
         } else if (line.origin === 'addition') {
           if (isSelected) {
             // Include this addition
             hunkPatchLines.push('+' + content);
             newLineCount++;
             lastContentEmitted = true;
-          } else {
-            // Unselected additions are simply not included
+          } else if (direction === 'stage') {
+            // Not in the index yet, so it must not appear in the patch at all.
             lastContentEmitted = false;
+          } else {
+            // Unstaging: the addition IS in the index and is staying there, so
+            // it is context — present on both sides of the reverse apply.
+            hunkPatchLines.push(' ' + content);
+            oldLineCount++;
+            newLineCount++;
+            lastContentEmitted = true;
           }
         }
       }
@@ -1675,7 +1708,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private async unstageSelectedLines(): Promise<void> {
     if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
 
-    const patch = this.buildSelectedLinesPatch();
+    const patch = this.buildSelectedLinesPatch('unstage');
     if (!patch) return;
 
     try {
