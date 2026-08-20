@@ -138,6 +138,7 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 }
 
 /// Fetch from remote
+#[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn fetch(
     app_handle: AppHandle,
@@ -146,8 +147,16 @@ pub async fn fetch(
     prune: Option<bool>,
     token: Option<String>,
     timeout_secs: Option<u64>,
+    quiet: Option<bool>,
     _operation_id: Option<String>,
 ) -> Result<()> {
+    // A fetch the user did not ask for must not announce itself. The
+    // window-focus refresh runs this same command, and the success event below
+    // is toasted by setupRemoteOperationListeners — so with fetch-on-focus
+    // enabled, "Fetched from origin" appeared every single time the user
+    // alt-tabbed back into the app. That is exactly the noise the background
+    // fetch is documented to avoid.
+    let quiet = quiet.unwrap_or(false);
     let do_fetch = async move {
         let path_clone = path.clone();
         let prune_val = prune.unwrap_or(false);
@@ -180,16 +189,18 @@ pub async fn fetch(
         .await
         .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
 
-        // Emit success event
-        let _ = app_handle.emit(
-            "remote-operation-completed",
-            RemoteOperationResult {
-                operation: "fetch".to_string(),
-                remote: remote_name_for_event,
-                success: true,
-                message: "Fetch completed successfully".to_string(),
-            },
-        );
+        // Emit success event, unless this fetch is a background one.
+        if !quiet {
+            let _ = app_handle.emit(
+                "remote-operation-completed",
+                RemoteOperationResult {
+                    operation: "fetch".to_string(),
+                    remote: remote_name_for_event,
+                    success: true,
+                    message: "Fetch completed successfully".to_string(),
+                },
+            );
+        }
 
         Ok(())
     };

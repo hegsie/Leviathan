@@ -110,6 +110,10 @@ export async function fetchInBackground(
   return invokeCommand<void>("fetch", {
     path: repoPath,
     token,
+    // Suppresses the backend's success event, which
+    // setupRemoteOperationListeners toasts. Without it this "silent" fetch
+    // popped "Fetched from origin" every time the user alt-tabbed back in.
+    quiet: true,
     ...(timeoutSecs > 0 ? { timeoutSecs } : {}),
   });
 }

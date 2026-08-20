@@ -182,6 +182,9 @@ export interface FetchCommand {
   prune?: boolean;
   token?: string;
   timeoutSecs?: number;
+  /** Suppress the success event a user-initiated fetch emits. Set by the
+   *  window-focus background fetch, which must not toast. */
+  quiet?: boolean;
 }
 
 export interface PullCommand {
