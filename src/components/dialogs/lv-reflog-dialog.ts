@@ -525,7 +525,11 @@ export class LvReflogDialog extends LitElement {
     const target = this.checkoutTarget(entry);
     if (!target || this.resetting) return;
 
-    const repoPath = this.repositoryPath;
+    // The repo the dialog was OPENED on, like the reset path uses.
+    // `repositoryPath` is live-bound to the active tab, so reading it here ran
+    // the checkout against whatever repo the user switched to while the dialog
+    // was up — a switch to a branch name that means something different there.
+    const repoPath = this.pinnedRepoPath;
     if (!repoPath) return;
 
     this.resetting = true;
@@ -538,7 +542,39 @@ export class LvReflogDialog extends LitElement {
     try {
       const result = await gitService.checkoutWithAutoStash(repoPath, target);
       if (result.success && result.data?.success) {
-        showToast(`Switched to ${target}`, 'success');
+        const data = result.data;
+        // The switch auto-stashes, so it can land with the user's changes still
+        // shelved or in conflict. Reporting a bare "Switched to X" hid that:
+        // the work looked lost, with the only clue in a stash entry nobody was
+        // told about. Same reporting the branch and tag lists give.
+        if (data.stashed && data.stashConflict) {
+          showToast(`Switched to ${target} — stash conflicts need resolution`, 'warning');
+          this.dispatchEvent(
+            new CustomEvent('open-conflict-dialog', {
+              bubbles: true,
+              composed: true,
+              // Auto-stash is pop semantics: drop it once resolved. Identified
+              // by oid, not position — another surface can push a stash in
+              // between and renumber the list.
+              detail: {
+                operationType: 'stash',
+                stashOid: data.stashOid ?? null,
+                stashIndex: 0,
+                dropStashOnComplete: true,
+                repositoryPath: repoPath,
+              },
+            }),
+          );
+        } else if (data.stashed && !data.stashApplied) {
+          showToast(data.message, 'warning');
+        } else if (data.stashed) {
+          showToast(
+            data.message,
+            data.message.includes('staged status was not preserved') ? 'warning' : 'info',
+          );
+        } else {
+          showToast(`Switched to ${target}`, 'success');
+        }
         // Same event the reset path emits, so the host refreshes the repo the
         // switch ran on even if the user changed tabs during the IPC await.
         this.dispatchEvent(
