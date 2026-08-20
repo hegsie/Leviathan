@@ -78,6 +78,45 @@ fn parse_attribute_token(token: &str) -> AttributeEntry {
 /// Per gitattributes(5), a pattern containing whitespace may be wrapped in
 /// double quotes, with C-style escapes (`\"`, `\\`, `\n`, `\t`, octal `\nnn`)
 /// inside. Otherwise the pattern is the first whitespace-delimited token.
+/// Render a pattern back into a .gitattributes line, quoting when it needs it.
+///
+/// The inverse of `split_pattern_and_rest`. The parser unescapes quoted
+/// patterns per gitattributes(5), so `"foo bar.txt" text` reads back as the
+/// pattern `foo bar.txt` — but both writers emitted the pattern verbatim. Round
+/// tripping one through an edit wrote `foo bar.txt text`, which git then reads
+/// as the pattern `foo` with attributes `bar.txt text`: the rule silently stops
+/// matching the file it was written for and starts matching something else.
+///
+/// Quoted when the pattern contains whitespace or a character that would change
+/// how the line parses; left bare otherwise, so ordinary patterns keep the plain
+/// form a human would write.
+fn format_pattern(pattern: &str) -> String {
+    let needs_quotes = pattern.is_empty()
+        || pattern
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\\')
+        || pattern.starts_with('#');
+
+    if !needs_quotes {
+        return pattern.to_string();
+    }
+
+    let mut out = String::with_capacity(pattern.len() + 2);
+    out.push('"');
+    for c in pattern.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn split_pattern_and_rest(trimmed: &str) -> (String, &str) {
     if let Some(after_quote) = trimmed.strip_prefix('"') {
         let bytes = after_quote.as_bytes();
@@ -199,7 +238,7 @@ pub async fn add_gitattribute(
     }
 
     // Append the new line
-    content.push_str(&format!("{} {}\n", pattern, attributes));
+    content.push_str(&format!("{} {}\n", format_pattern(&pattern), attributes));
 
     std::fs::write(&attrs_path, &content)?;
     Ok(parse_gitattributes(&content))
@@ -268,7 +307,7 @@ pub async fn update_gitattribute(
         )));
     }
 
-    lines[(line_number as usize) - 1] = format!("{} {}", pattern, attributes);
+    lines[(line_number as usize) - 1] = format!("{} {}", format_pattern(&pattern), attributes);
 
     let mut result = lines.join("\n");
     if !result.is_empty() {
@@ -586,6 +625,91 @@ mod tests {
         assert_eq!(entries[0].pattern, "*.md");
         assert_eq!(entries[0].attributes.len(), 2);
         assert_eq!(entries[1].pattern, "*.png");
+    }
+
+    /// A pattern with whitespace must survive being written and read back.
+    ///
+    /// The parser unescapes quoted patterns per gitattributes(5), so
+    /// `"foo bar.txt" text` reads back as `foo bar.txt`. Both writers emitted
+    /// the pattern verbatim, so editing that entry wrote `foo bar.txt text` —
+    /// which git reads as the pattern `foo` with attributes `bar.txt text`. The
+    /// rule silently stops matching the file it was written for and starts
+    /// matching something else entirely.
+    #[tokio::test]
+    async fn test_add_gitattribute_round_trips_a_pattern_with_spaces() {
+        let repo = TestRepo::with_initial_commit();
+
+        let entries = add_gitattribute(
+            repo.path_str(),
+            "foo bar.txt".to_string(),
+            "text".to_string(),
+        )
+        .await
+        .expect("adding must succeed");
+
+        assert_eq!(
+            entries[0].pattern, "foo bar.txt",
+            "the pattern must read back as written, not split at the space"
+        );
+
+        // And it is quoted on disk, which is what makes that true.
+        let on_disk = std::fs::read_to_string(repo.path.join(".gitattributes")).unwrap();
+        assert!(
+            on_disk.contains(r#""foo bar.txt" text"#),
+            "the pattern must be quoted on disk, got: {}",
+            on_disk.trim()
+        );
+    }
+
+    /// Editing an existing quoted entry must not unquote it.
+    #[tokio::test]
+    async fn test_update_gitattribute_round_trips_a_pattern_with_spaces() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitattributes", "\"foo bar.txt\" text\n");
+
+        let entries = update_gitattribute(
+            repo.path_str(),
+            1,
+            "foo bar.txt".to_string(),
+            "text diff=markdown".to_string(),
+        )
+        .await
+        .expect("updating must succeed");
+
+        assert_eq!(
+            entries[0].pattern, "foo bar.txt",
+            "editing the attributes must not corrupt the pattern"
+        );
+        assert_eq!(entries[0].attributes.len(), 2);
+    }
+
+    /// An ordinary pattern stays bare — quoting everything would be noise.
+    #[tokio::test]
+    async fn test_add_gitattribute_leaves_a_plain_pattern_unquoted() {
+        let repo = TestRepo::with_initial_commit();
+
+        add_gitattribute(repo.path_str(), "*.txt".to_string(), "text".to_string())
+            .await
+            .unwrap();
+
+        let on_disk = std::fs::read_to_string(repo.path.join(".gitattributes")).unwrap();
+        assert!(
+            on_disk.contains("*.txt text"),
+            "a plain pattern needs no quotes, got: {}",
+            on_disk.trim()
+        );
+        assert!(!on_disk.contains('"'), "and must not gain any");
+    }
+
+    /// Quotes and backslashes in a pattern are escaped, not passed through.
+    #[test]
+    fn test_format_pattern_escapes_what_would_break_the_line() {
+        assert_eq!(format_pattern("*.txt"), "*.txt");
+        assert_eq!(format_pattern("foo bar.txt"), r#""foo bar.txt""#);
+        assert_eq!(format_pattern(r#"say"hi""#), r#""say\"hi\"""#);
+        assert_eq!(format_pattern(r"back\slash"), r#""back\\slash""#);
+        // A leading # would otherwise turn the line into a comment.
+        assert_eq!(format_pattern("#notacomment"), r##""#notacomment""##);
     }
 
     #[tokio::test]
