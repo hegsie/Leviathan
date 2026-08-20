@@ -113,7 +113,7 @@ export interface TagDetails {
   isSigned: boolean;
 }
 
-export type RefType = 'localBranch' | 'remoteBranch' | 'tag';
+export type RefType = 'localBranch' | 'remoteBranch' | 'tag' | 'detachedHead';
 
 export interface RefInfo {
   name: string;

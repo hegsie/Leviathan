@@ -1756,6 +1756,21 @@ export class CanvasRenderer {
         break;
       }
 
+      case 'detachedHead': {
+        // A "you are here" locator, deliberately unlike the branch icon: a
+        // detached HEAD is a position in history, not a branch. Without a case
+        // of its own it fell to the default circle and read as an unlabelled
+        // branch pill.
+        const cx = left + size / 2;
+        ctx.beginPath();
+        ctx.arc(cx, y, size / 3, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, y, size / 8, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      }
+
       default:
         // Default: simple circle
         ctx.beginPath();

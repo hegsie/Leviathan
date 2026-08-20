@@ -191,6 +191,14 @@ export class LvCommitDetails extends LitElement {
         color: var(--color-warning, #d97706);
       }
 
+      /* A detached HEAD is not a branch, so it must not wear the branch
+         colour — without a case of its own getRefClass returned '' and the
+         badge rendered unstyled, indistinguishable from nothing at all. */
+      .ref-badge.detached-head {
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-secondary);
+      }
+
       .ref-badge.head {
         border: 1px solid currentColor;
       }
@@ -752,6 +760,8 @@ export class LvCommitDetails extends LitElement {
         return 'remote-branch';
       case 'tag':
         return 'tag';
+      case 'detachedHead':
+        return 'detached-head';
       default:
         return '';
     }
