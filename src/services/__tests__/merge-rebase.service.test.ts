@@ -136,18 +136,26 @@ describe('git.service - Rebase operations', () => {
   });
 
   describe('getRebaseCommits', () => {
-    it('invokes get_rebase_commits with path and onto', async () => {
-      const mockCommits = [
-        { oid: 'abc', summary: 'commit 1', action: 'pick' },
-        { oid: 'def', summary: 'commit 2', action: 'pick' },
-      ];
-      mockInvoke = () => Promise.resolve(mockCommits);
+    // The command returns a PLAN — the todo commits plus the count of merge
+    // commits the todo excludes — not a bare commit array. Mocking the old
+    // shape here meant the service test agreed with nothing the backend sends.
+    it('invokes get_rebase_commits with path and onto, and returns the plan', async () => {
+      const mockPlan = {
+        commits: [
+          { oid: 'abc', summary: 'commit 1', action: 'pick' },
+          { oid: 'def', summary: 'commit 2', action: 'pick' },
+        ],
+        mergeCount: 1,
+      };
+      mockInvoke = () => Promise.resolve(mockPlan);
 
       const result = await getRebaseCommits('/test/repo', 'main');
       expect(lastInvokedCommand).to.equal('get_rebase_commits');
       expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo', onto: 'main' });
       expect(result.success).to.be.true;
-      expect(result.data).to.deep.equal(mockCommits);
+      expect(result.data).to.deep.equal(mockPlan);
+      expect(result.data?.commits).to.have.length(2);
+      expect(result.data?.mergeCount).to.equal(1);
     });
   });
 

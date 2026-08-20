@@ -495,8 +495,13 @@ export class LvInteractiveRebaseDialog extends LitElement {
   @state() private executing = false;
   @state() private error = '';
   @state() private warning = '';
-  /** Set when open() was given a reword target the loaded plan does not contain. */
-  @state() private rewordTargetMissing = false;
+  /**
+   * Set when open()'s reword request was refused, so the dialog shows the
+   * reason and keeps Start Rebase disabled. Two causes: the target is not in
+   * the loaded plan, or the range contains merge commits a rebase would
+   * flatten.
+   */
+  @state() private rewordRefused = false;
   /** Merge commits in the rebase range; they are excluded from the plan. */
   @state() private mergeCountInRange = 0;
   @state() private draggedIndex: number | null = null;
@@ -570,7 +575,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
       // that would destroy the very commit the user asked to reword. Refuse
       // instead: say so, and keep Start Rebase disabled.
       if (!this.commits.some((c) => c.oid === options.rewordCommitOid)) {
-        this.rewordTargetMissing = true;
+        this.rewordRefused = true;
         this.warning =
           'This commit is not part of the rebase plan, so its message cannot be ' +
           'rewritten here. Merge commits cannot be reworded by rebase.';
@@ -583,7 +588,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
       // history rewrite from a gesture that promised to change one commit
       // message. Refuse, the same way an unrebaseable target is refused.
       if (this.mergeCountInRange > 0) {
-        this.rewordTargetMissing = true;
+        this.rewordRefused = true;
         this.warning =
           `This commit cannot be reworded here: the range contains ` +
           `${this.mergeCountInRange} merge ` +
@@ -627,7 +632,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
     this.executing = false;
     this.error = '';
     this.warning = '';
-    this.rewordTargetMissing = false;
+    this.rewordRefused = false;
     this.mergeCountInRange = 0;
     this.draggedIndex = null;
     this.dropTargetIndex = null;
@@ -1034,7 +1039,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
   private get canExecute(): boolean {
     return (
       this.commits.length > 0 &&
-      !this.rewordTargetMissing &&
+      !this.rewordRefused &&
       !this.executing &&
       !this.hasValidationErrors()
     );
@@ -1246,7 +1251,7 @@ export class LvInteractiveRebaseDialog extends LitElement {
             </div>
           </div>
 
-          ${this.mergeCountInRange > 0 && !this.rewordTargetMissing
+          ${this.mergeCountInRange > 0 && !this.rewordRefused
             ? html`<div class="warning-message">
                 This range contains ${this.mergeCountInRange} merge
                 ${this.mergeCountInRange === 1 ? 'commit' : 'commits'}, which are not
