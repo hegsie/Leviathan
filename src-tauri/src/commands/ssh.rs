@@ -280,6 +280,47 @@ pub async fn generate_ssh_key(
     })
 }
 
+/// Where to point `ssh -T`, and the success banner to expect from it.
+struct SshTarget {
+    /// The `[user@]host` argument for ssh.
+    ssh_host: String,
+    /// An explicit port from an `ssh://host:port/…` URL, if the user gave one.
+    port: Option<String>,
+    /// The banner this host is known to answer with, or "" if it is unknown.
+    expected_pattern: &'static str,
+}
+
+/// Split a `[user@]host[:port]` fragment into its host and port parts.
+///
+/// Bracketed IPv6 literals keep their brackets — `ssh` wants them that way —
+/// and only an all-digit suffix counts as a port, so an SCP path remnant like
+/// `github.com:owner` does not turn into one.
+fn split_host_port(host_port: &str) -> (&str, Option<String>) {
+    let split_at = if host_port.starts_with('[') {
+        // Only a colon AFTER the closing bracket can be a port separator.
+        match host_port.find(']') {
+            Some(end) => host_port[end..].find(':').map(|i| end + i),
+            None => None,
+        }
+    } else {
+        host_port.rfind(':')
+    };
+
+    match split_at {
+        Some(i) => {
+            let (bare, rest) = host_port.split_at(i);
+            let port = &rest[1..];
+            if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+                (bare, Some(port.to_string()))
+            } else {
+                // An SCP-style path (`git@github.com:owner/repo.git`) — not a port.
+                (bare, None)
+            }
+        }
+        None => (host_port, None),
+    }
+}
+
 /// Which host to connect to, and the success banner to expect from it.
 ///
 /// The canonical SaaS hosts are matched EXACTLY. Matching on `contains` and then
@@ -287,10 +328,32 @@ pub async fn generate_ssh_key(
 /// the public servers instead: the test passed against a machine the user never
 /// named (their personal key works on github.com), while the result panel still
 /// displayed the host they typed. Anything else is contacted as entered.
-fn resolve_ssh_target(host: &str) -> (String, &'static str) {
-    let trimmed = host.trim().trim_end_matches('/');
-    // Compare on the host part so "git@github.com" resolves like "github.com".
-    let bare = trimmed.rsplit('@').next().unwrap_or(trimmed);
+///
+/// The input is whatever the user pasted, so a remote URL is accepted as well as
+/// a bare host: `github.com`, `git@github.com`, `git@github.com:owner/repo.git`
+/// and `ssh://git@github.com:2222/owner/repo.git` all resolve to the same host.
+/// Handing those URL forms to `ssh -T` verbatim made every one of them miss the
+/// canonical-host match and then fail to connect at all.
+fn resolve_ssh_target(host: &str) -> SshTarget {
+    let mut rest = host.trim();
+    for scheme in ["ssh://", "git+ssh://"] {
+        if let Some(stripped) = rest.strip_prefix(scheme) {
+            rest = stripped;
+            break;
+        }
+    }
+    // Drop the repository path, from either URL form.
+    if let Some(slash) = rest.find('/') {
+        rest = &rest[..slash];
+    }
+
+    let (user, host_port) = match rest.rsplit_once('@') {
+        Some((user, host_port)) if !user.is_empty() => (Some(user), host_port),
+        Some((_, host_port)) => (None, host_port),
+        None => (None, rest),
+    };
+
+    let (bare, port) = split_host_port(host_port);
 
     let expected_pattern = match bare.to_ascii_lowercase().as_str() {
         "github.com" | "ssh.github.com" => "successfully authenticated",
@@ -299,13 +362,11 @@ fn resolve_ssh_target(host: &str) -> (String, &'static str) {
         _ => "",
     };
 
-    let ssh_host = if trimmed.contains('@') {
-        trimmed.to_string()
-    } else {
-        format!("git@{}", trimmed)
-    };
-
-    (ssh_host, expected_pattern)
+    SshTarget {
+        ssh_host: format!("{}@{}", user.unwrap_or("git"), bare),
+        port,
+        expected_pattern,
+    }
 }
 
 /// Whether an `ssh -T` result means authentication succeeded.
@@ -333,20 +394,28 @@ fn ssh_test_succeeded(message: &str, expected_pattern: &str, status_success: boo
 /// Test SSH connection to a host
 #[command]
 pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
-    let (ssh_host, expected_pattern) = resolve_ssh_target(&host);
+    let SshTarget {
+        ssh_host,
+        port,
+        expected_pattern,
+    } = resolve_ssh_target(&host);
 
     // Run ssh -T to test connection
-    let output = create_command("ssh")
-        .args([
-            "-T",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            &ssh_host,
-        ])
+    let mut command = create_command("ssh");
+    command.args([
+        "-T",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+    ]);
+    if let Some(port) = &port {
+        command.args(["-p", port]);
+    }
+    let output = command
+        .arg(&ssh_host)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run ssh: {}", e)))?;
 
@@ -505,9 +574,9 @@ mod tests {
             "bitbucket.corp.example",
             "git.example.com",
         ] {
-            let (target, _) = resolve_ssh_target(host);
+            let target = resolve_ssh_target(host);
             assert_eq!(
-                target,
+                target.ssh_host,
                 format!("git@{}", host),
                 "{} must be contacted as entered",
                 host
@@ -518,25 +587,72 @@ mod tests {
     /// The canonical hosts still resolve to their known banner.
     #[test]
     fn test_canonical_hosts_keep_their_expected_banner() {
-        assert_eq!(
-            resolve_ssh_target("github.com"),
-            ("git@github.com".to_string(), "successfully authenticated")
-        );
-        assert_eq!(
-            resolve_ssh_target("gitlab.com"),
-            ("git@gitlab.com".to_string(), "welcome to gitlab")
-        );
-        assert_eq!(
-            resolve_ssh_target("bitbucket.org"),
-            ("git@bitbucket.org".to_string(), "logged in as")
-        );
-        // An explicit user resolves the same way and is preserved.
-        assert_eq!(
-            resolve_ssh_target("git@github.com"),
-            ("git@github.com".to_string(), "successfully authenticated")
-        );
+        for (input, ssh_host, pattern) in [
+            ("github.com", "git@github.com", "successfully authenticated"),
+            ("gitlab.com", "git@gitlab.com", "welcome to gitlab"),
+            ("bitbucket.org", "git@bitbucket.org", "logged in as"),
+            // An explicit user resolves the same way and is preserved.
+            (
+                "git@github.com",
+                "git@github.com",
+                "successfully authenticated",
+            ),
+        ] {
+            let target = resolve_ssh_target(input);
+            assert_eq!(target.ssh_host, ssh_host, "target for {}", input);
+            assert_eq!(target.expected_pattern, pattern, "banner for {}", input);
+            assert_eq!(target.port, None, "port for {}", input);
+        }
         // A self-hosted host gets no banner to match on.
-        assert_eq!(resolve_ssh_target("github.mycompany.com").1, "");
+        assert_eq!(
+            resolve_ssh_target("github.mycompany.com").expected_pattern,
+            ""
+        );
+    }
+
+    /// Pasting a remote URL is the natural thing to do, so every URL form has to
+    /// resolve to the same host as the bare name.
+    ///
+    /// Only the `user@` prefix used to be stripped, so `git@github.com:me/x.git`
+    /// missed the canonical-host match AND was handed to `ssh -T` complete with
+    /// its repository path — which cannot connect to anything.
+    #[test]
+    fn test_remote_urls_resolve_to_their_host() {
+        for input in [
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo.git",
+            "ssh://git@github.com:22/owner/repo.git",
+            "git+ssh://git@github.com/owner/repo.git",
+            "github.com/owner/repo",
+            "  git@github.com:owner/repo.git  ",
+        ] {
+            let target = resolve_ssh_target(input);
+            assert_eq!(target.ssh_host, "git@github.com", "target for {}", input);
+            assert_eq!(
+                target.expected_pattern, "successfully authenticated",
+                "banner for {}",
+                input
+            );
+        }
+    }
+
+    /// A non-default port from an SSH URL has to reach the ssh invocation, or
+    /// the test silently probes port 22 of a server that does not listen there.
+    #[test]
+    fn test_ssh_url_port_is_preserved() {
+        let target = resolve_ssh_target("ssh://git@git.example.com:2222/owner/repo.git");
+        assert_eq!(target.ssh_host, "git@git.example.com");
+        assert_eq!(target.port.as_deref(), Some("2222"));
+
+        // An SCP-style path is not a port.
+        let scp = resolve_ssh_target("git@git.example.com:owner/repo.git");
+        assert_eq!(scp.ssh_host, "git@git.example.com");
+        assert_eq!(scp.port, None);
+
+        // A bracketed IPv6 literal keeps its brackets and still yields its port.
+        let v6 = resolve_ssh_target("ssh://git@[2001:db8::1]:2222/owner/repo.git");
+        assert_eq!(v6.ssh_host, "git@[2001:db8::1]");
+        assert_eq!(v6.port.as_deref(), Some("2222"));
     }
 
     /// With no known banner, expected_pattern is "" — and contains("") is
