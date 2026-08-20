@@ -29,6 +29,9 @@ pub enum RefType {
     LocalBranch,
     RemoteBranch,
     Tag,
+    /// A detached HEAD. Not a branch — it must not offer branch operations —
+    /// but it is a ref the graph has to know about.
+    DetachedHead,
 }
 
 /// Get all refs mapped by their target commit OID
@@ -119,6 +122,24 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
         refs_map.entry(target_oid).or_default().push(ref_info);
     }
 
+    // A detached HEAD has no branch ref pointing at it, and the literal "HEAD"
+    // ref is skipped above — so nothing in the map carried is_head, and the
+    // graph's getHeadOid() returned undefined. That silently dropped the
+    // lane-0 mainline pinning, left no HEAD marker anywhere on a checkout the
+    // app itself offers, and made "Jump to HEAD" a no-op. Emit HEAD itself.
+    if repo.head_detached().unwrap_or(false) {
+        if let Some(oid) = head.as_ref().and_then(|h| h.target()) {
+            refs_map.entry(oid.to_string()).or_default().push(RefInfo {
+                name: "HEAD".to_string(),
+                shorthand: "HEAD (detached)".to_string(),
+                ref_type: RefType::DetachedHead,
+                is_head: true,
+                is_annotated: None,
+                tag_message: None,
+            });
+        }
+    }
+
     Ok(refs_map)
 }
 
@@ -126,6 +147,63 @@ pub async fn get_refs_by_commit(path: String) -> Result<HashMap<String, Vec<RefI
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// A detached HEAD must still be reported, or the graph loses HEAD entirely.
+    ///
+    /// The literal "HEAD" ref is skipped in the loop, and when HEAD is detached
+    /// no branch ref carries is_head — so the map had nothing marked HEAD at
+    /// all. The graph's getHeadOid() returned undefined, which silently dropped
+    /// the lane-0 mainline pinning, left no HEAD marker on a checkout the app
+    /// itself offers, and made "Jump to HEAD" a no-op.
+    #[tokio::test]
+    async fn test_get_refs_by_commit_reports_a_detached_head() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Second", &[("a.txt", "a")]);
+
+        // Detach HEAD onto that commit, the way the graph's checkout-commit
+        // action does.
+        {
+            let git_repo = repo.repo();
+            git_repo.set_head_detached(target).unwrap();
+        }
+
+        let refs_map = get_refs_by_commit(repo.path_str()).await.unwrap();
+
+        let head_refs: Vec<_> = refs_map
+            .get(&target.to_string())
+            .expect("the detached HEAD commit must appear in the map")
+            .iter()
+            .filter(|r| r.is_head)
+            .collect();
+
+        assert_eq!(head_refs.len(), 1, "exactly one ref marks HEAD");
+        assert!(
+            matches!(head_refs[0].ref_type, RefType::DetachedHead),
+            "a detached HEAD is not a branch and must not offer branch operations"
+        );
+        assert!(head_refs[0].shorthand.contains("detached"));
+    }
+
+    /// On a normal branch checkout the branch itself is HEAD — no synthetic ref.
+    #[tokio::test]
+    async fn test_get_refs_by_commit_marks_the_checked_out_branch_as_head() {
+        let repo = TestRepo::with_initial_commit();
+        let tip = repo.create_commit("Second", &[("a.txt", "a")]);
+
+        let refs_map = get_refs_by_commit(repo.path_str()).await.unwrap();
+        let head_refs: Vec<_> = refs_map
+            .get(&tip.to_string())
+            .expect("the tip must appear in the map")
+            .iter()
+            .filter(|r| r.is_head)
+            .collect();
+
+        assert_eq!(head_refs.len(), 1, "exactly one ref marks HEAD");
+        assert!(
+            matches!(head_refs[0].ref_type, RefType::LocalBranch),
+            "an attached HEAD is the branch itself, not a synthetic ref"
+        );
+    }
 
     #[tokio::test]
     async fn test_get_refs_by_commit_empty_repo() {

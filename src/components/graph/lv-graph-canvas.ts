@@ -2711,6 +2711,8 @@ export class LvGraphCanvas extends LitElement {
         return 'Tag';
       case 'pullRequest':
         return 'Pull request';
+      case 'detachedHead':
+        return 'Detached HEAD';
       default:
         return 'Reference';
     }
