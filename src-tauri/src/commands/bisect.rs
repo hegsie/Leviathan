@@ -377,9 +377,36 @@ fn session_terms(repo_path: &Path) -> (String, String) {
     }
 }
 
-/// git announces the culprit using the session's own bad term.
-fn culprit_marker(term_bad: &str) -> String {
-    format!("is the first {} commit", term_bad)
+/// Run a bisect STEP and return stdout and stderr together.
+///
+/// Which stream git announces the culprit on, and whether it exits zero doing
+/// so, both vary by git version — 2.43 exits zero with the summary on stdout;
+/// CI's 2.55 does not, which is how a test that passed locally went red there.
+/// The step handlers care only about the text, so they get both streams and
+/// stop depending on either choice.
+fn run_bisect_step(repo_path: &Path, args: &[&str]) -> Result<String> {
+    let output = git_command(repo_path)
+        .args(args)
+        .output()
+        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    if output.status.success()
+        || combined.contains("We cannot bisect more")
+        || announces_culprit(&combined)
+    {
+        Ok(combined.trim().to_string())
+    } else {
+        let message = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        Err(LeviathanError::OperationFailed(message.to_string()))
+    }
 }
 
 /// Mark the current commit (or specified commit) as bad
@@ -394,10 +421,10 @@ pub async fn bisect_bad(path: String, commit: Option<String>) -> Result<BisectSt
         None => vec!["bisect", term_bad.as_str()],
     };
 
-    let output = run_git_command(repo_path, &args)?;
+    let output = run_bisect_step(repo_path, &args)?;
 
     // Check if we found the culprit
-    let culprit = if output.contains(&culprit_marker(&term_bad)) {
+    let culprit = if announces_culprit(&output) {
         // Parse the culprit commit info
         parse_culprit_from_output(&output)
     } else {
@@ -425,11 +452,11 @@ pub async fn bisect_good(path: String, commit: Option<String>) -> Result<BisectS
         None => vec!["bisect", term_good.as_str()],
     };
 
-    let output = run_git_command(repo_path, &args)?;
+    let output = run_bisect_step(repo_path, &args)?;
 
     // Marking good is what usually NARROWS the range to the culprit, so this
-    // handler needs the bad term to recognise the announcement just as much.
-    let culprit = if output.contains(&culprit_marker(&term_bad)) {
+    // handler must recognise the announcement just as much as marking bad.
+    let culprit = if announces_culprit(&output) {
         parse_culprit_from_output(&output)
     } else {
         None
@@ -496,16 +523,18 @@ fn parse_culprit_from_output(output: &str) -> Option<CulpritCommit> {
     //     commit message
 
     let lines: Vec<&str> = output.lines().collect();
-    if lines.is_empty() {
-        return None;
-    }
 
-    // First line contains the commit hash
-    let first_line = lines[0];
-    let oid = first_line.split_whitespace().next()?.to_string();
+    // FIND the announcing line rather than assuming it is line 0. It is not
+    // always first: git may put it on stderr, so combined output can lead with
+    // stdout, and the term in it is the session's, not always "bad".
+    let announce_at = lines.iter().position(|l| announces_culprit(l))?;
+    let oid = lines[announce_at].split_whitespace().next()?.to_string();
 
-    // Find Author line
-    let author_line = lines.iter().find(|l| l.trim().starts_with("Author:"))?;
+    // Find the Author line AFTER the announcement, so anything printed before
+    // it cannot be mistaken for the culprit's.
+    let author_line = lines[announce_at..]
+        .iter()
+        .find(|l| l.trim().starts_with("Author:"))?;
     let author_part = author_line.trim().strip_prefix("Author:")?.trim();
 
     // Parse "Name <email>"
@@ -797,6 +826,35 @@ mod tests {
         );
 
         bisect_reset(repo.path_str()).await.unwrap();
+    }
+
+    /// The culprit must be found wherever the announcement sits.
+    ///
+    /// The parser used to take line 0 as the announcement. git may print it on
+    /// stderr — so in combined output it can follow stdout rather than lead —
+    /// and the term in it is the session's, not always "bad". CI's git 2.55
+    /// exposed exactly this after it passed on 2.43 locally.
+    #[test]
+    fn test_parse_culprit_finds_the_announcement_anywhere() {
+        let stderr_first = "Bisecting: 0 revisions left to test after this\n\
+             abc123def is the first broken commit\n\
+             commit abc123def\n\
+             Author: Alice <alice@example.com>\n\
+             Date:   Mon Jan 1 00:00:00 2026 +0000\n\
+             \n    Broke the thing\n";
+
+        let culprit = parse_culprit_from_output(stderr_first)
+            .expect("the announcement is not on line 0, and must still be found");
+        assert_eq!(culprit.oid, "abc123def");
+        assert_eq!(culprit.author, "Alice");
+        assert_eq!(culprit.email, "alice@example.com");
+    }
+
+    /// Output with no announcement yields no culprit.
+    #[test]
+    fn test_parse_culprit_returns_none_without_an_announcement() {
+        assert!(parse_culprit_from_output("Bisecting: 3 revisions left").is_none());
+        assert!(parse_culprit_from_output("").is_none());
     }
 
     /// The term-independent match accepts any term, and nothing else.
