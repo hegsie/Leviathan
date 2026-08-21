@@ -452,3 +452,225 @@ describe('git.service - getRepoToken keyring sync (via fetch)', () => {
     expect(credWrites, 're-synced after reset').to.have.length(4);
   });
 });
+
+describe('git.service - getRepoToken repo-aware account resolution', () => {
+  const keyring = new Map<string, string>();
+  /** The token `fetch` actually sent to the backend — i.e. the one that authenticates. */
+  let fetchToken: string | undefined;
+  /** Args the backend resolver was invoked with, or null when it was never called. */
+  let resolverArgs: Record<string, unknown> | null;
+  let credWrites: string[];
+
+  const GH_REPO = { owner: 'acme', repo: 'app', remoteName: 'origin' };
+  const GH_URL = 'https://github.com/acme/app.git';
+
+  /** Keyring entries for an account, with a far-future OAuth expiry (→ no refresh). */
+  function seedToken(integrationType: string, accountId: string, token: string) {
+    const key = `${integrationType}_token_${accountId}`;
+    keyring.set(key, token);
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: token,
+      refreshToken: 'r',
+      expiresAt: Date.now() + 3_600_000,
+    }));
+  }
+
+  interface MockOptions {
+    detectGitHub?: unknown;
+    detectAdo?: unknown;
+    detectGitLab?: unknown;
+    remoteUrl?: string;
+    /** null → no profile assigned; 'throw' → the profile lookup fails. */
+    assignedProfile?: { id: string } | null | 'throw';
+    /** What the backend resolver returns; 'throw' → the command fails. */
+    preferredAccount?: IntegrationAccount | null | 'throw';
+  }
+
+  function installMock(opts: MockOptions) {
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'detect_github_repo') return opts.detectGitHub ?? null;
+      if (command === 'detect_ado_repo') return opts.detectAdo ?? null;
+      if (command === 'detect_gitlab_repo') return opts.detectGitLab ?? null;
+      if (command === 'get_remotes') {
+        return [{ name: 'origin', url: opts.remoteUrl ?? GH_URL, pushUrl: null }];
+      }
+      if (command === 'get_assigned_unified_profile') {
+        if (opts.assignedProfile === 'throw') throw new Error('profile lookup failed');
+        return opts.assignedProfile ?? null;
+      }
+      if (command === 'get_repository_preferred_account') {
+        resolverArgs = a ?? null;
+        if (opts.preferredAccount === 'throw') throw new Error('resolver unavailable');
+        return opts.preferredAccount ?? null;
+      }
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'store_git_credentials') { credWrites.push(a!.url as string); return null; }
+      if (command === 'fetch') { fetchToken = a?.token as string | undefined; return null; }
+      return null;
+    };
+  }
+
+  /** Personal is the global default; work is only reachable via repo-aware resolution. */
+  function setupGitHubAccounts() {
+    const personal: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('github'),
+      id: 'gh-personal',
+      isDefault: true,
+    };
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('github'),
+      id: 'gh-work',
+      isDefault: false,
+    };
+    unifiedProfileStore.getState().setAccounts([personal, work]);
+    keyring.clear();
+    seedToken('github', 'gh-personal', 'personal-tok');
+    seedToken('github', 'gh-work', 'work-tok');
+    return { personal, work };
+  }
+
+  beforeEach(() => {
+    fetchToken = undefined;
+    resolverArgs = null;
+    credWrites = [];
+  });
+
+  afterEach(() => {
+    unifiedProfileStore.getState().reset();
+    resetAdoGitCredentialSyncCache();
+    mockInvoke = () => Promise.resolve(null);
+  });
+
+  it("uses the repo's assigned-profile account, not the global default", async () => {
+    const { work } = setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, "the work repo's own account authenticates").to.equal('work-tok');
+  });
+
+  it("passes the assigned profile id and the repo's remote URL to the resolver", async () => {
+    const { work } = setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    // The repo URL is what feeds the account-urlPatterns tier of the resolver.
+    expect(resolverArgs).to.deep.equal({
+      profileId: 'profile-work',
+      integrationType: 'github',
+      repoUrl: GH_URL,
+    });
+  });
+
+  it('still resolves by account URL patterns when the profile lookup fails', async () => {
+    const { work } = setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: 'throw',
+      preferredAccount: work, // backend matched urlPatterns without a profile
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(resolverArgs!.profileId, 'resolves with no profile rather than aborting').to.equal('');
+    expect(fetchToken).to.equal('work-tok');
+  });
+
+  it('falls back to the global default when the resolver command fails', async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: null,
+      preferredAccount: 'throw',
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'a resolver hiccup must not cost the user their token').to.equal(
+      'personal-tok',
+    );
+    expect(fetchToken).to.not.be.undefined;
+  });
+
+  it("syncs keyring credentials for the resolved non-default account's org", async () => {
+    const personal: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'personalorg'),
+      id: 'ado-personal',
+      isDefault: true,
+    };
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'workorg'),
+      id: 'ado-work',
+      isDefault: false,
+    };
+    unifiedProfileStore.getState().setAccounts([personal, work]);
+    keyring.clear();
+    seedToken('azure-devops', 'ado-personal', 'personal-tok');
+    seedToken('azure-devops', 'ado-work', 'work-tok');
+    installMock({
+      detectAdo: { organization: 'workorg', project: 'p', repository: 'repo', remoteName: 'origin' },
+      remoteUrl: 'https://dev.azure.com/workorg/p/_git/repo',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('work-tok');
+    // The org guard only lets the sync through when the resolved account's org
+    // is the repo's org — which it now is.
+    expect(credWrites).to.include('https://workorg.visualstudio.com');
+  });
+
+  it('applies repo-aware resolution on the GitLab branch too', async () => {
+    const personal: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab'),
+      id: 'gl-personal',
+      isDefault: true,
+    };
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab'),
+      id: 'gl-work',
+      isDefault: false,
+    };
+    unifiedProfileStore.getState().setAccounts([personal, work]);
+    keyring.clear();
+    seedToken('gitlab', 'gl-personal', 'gl-personal-tok');
+    seedToken('gitlab', 'gl-work', 'gl-work-tok');
+    installMock({
+      detectGitLab: { projectId: '1', projectPath: 'acme/app', remoteName: 'origin' },
+      remoteUrl: 'https://gitlab.com/acme/app.git',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('gl-work-tok');
+  });
+
+  it('keeps using the global default when nothing repo-specific matches', async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: null,
+      preferredAccount: null, // no urlPattern match, no profile default
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'single-account setups are unaffected').to.equal('personal-tok');
+  });
+});

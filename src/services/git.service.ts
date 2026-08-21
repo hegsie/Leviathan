@@ -331,6 +331,10 @@ import type {
   CommandResult,
   InteractiveRebaseOutcome,
 } from "../types/api.types.ts";
+import type {
+  IntegrationType,
+  IntegrationAccount,
+} from "../types/unified-profile.types.ts";
 
 /**
  * Repository operations
@@ -1189,8 +1193,55 @@ export async function syncAdoGitCredentials(org: string, token: string): Promise
 }
 
 /**
- * Helper to get authentication token for a repository
- * Tries the multi-account system first, then falls back to legacy single-token methods
+ * Resolve which integration account's token a repository's network operations
+ * should use.
+ *
+ * `selectDefaultGlobalAccount` knows nothing about the repository, so on its own
+ * it hands a Work repo the Personal account's token in any multi-account setup.
+ * The backend resolver owns the real precedence — account `urlPatterns`, then
+ * the repo's assigned profile default, then the global default — so delegate to
+ * it and keep the global default purely as the fallback for when it cannot
+ * answer (no accounts configured, or the command failed).
+ */
+async function resolveRepoAccount(
+  repoPath: string,
+  integrationType: IntegrationType,
+  remoteName: string | undefined,
+): Promise<IntegrationAccount | undefined> {
+  const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
+  try {
+    // Dynamic import: unified-profile.service.ts statically imports this module,
+    // so a static import back would close a runtime cycle.
+    const { getAssignedUnifiedProfile, fetchRepositoryPreferredAccount } = await import(
+      "./unified-profile.service.ts"
+    );
+    const [profile, repoUrl] = await Promise.all([
+      // A failed profile lookup must not cost us the account-level urlPatterns
+      // tier or the global default — resolve with no profile instead.
+      getAssignedUnifiedProfile(repoPath).catch(() => null),
+      resolveRemoteUrl(repoPath, remoteName),
+    ]);
+    // An unknown profile id resolves to no profile on the backend, which simply
+    // falls through to the remaining tiers.
+    const account = await fetchRepositoryPreferredAccount(
+      profile?.id ?? "",
+      integrationType,
+      repoUrl,
+    );
+    if (account) return account;
+  } catch (err) {
+    // Must be caught here: letting it reach getRepoToken's outer catch would
+    // skip the remaining providers and every legacy fallback below.
+    console.error("Failed to resolve the repository's preferred account:", err);
+  }
+  return selectDefaultGlobalAccount(integrationType);
+}
+
+/**
+ * Helper to get authentication token for a repository.
+ * Resolves the account the way the profile UI does — account URL patterns, then
+ * the repo's assigned profile, then the global default — before falling back to
+ * the legacy single-token methods.
  */
 async function getRepoToken(
   repoPath: string,
@@ -1198,7 +1249,6 @@ async function getRepoToken(
 ): Promise<string | undefined> {
   try {
     // --- Multi-account system (preferred) ---
-    const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
     const { AccountCredentials } = await import("./credential.service.ts");
 
     // GitHub
@@ -1208,7 +1258,7 @@ async function getRepoToken(
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
-      const account = selectDefaultGlobalAccount("github");
+      const account = await resolveRepoAccount(repoPath, "github", ghRepoResult.data.remoteName);
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
         if (token) return token;
@@ -1227,7 +1277,11 @@ async function getRepoToken(
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
-      const account = selectDefaultGlobalAccount("azure-devops");
+      const account = await resolveRepoAccount(
+        repoPath,
+        "azure-devops",
+        adoRepoResult.data.remoteName,
+      );
       if (account) {
         // Refresh the Entra OAuth access token if it is expiring, so push/pull/
         // fetch (which pass this token directly) keep working past the ~1h expiry.
@@ -1236,7 +1290,7 @@ async function getRepoToken(
         if (token) {
           // Keep the OS keyring git credential fresh too, so EXTERNAL git CLI
           // operations (which read the keyring, not this returned token) also work
-          // after a refresh. Only sync when the default account actually belongs
+          // after a refresh. Only sync when the resolved account actually belongs
           // to THIS repo's org — otherwise, in a multi-account setup, a different
           // org's token would clobber the keyring credential for the repo's org.
           const accountOrg =
@@ -1261,7 +1315,11 @@ async function getRepoToken(
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
-      const account = selectDefaultGlobalAccount("gitlab");
+      const account = await resolveRepoAccount(
+        repoPath,
+        "gitlab",
+        gitlabRepoResult.data.remoteName,
+      );
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
         if (token) return token;
