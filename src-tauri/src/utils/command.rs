@@ -55,3 +55,32 @@ pub fn create_command(program: &str) -> Command {
 
     cmd
 }
+
+/// Feed a token to a `git` subprocess as a one-shot credential helper.
+///
+/// `create_command` sets GIT_TERMINAL_PROMPT=0, so a git subprocess that needs
+/// HTTPS credentials and has none simply fails — there is no prompt to fall
+/// back to. This hands git the token the app already holds, the same way the
+/// git2 paths hand it to `Cred::userpass_plaintext`.
+///
+/// Configured through GIT_CONFIG_* rather than `-c` on purpose: those are
+/// ENVIRONMENT variables, so every child git process inherits them. `git
+/// submodule update` clones and fetches each submodule in a child process, and
+/// a `-c` on the outer command would not reach them.
+///
+/// This ADDS to the user's credential.helper list rather than replacing it —
+/// clearing the list would also disable their own helper, so a token that is
+/// wrong or expired could no longer be recovered from the keychain.
+pub fn apply_token_credential_helper(cmd: &mut Command, token: &str) {
+    cmd.env("LEVIATHAN_GIT_TOKEN", token);
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+    // `git` as the username matches the git2 path's fallback; every provider we
+    // support authenticates a token as the password and ignores the username.
+    // The token stays in the environment and never enters the URL, so it cannot
+    // leak into .git/config, the reflog, or a git error message.
+    cmd.env(
+        "GIT_CONFIG_VALUE_0",
+        "!f() { echo username=git; echo \"password=$LEVIATHAN_GIT_TOKEN\"; }; f",
+    );
+}
