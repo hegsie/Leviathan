@@ -38,6 +38,49 @@ function defaultMockInvoke(command: string): Promise<unknown> {
   return Promise.resolve(null);
 }
 
+type MockRemote = { name: string; url: string; pushUrl: string | null };
+
+/**
+ * A mock for the tag-delete flow, which now asks TWO questions: the local
+ * confirm, then the remote follow-up. Records every dialog's message so the
+ * copy and the dialog count are assertable, and answers them in order.
+ */
+function deleteFlowMock(options: {
+  remotes?: MockRemote[];
+  answers?: string[];
+  deleteRemoteTag?: () => Promise<unknown>;
+}) {
+  const dialogMessages: string[] = [];
+  const invokes: Array<{ command: string; args?: unknown }> = [];
+  const answers = options.answers ?? [];
+  let dialogIndex = 0;
+
+  const mock: MockInvoke = (command: string, args?: unknown) => {
+    invokes.push({ command, args });
+    if (command === 'plugin:dialog|message') {
+      dialogMessages.push(String((args as { message?: string } | undefined)?.message ?? ''));
+      return Promise.resolve(answers[dialogIndex++] ?? 'Cancel');
+    }
+    if (command === 'get_remotes') return Promise.resolve(options.remotes ?? []);
+    if (command === 'delete_tag') return Promise.resolve(null);
+    if (command === 'delete_remote_tag') {
+      return options.deleteRemoteTag ? options.deleteRemoteTag() : Promise.resolve(null);
+    }
+    return defaultMockInvoke(command);
+  };
+
+  return { mock, dialogMessages, invokes };
+}
+
+/** Run handleDeleteTag against a tag the context menu is open on. */
+async function runDeleteTag(el: LvTagList, tagName: string): Promise<void> {
+  const tag = makeTag(tagName);
+  (el as unknown as { contextMenu: { visible: boolean; x: number; y: number; tag: typeof tag | null } }).contextMenu = {
+    visible: true, x: 0, y: 0, tag,
+  };
+  await (el as unknown as { handleDeleteTag: () => Promise<void> }).handleDeleteTag();
+}
+
 async function createComponent(): Promise<LvTagList> {
   mockInvoke = defaultMockInvoke;
   const el = await fixture<LvTagList>(
@@ -118,6 +161,92 @@ describe('lv-tag-list feedback', () => {
     const successToast = uiStore.getState().toasts.find((t) => t.type === 'success');
     expect(successToast, 'the delete is acknowledged').to.not.be.undefined;
     expect(successToast!.message).to.equal('Deleted tag v3.0.0');
+  });
+
+  // ── Remote follow-up ──────────────────────────────────────────────────────
+  // delete_tag removes the local ref only, and the tag fetch refspec
+  // (refs/tags/*:refs/tags/*) copies a pushed tag straight back — so a
+  // "deleted" tag reappeared on the next fetch under a confirm that promised
+  // the delete could not be undone.
+
+  const ORIGIN: MockRemote[] = [{ name: 'origin', url: 'https://example.test/r.git', pushUrl: null }];
+
+  it('the delete confirm says the tag survives on the remote', async () => {
+    const el = await createComponent();
+    const flow = deleteFlowMock({ remotes: ORIGIN, answers: ['Cancel'] });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    expect(flow.dialogMessages[0], 'the local confirm names the remote copy').to.match(
+      /stays on the remote/
+    );
+    expect(flow.dialogMessages[0]).to.match(/next fetch/);
+  });
+
+  it('confirming the follow-up deletes the tag on the remote', async () => {
+    const el = await createComponent();
+    const flow = deleteFlowMock({ remotes: ORIGIN, answers: ['Ok', 'Ok'] });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    const remoteDelete = flow.invokes.filter((i) => i.command === 'delete_remote_tag');
+    expect(remoteDelete.length, 'the remote copy is deleted too').to.equal(1);
+    expect(remoteDelete[0].args).to.deep.include({
+      path: REPO_PATH,
+      name: 'v3.0.0',
+      remote: 'origin',
+    });
+
+    const toasts = uiStore.getState().toasts;
+    expect(
+      toasts.some((t) => t.type === 'success' && t.message === 'Deleted tag v3.0.0 on origin'),
+      'the remote delete is acknowledged'
+    ).to.be.true;
+  });
+
+  it('declining the follow-up leaves the remote tag alone', async () => {
+    const el = await createComponent();
+    const flow = deleteFlowMock({ remotes: ORIGIN, answers: ['Ok', 'Cancel'] });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    expect(flow.dialogMessages.length, 'the follow-up was offered').to.equal(2);
+    expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+    // The local delete is not conditional on the follow-up's answer.
+    expect(flow.invokes.filter((i) => i.command === 'delete_tag')).to.have.length(1);
+  });
+
+  it('a repo with no remotes is not asked about one', async () => {
+    const el = await createComponent();
+    const flow = deleteFlowMock({ remotes: [], answers: ['Ok'] });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    expect(flow.dialogMessages[0]).to.match(/stays on the remote/);
+    expect(flow.dialogMessages.length, 'nothing to ask about').to.equal(1);
+    expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+  });
+
+  it('a failed remote delete is reported to the user', async () => {
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      remotes: ORIGIN,
+      answers: ['Ok', 'Ok'],
+      deleteRemoteTag: () =>
+        Promise.reject({ code: 'OPERATION_FAILED', message: 'remote ref does not exist' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    const errorToast = uiStore.getState().toasts.find((t) => t.type === 'error');
+    expect(errorToast, 'the failure is not swallowed').to.not.be.undefined;
+    expect(errorToast!.message).to.contain('Failed to delete tag v3.0.0 on origin');
+    expect(errorToast!.message).to.contain('remote ref does not exist');
   });
 
   it('a rejected tag push carries the tag name to the Force Push Tag action', async () => {

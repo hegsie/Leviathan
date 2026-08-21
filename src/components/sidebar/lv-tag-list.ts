@@ -13,6 +13,7 @@ import { showErrorWithSuggestion } from '../../services/error-suggestion.service
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { Tag } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import { confirmDeleteTag, offerRemoteTagDelete } from '../../utils/tag-delete.ts';
 import {
   tryAcquireRefOpOrWarn,
   releaseRefOp,
@@ -732,11 +733,7 @@ export class LvTagList extends LitElement {
     // target the repo it was invoked on, even if the user switches tabs (to a
     // repo that may have a same-named tag) while the confirm is up.
     const repoPath = this.repositoryPath;
-    const confirmed = await showConfirm(
-      'Delete Tag',
-      `Are you sure you want to delete tag "${tag.name}"?\n\nThis action cannot be undone.`,
-      'warning'
-    );
+    const confirmed = await confirmDeleteTag(tag.name);
 
     if (!confirmed) {
       this.releaseOperation(lockedRepo);
@@ -762,6 +759,10 @@ export class LvTagList extends LitElement {
           bubbles: true,
           composed: true,
         }));
+        // The local ref is gone; the remote copy is not, and the tag fetch
+        // refspec would restore it. Asked here, inside the claim, so the
+        // follow-up push is serialized with the rest of this repo's ref ops.
+        await offerRemoteTagDelete(repoPath, tag.name);
       } else {
         console.error('Failed to delete tag:', result.error);
         showToast(`Failed to delete tag: ${result.error?.message ?? 'Unknown error'}`, 'error');

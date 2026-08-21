@@ -340,6 +340,23 @@ pub fn run_pre_push_tag(repo: &git2::Repository, remote_name: &str, tag_name: &s
     run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
 }
 
+/// Run the pre-push hook for a tag DELETION (blocking, git parity).
+///
+/// git spells a deletion with the literal local ref `(delete)` and an all-zero
+/// local oid. Tag refs are not mirrored into refs/remotes, so the remote oid is
+/// unknown here and sent as all-zeros, the same assumption `run_pre_push_tag`
+/// makes. A non-zero exit aborts the deletion.
+pub fn run_pre_push_tag_delete(
+    repo: &git2::Repository,
+    remote_name: &str,
+    tag_name: &str,
+) -> Result<()> {
+    let url = remote_url(repo, remote_name);
+    let remote_ref = format!("refs/tags/{}", tag_name);
+    let stdin = format!("(delete) {} {} {}\n", ZERO_OID, remote_ref, ZERO_OID);
+    run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
+}
+
 /// A git hook
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
