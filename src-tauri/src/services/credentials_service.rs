@@ -414,8 +414,16 @@ fn extract_host(url: &str) -> Option<String> {
 
 /// Get fetch options with credential and progress callbacks
 pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
+    get_fetch_options_with_deadline(token, None)
+}
+
+/// Same, but the transfer aborts itself once `deadline` passes.
+pub fn get_fetch_options_with_deadline<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> git2::FetchOptions<'a> {
     let mut fetch_opts = git2::FetchOptions::new();
-    fetch_opts.remote_callbacks(get_callbacks_with_progress(token));
+    fetch_opts.remote_callbacks(get_callbacks_with_deadline(token, deadline));
     fetch_opts
 }
 
@@ -444,10 +452,27 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
 
 /// Get remote callbacks with both credential and progress support
 pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
+    get_callbacks_with_deadline(token, None)
+}
+
+/// Same, but the transfer aborts itself once `deadline` passes.
+///
+/// Returning false from `transfer_progress` is the only cancellation point
+/// libgit2 offers, and it is the one `clone_repository` already uses: without
+/// it a fetch keeps downloading long after the caller's `tokio::time::timeout`
+/// gave up, because dropping that future does not cancel the blocking task.
+pub fn get_callbacks_with_deadline<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> RemoteCallbacks<'a> {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
 
     // Add transfer progress callback
-    callbacks.transfer_progress(|stats| {
+    callbacks.transfer_progress(move |stats| {
+        if crate::utils::deadline_passed(deadline) {
+            return false;
+        }
+
         let received = stats.received_objects();
         let total = stats.total_objects();
         let bytes = stats.received_bytes();

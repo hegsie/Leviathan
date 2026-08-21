@@ -17,8 +17,15 @@ pub struct Remote {
 pub struct RemoteOperationResult {
     pub operation: String,
     pub remote: String,
+    /// The repository the operation ran on, so a late completion can refresh
+    /// the right tab rather than whichever one happens to be active.
+    pub repo_path: String,
     pub success: bool,
     pub message: String,
+    /// This completion arrived AFTER the command had already reported a
+    /// timeout to its caller, so nothing on the frontend is waiting to
+    /// refresh. See `await_remote_task` in commands/remote.rs.
+    pub late: bool,
 }
 
 /// Result of fetching all remotes

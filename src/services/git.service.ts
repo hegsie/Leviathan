@@ -4683,8 +4683,12 @@ export async function getRemoteStatus(
 export interface RemoteOperationResult {
   operation: string;
   remote: string;
+  /** Repository the operation ran on, so a late completion refreshes the right tab. */
+  repoPath: string;
   success: boolean;
   message: string;
+  /** Arrived after the command already reported a timeout to its caller. */
+  late?: boolean;
 }
 
 let remoteOperationUnlisten: UnlistenFn | null = null;
@@ -4703,6 +4707,23 @@ export async function setupRemoteOperationListeners(): Promise<void> {
   remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
     "remote-operation-completed",
     (result) => {
+      // A pull or push that lands AFTER the command reported a timeout has
+      // already changed refs and the working tree, and the caller that would
+      // normally refresh returned an error long ago. Say so plainly and
+      // refresh the repository it actually changed — pinned by repoPath, since
+      // the user may have switched tabs in the minutes since.
+      if (result.late) {
+        showToast(result.message, result.success ? "warning" : "error", 8000);
+        if (result.repoPath) {
+          window.dispatchEvent(
+            new CustomEvent("repository-refresh", {
+              detail: { repoPath: result.repoPath },
+            }),
+          );
+        }
+        return;
+      }
+
       // Show toast notifications for all remote operations
       if (result.success) {
         // Success notifications
