@@ -638,6 +638,63 @@ test.describe('Diff View - Stage Hunk', () => {
     const stageLineCommands = await findCommand(page, 'stage_lines');
     expect(stageHunkCommands.length + stageFileCommands.length + stageLineCommands.length).toBeGreaterThan(0);
   });
+
+  test('should drop a line selection after staging a line from the context menu', async ({ page }) => {
+    // Selection keys are positional hunk/line indices. Staging reloads the diff
+    // and renumbers them, so keeping the old selection would point at other code.
+    await injectCommandMock(page, {
+      get_file_diff: {
+        path: 'src/main.ts',
+        oldPath: null,
+        status: 'modified',
+        hunks: [
+          {
+            header: '@@ -1,4 +1,4 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 4,
+            lines: [
+              { content: 'line 1', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'old a', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'old b', origin: 'deletion', oldLineNo: 3, newLineNo: null },
+              { content: 'new a', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'new b', origin: 'addition', oldLineNo: null, newLineNo: 3 },
+            ],
+          },
+        ],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 2,
+        deletions: 2,
+      },
+      stage_hunk: null,
+    });
+
+    await startCommandCapture(page);
+
+    await rightPanel.getUnstagedFile('src/main.ts').click();
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page
+      .locator('lv-diff-view button.view-btn[title="Toggle line selection mode for staging individual lines"]')
+      .click();
+
+    // Select two lines the way a user would.
+    const checkboxes = page.locator('lv-diff-view .line-checkbox');
+    await checkboxes.nth(0).check();
+    await checkboxes.nth(1).check();
+    await expect(page.locator('lv-diff-view .selection-info')).toHaveText(/2 lines selected/);
+
+    // Stage a different line through the context menu.
+    await page.locator('lv-diff-view .line.code-addition').last().click({ button: 'right' });
+    await page.locator('lv-diff-view .context-menu-item', { hasText: 'Stage line' }).click();
+
+    // The reloaded diff invalidated the old keys, so the selection bar is gone.
+    await expect(page.locator('lv-diff-view .selection-actions')).toHaveCount(0);
+    expect((await findCommand(page, 'stage_hunk')).length).toBeGreaterThan(0);
+  });
 });
 
 test.describe('Diff Error Scenarios', () => {

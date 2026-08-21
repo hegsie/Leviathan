@@ -1112,7 +1112,7 @@ describe('lv-diff-view', () => {
 
       clearHistory();
       mockInvoke = () => Promise.resolve(null);
-      await (el as unknown as { unstageSelectedLines: () => Promise<void> }).unstageSelectedLines();
+      await (el as unknown as { unstageSelectedLines: () => Promise<boolean> }).unstageSelectedLines();
 
       const calls = findCommands('unstage_hunk');
       expect(calls.length, 'unstage_hunk should have been invoked').to.equal(1);
@@ -1205,6 +1205,168 @@ describe('lv-diff-view', () => {
       const patch = (el as unknown as { buildSelectedLinesPatch: () => string }).buildSelectedLinesPatch();
       // No change selected → empty patch, and certainly no stray marker.
       expect(patch).to.not.contain('No newline at end of file');
+    });
+  });
+
+  // ── Context-menu line staging ────────────────────────────────────────────
+  // Selection keys are positional `${hunkIndex}-${lineIndex}` pairs. A stage or
+  // unstage reloads the diff and renumbers those positions, so a selection
+  // saved across the call would silently address different code.
+  describe('context-menu line staging', () => {
+    function stageableHunk(): DiffHunk {
+      return makeDiffHunk({
+        header: '@@ -1,4 +1,4 @@',
+        oldStart: 1,
+        oldLines: 4,
+        newStart: 1,
+        newLines: 4,
+        lines: [
+          makeDiffLine({ content: 'ctx\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'del-a\n', origin: 'deletion', oldLineNo: 2, newLineNo: null }),
+          makeDiffLine({ content: 'del-b\n', origin: 'deletion', oldLineNo: 3, newLineNo: null }),
+          makeDiffLine({ content: 'add-a\n', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+          makeDiffLine({ content: 'add-b\n', origin: 'addition', oldLineNo: null, newLineNo: 3 }),
+        ],
+      });
+    }
+
+    // The same file after one change was applied: one hunk line fewer, so the
+    // old key '0-2' now addresses an addition and '0-4' no longer exists.
+    function reloadedHunk(): DiffHunk {
+      return makeDiffHunk({
+        header: '@@ -1,3 +1,3 @@',
+        oldStart: 1,
+        oldLines: 3,
+        newStart: 1,
+        newLines: 3,
+        lines: [
+          makeDiffLine({ content: 'ctx\n', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+          makeDiffLine({ content: 'del-b\n', origin: 'deletion', oldLineNo: 2, newLineNo: null }),
+          makeDiffLine({ content: 'add-a\n', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+        ],
+      });
+    }
+
+    type Handlers = {
+      handleContextStageLine: () => Promise<void>;
+      handleContextUnstageLine: () => Promise<void>;
+      stageSelectedLines: () => Promise<boolean>;
+      selectedLines: Set<string>;
+      lineSelectionMode: boolean;
+      diff: DiffFile;
+      contextMenu: { visible: boolean; x: number; y: number; line: DiffLine | null; hunk: DiffHunk | null };
+    };
+
+    /**
+     * Renders the view with two lines already selected by the user ('0-2' and
+     * '0-4') and the context menu open on a third line.
+     */
+    async function viewWithOpenContextMenu(
+      opts: { isStaged?: boolean; hunkFails?: boolean } = {},
+    ): Promise<LvDiffView> {
+      const original = makeDiffFile({ hunks: [stageableHunk()] });
+      const reloaded = makeDiffFile({ hunks: [reloadedHunk()] });
+      let applied = false;
+
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_file_diff':
+            return applied ? reloaded : original;
+          case 'get_diff_tool':
+            return { tool: null };
+          case 'read_file_content':
+            return 'file content here';
+          case 'stage_hunk':
+          case 'unstage_hunk':
+            if (opts.hunkFails) throw { code: 'COMMAND_ERROR', message: 'patch does not apply' };
+            applied = true;
+            return null;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: opts.isStaged ?? false }) });
+      const view = el as unknown as Handlers;
+      const loaded = view.diff;
+      view.lineSelectionMode = true;
+      // The user's own multi-line selection: del-b and add-b.
+      view.selectedLines = new Set(['0-2', '0-4']);
+      // The objects MUST come from el.diff — the handler locates them by indexOf.
+      view.contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        line: loaded.hunks[0].lines[1],
+        hunk: loaded.hunks[0],
+      };
+      await el.updateComplete;
+      return el;
+    }
+
+    it('clears the selection after a context-menu stage reloads the diff', async () => {
+      const el = await viewWithOpenContextMenu();
+      await (el as unknown as Handlers).handleContextStageLine();
+      await el.updateComplete;
+
+      expect(
+        (el as unknown as Handlers).selectedLines.size,
+        'a stale positional selection was restored after the diff reloaded',
+      ).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.selection-actions')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.line.selected').length).to.equal(0);
+    });
+
+    it('clears the selection after a context-menu unstage reloads the diff', async () => {
+      const el = await viewWithOpenContextMenu({ isStaged: true });
+      await (el as unknown as Handlers).handleContextUnstageLine();
+      await el.updateComplete;
+
+      expect(
+        (el as unknown as Handlers).selectedLines.size,
+        'a stale positional selection was restored after the diff reloaded',
+      ).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.selection-actions')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.line.selected').length).to.equal(0);
+    });
+
+    it('does not let a follow-up Stage Selected act on stale keys', async () => {
+      const el = await viewWithOpenContextMenu();
+      await (el as unknown as Handlers).handleContextStageLine();
+      await el.updateComplete;
+
+      clearHistory();
+      await (el as unknown as Handlers).stageSelectedLines();
+
+      expect(
+        findCommands('stage_hunk').length,
+        'a stale selection let a second stage send a patch built from renumbered keys',
+      ).to.equal(0);
+    });
+
+    it('keeps the previous selection when the stage fails', async () => {
+      const el = await viewWithOpenContextMenu({ hunkFails: true });
+      await (el as unknown as Handlers).handleContextStageLine();
+      await el.updateComplete;
+
+      // Nothing was applied, so the diff is untouched and the keys still valid.
+      expect([...(el as unknown as Handlers).selectedLines]).to.have.members(['0-2', '0-4']);
+      expect(findCommands('stage_hunk').length).to.equal(1);
+    });
+
+    it('keeps the previous selection when the clicked line produces no patch', async () => {
+      const el = await viewWithOpenContextMenu();
+      const view = el as unknown as Handlers;
+      // A context line yields an empty patch, so nothing is sent or reloaded.
+      view.contextMenu = { ...view.contextMenu, line: view.diff.hunks[0].lines[0] };
+      await el.updateComplete;
+
+      clearHistory();
+      await view.handleContextStageLine();
+      await el.updateComplete;
+
+      expect([...view.selectedLines]).to.have.members(['0-2', '0-4']);
+      expect(findCommands('stage_hunk').length).to.equal(0);
     });
   });
 });
