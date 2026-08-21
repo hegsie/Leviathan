@@ -2102,6 +2102,8 @@ export interface BisectStatus {
   totalSteps: number | null;
   currentStep: number | null;
   log: BisectLogEntry[];
+  /** Set once git has recorded the first bad commit; the session stays active until reset. */
+  culprit: CulpritCommit | null;
 }
 
 export interface CulpritCommit {

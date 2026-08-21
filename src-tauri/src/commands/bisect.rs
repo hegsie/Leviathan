@@ -27,6 +27,10 @@ pub struct BisectStatus {
     pub current_step: Option<u32>,
     /// Log of bisect operations
     pub log: Vec<BisectLogEntry>,
+    /// The first bad commit, once the search has converged. The session stays
+    /// active in git until `bisect reset`, so without this the result is lost
+    /// the moment the dialog is closed at its result screen.
+    pub culprit: Option<CulpritCommit>,
 }
 
 /// A single entry in the bisect log
@@ -219,6 +223,44 @@ fn parse_bisect_log(repo_path: &Path) -> Vec<BisectLogEntry> {
         .collect()
 }
 
+/// Whether git has already announced the answer for this session.
+///
+/// Once the search converges git appends its result to BISECT_LOG as a comment
+/// (`# first <term_bad> commit: [<oid>] <subject>`) and leaves the session
+/// ACTIVE until `git bisect reset`. That comment is the only on-disk record
+/// that the search finished, so it is what tells a reopened dialog to show the
+/// result rather than another Good/Bad/Skip round.
+fn bisect_finished(git_dir: &Path, term_bad: &str) -> bool {
+    let marker = format!("# first {} commit:", term_bad);
+    std::fs::read_to_string(git_dir.join("BISECT_LOG"))
+        .map(|c| c.lines().any(|l| l.trim_start().starts_with(&marker)))
+        .unwrap_or(false)
+}
+
+/// Describe `oid` for the culprit card. Unit-separated so an empty subject
+/// cannot shift the fields.
+fn culprit_commit(repo_path: &Path, oid: &str) -> Option<CulpritCommit> {
+    let out = run_git_command(
+        repo_path,
+        &["log", "-1", "--format=%H%x1f%s%x1f%an%x1f%ae", oid, "--"],
+    )
+    .ok()?;
+    let mut parts = out.split('\u{1f}');
+    let oid = parts.next()?.trim().to_string();
+    let summary = parts.next()?.to_string();
+    let author = parts.next()?.to_string();
+    let email = parts.next()?.trim().to_string();
+    if oid.is_empty() {
+        return None;
+    }
+    Some(CulpritCommit {
+        oid,
+        summary,
+        author,
+        email,
+    })
+}
+
 /// The status returned when no bisect session is in progress.
 fn inactive_status() -> BisectStatus {
     BisectStatus {
@@ -230,6 +272,7 @@ fn inactive_status() -> BisectStatus {
         total_steps: None,
         current_step: None,
         log: Vec::new(),
+        culprit: None,
     }
 }
 
@@ -282,6 +325,18 @@ pub async fn get_bisect_status(path: String) -> Result<BisectStatus> {
     // Parse the log
     let log = parse_bisect_log(repo_path);
 
+    // git records the answer against refs/bisect/<term_bad> — already resolved
+    // into `bad_commit` above; the log comment is only the signal that the
+    // search got there. Do not parse the oid out of that comment: its bracket
+    // formatting has drifted across git versions.
+    let culprit = if bisect_finished(&gdir, &term_bad) {
+        bad_commit
+            .as_deref()
+            .and_then(|oid| culprit_commit(repo_path, oid))
+    } else {
+        None
+    };
+
     // Estimate remaining work exactly as git prints it:
     //   "Bisecting: N revisions left to test after this (roughly M steps)"
     // where N = all - reaches - 1 (all = candidate commits in the range,
@@ -317,6 +372,7 @@ pub async fn get_bisect_status(path: String) -> Result<BisectStatus> {
         total_steps: remaining_info.map(|(_, t)| t),
         current_step: Some(log.len() as u32),
         log,
+        culprit,
     })
 }
 
@@ -1187,5 +1243,112 @@ Date:   Mon Jan 1 12:00:00 2024 +0000
         );
 
         let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    // The session stays active in git until `bisect reset`, so a status that
+    // cannot say the search is over presents a finished bisect as unfinished —
+    // the dialog reopens on Good/Bad/Skip and the answer is gone.
+    #[tokio::test]
+    async fn test_get_bisect_status_reports_the_culprit_once_the_search_converges() {
+        let repo = TestRepo::with_initial_commit();
+        let good = repo.head_oid().to_string();
+        repo.create_commit("Bug introduced", &[("bug.txt", "bug")]);
+        let bad = repo.head_oid().to_string();
+
+        // With a single candidate git converges inside the start itself.
+        bisect_start(repo.path_str(), Some(bad.clone()), Some(good))
+            .await
+            .unwrap();
+
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(
+            status.active,
+            "git keeps the session open until reset, which is exactly the problem"
+        );
+        let culprit = status
+            .culprit
+            .as_ref()
+            .expect("a converged search must report its answer");
+        assert_eq!(culprit.oid, bad);
+        assert_eq!(culprit.summary, "Bug introduced");
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    // The guard against reporting the range endpoint as the answer on step one.
+    #[tokio::test]
+    async fn test_get_bisect_status_has_no_culprit_mid_search() {
+        let repo = TestRepo::with_initial_commit();
+        let good = repo.head_oid().to_string();
+        for i in 2..=5 {
+            repo.create_commit(
+                &format!("Commit {}", i),
+                &[(format!("f{}.txt", i).as_str(), "x")],
+            );
+        }
+        let bad = repo.head_oid().to_string();
+
+        bisect_start(repo.path_str(), Some(bad), Some(good))
+            .await
+            .unwrap();
+
+        let status = get_bisect_status(repo.path_str()).await.unwrap();
+        assert!(status.active);
+        assert!(
+            status.culprit.is_none(),
+            "a search still in flight has no answer to report"
+        );
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    #[test]
+    fn test_bisect_finished_matches_the_recorded_term() {
+        let repo = TestRepo::with_initial_commit();
+        let gdir = repo.path.join(".git");
+        std::fs::write(
+            gdir.join("BISECT_LOG"),
+            "git bisect start\n# first broken commit: [abc123] Broke it\n",
+        )
+        .unwrap();
+
+        assert!(
+            bisect_finished(&gdir, "broken"),
+            "a --term-new=broken session records its result under that term"
+        );
+        assert!(
+            !bisect_finished(&gdir, "bad"),
+            "a mismatched term must not be read as a result"
+        );
+        assert!(
+            parse_bisect_log(&repo.path)
+                .iter()
+                .all(|e| e.action != "first"),
+            "the result comment must stay out of the Bisect History list"
+        );
+
+        // Skip-exhaustion writes "# possible first bad commit:" for EACH
+        // candidate — git has no answer there, and reading one as final would
+        // put the dialog on a result screen naming an arbitrary candidate.
+        std::fs::write(
+            gdir.join("BISECT_LOG"),
+            "git bisect start\n# only skipped commits left to test\n\
+             # possible first bad commit: [abc123] Maybe\n\
+             # possible first bad commit: [def456] Or maybe\n",
+        )
+        .unwrap();
+        assert!(
+            !bisect_finished(&gdir, "bad"),
+            "\"only skipped commits left\" is not a converged search"
+        );
+    }
+
+    #[test]
+    fn test_culprit_commit_ignores_an_unresolvable_oid() {
+        let repo = TestRepo::with_initial_commit();
+        assert!(
+            culprit_commit(&repo.path, "0000000000000000000000000000000000000000").is_none(),
+            "status must stay Ok with no culprit rather than erroring"
+        );
     }
 }
