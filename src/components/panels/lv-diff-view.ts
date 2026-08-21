@@ -1676,12 +1676,16 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
   /**
    * Stage selected lines
+   *
+   * Resolves to true only when the stage was applied and the diff reloaded.
+   * The reload renumbers hunks and lines, so every positional
+   * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
-  private async stageSelectedLines(): Promise<void> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+  private async stageSelectedLines(): Promise<boolean> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch();
-    if (!patch) return;
+    if (!patch) return false;
 
     try {
       const result = await gitService.stageHunk(this.repositoryPath, patch);
@@ -1692,24 +1696,29 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         await this.loadWorkingDiff();
-      } else {
-        console.error('Failed to stage selected lines:', result.error);
-        showToast(`Failed to stage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        return true;
       }
+      console.error('Failed to stage selected lines:', result.error);
+      showToast(`Failed to stage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
     } catch (err) {
       console.error('Failed to stage selected lines:', err);
       showToast(`Failed to stage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
+    return false;
   }
 
   /**
    * Unstage selected lines
+   *
+   * Resolves to true only when the unstage was applied and the diff reloaded.
+   * The reload renumbers hunks and lines, so every positional
+   * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
-  private async unstageSelectedLines(): Promise<void> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+  private async unstageSelectedLines(): Promise<boolean> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch('unstage');
-    if (!patch) return;
+    if (!patch) return false;
 
     try {
       const result = await gitService.unstageHunk(this.repositoryPath, patch);
@@ -1720,14 +1729,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         await this.loadWorkingDiff();
-      } else {
-        console.error('Failed to unstage selected lines:', result.error);
-        showToast(`Failed to unstage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        return true;
       }
+      console.error('Failed to unstage selected lines:', result.error);
+      showToast(`Failed to unstage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
     } catch (err) {
       console.error('Failed to unstage selected lines:', err);
       showToast(`Failed to unstage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
+    return false;
   }
 
   /**
@@ -1995,8 +2005,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // Temporarily select just this line and stage it
     const prevSelected = this.selectedLines;
     this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
-    await this.stageSelectedLines();
-    this.selectedLines = prevSelected;
+    // A successful stage reloads the diff, which renumbers hunks and lines, so
+    // the saved `${hunkIndex}-${lineIndex}` keys would point at different code.
+    // Put the previous selection back only when nothing was applied.
+    if (!(await this.stageSelectedLines())) {
+      this.selectedLines = prevSelected;
+    }
   }
 
   /**
@@ -2017,8 +2031,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // Temporarily select just this line and unstage it
     const prevSelected = this.selectedLines;
     this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
-    await this.unstageSelectedLines();
-    this.selectedLines = prevSelected;
+    // A successful unstage reloads the diff, which renumbers hunks and lines,
+    // so the saved `${hunkIndex}-${lineIndex}` keys would point at different
+    // code. Put the previous selection back only when nothing was applied.
+    if (!(await this.unstageSelectedLines())) {
+      this.selectedLines = prevSelected;
+    }
   }
 
   private buildFlatLines(): void {
