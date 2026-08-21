@@ -90,7 +90,6 @@ pub async fn init_gitflow(
     let repo = git2::Repository::open(Path::new(&path))?;
     let mut config = repo.config()?;
 
-    let master = master_branch.unwrap_or_else(|| "main".to_string());
     let develop = develop_branch.unwrap_or_else(|| "develop".to_string());
     let feature = feature_prefix.unwrap_or_else(|| "feature/".to_string());
     let release = release_prefix.unwrap_or_else(|| "release/".to_string());
@@ -98,7 +97,51 @@ pub async fn init_gitflow(
     let support = support_prefix.unwrap_or_else(|| "support/".to_string());
     let version_tag = version_tag_prefix.unwrap_or_else(|| "v".to_string());
 
-    // Set git flow config values
+    // gitflow.branch.master must name a branch that EXISTS. Every hotfix start
+    // and every release/hotfix finish resolves it and fails with
+    // BranchNotFound when it does not, and get_gitflow_config keys
+    // `initialized` off this very entry — so once a wrong name is written the
+    // panel never offers the init section again and there is no way back
+    // inside the app. Writing the "main" default on a repository whose default
+    // branch is "master" did exactly that: develop was cut from master through
+    // the fallback below, but the name the fallback resolved was thrown away.
+    let master = match master_branch {
+        // An explicitly requested branch is honoured or refused — never
+        // silently swapped for a different one.
+        Some(requested) => {
+            if repo
+                .find_branch(&requested, git2::BranchType::Local)
+                .is_err()
+            {
+                return Err(LeviathanError::BranchNotFound(requested));
+            }
+            requested
+        }
+        None => ["main", "master"]
+            .into_iter()
+            .find(|name| repo.find_branch(name, git2::BranchType::Local).is_ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                LeviathanError::OperationFailed(
+                    "Cannot find a main or master branch to base Git Flow on".to_string(),
+                )
+            })?,
+    };
+
+    // Ensure develop branch exists
+    if repo.find_branch(&develop, git2::BranchType::Local).is_err() {
+        // Create develop from the resolved master
+        let base = repo
+            .find_branch(&master, git2::BranchType::Local)
+            .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
+        let commit = base.get().peel_to_commit()?;
+        repo.branch(&develop, &commit, false)?;
+    }
+
+    // Written last, once every branch this config names is known to exist. A
+    // half-written gitflow config still reads as initialized, so an init that
+    // errored after this point used to leave the repository permanently stuck
+    // with a config pointing at branches that were never created.
     config.set_str("gitflow.branch.master", &master)?;
     config.set_str("gitflow.branch.develop", &develop)?;
     config.set_str("gitflow.prefix.feature", &feature)?;
@@ -106,25 +149,6 @@ pub async fn init_gitflow(
     config.set_str("gitflow.prefix.hotfix", &hotfix)?;
     config.set_str("gitflow.prefix.support", &support)?;
     config.set_str("gitflow.prefix.versiontag", &version_tag)?;
-
-    // Ensure develop branch exists
-    let develop_exists = repo.find_branch(&develop, git2::BranchType::Local).is_ok();
-
-    if !develop_exists {
-        // Create develop from master/main
-        let master_branch = repo
-            .find_branch(&master, git2::BranchType::Local)
-            .or_else(|_| repo.find_branch("master", git2::BranchType::Local))
-            .or_else(|_| repo.find_branch("main", git2::BranchType::Local))
-            .map_err(|_| {
-                LeviathanError::OperationFailed(
-                    "Cannot find master/main branch to create develop from".to_string(),
-                )
-            })?;
-
-        let commit = master_branch.get().peel_to_commit()?;
-        repo.branch(&develop, &commit, false)?;
-    }
 
     Ok(GitFlowConfig {
         initialized: true,
@@ -782,6 +806,23 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
 
+    /// A repository whose default branch is "master" — still the case for any
+    /// repo created before git 2.28, and the setup init_gitflow got wrong.
+    fn repo_on_master() -> TestRepo {
+        let test_repo = TestRepo::with_initial_commit();
+        {
+            let repo = test_repo.repo();
+            let mut main = repo
+                .find_branch("main", git2::BranchType::Local)
+                .expect("with_initial_commit leaves HEAD on main");
+            // libgit2 moves HEAD along with the branch; with_initial_commit
+            // relies on the same rename in the other direction.
+            main.rename("master", false).expect("rename main -> master");
+        }
+        assert_eq!(test_repo.current_branch(), "master");
+        test_repo
+    }
+
     #[tokio::test]
     async fn test_get_gitflow_config_not_initialized() {
         let repo = TestRepo::with_initial_commit();
@@ -1077,9 +1118,116 @@ mod tests {
         assert!(develop.is_ok());
     }
 
+    /// The name recorded in gitflow.branch.master has to be the branch develop
+    /// was actually cut from. Recording the "main" default on a master-default
+    /// repository left every later hotfix and finish looking for a branch that
+    /// was never there.
+    #[tokio::test]
+    async fn test_init_gitflow_records_the_master_branch_that_exists() {
+        let repo = repo_on_master();
+
+        let config = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect("init must succeed on a repo whose default branch is master");
+
+        assert_eq!(config.master_branch, "master");
+        assert_eq!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.master")
+                .unwrap(),
+            "master",
+            "the persisted name must be the branch that exists"
+        );
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_ok(),
+            "develop must still be created"
+        );
+    }
+
+    /// The user-visible consequence: the panel's Initialize button passes no
+    /// config at all, so a master-default repo used to end up with a hotfix
+    /// button that could only ever fail.
+    #[tokio::test]
+    async fn test_gitflow_hotfix_works_after_init_on_a_master_repo() {
+        let repo = repo_on_master();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let branch = gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .expect("hotfix start must work on a repo initialized by the panel");
+
+        assert_eq!(branch.name, "hotfix/1.0.1");
+        assert!(branch.is_head);
+    }
+
+    /// A gitflow config reads as initialized the moment gitflow.branch.master
+    /// exists, so writing the keys before the branch lookup turned a failed
+    /// init into a repository permanently stuck on a broken config.
+    #[tokio::test]
+    async fn test_init_gitflow_failure_leaves_the_repo_uninitialized() {
+        // No commit, so there is no branch to base anything on.
+        let repo = TestRepo::new();
+
+        let err = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect_err("init must fail with no branch to base on");
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(
+            !config.initialized,
+            "a failed init must not leave the repo looking initialized"
+        );
+        assert!(
+            err.to_string().contains("main or master"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_gitflow_refuses_a_master_branch_that_does_not_exist() {
+        let repo = TestRepo::with_initial_commit();
+
+        let err = init_gitflow(
+            repo.path_str(),
+            Some("nope".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("init must refuse a master branch that does not exist");
+        assert!(
+            err.to_string().contains("Branch not found: nope"),
+            "unexpected error: {}",
+            err
+        );
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(!config.initialized);
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_err(),
+            "a refused init must not create develop"
+        );
+    }
+
     #[tokio::test]
     async fn test_init_gitflow_custom_branches() {
         let repo = TestRepo::with_initial_commit();
+        // The custom master must exist — init_gitflow refuses to record a
+        // branch that does not.
+        repo.create_branch("production");
         let result = init_gitflow(
             repo.path_str(),
             Some("production".to_string()),
