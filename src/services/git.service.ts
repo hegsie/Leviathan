@@ -297,10 +297,12 @@ import type {
   CherryPickCommand,
   ContinueCherryPickCommand,
   AbortCherryPickCommand,
+  SkipCherryPickCommand,
   CherryPickFromBranchCommand,
   RevertCommand,
   ContinueRevertCommand,
   AbortRevertCommand,
+  SkipRevertCommand,
   ResetCommand,
   CreateStashCommand,
   ApplyStashCommand,
@@ -1502,6 +1504,17 @@ export async function abortCherryPick(
 }
 
 /**
+ * Skip the stopped pick and resume the rest of the sequence
+ * (`git cherry-pick --skip`). Resolves with the last commit the resumed
+ * sequence created, or `null` when there was nothing left to apply.
+ */
+export async function skipCherryPick(
+  args: SkipCherryPickCommand,
+): Promise<CommandResult<Commit | null>> {
+  return invokeCommand<Commit | null>("skip_cherry_pick", args);
+}
+
+/**
  * Revert operations
  */
 export async function revert(
@@ -1520,6 +1533,13 @@ export async function abortRevert(
   args: AbortRevertCommand,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("abort_revert", args);
+}
+
+/** Skip the stopped revert (`git revert --skip`). */
+export async function skipRevert(
+  args: SkipRevertCommand,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("skip_revert", args);
 }
 
 /**

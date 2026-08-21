@@ -349,6 +349,10 @@ export interface AbortCherryPickCommand {
   path: string;
 }
 
+export interface SkipCherryPickCommand {
+  path: string;
+}
+
 export interface CherryPickFromBranchCommand {
   path: string;
   branch: string;
@@ -374,6 +378,10 @@ export interface ContinueRevertCommand {
 }
 
 export interface AbortRevertCommand {
+  path: string;
+}
+
+export interface SkipRevertCommand {
   path: string;
 }
 
