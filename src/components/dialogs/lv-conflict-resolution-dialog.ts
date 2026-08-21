@@ -421,6 +421,9 @@ export class LvConflictResolutionDialog extends LitElement {
   private priorFinishCommitLanded = false;
   @state() private aborting = false;
   @state() private continuing = false;
+  /** True while a `--skip` is in flight. Mutually exclusive with the other
+   * working-tree operations, exactly as `aborting` / `continuing` are. */
+  @state() private skipping = false;
   /** True while the EMBEDDED merge editor has an external tool session open. */
   @state() private editorToolActive = false;
   /**
@@ -494,6 +497,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.selectedIndex = 0;
       this.aborting = false;
       this.continuing = false;
+      this.skipping = false;
       this.editorToolActive = false;
       this.editorResolveDepth = 0;
       this.showAbortConfirm = false;
@@ -568,6 +572,7 @@ export class LvConflictResolutionDialog extends LitElement {
     this.resolvedFiles = new Set();
     this.aborting = false;
     this.continuing = false;
+    this.skipping = false;
     this.editorToolActive = false;
     this.editorResolveDepth = 0;
     this.showAbortConfirm = false;
@@ -664,6 +669,7 @@ export class LvConflictResolutionDialog extends LitElement {
       this.launchingExternalTool !== null ||
       this.aborting ||
       this.continuing ||
+      this.skipping ||
       this.editorToolActive ||
       this.editorResolveDepth > 0
     ) {
@@ -859,6 +865,7 @@ export class LvConflictResolutionDialog extends LitElement {
     if (
       this.aborting ||
       this.continuing ||
+      this.skipping ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
       this.editorResolveDepth > 0
@@ -906,6 +913,7 @@ export class LvConflictResolutionDialog extends LitElement {
       !this.repositoryPath ||
       this.aborting ||
       this.continuing ||
+      this.skipping ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
       this.editorResolveDepth > 0
@@ -1066,6 +1074,82 @@ export class LvConflictResolutionDialog extends LitElement {
     }
   }
 
+  /**
+   * Skip the stopped pick (`git cherry-pick --skip` / `git revert --skip`).
+   *
+   * The empty-pick error the backend returns tells the user to "Skip or abort";
+   * this is the Skip half. Unlike Abort it KEEPS the picks already applied and
+   * resumes the rest of the range, so it is the only exit from an
+   * already-applied commit that does not throw the whole range away. Only
+   * cherry-pick and revert have a backend skip.
+   */
+  private async handleSkip(): Promise<void> {
+    if (this.operationType !== 'cherry-pick' && this.operationType !== 'revert') return;
+    if (
+      !this.repositoryPath ||
+      this.continuing ||
+      this.aborting ||
+      this.skipping ||
+      this.launchingExternalTool !== null ||
+      this.editorToolActive ||
+      this.editorResolveDepth > 0 ||
+      this.showAbortConfirm
+    ) {
+      return;
+    }
+
+    // Shared working-tree lock — the same claim handleContinue and
+    // handleAbortConfirm make, for the same reason: this restores the working
+    // tree and must not run beside a discard or a reset.
+    const lockedRepo = this.repositoryPath;
+    if (!tryAcquireRefOp(lockedRepo)) {
+      showToast('Another operation is already running in this repository.', 'warning');
+      return;
+    }
+
+    this.skipping = true;
+    try {
+      const result =
+        this.operationType === 'cherry-pick'
+          ? await gitService.skipCherryPick({ path: this.repositoryPath })
+          : await gitService.skipRevert({ path: this.repositoryPath });
+
+      if (result.success) {
+        showToast(`Skipped ${this.getOperationTitle().toLowerCase()}`, 'success');
+        this.dispatchEvent(
+          new CustomEvent('operation-completed', { bubbles: true, composed: true })
+        );
+        this.close();
+        return;
+      }
+
+      // The skip resumed the range and stopped AGAIN on a conflict: reload and
+      // stay open, exactly as runContinue's cherry-pick arm does.
+      console.error('Failed to skip:', result.error);
+      if (
+        result.error?.code === 'CHERRY_PICK_CONFLICT' ||
+        result.error?.code === 'REVERT_CONFLICT'
+      ) {
+        await this.loadConflicts();
+        if (this.conflicts.length > 0) {
+          this.resolvedFiles = new Set();
+          this.selectedIndex = 0;
+          return;
+        }
+      }
+      showToast(
+        result.error?.message ?? `Failed to skip ${this.getOperationTitle().toLowerCase()}`,
+        'error',
+      );
+    } catch (err) {
+      console.error('Failed to skip:', err);
+      showToast(`Failed to skip ${this.getOperationTitle().toLowerCase()}`, 'error');
+    } finally {
+      this.skipping = false;
+      releaseRefOp(lockedRepo);
+    }
+  }
+
   /** True when an abort failed because the operation no longer exists in the
    * repo — the user concluded it outside the app. Detected from the
    * backend/git2 "no ... to abort / not in progress" wording. */
@@ -1115,6 +1199,7 @@ export class LvConflictResolutionDialog extends LitElement {
       !this.repositoryPath ||
       this.continuing ||
       this.aborting ||
+      this.skipping ||
       this.launchingExternalTool !== null ||
       this.editorToolActive ||
       this.editorResolveDepth > 0 ||
@@ -1591,6 +1676,7 @@ export class LvConflictResolutionDialog extends LitElement {
                           ?disabled=${this.launchingExternalTool !== null ||
                           this.aborting ||
                           this.continuing ||
+                          this.skipping ||
                           this.editorToolActive ||
                           this.editorResolveDepth > 0}
                           title="Open in external merge tool"
@@ -1612,6 +1698,7 @@ export class LvConflictResolutionDialog extends LitElement {
                     .operationType=${this.operationType}
                     .externalToolLocked=${this.continuing ||
                     this.aborting ||
+                    this.skipping ||
                     this.launchingExternalTool !== null}
                     @conflict-resolved=${this.handleConflictResolved}
                     @external-tool-started=${() => { this.editorToolActive = true; }}
@@ -1659,6 +1746,7 @@ export class LvConflictResolutionDialog extends LitElement {
               @click=${this.handleAbort}
               ?disabled=${this.continuing ||
                 this.aborting ||
+                this.skipping ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
                 this.editorResolveDepth > 0 ||
@@ -1666,11 +1754,30 @@ export class LvConflictResolutionDialog extends LitElement {
             >
               Abort ${this.getOperationTitle()}
             </button>
+            ${this.operationType === 'cherry-pick' || this.operationType === 'revert'
+              ? html`
+                  <button
+                    class="btn skip-btn"
+                    @click=${this.handleSkip}
+                    ?disabled=${this.continuing ||
+                      this.aborting ||
+                      this.skipping ||
+                      this.launchingExternalTool !== null ||
+                      this.editorToolActive ||
+                      this.editorResolveDepth > 0 ||
+                      this.showAbortConfirm}
+                    title="Do not apply this commit; keep the picks already applied and continue with the rest"
+                  >
+                    Skip ${this.getOperationTitle()}
+                  </button>
+                `
+              : nothing}
             <button
               class="btn btn-primary"
               @click=${this.handleContinue}
               ?disabled=${this.continuing ||
                 this.aborting ||
+                this.skipping ||
                 this.launchingExternalTool !== null ||
                 this.editorToolActive ||
                 this.editorResolveDepth > 0 ||

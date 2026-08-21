@@ -70,6 +70,9 @@ function setupDefaultMocks(conflicts: ConflictFile[] = TEST_CONFLICTS): void {
       case 'continue_cherry_pick':
       case 'continue_revert':
         return { success: true };
+      case 'skip_cherry_pick':
+      case 'skip_revert':
+        return null;
       default:
         return null;
     }
@@ -1692,6 +1695,107 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(el.open, 'dialog closed instead of trapping the user').to.be.false;
       const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
       expect(warn?.message).to.contain('concluded outside the app');
+    });
+  });
+
+  // ── Skip flow ──────────────────────────────────────────────────────────
+  // The backend's empty-pick error tells the user to "Skip or abort"; these pin
+  // the Skip half, which keeps already-applied picks instead of rewinding them.
+  describe('skip flow', () => {
+    beforeEach(() => clearToasts());
+
+    async function openDialog(
+      operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash'
+    ): Promise<LvConflictResolutionDialog> {
+      const el = await renderDialog(operationType);
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+      return el;
+    }
+
+    function skipButton(el: LvConflictResolutionDialog): HTMLButtonElement | null {
+      const buttons = Array.from(
+        el.shadowRoot!.querySelectorAll('.footer-actions .btn')
+      ) as HTMLButtonElement[];
+      return buttons.find(b => /^Skip/.test(b.textContent!.trim())) ?? null;
+    }
+
+    it('renders Skip only for cherry-pick and revert', async () => {
+      for (const type of ['cherry-pick', 'revert'] as const) {
+        const el = await openDialog(type);
+        expect(skipButton(el), `Skip offered for ${type}`).to.not.be.null;
+      }
+      for (const type of ['merge', 'rebase', 'stash'] as const) {
+        const el = await openDialog(type);
+        expect(skipButton(el), `no Skip for ${type} — no backend skip`).to.be.null;
+      }
+    });
+
+    it('Skip invokes skip_cherry_pick and closes with a success toast', async () => {
+      const el = await openDialog('cherry-pick');
+      let completedFired = false;
+      el.addEventListener('operation-completed', () => { completedFired = true; });
+
+      invokeHistory.length = 0;
+      skipButton(el)!.click();
+      await new Promise(r => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const call = invokeHistory.find(c => c.command === 'skip_cherry_pick');
+      expect(call, 'skip_cherry_pick invoked').to.not.be.undefined;
+      expect(call!.args).to.deep.equal({ path: REPO_PATH });
+      expect(completedFired, 'operation-completed dispatched').to.be.true;
+      expect(el.open, 'dialog closed').to.be.false;
+      const success = uiStore.getState().toasts.find(t => t.type === 'success');
+      expect(success?.message).to.contain('Skipped');
+    });
+
+    it('Skip uses skip_revert for a revert', async () => {
+      const el = await openDialog('revert');
+      invokeHistory.length = 0;
+      skipButton(el)!.click();
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(invokeHistory.find(c => c.command === 'skip_revert')).to.not.be.undefined;
+      expect(invokeHistory.find(c => c.command === 'skip_cherry_pick')).to.be.undefined;
+    });
+
+    it('a skip that stops again on a conflict keeps the dialog open', async () => {
+      const el = await openDialog('cherry-pick');
+      mockInvoke = async (command: string) => {
+        if (command === 'skip_cherry_pick')
+          throw { code: 'CHERRY_PICK_CONFLICT', message: 'Cherry-pick conflict' };
+        if (command === 'get_conflicts') return [makeConflict('src/next.ts')];
+        return null;
+      };
+
+      await (el as unknown as { handleSkip: () => Promise<void> }).handleSkip.bind(el)();
+      await el.updateComplete;
+
+      expect(el.open, 'stays open on the next conflict').to.be.true;
+      const internal = el as unknown as { resolvedFiles: Set<string>; skipping: boolean };
+      expect(internal.resolvedFiles.size, 'resolution state reset for the new stop').to.equal(0);
+      expect(internal.skipping, 'flag cleared so Skip can run again').to.be.false;
+      expect(uiStore.getState().toasts.find(t => t.type === 'success')).to.be.undefined;
+    });
+
+    it('a failed skip surfaces the error and keeps the dialog open', async () => {
+      const el = await openDialog('cherry-pick');
+      mockInvoke = async (command: string) => {
+        if (command === 'skip_cherry_pick')
+          throw { code: 'COMMAND_ERROR', message: 'Repository is busy' };
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        return null;
+      };
+
+      await (el as unknown as { handleSkip: () => Promise<void> }).handleSkip.bind(el)();
+      await el.updateComplete;
+
+      const errorToast = uiStore.getState().toasts.find(t => t.type === 'error');
+      expect(errorToast?.message, 'error path is never silent').to.contain('Repository is busy');
+      expect(el.open, 'dialog stays open so the user can retry').to.be.true;
     });
   });
 

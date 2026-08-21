@@ -28,6 +28,16 @@ const ABORTABLE_STATES: readonly RepositoryState[] = [
   'rebase-merge',
   'revert',
 ];
+
+/**
+ * Repository states that have a working skip command.
+ *
+ * The banner's Skip button and handleSkipOperation BOTH read this, so the UI can
+ * never offer a skip the handler will refuse. Rebase is intentionally absent:
+ * `skip_rebase_commit` exists in the backend but is not wired to this control,
+ * and listing it here without a switch arm would render a dead button.
+ */
+const SKIPPABLE_STATES: readonly RepositoryState[] = ['cherrypick', 'revert'];
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -573,6 +583,7 @@ export class AppShell extends LitElement {
   @state() private showSettings = false;
   /** True while an abort is in flight — blocks a double-click firing two. */
   @state() private abortInProgress = false;
+  @state() private skipInProgress = false;
 
   // Search/filter
   @state() private searchFilter: SearchFilter | null = null;
@@ -2673,6 +2684,84 @@ export class AppShell extends LitElement {
       }
     } finally {
       this.abortInProgress = false;
+      this.releaseRefOperation(path);
+    }
+  }
+
+  /** `pinnedRepoPath` is optional, so this must NEVER be bound directly as an
+   * event handler — see handleAbortOperation. Bind it as
+   * `() => this.handleSkipOperation()`. */
+  private async handleSkipOperation(pinnedRepoPath?: string): Promise<void> {
+    if (this.skipInProgress) return;
+
+    const repo = pinnedRepoPath
+      ? repositoryStore
+          .getState()
+          .openRepositories.find((r) => r.repository.path === pinnedRepoPath)
+      : this.activeRepository;
+    if (!repo) return;
+
+    const state = repo.repository.state;
+    const path = repo.repository.path;
+    let result;
+
+    // Reject an unskippable state BEFORE doing anything, so the handler can
+    // never run a skip the banner was not offering.
+    if (!SKIPPABLE_STATES.includes(state)) {
+      showToast(`Cannot skip operation: ${state}`, 'error');
+      return;
+    }
+
+    // Same shared working-tree lock the banner's Abort claims, and for the same
+    // reason: a skip restores the working tree, so a graph reset or a sidebar
+    // discard must not run beside it.
+    if (!this.claimRefOperation(path)) {
+      this.warnRepositoryBusy();
+      return;
+    }
+    this.skipInProgress = true;
+
+    try {
+      // Skip only discards the CURRENT pick — commits already applied stay. When
+      // there are conflicted files there IS resolution work to lose, so gate it
+      // like Abort; on an empty stop there is nothing to lose and a scary
+      // confirm would be pure friction.
+      if (this.hasConflictedFiles) {
+        const confirmed = await showConfirm(
+          `Skip ${state}?`,
+          `This commit will not be applied and the conflict resolutions for it are ` +
+            `discarded. Commits already applied stay, and the rest of the range continues.`,
+          'warning'
+        );
+        if (!confirmed) return;
+      }
+
+      switch (state) {
+        case 'cherrypick':
+          result = await gitService.skipCherryPick({ path });
+          break;
+        case 'revert':
+          result = await gitService.skipRevert({ path });
+          break;
+        default:
+          // Unreachable while SKIPPABLE_STATES gates entry above. Kept explicit
+          // so that adding a state to that list without adding a case here
+          // fails loudly instead of silently running an unrelated skip.
+          showToast(`Cannot skip operation: ${state}`, 'error');
+          return;
+      }
+
+      if (result.success) {
+        showToast(`Skipped ${state}`, 'success');
+        // `path` was captured before the skip await — pin the refresh to it so
+        // a mid-skip tab switch doesn't refresh the wrong repo.
+        this.refreshConflictDialogRepo(path);
+      } else {
+        log.error('Skip failed:', result.error);
+        showToast(result.error?.message || 'Skip failed', 'error');
+      }
+    } finally {
+      this.skipInProgress = false;
       this.releaseRefOperation(path);
     }
   }
@@ -5019,11 +5108,27 @@ export class AppShell extends LitElement {
                                 </button>
                               `
                             : ''}
+                          ${SKIPPABLE_STATES.includes(this.activeRepository.repository.state)
+                            ? html`
+                                <button
+                                  class="operation-btn operation-skip-btn"
+                                  ?disabled=${this.skipInProgress ||
+                                  this.abortInProgress ||
+                                  this.isRefOperationInFlight()}
+                                  @click=${() => this.handleSkipOperation()}
+                                  title="Do not apply this commit; keep what is already applied"
+                                >
+                                  Skip
+                                </button>
+                              `
+                            : ''}
                           ${ABORTABLE_STATES.includes(this.activeRepository.repository.state)
                             ? html`
                                 <button
                                   class="operation-abort-btn"
-                                  ?disabled=${this.abortInProgress || this.isRefOperationInFlight()}
+                                  ?disabled=${this.skipInProgress ||
+                                  this.abortInProgress ||
+                                  this.isRefOperationInFlight()}
                                   @click=${() => this.handleAbortOperation()}
                                 >
                                   Abort
