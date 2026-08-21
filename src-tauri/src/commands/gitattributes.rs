@@ -72,12 +72,6 @@ fn parse_attribute_token(token: &str) -> AttributeEntry {
     }
 }
 
-/// Split a trimmed .gitattributes line into its pattern and the remainder
-/// (the attribute list).
-///
-/// Per gitattributes(5), a pattern containing whitespace may be wrapped in
-/// double quotes, with C-style escapes (`\"`, `\\`, `\n`, `\t`, octal `\nnn`)
-/// inside. Otherwise the pattern is the first whitespace-delimited token.
 /// Render a pattern back into a .gitattributes line, quoting when it needs it.
 ///
 /// The inverse of `split_pattern_and_rest`. The parser unescapes quoted
@@ -117,6 +111,28 @@ fn format_pattern(pattern: &str) -> String {
     out
 }
 
+/// Refuse a pattern that is empty or nothing but whitespace.
+///
+/// `format_pattern` renders one as `""`, and `parse_gitattributes` then drops
+/// the line again because the pattern it reads back is empty. The write would
+/// report success, the entry would be missing from the list the caller renders,
+/// and the junk line would sit in `.gitattributes` with no way to reach it from
+/// the UI. There is also nothing such a pattern could usefully match.
+fn ensure_pattern_usable(pattern: &str) -> Result<()> {
+    if pattern.trim().is_empty() {
+        return Err(LeviathanError::OperationFailed(
+            "A .gitattributes pattern cannot be empty.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Split a trimmed .gitattributes line into its pattern and the remainder
+/// (the attribute list).
+///
+/// Per gitattributes(5), a pattern containing whitespace may be wrapped in
+/// double quotes, with C-style escapes (`\"`, `\\`, `\n`, `\t`, octal `\nnn`)
+/// inside. Otherwise the pattern is the first whitespace-delimited token.
 fn split_pattern_and_rest(trimmed: &str) -> (String, &str) {
     if let Some(after_quote) = trimmed.strip_prefix('"') {
         let bytes = after_quote.as_bytes();
@@ -224,6 +240,8 @@ pub async fn add_gitattribute(
     pattern: String,
     attributes: String,
 ) -> Result<Vec<GitAttribute>> {
+    ensure_pattern_usable(&pattern)?;
+
     let attrs_path = Path::new(&path).join(".gitattributes");
 
     let mut content = if attrs_path.exists() {
@@ -289,6 +307,8 @@ pub async fn update_gitattribute(
     pattern: String,
     attributes: String,
 ) -> Result<Vec<GitAttribute>> {
+    ensure_pattern_usable(&pattern)?;
+
     let attrs_path = Path::new(&path).join(".gitattributes");
 
     if !attrs_path.exists() {
@@ -710,6 +730,50 @@ mod tests {
         assert_eq!(format_pattern(r"back\slash"), r#""back\\slash""#);
         // A leading # would otherwise turn the line into a comment.
         assert_eq!(format_pattern("#notacomment"), r##""#notacomment""##);
+    }
+
+    /// An empty pattern would be written as `""` and then dropped by the parser,
+    /// so the caller would be told the write succeeded while the entry never
+    /// appears and an unreachable line accumulates in the file.
+    #[tokio::test]
+    async fn test_add_gitattribute_refuses_an_empty_pattern() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = add_gitattribute(repo.path_str(), String::new(), "text".to_string()).await;
+
+        assert!(result.is_err(), "an empty pattern must be refused");
+        assert!(
+            !repo.path.join(".gitattributes").exists(),
+            "a refused add must not create the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_gitattribute_refuses_a_whitespace_only_pattern() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitattributes", "*.txt text\n");
+
+        let result = add_gitattribute(repo.path_str(), "   ".to_string(), "text".to_string()).await;
+
+        assert!(result.is_err(), "a whitespace-only pattern must be refused");
+        let on_disk = std::fs::read_to_string(repo.path.join(".gitattributes")).unwrap();
+        assert_eq!(on_disk, "*.txt text\n", "a refused add must write nothing");
+    }
+
+    #[tokio::test]
+    async fn test_update_gitattribute_refuses_an_empty_pattern() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitattributes", "*.txt text\n");
+
+        let result =
+            update_gitattribute(repo.path_str(), 1, String::new(), "text".to_string()).await;
+
+        assert!(result.is_err(), "an empty pattern must be refused");
+        let on_disk = std::fs::read_to_string(repo.path.join(".gitattributes")).unwrap();
+        assert_eq!(
+            on_disk, "*.txt text\n",
+            "a refused update must leave the existing entry intact"
+        );
     }
 
     #[tokio::test]
