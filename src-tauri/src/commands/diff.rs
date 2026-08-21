@@ -741,18 +741,48 @@ pub async fn get_commit_file_diff(
     let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
     let commit_tree = commit.tree()?;
 
+    // Normalize path separators for git (always use forward slashes)
+    let normalized_file_path = file_path.replace('\\', "/");
+
     let mut opts = git2::DiffOptions::new();
-    opts.pathspec(&file_path);
+    opts.pathspec(&normalized_file_path);
 
     let mut diff =
         repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
 
     detect_renames(&mut diff)?;
 
-    let files = parse_diff(&diff)?;
-    files
-        .into_iter()
-        .next()
+    let filtered = parse_diff(&diff)?.into_iter().next();
+
+    // The two halves of a rename live at different paths, so the pathspec above
+    // keeps only one of them and `find_similar` has nothing left to pair it
+    // with: the file comes back as a whole-file add (or delete). Re-diff the
+    // whole tree, where both halves are present, and pick our file out of the
+    // rename-aware result — the same view the file list gets from
+    // `get_commit_files`. Only those two statuses can be half of a rename, so
+    // every other file still costs a single path-filtered diff.
+    if filtered
+        .as_ref()
+        .is_some_and(|f| matches!(f.status, FileStatus::New | FileStatus::Deleted))
+    {
+        let mut full_diff =
+            repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+        detect_renames(&mut full_diff)?;
+
+        // `parse_diff` fills `old_path` for every delta (libgit2 reports the
+        // new path there for a plain addition), so the old-path match must stay
+        // gated on Renamed/Copied or unrelated added files would match it.
+        let matched = parse_diff(&full_diff)?.into_iter().find(|f| {
+            f.path == normalized_file_path
+                || (matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
+                    && f.old_path.as_deref() == Some(normalized_file_path.as_str()))
+        });
+        if let Some(found) = matched {
+            return Ok(maybe_truncate_diff(found, max_lines));
+        }
+    }
+
+    filtered
         .map(|f| maybe_truncate_diff(f, max_lines))
         .ok_or_else(|| {
             crate::error::LeviathanError::OperationFailed("File not found in commit".to_string())
@@ -2188,6 +2218,104 @@ mod tests {
         assert_eq!(stats[0].additions, 0);
         assert_eq!(stats[0].deletions, 0);
         assert_eq!(stats[0].files_changed, 1);
+    }
+
+    /// Clicking a file the commit's file list badges "renamed" must show the
+    /// rename diff (only the edited lines), not the whole file as added.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_renamed_with_edit() {
+        let repo = TestRepo::with_initial_commit();
+        let before = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n";
+        let after = "alpha\nbeta\ngamma-edited\ndelta\nepsilon\nzeta\n";
+        repo.create_commit("add", &[("old_name.txt", before)]);
+        let oid = commit_rename(&repo, "old_name.txt", "new_name.txt", after);
+
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "new_name.txt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.path, "new_name.txt");
+        assert_eq!(f.old_path.as_deref(), Some("old_name.txt"));
+        assert_eq!(f.additions, 1, "only the edited line is added");
+        assert_eq!(f.deletions, 1, "only the edited line is removed");
+    }
+
+    /// A rename with no content change must report no hunks and 0/0 stats,
+    /// matching `git show` for a pure rename.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_pure_rename_has_no_hunks() {
+        let repo = TestRepo::with_initial_commit();
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        repo.create_commit("add", &[("a.txt", content)]);
+        let oid = commit_rename(&repo, "a.txt", "b.txt", content);
+
+        let f = get_commit_file_diff(repo.path_str(), oid.to_string(), "b.txt".to_string(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.old_path.as_deref(), Some("a.txt"));
+        assert_eq!(f.additions, 0, "a pure rename adds no lines");
+        assert_eq!(f.deletions, 0);
+        assert!(f.hunks.is_empty(), "a pure rename has no hunks");
+    }
+
+    /// Asking for the *old* path of a rename must resolve to the same rename
+    /// entry, not a whole-file deletion.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_old_path_of_rename() {
+        let repo = TestRepo::with_initial_commit();
+        let content = "one\ntwo\nthree\nfour\nfive\nsix\n";
+        repo.create_commit("add", &[("src/old.txt", content)]);
+        let oid = commit_rename(&repo, "src/old.txt", "src/new.txt", content);
+
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "src/old.txt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.path, "src/new.txt");
+        assert_eq!(f.old_path.as_deref(), Some("src/old.txt"));
+        assert_eq!(f.deletions, 0, "the file was moved, not deleted");
+    }
+
+    /// Guard: a file added alongside an unrelated deletion must stay a plain
+    /// addition — the rename fallback must never hand back the wrong file.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_add_alongside_unrelated_delete_stays_new() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("add", &[("gone.txt", "qqq\nrrr\nsss\nttt\n")]);
+        // Delete gone.txt and add a wholly dissimilar file in the same commit.
+        let added = "totally\ndifferent\ncontent\nhere\n";
+        let oid = commit_rename(&repo, "gone.txt", "fresh.txt", added);
+
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "fresh.txt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            f.status,
+            FileStatus::New,
+            "dissimilar add must not be paired as a rename"
+        );
+        assert_eq!(f.additions, 4);
+        assert_eq!(f.deletions, 0);
     }
 
     /// Finding 62: a working-tree blame with an uncommitted inserted line must
