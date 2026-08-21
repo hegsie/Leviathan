@@ -443,3 +443,79 @@ test.describe('Stash Context Menu - Extended Tests', () => {
     expect(finalCount).toBe(2);
   });
 });
+
+test.describe('Stash Contents Preview', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+
+    await setupOpenRepository(page, {
+      stashes: [
+        { index: 0, message: 'WIP on main: abc123 first stash', oid: 'stash1' },
+        { index: 1, message: 'WIP on feature: def456 second stash', oid: 'stash2' },
+        { index: 2, message: 'WIP on develop: ghi789 third stash', oid: 'stash3' },
+      ],
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|confirm': true,
+      'plugin:dialog|ask': true,
+    });
+  });
+
+  test('clicking a stash reveals its file list', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    await injectCommandMock(page, {
+      stash_show: {
+        index: 0,
+        message: 'WIP on main',
+        files: [{ path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' }],
+        totalAdditions: 4,
+        totalDeletions: 2,
+        patch: null,
+      },
+    });
+
+    await leftPanel.getStash(0).click();
+
+    await expect(leftPanel.stashDetails).toBeVisible();
+    await expect(page.locator('.stash-file-path')).toHaveText('src/app.ts');
+
+    const showCommands = await findCommand(page, 'stash_show');
+    expect(showCommands.length).toBeGreaterThan(0);
+  });
+
+  test('clicking the stash again hides its file list', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    await leftPanel.getStash(0).click();
+    await expect(leftPanel.stashDetails).toBeVisible();
+
+    await leftPanel.getStash(0).click();
+    await expect(leftPanel.stashDetails).toHaveCount(0);
+  });
+
+  test('a failed read shows an inline error, not a blank box', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    await injectCommandError(page, 'stash_show', 'Stash entry 0 not found');
+
+    await leftPanel.getStash(0).click();
+
+    await expect(page.locator('.stash-details-error')).toContainText('Stash entry 0 not found');
+  });
+
+  test('Show Contents in the context menu opens the preview', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    await leftPanel.getStash(0).click({ button: 'right' });
+
+    const showOption = page.locator('.context-menu-item', { hasText: /show contents/i });
+    await expect(showOption).toBeVisible();
+    await showOption.click();
+
+    await expect(leftPanel.stashDetails).toBeVisible();
+  });
+});
