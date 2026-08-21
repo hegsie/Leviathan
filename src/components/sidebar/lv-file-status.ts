@@ -661,6 +661,37 @@ export class LvFileStatus extends LitElement {
     return count;
   }
 
+  /**
+   * Count only the files a tree node actually RENDERS — a collapsed folder
+   * renders none. The keyboard model (getAllVisibleFiles) numbers rows this
+   * way, so the data-index the rows carry has to be counted the same way;
+   * counting hidden files here put `.focused` on a different row than the one
+   * Enter/s/u acted on. `path` is the node's own full path.
+   */
+  private countVisibleTreeNodeFiles(
+    node: { file?: StatusEntry; children: Map<string, unknown> },
+    path: string,
+  ): number {
+    if (node.file) return 1;
+    if (!this.expandedFolders.has(path)) return 0;
+    let count = 0;
+    for (const [childName, child] of node.children.entries()) {
+      count += this.countVisibleTreeNodeFiles(
+        child as { file?: StatusEntry; children: Map<string, unknown> },
+        path ? `${path}/${childName}` : childName,
+      );
+    }
+    return count;
+  }
+
+  /** How many rows a section actually renders (collapsed folders hide theirs) */
+  private visibleFileCount(files: StatusEntry[]): number {
+    if (this.viewMode !== "tree") return files.length;
+    const visible: StatusEntry[] = [];
+    this.collectVisibleTreeFiles(files, visible);
+    return visible.length;
+  }
+
   /** Collect all file paths under a given directory prefix */
   private getFilesUnderPath(
     files: StatusEntry[],
@@ -2131,11 +2162,12 @@ export class LvFileStatus extends LitElement {
                   staged,
                   currentIndex,
                 );
-                currentIndex += this.countTreeNodeFiles(
+                currentIndex += this.countVisibleTreeNodeFiles(
                   childNode as {
                     file?: StatusEntry;
                     children: Map<string, unknown>;
                   },
+                  childPath,
                 );
                 return result;
               })}
@@ -2205,7 +2237,7 @@ export class LvFileStatus extends LitElement {
               staged,
               currentIndex,
             );
-            currentIndex += this.countTreeNodeFiles(node);
+            currentIndex += this.countVisibleTreeNodeFiles(node, name);
             return result;
           })}
         </ul>
@@ -2524,7 +2556,7 @@ export class LvFileStatus extends LitElement {
           ? this.renderFileList(
               this.unstagedFiles,
               false,
-              this.stagedExpanded ? this.stagedFiles.length : 0,
+              this.stagedExpanded ? this.visibleFileCount(this.stagedFiles) : 0,
             )
           : nothing}
       </div>
