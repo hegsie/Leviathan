@@ -291,34 +291,21 @@ pub async fn fixup_commit(
     let staged_tree_oid = index.write_tree()?;
     let staged_tree = repo.find_tree(staged_tree_oid)?;
 
-    // Merge the staged tree with the target tree
-    // We need to create a tree that has target's content + our staged changes
-    // The simplest approach: use the current staged tree as the new content for the target
-
-    // Get the diff between HEAD tree and staged tree (our staged changes)
-    let changes_diff = repo.diff_tree_to_tree(Some(&head_tree), Some(&staged_tree), None)?;
-
-    // Apply these changes to the target tree
-    let mut treebuilder = repo.treebuilder(Some(&target_tree))?;
-
-    for delta in changes_diff.deltas() {
-        let new_path = delta.new_file().path().unwrap();
-
-        match delta.status() {
-            git2::Delta::Added | git2::Delta::Modified => {
-                // Get the blob from the staged tree
-                let entry = staged_tree.get_path(new_path)?;
-                treebuilder.insert(new_path, entry.id(), entry.filemode())?;
-            }
-            git2::Delta::Deleted => {
-                treebuilder.remove(new_path)?;
-            }
-            _ => {}
-        }
+    // Apply the staged changes to the target tree with a three-way merge:
+    // HEAD is the base, so exactly `staged_tree - head_tree` — what the user
+    // staged — is replayed onto the target tree. A treebuilder cannot be used
+    // here: it operates on a single tree level and rejects entry names
+    // containing '/', so any staged file inside a subdirectory would fail.
+    let mut merge_result = repo.merge_trees(&head_tree, &target_tree, &staged_tree, None)?;
+    if merge_result.has_conflicts() {
+        // Nothing has been moved yet — the repository is untouched.
+        return Err(LeviathanError::OperationFailed(format!(
+            "Cannot fixup: the staged changes conflict with commit {}. \
+             Use an interactive rebase instead.",
+            target_commit.id()
+        )));
     }
-
-    let new_target_tree_oid = treebuilder.write()?;
-    let new_target_tree = repo.find_tree(new_target_tree_oid)?;
+    let new_target_tree = repo.find_tree(merge_result.write_tree_to(&repo)?)?;
 
     // Create the new target commit with the merged tree
     let signature = repo.signature()?;
@@ -753,6 +740,122 @@ mod tests {
         // Verify both files exist
         assert!(repo.path.join("file.txt").exists());
         assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_nested_path() {
+        // Every real project stages files inside directories, and a treebuilder
+        // rejects entry names containing '/', so this is the normal case.
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit("Target commit", &[("src/dir/file.txt", "original\n")]);
+        repo.create_commit("After commit", &[("after.txt", "after\n")]);
+
+        repo.create_file("src/dir/file.txt", "modified\n");
+        repo.stage_file("src/dir/file.txt");
+
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup of a file in a subdirectory failed: {:?}",
+            result.err()
+        );
+
+        // The change landed in the target commit, not on top of HEAD.
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("After commit"));
+        let rewritten_target = head.parent(0).unwrap();
+        assert_eq!(rewritten_target.summary().unwrap(), Some("Target commit"));
+        let entry = rewritten_target
+            .tree()
+            .unwrap()
+            .get_path(Path::new("src/dir/file.txt"))
+            .unwrap();
+        assert_eq!(
+            git_repo.find_blob(entry.id()).unwrap().content(),
+            b"modified\n"
+        );
+
+        // Working tree and the later commit survive.
+        let content =
+            std::fs::read_to_string(repo.path.join("src").join("dir").join("file.txt")).unwrap();
+        assert_eq!(content, "modified\n");
+        assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_nested_deletion() {
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit(
+            "Target commit",
+            &[("src/keep.txt", "keep\n"), ("src/gone.txt", "gone\n")],
+        );
+        repo.create_commit("After commit", &[("after.txt", "after\n")]);
+
+        // Stage the deletion of a file in a subdirectory (staged, so the
+        // unstaged-changes guard does not fire).
+        std::fs::remove_file(repo.path.join("src").join("gone.txt")).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("src/gone.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup of a deletion in a subdirectory failed: {:?}",
+            result.err()
+        );
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = head.parent(0).unwrap().tree().unwrap();
+        assert!(
+            tree.get_path(Path::new("src/gone.txt")).is_err(),
+            "the deletion belongs to the target commit"
+        );
+        assert!(tree.get_path(Path::new("src/keep.txt")).is_ok());
+        assert!(!repo.path.join("src").join("gone.txt").exists());
+        assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_refuses_conflicting_staged_change() {
+        // A later commit rewrote the same line, so the staged fix cannot be
+        // replayed onto the target — refuse and leave the repository untouched.
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit("Target commit", &[("src/f.txt", "v1\n")]);
+        repo.create_commit("After commit", &[("src/f.txt", "v2\n")]);
+
+        repo.create_file("src/f.txt", "v3\n");
+        repo.stage_file("src/f.txt");
+
+        let head_before = repo.head_oid();
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(result.is_err(), "a conflicting fixup must be refused");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Cannot fixup") && msg.contains("conflict"),
+            "unexpected message: {msg}"
+        );
+
+        // Nothing was rewritten and the staged change is still staged.
+        assert_eq!(repo.head_oid(), head_before);
+        let content = std::fs::read_to_string(repo.path.join("src").join("f.txt")).unwrap();
+        assert_eq!(content, "v3\n");
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let head_tree = git_repo.head().unwrap().peel_to_tree().unwrap();
+        let diff = git_repo
+            .diff_tree_to_index(Some(&head_tree), Some(&index), None)
+            .unwrap();
+        assert_eq!(
+            diff.deltas().len(),
+            1,
+            "the staged change must survive the refusal"
+        );
     }
 
     #[tokio::test]
