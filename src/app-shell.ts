@@ -1279,13 +1279,38 @@ export class AppShell extends LitElement {
     this.showConflictDialog = true;
   }
 
-  /** Dialog flags that are NOT tied to an open repository. */
+  /**
+   * Dialog flags that are NOT tied to an open repository.
+   *
+   * The criterion is where the dialog RENDERS. The sweep exists because a
+   * dialog inside the `${this.activeRepository ? ...}` block has its ELEMENT
+   * destroyed while its flag stays true, so it springs back open over the next
+   * repository. A dialog rendered outside that block is never destroyed and has
+   * no such problem: clearing its flag just kills a session the user started,
+   * and skips the `@close` binding that unwinds its navigation state
+   * (`integrationContext`, `manageAccountsReturnProvider`).
+   *
+   * Every flag below is reachable with zero repositories open — the welcome
+   * screen offers the profile manager, and the palette's SSH, profiles and
+   * provider entries are deliberately not wrapped in `requiresRepository`.
+   */
   private static readonly REPO_INDEPENDENT_DIALOGS = new Set([
     'showSettings',
     'showShortcuts',
     'showOutputPanel',
     'showCommandPalette',
     'showWorkspaceManager',
+    'showSsh',
+    'showProfileManager',
+    // Fires from checkUnifiedProfilesMigration on startup, before any repo.
+    'showMigrationDialog',
+    // Account connection is repo-independent; only the PR/issue/pipeline tabs
+    // inside these dialogs guard themselves on a repository.
+    'showGitHub',
+    'showGitLab',
+    'showBitbucket',
+    'showAzureDevOps',
+    'showOidc',
   ]);
 
   /**
