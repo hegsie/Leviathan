@@ -494,6 +494,49 @@ test.describe('Remote Dialog - Extended Tests', () => {
     await expect(remoteDialog).toBeVisible();
   });
 
+  test('clearing the push URL removes it from the remote list', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      'get_remotes': [
+        { name: 'origin', url: 'https://github.com/user/repo.git', pushUrl: 'git@github.com:user/repo.git' },
+      ],
+      'set_remote_url': { success: true },
+    });
+
+    await openRemoteDialog(page);
+
+    const remoteDialog = page.locator('lv-remote-dialog');
+    await expect(page.getByText('Push: git@github.com:user/repo.git')).toBeVisible();
+
+    const editButton = remoteDialog.locator('button[title*="Edit"]').first();
+    await expect(editButton).toBeVisible();
+    await editButton.click();
+
+    // Second text input in the edit form is the Push URL
+    const pushUrlInput = remoteDialog.locator('input[type="text"]').nth(1);
+    await expect(pushUrlInput).toBeVisible();
+    await pushUrlInput.fill('');
+
+    // The post-save reload should report the cleared remote
+    await injectCommandMock(page, {
+      'get_remotes': [{ name: 'origin', url: 'https://github.com/user/repo.git', pushUrl: null }],
+    });
+
+    const saveButton = remoteDialog.locator('button', { hasText: /save|confirm|update/i }).first();
+    await saveButton.click();
+
+    await waitForCommand(page, 'set_remote_url');
+
+    const setUrlCommands = await findCommand(page, 'set_remote_url');
+    const clearCall = setUrlCommands.find((c) => {
+      const args = c.args as Record<string, unknown>;
+      return args.push === true && args.url === '';
+    });
+    expect(clearCall).toBeDefined();
+
+    // UI outcome: the Push line is gone
+    await expect(page.getByText(/^Push: /)).toHaveCount(0);
+  });
+
   test('remote list should refresh after adding a new remote', async ({ page }) => {
     await startCommandCaptureWithMocks(page, {
       'get_remotes': [{ name: 'origin', url: 'https://github.com/user/repo.git', pushUrl: null }],

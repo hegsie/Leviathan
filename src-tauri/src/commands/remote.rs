@@ -87,6 +87,10 @@ pub async fn rename_remote(path: String, old_name: String, new_name: String) -> 
 }
 
 /// Set the URL of a remote
+///
+/// An empty `url` with `push` set clears the push URL so pushes fall back to
+/// the fetch URL — that is the only way to undo a divergent push destination.
+/// An empty fetch URL is refused: a remote without one is unusable.
 #[command]
 pub async fn set_remote_url(
     path: String,
@@ -100,10 +104,22 @@ pub async fn set_remote_url(
     repo.find_remote(&name)
         .map_err(|_| LeviathanError::RemoteNotFound(name.clone()))?;
 
+    let url = url.trim();
+
     if push.unwrap_or(false) {
-        repo.remote_set_pushurl(&name, Some(&url))?;
+        match repo.remote_set_pushurl(&name, if url.is_empty() { None } else { Some(url) }) {
+            // Deleting an absent pushurl reports NotFound; the remote is
+            // already in the state the caller asked for.
+            Err(e) if url.is_empty() && e.code() == git2::ErrorCode::NotFound => {}
+            other => other?,
+        }
     } else {
-        repo.remote_set_url(&name, &url)?;
+        if url.is_empty() {
+            return Err(LeviathanError::OperationFailed(
+                "Remote URL cannot be empty".to_string(),
+            ));
+        }
+        repo.remote_set_url(&name, url)?;
     }
 
     // Get updated remote info
@@ -2727,6 +2743,109 @@ mod tests {
             remote.push_url,
             Some("git@github.com:test/repo.git".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_remote_push_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let remote = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "git@github.com:test/repo.git".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote.push_url,
+            Some("git@github.com:test/repo.git".to_string())
+        );
+
+        // Clearing the field must remove the push URL, not store an empty one
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(result.is_ok(), "clearing push URL failed: {result:?}");
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
+
+        // And it must actually be gone from the config, not just the response
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.push_url, None);
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_set_remote_url_rejects_an_empty_fetch_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "   ".to_string(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot be empty"),
+            "expected an empty-URL error"
+        );
+
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_clearing_a_push_url_that_was_never_set_is_a_no_op() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "clearing an unset push URL failed: {result:?}"
+        );
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
     }
 
     #[tokio::test]
