@@ -4,7 +4,13 @@
  */
 import { expect } from '@open-wc/testing';
 import { VirtualScrollManager, ScrollStateManager } from '../virtual-scroll.ts';
-import { assignLanes, type GraphCommit } from '../lane-assignment.ts';
+import {
+  assignLanes,
+  type GraphCommit,
+  type GraphLayout,
+  type LayoutEdge,
+  type LayoutNode,
+} from '../lane-assignment.ts';
 
 function makeCommit(oid: string, parentIds: string[], timestamp: number): GraphCommit {
   return { oid, parentIds, timestamp, message: `Commit ${oid}`, author: 'Test' };
@@ -170,5 +176,156 @@ describe('VirtualScrollManager virtual total rows', () => {
     });
     expect(data.nodes).to.have.length(0);
     expect(data.edges).to.have.length(0);
+  });
+});
+
+/**
+ * The graph is drawn mirrored — lane 0 (the HEAD mainline) sits at the RIGHT
+ * edge of the graph and higher lanes extend left — so the visible range has to
+ * be converted out of drawn-column space before anything is culled by lane.
+ */
+describe('VirtualScrollManager wide-graph lane culling', () => {
+  const ROW_HEIGHT = 22;
+  const LANE_WIDTH = 14;
+  const PADDING = 20;
+  const MAX_LANE = 60; // content width = 61 * 14 + 40 = 894
+  const VIEW_W = 400; // maxScrollX = 494
+  const SCROLL_RIGHT = 494; // scrolled fully right, to the message column
+
+  /**
+   * Wide layout: rows alternate between the mainline (lane 0, drawn at the
+   * right of the mirrored graph) and a far side branch (lane maxLane, drawn at
+   * the far left), each with a straight edge to the previous row in its lane.
+   */
+  function makeWideLayout(rows: number, maxLane: number): GraphLayout {
+    const nodes = new Map<string, LayoutNode>();
+    const edges: LayoutEdge[] = [];
+
+    for (let row = 0; row < rows; row++) {
+      const lane = row % 2 === 0 ? 0 : maxLane;
+      const colorIndex = row % 2 === 0 ? 0 : 1;
+      const oid = `n${row}`;
+      nodes.set(oid, {
+        oid,
+        row,
+        lane,
+        commit: {
+          oid,
+          parentIds: [],
+          timestamp: rows - row,
+          message: `Commit ${row}`,
+          author: 'Test',
+        },
+        childLanes: [],
+        parentLanes: [],
+        colorIndex,
+        hasMissingParents: false,
+      });
+      if (row >= 2) {
+        edges.push({
+          fromOid: oid,
+          toOid: `n${row - 2}`,
+          fromRow: row,
+          toRow: row - 2,
+          fromLane: lane,
+          toLane: lane,
+          isMerge: false,
+          colorIndex,
+        });
+      }
+    }
+
+    return { nodes, edges, maxLane, totalRows: rows };
+  }
+
+  function makeManager(rows: number, maxLane: number): VirtualScrollManager {
+    const manager = new VirtualScrollManager({
+      rowHeight: ROW_HEIGHT,
+      laneWidth: LANE_WIDTH,
+      padding: PADDING,
+      overscanRows: 2,
+    });
+    manager.setLayout(makeWideLayout(rows, maxLane));
+    return manager;
+  }
+
+  it('reports the visible range in lane space, not drawn columns', () => {
+    const range = makeManager(40, MAX_LANE).getVisibleRange({
+      scrollTop: 0,
+      scrollLeft: SCROLL_RIGHT,
+      width: VIEW_W,
+      height: 10 * ROW_HEIGHT,
+    });
+
+    // Columns 31..65 are on screen; mirrored, those are lanes 0..29
+    expect(range.startLane).to.equal(0);
+    expect(range.endLane).to.equal(29);
+  });
+
+  it('keeps the mainline visible when scrolled right on a wide graph', () => {
+    const data = makeManager(40, MAX_LANE).getRenderData({
+      scrollTop: 0,
+      scrollLeft: SCROLL_RIGHT,
+      width: VIEW_W,
+      height: 10 * ROW_HEIGHT,
+    });
+
+    expect(data.nodes.some((n) => n.lane === 0)).to.be.true;
+    expect(data.edges.length).to.be.greaterThan(0);
+    expect(data.edges.every((e) => e.fromLane === 0 && e.toLane === 0)).to.be.true;
+  });
+
+  it("returns every visible row's node at any horizontal scroll", () => {
+    const manager = makeManager(40, MAX_LANE);
+
+    for (const scrollLeft of [0, 250, SCROLL_RIGHT]) {
+      const data = manager.getRenderData({
+        scrollTop: 4 * ROW_HEIGHT,
+        scrollLeft,
+        width: VIEW_W,
+        height: 10 * ROW_HEIGHT,
+      });
+
+      // A node carries its whole row's text, so no row may be lane-culled
+      const expectedRows = data.range.endRow - data.range.startRow + 1;
+      expect(data.nodes.length, `scrollLeft ${scrollLeft}`).to.equal(expectedRows);
+      expect(new Set(data.nodes.map((n) => n.row)).size).to.equal(expectedRows);
+    }
+  });
+
+  it('culls the mainline edges when scrolled to the far left of a wide graph', () => {
+    const data = makeManager(40, MAX_LANE).getRenderData({
+      scrollTop: 0,
+      scrollLeft: 0,
+      width: VIEW_W,
+      height: 10 * ROW_HEIGHT,
+    });
+
+    // Only the far side branch is drawn on screen at the left end
+    expect(data.edges.length).to.be.greaterThan(0);
+    expect(data.edges.every((e) => e.fromLane === MAX_LANE)).to.be.true;
+    // ...but the rows themselves still render
+    expect(data.nodes.some((n) => n.lane === 0)).to.be.true;
+  });
+
+  it('does not cull horizontally when the whole graph fits the viewport', () => {
+    const data = makeManager(20, 1).getRenderData({
+      scrollTop: 0,
+      scrollLeft: 0,
+      width: 800,
+      height: 10 * ROW_HEIGHT,
+    });
+
+    expect(data.nodes.length).to.equal(data.range.endRow - data.range.startRow + 1);
+    expect(data.edges.length).to.be.greaterThan(0);
+    expect(data.edges.some((e) => e.fromLane === 0)).to.be.true;
+    expect(data.edges.some((e) => e.fromLane === 1)).to.be.true;
+    expect(
+      data.edges.every(
+        (e) =>
+          Math.min(e.fromRow, e.toRow) <= data.range.endRow &&
+          Math.max(e.fromRow, e.toRow) >= data.range.startRow
+      )
+    ).to.be.true;
   });
 });
