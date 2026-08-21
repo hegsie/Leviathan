@@ -32,6 +32,9 @@ const mockWorktrees: Worktree[] = [
   },
 ];
 
+/** What `get_worktrees` answers with; a test may swap it before mounting. */
+let worktreeFixture: Worktree[] = mockWorktrees;
+
 const invokedCommands: string[] = [];
 let failingCommands: Set<string> = new Set();
 
@@ -89,7 +92,7 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 
   switch (command) {
     case 'get_worktrees':
-      return mockWorktrees;
+      return worktreeFixture;
     case 'lock_worktree':
       return null;
     case 'unlock_worktree':
@@ -132,6 +135,7 @@ describe('lv-worktree-dialog', () => {
     gateReleases.forEach((resolve) => resolve());
     gateReleases.clear();
     worktreeReads.length = 0;
+    worktreeFixture = mockWorktrees;
     resetRefOpLocks();
   });
 
@@ -369,6 +373,91 @@ describe('lv-worktree-dialog', () => {
       expect(routed, 'the host refreshes the repo the worktree was added to').to.deep.equal([
         REPO_A,
       ]);
+    });
+  });
+
+  // `git worktree remove` deletes a working directory from disk, and the one
+  // the app is open on must survive. The paths being compared come from two
+  // different sources — git's `worktree list` and the OS file dialog — so the
+  // same directory reaches the dialog under two spellings, and the raw string
+  // compare that used to back this guard simply missed.
+  describe('the open worktree cannot be removed', () => {
+    async function open(repositoryPath: string): Promise<LvWorktreeDialog> {
+      return fixture<LvWorktreeDialog>(
+        html`<lv-worktree-dialog
+          ?open=${true}
+          .repositoryPath=${repositoryPath}
+        ></lv-worktree-dialog>`,
+      );
+    }
+
+    it('blocks removal when git and the file dialog disagree on separators', async () => {
+      const el = await open('C:\\work\\repo');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRemove({ ...mockWorktrees[1], path: 'C:/work/repo' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.contain('currently have open');
+      expect(invokedCommands).to.not.include('remove_worktree');
+    });
+
+    it('blocks removal when the two spellings differ only in case on Windows', async () => {
+      const el = await open('C:\\work\\repo');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRemove({ ...mockWorktrees[1], path: 'c:/Work/Repo' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.contain('currently have open');
+      expect(invokedCommands).to.not.include('remove_worktree');
+    });
+
+    it('blocks removal when only the backend can tell (a symlinked repo path)', async () => {
+      const el = await open('/var/folders/x/repo');
+
+      await (el as any) // eslint-disable-line @typescript-eslint/no-explicit-any
+        .handleRemove({
+          ...mockWorktrees[1],
+          path: '/private/var/folders/x/repo',
+          isCurrent: true,
+        });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.contain('currently have open');
+      expect(invokedCommands).to.not.include('remove_worktree');
+    });
+
+    it('disables the Remove button for the open worktree', async () => {
+      worktreeFixture = [mockWorktrees[0], { ...mockWorktrees[1], path: 'C:/work/repo' }];
+      const el = await open('C:\\work\\repo');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await waitUntil(() => (el as any).worktrees.length === 2, 'the worktree list');
+      await el.updateComplete;
+
+      const removeBtns = el.shadowRoot!.querySelectorAll('.action-btn.danger');
+      expect((removeBtns[1] as HTMLButtonElement).disabled).to.be.true;
+    });
+
+    it('still removes a worktree that is merely a sibling of the open one', async () => {
+      const el = await open('/test/repo');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRemove(mockWorktrees[1]);
+
+      expect(invokedCommands).to.include('remove_worktree');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.equal('');
+    });
+
+    it('keeps POSIX paths case-sensitive: /test/repo is not /test/Repo', async () => {
+      const el = await open('/test/Repo');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRemove({ ...mockWorktrees[1], path: '/test/repo' });
+
+      expect(invokedCommands).to.include('remove_worktree');
     });
   });
 });
