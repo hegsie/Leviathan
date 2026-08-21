@@ -26,6 +26,13 @@ interface ReflogContextMenuState {
   entry: ReflogEntry | null;
 }
 
+/**
+ * Entries one page of the listing asks for. HEAD reflogs routinely hold
+ * hundreds of entries and this dialog is the app's recovery surface, so the
+ * first page has to be followed by a way to reach the rest.
+ */
+const REFLOG_PAGE_SIZE = 50;
+
 @customElement('lv-reflog-dialog')
 export class LvReflogDialog extends LitElement {
   static styles = [
@@ -146,6 +153,41 @@ export class LvReflogDialog extends LitElement {
         display: flex;
         flex-direction: column;
         gap: 2px;
+      }
+
+      .list-footer {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-sm);
+      }
+
+      .list-note {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
+      .show-more-btn {
+        padding: var(--spacing-xs) var(--spacing-sm);
+        font-size: var(--font-size-xs);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+        border: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-primary);
+      }
+
+      .show-more-btn:hover:not(:disabled) {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .show-more-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
       }
 
       .entry {
@@ -331,6 +373,10 @@ export class LvReflogDialog extends LitElement {
   @state() private selectedIndex: number | null = null;
   @state() private resetting = false;
 
+  /** Entries the CURRENT listing asked for; grows one page per "Show more". */
+  @state() private entryLimit = REFLOG_PAGE_SIZE;
+  @state() private loadingMore = false;
+
   /**
    * The OBSERVATION half of the shared lock, which this dialog was missing.
    *
@@ -394,6 +440,10 @@ export class LvReflogDialog extends LitElement {
       // session on top of it.
       if (this.resetting) return;
       this.pinnedRepoPath = this.repositoryPath;
+      // A new session starts at the first page. loadReflog deliberately does
+      // NOT reset this — it doubles as the post-failed-reset refresh, which
+      // must keep whatever the user has expanded to.
+      this.entryLimit = REFLOG_PAGE_SIZE;
       this.focusInitialControl();
       await this.loadReflog();
     }
@@ -420,6 +470,18 @@ export class LvReflogDialog extends LitElement {
     });
   }
 
+  /**
+   * get_reflog reports no total and takes no cursor — it just stops at
+   * `limit` — so a full page is the only signal that older entries may exist.
+   * A reflog whose length is an exact multiple of the page size therefore
+   * shows one "Show more" that comes back with nothing new; the footer then
+   * settles on "Showing all N". Same heuristic the graph canvas uses for its
+   * commit batches.
+   */
+  private get hasMoreEntries(): boolean {
+    return this.entries.length >= this.entryLimit;
+  }
+
   private async loadReflog(): Promise<void> {
     if (!this.pinnedRepoPath) return;
 
@@ -427,7 +489,7 @@ export class LvReflogDialog extends LitElement {
     this.entries = [];
 
     try {
-      const result = await gitService.getReflog(this.pinnedRepoPath, 50);
+      const result = await gitService.getReflog(this.pinnedRepoPath, this.entryLimit);
       if (result.success && result.data) {
         this.entries = result.data;
       } else if (!result.success) {
@@ -441,6 +503,49 @@ export class LvReflogDialog extends LitElement {
       );
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * Pull the next page. get_reflog has no skip parameter, so this re-reads
+   * from HEAD@{0} with a bigger limit and REPLACES the list rather than
+   * appending — appending would duplicate every entry already on screen, and a
+   * fresh read keeps entry.index consistent with what a reset is sent.
+   *
+   * `entries` is deliberately not cleared and `entryLimit` only advances on
+   * success: a transient failure must leave the list and the control exactly
+   * as they were so the user can retry.
+   */
+  private async loadMoreEntries(): Promise<void> {
+    if (this.loading || this.loadingMore || !this.pinnedRepoPath) return;
+
+    // Pinned like every other fetch here: the dialog may be closed and
+    // reopened on another repo while this round trip is in flight, and the
+    // stale page must not overwrite the fresh listing.
+    const repoPath = this.pinnedRepoPath;
+    const nextLimit = this.entryLimit + REFLOG_PAGE_SIZE;
+    this.loadingMore = true;
+
+    try {
+      const result = await gitService.getReflog(repoPath, nextLimit);
+      if (!this.open || this.pinnedRepoPath !== repoPath) return;
+      if (result.success && result.data) {
+        this.entries = result.data;
+        this.entryLimit = nextLimit;
+      } else if (!result.success) {
+        showToast(
+          `Failed to load more reflog entries: ${result.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load more reflog entries:', err);
+      showToast(
+        `Failed to load more reflog entries: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        'error',
+      );
+    } finally {
+      this.loadingMore = false;
     }
   }
 
@@ -859,6 +964,22 @@ export class LvReflogDialog extends LitElement {
               : html`
                   <div class="entry-list">
                     ${this.entries.map(entry => this.renderEntry(entry))}
+                  </div>
+                  <div class="list-footer">
+                    ${this.hasMoreEntries
+                      ? html`
+                          <span class="list-note">
+                            Showing the first ${this.entries.length} entries
+                          </span>
+                          <button
+                            class="show-more-btn"
+                            @click=${this.loadMoreEntries}
+                            ?disabled=${this.loadingMore}
+                          >
+                            ${this.loadingMore ? 'Loading...' : 'Show more'}
+                          </button>
+                        `
+                      : html`<span class="list-note">Showing all ${this.entries.length} entries</span>`}
                   </div>
                 `}
         </div>
