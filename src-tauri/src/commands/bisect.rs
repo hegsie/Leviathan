@@ -223,17 +223,47 @@ fn parse_bisect_log(repo_path: &Path) -> Vec<BisectLogEntry> {
         .collect()
 }
 
+/// Whether one BISECT_LOG line is git's converged-result comment for `term_bad`.
+///
+/// git quotes the term in this comment as of 2.44 and did not before, so the
+/// same converged session writes either of:
+///
+/// ```text
+/// # first bad commit: [<oid>] <subject>      (git 2.43)
+/// # first 'bad' commit: [<oid>] <subject>    (git 2.55)
+/// ```
+///
+/// Matching the line's SHAPE and comparing the term with any quoting stripped
+/// reads both. An exact-string marker read only whichever git the author
+/// happened to have: built against 2.43, it silently reported every converged
+/// search as unfinished on 2.44+.
+fn log_announces_culprit(line: &str, term_bad: &str) -> bool {
+    let Some(comment) = line.trim_start().strip_prefix('#') else {
+        return false;
+    };
+    let mut tokens = comment.split_whitespace();
+    if tokens.next() != Some("first") {
+        return false;
+    }
+    // git rejects a term containing whitespace, so the term is always one token.
+    let Some(term) = tokens.next() else {
+        return false;
+    };
+    if term.trim_matches('\'') != term_bad {
+        return false;
+    }
+    tokens.next() == Some("commit:")
+}
+
 /// Whether git has already announced the answer for this session.
 ///
 /// Once the search converges git appends its result to BISECT_LOG as a comment
-/// (`# first <term_bad> commit: [<oid>] <subject>`) and leaves the session
-/// ACTIVE until `git bisect reset`. That comment is the only on-disk record
-/// that the search finished, so it is what tells a reopened dialog to show the
-/// result rather than another Good/Bad/Skip round.
+/// and leaves the session ACTIVE until `git bisect reset`. That comment is the
+/// only on-disk record that the search finished, so it is what tells a reopened
+/// dialog to show the result rather than another Good/Bad/Skip round.
 fn bisect_finished(git_dir: &Path, term_bad: &str) -> bool {
-    let marker = format!("# first {} commit:", term_bad);
     std::fs::read_to_string(git_dir.join("BISECT_LOG"))
-        .map(|c| c.lines().any(|l| l.trim_start().starts_with(&marker)))
+        .map(|c| c.lines().any(|l| log_announces_culprit(l, term_bad)))
         .unwrap_or(false)
 }
 
@@ -1243,6 +1273,49 @@ Date:   Mon Jan 1 12:00:00 2024 +0000
         );
 
         let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
+    /// Both spellings git has used for the converged-result comment must read as
+    /// converged. The unquoted form is what git <= 2.43 writes and the quoted
+    /// form is what 2.44+ writes; a build that understands only the local git's
+    /// spelling reports every converged search as unfinished on the other, which
+    /// is exactly how this shipped red.
+    #[test]
+    fn test_log_announces_culprit_reads_both_git_spellings() {
+        let oid = "d2598a42cba989fc57a7dd16fe321404bfa66177";
+
+        assert!(
+            log_announces_culprit(&format!("# first bad commit: [{}] Bug", oid), "bad"),
+            "git 2.43 writes the term unquoted"
+        );
+        assert!(
+            log_announces_culprit(&format!("# first 'bad' commit: [{}] Bug", oid), "bad"),
+            "git 2.55 writes the term quoted"
+        );
+        assert!(
+            log_announces_culprit(&format!("# first 'broken' commit: [{}] Bug", oid), "broken"),
+            "a custom --term-new is quoted the same way"
+        );
+
+        // The other comments in BISECT_LOG must not read as the result, or a
+        // session would look converged the moment it started.
+        assert!(!log_announces_culprit(
+            &format!("# bad: [{}] Bug", oid),
+            "bad"
+        ));
+        assert!(!log_announces_culprit(
+            &format!("# good: [{}] initial", oid),
+            "bad"
+        ));
+        assert!(!log_announces_culprit(
+            &format!("git bisect start '{}' 'x'", oid),
+            "bad"
+        ));
+        // A different session's term is not this session's answer.
+        assert!(!log_announces_culprit(
+            &format!("# first 'broken' commit: [{}] Bug", oid),
+            "bad"
+        ));
     }
 
     // The session stays active in git until `bisect reset`, so a status that
