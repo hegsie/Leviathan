@@ -464,7 +464,7 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
   const GH_REPO = { owner: 'acme', repo: 'app', remoteName: 'origin' };
   const GH_URL = 'https://github.com/acme/app.git';
 
-  /** Keyring entries for an account, with a far-future OAuth expiry (→ no refresh). */
+  /** Keyring entries for an account, with an OAuth expiry an hour out — well past the 5-minute refresh threshold (→ no refresh). */
   function seedToken(integrationType: string, accountId: string, token: string) {
     const key = `${integrationType}_token_${accountId}`;
     keyring.set(key, token);
