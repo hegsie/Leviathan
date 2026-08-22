@@ -332,6 +332,30 @@ test.describe('Tag Context Menu - Event Propagation', () => {
     // After deletion with 0 tags remaining, the tag list section collapses
     await expect(leftPanel.tagItems).toHaveCount(0);
   });
+
+  test('deleting a pushed tag also offers to delete it on the remote', async ({ page }) => {
+    // delete_tag only removes the local ref, and the tag fetch refspec
+    // (refs/tags/*:refs/tags/*) copies the remote's copy straight back — so
+    // without the follow-up the "deleted" tag returns on the next fetch.
+    await startCommandCapture(page);
+
+    await leftPanel.expandTags();
+    const tag = leftPanel.getTag('v1.0.0');
+    await tag.click({ button: 'right' });
+
+    const deleteOption = page.locator('.context-menu-item, .menu-item', { hasText: /delete/i });
+    await expect(deleteOption).toBeVisible();
+    await clickMenuItem(deleteOption);
+
+    await waitForCommand(page, 'delete_remote_tag');
+    const remoteDeletes = await findCommand(page, 'delete_remote_tag');
+    expect(remoteDeletes.length).toBeGreaterThan(0);
+    const args = remoteDeletes[0].args as { name?: string; remote?: string };
+    expect(args?.name).toBe('v1.0.0');
+    expect(args?.remote).toBe('origin');
+
+    await expect(page.locator('.toast', { hasText: 'Deleted tag v1.0.0 on origin' })).toBeVisible();
+  });
 });
 
 test.describe('Tag Context Menu - Error Handling', () => {

@@ -359,6 +359,7 @@ pub fn run() {
             commands::tags::create_tag,
             commands::tags::delete_tag,
             commands::tags::push_tag,
+            commands::tags::delete_remote_tag,
             commands::tags::edit_tag_message,
             commands::diff::get_diff,
             commands::diff::get_diff_with_options,

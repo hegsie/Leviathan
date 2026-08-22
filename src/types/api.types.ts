@@ -466,6 +466,13 @@ export interface PushTagCommand {
   token?: string;
 }
 
+export interface DeleteRemoteTagCommand {
+  path: string;
+  name: string;
+  remote?: string;
+  token?: string;
+}
+
 export interface GetTagDetailsCommand {
   path: string;
   name: string;

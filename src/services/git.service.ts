@@ -310,6 +310,7 @@ import type {
   CreateTagCommand,
   DeleteTagCommand,
   PushTagCommand,
+  DeleteRemoteTagCommand,
   GetTagDetailsCommand,
   EditTagMessageCommand,
   DescribeOptions,
@@ -1684,6 +1685,32 @@ export async function pushTag(
   }
 
   return invokeCommand<void>("push_tag", args);
+}
+
+/**
+ * Delete a tag on a remote (`git push <remote> :refs/tags/<name>`).
+ *
+ * The local `deleteTag` above removes the local ref only, and the tag fetch
+ * refspec copies a pushed tag straight back — so without this a "deleted" tag
+ * reappeared on the next fetch.
+ */
+export async function deleteRemoteTag(
+  args: DeleteRemoteTagCommand,
+): Promise<CommandResult<void>> {
+  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote)) {
+    return blockedResult();
+  }
+
+  // Same credential plumbing push_tag needs: without a token this fails with
+  // "No valid credentials found" on a token-authenticated HTTPS remote.
+  if (!args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  return invokeCommand<void>("delete_remote_tag", args);
 }
 
 export async function getTagDetails(
