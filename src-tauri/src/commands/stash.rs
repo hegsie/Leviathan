@@ -254,10 +254,12 @@ pub async fn stash_show(
     // Untracked files stashed with INCLUDE_UNTRACKED are not in the stash
     // commit's tree — git records them in a third parent commit whose tree holds
     // only those files. Diff an empty tree against it so the preview shows what
-    // `git stash show -u` would; every stash this app creates includes untracked
-    // files, so without this a stash of nothing but new files reports no files
-    // at all. A stash created without untracked files has only two parents, and
-    // libgit2 also writes an EMPTY third parent when untracked capture was
+    // `git stash show -u` would; the app's stash-creation surfaces request
+    // untracked capture, so without this a stash of nothing but new files
+    // reports no files at all. `create_stash` leaves `include_untracked`
+    // optional (defaulting to false), so a stash created without untracked
+    // capture has only two parents — hence the guard below. libgit2 also
+    // writes an EMPTY third parent when untracked capture was
     // requested but nothing was untracked — which simply yields no deltas.
     let mut diffs = vec![diff];
     if stash_commit.parent_count() >= 3 {
