@@ -290,7 +290,15 @@ test.describe('Remote Dialog - Add Remote E2E', () => {
     const saveButton = remoteDialog.locator('button', { hasText: /save|add/i }).last();
     await saveButton.click();
 
-    const errorIndicator = page.locator('.toast, .error, [class*="error"]').first();
+    // Filter to visible before taking .first(): `[class*="error"]` matches any
+    // element on the page whose class merely CONTAINS "error", and .first()
+    // takes them in DOM order. A hidden error element in a sidebar panel
+    // therefore shadowed the toast this test is about, failing it from across
+    // the app.
+    const errorIndicator = page
+      .locator('.toast, .error, [class*="error"]')
+      .filter({ visible: true })
+      .first();
     await expect(errorIndicator).toBeVisible({ timeout: 3000 });
   });
 
