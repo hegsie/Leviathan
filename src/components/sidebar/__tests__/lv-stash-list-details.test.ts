@@ -284,4 +284,27 @@ describe('lv-stash-list contents preview', () => {
 
     expect(el.shadowRoot!.querySelector('.stash-details')).to.be.null;
   });
+
+  it('does not add a phantom list entry when a stash is expanded', async () => {
+    // The preview is a sibling <li>. If it is exposed as a listitem, a screen
+    // reader announces "list, 4 items" for 3 stashes the moment one is
+    // expanded — and in the transient state before the preview has any content
+    // it announces an entirely empty entry.
+    mockStashes = [
+      makeStash({ index: 0, message: 'WIP one', oid: 'aaa111' }),
+      makeStash({ index: 1, message: 'WIP two', oid: 'bbb222' }),
+      makeStash({ index: 2, message: 'WIP three', oid: 'ccc333' }),
+    ];
+    const el = await createComponent();
+
+    const listItems = () =>
+      el.shadowRoot!.querySelectorAll('.stash-list [role="listitem"]').length;
+    expect(listItems()).to.equal(3);
+
+    row(el).click();
+    await settle(el);
+
+    expect(el.shadowRoot!.querySelector('.stash-details')).to.not.be.null;
+    expect(listItems()).to.equal(3);
+  });
 });

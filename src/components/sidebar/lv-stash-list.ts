@@ -1056,9 +1056,14 @@ export class LvStashList extends LitElement {
                   </li>
                   <!-- A SIBLING row, not nested: nesting would bubble clicks
                        inside the preview back to the row handler and collapse
-                       it, and would change .stash-item subtree matching. -->
+                       it, and would change .stash-item subtree matching.
+                       role="presentation" keeps it out of the list's a11y
+                       semantics so expanding a stash does not change the
+                       announced item count (and an empty transient row is not
+                       announced at all); its .stash-details children stay
+                       exposed. -->
                   ${this.expandedOid === stash.oid
-                    ? html`<li class="stash-details-row" role="listitem">${this.renderStashDetails()}</li>`
+                    ? html`<li class="stash-details-row" role="presentation">${this.renderStashDetails()}</li>`
                     : nothing}
                 `)}
               </ul>
