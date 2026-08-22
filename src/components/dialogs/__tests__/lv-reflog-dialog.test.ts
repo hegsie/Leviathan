@@ -49,6 +49,37 @@ function checkoutEntry(from: string, to: string): ReflogEntry {
   } as unknown as ReflogEntry;
 }
 
+/** `count` sequential reflog entries, newest first. */
+function pageEntries(count: number): ReflogEntry[] {
+  return Array.from({ length: count }, (_, i) => ({
+    oid: `oid${i}`.padEnd(12, '0'),
+    shortId: `oid${i}`.padEnd(7, '0').slice(0, 7),
+    index: i,
+    action: 'commit',
+    message: `commit: entry ${i}`,
+    timestamp: Math.floor(Date.now() / 1000),
+    author: 'T',
+  })) as unknown as ReflogEntry[];
+}
+
+/**
+ * A repo whose reflog holds `total` entries; get_reflog honours `limit` the
+ * way the backend does (it stops once `limit` entries have been collected).
+ * Every requested limit is recorded in `calls`.
+ */
+function mockReflogOfSize(total: number, calls: Array<{ limit?: number }>): void {
+  const all = pageEntries(total);
+  mockInvoke = async (command, args) => {
+    if (command === 'get_reflog') {
+      const limit = (args as { limit?: number }).limit;
+      calls.push({ limit });
+      return all.slice(0, limit ?? total);
+    }
+    if (command === 'plugin:dialog|message') return 'Ok';
+    return null;
+  };
+}
+
 /** An ordinary commit entry, which SHOULD still offer a reset. */
 function commitEntry(): ReflogEntry {
   return {
@@ -367,6 +398,276 @@ describe('lv-reflog-dialog', () => {
       expect(target(checkoutEntry('main', 'feature'))).to.equal('feature');
       expect(target(checkoutEntry('feature', 'release/2.0'))).to.equal('release/2.0');
       expect(target(commitEntry()), 'a commit entry is not a checkout').to.be.null;
+    });
+  });
+
+  // ── Reaching entries past the first page ─────────────────────────────────
+  //
+  // This dialog is the app's recovery surface, and it asked for exactly 50
+  // entries and rendered nothing else: a user whose lost commit sat at
+  // HEAD@{51} scrolled to the bottom, found nothing, and had no way to learn
+  // that older states existed — while git could still recover them.
+  describe('pagination', () => {
+    /** Open a real session so the dialog pins a repo and loads its first page. */
+    async function openDialog(repositoryPath = '/test/repo'): Promise<LvReflogDialog> {
+      const el = await fixture<LvReflogDialog>(
+        html`<lv-reflog-dialog ?open=${true} .repositoryPath=${repositoryPath}></lv-reflog-dialog>`
+      );
+      await settle(el);
+      return el;
+    }
+
+    async function settle(el: LvReflogDialog): Promise<void> {
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+
+    function showMore(el: LvReflogDialog): HTMLButtonElement | null {
+      return el.shadowRoot!.querySelector<HTMLButtonElement>('.show-more-btn');
+    }
+
+    function note(el: LvReflogDialog): string {
+      return el.shadowRoot!.querySelector('.list-note')?.textContent ?? '';
+    }
+
+    it('flags the list as truncated and offers a way to see older entries', async () => {
+      const calls: Array<{ limit?: number }> = [];
+      mockReflogOfSize(120, calls);
+
+      const el = await openDialog();
+
+      expect(calls[0].limit, 'the first page asks for 50').to.equal(50);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+      expect(showMore(el), 'a truncated list must offer more').to.not.be.null;
+      expect(note(el)).to.match(/first 50/);
+    });
+
+    it('Show more pulls the next page and stops once the whole reflog is listed', async () => {
+      const calls: Array<{ limit?: number }> = [];
+      mockReflogOfSize(120, calls);
+
+      const el = await openDialog();
+
+      showMore(el)!.click();
+      await settle(el);
+
+      // get_reflog has no skip parameter, so the next page is a re-read from
+      // HEAD@{0} with a bigger limit — replacing the list, not appending.
+      expect(calls[1].limit).to.equal(100);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(100);
+      expect(showMore(el), 'still more to come').to.not.be.null;
+
+      showMore(el)!.click();
+      await settle(el);
+
+      expect(calls[2].limit).to.equal(150);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(120);
+      expect(showMore(el), 'a complete list must not offer a dead control').to.be.null;
+      expect(note(el)).to.match(/Showing all 120/);
+    });
+
+    it('keeps the list and the control when a page fails to load, and says so', async () => {
+      let loads = 0;
+      mockInvoke = async (command) => {
+        if (command === 'get_reflog') {
+          loads++;
+          if (loads > 1) throw new Error('reflog read failed');
+          return pageEntries(50);
+        }
+        return null;
+      };
+
+      const el = await openDialog();
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+
+      showMore(el)!.click();
+      await settle(el);
+
+      const toasts = uiStore.getState().toasts;
+      expect(
+        toasts.some((t) => t.type === 'error' && /load more/i.test(t.message)),
+        'a failed page must be reported'
+      ).to.be.true;
+      expect(
+        el.shadowRoot!.querySelectorAll('.entry').length,
+        'the failure must not wipe the list the user was reading'
+      ).to.equal(50);
+      expect(showMore(el), 'retry must stay available').to.not.be.null;
+    });
+
+    it('a short reflog says the list is complete instead of offering a dead control', async () => {
+      const calls: Array<{ limit?: number }> = [];
+      mockReflogOfSize(3, calls);
+
+      const el = await openDialog();
+
+      expect(showMore(el)).to.be.null;
+      expect(note(el)).to.match(/Showing all 3/);
+    });
+
+    // loadReflog doubles as the post-failed-reset refresh (the backend's
+    // "refresh and try again" advice), so it must NOT collapse the expansion
+    // at exactly the moment the user is hunting for a deep entry.
+    it('keeps the expanded listing when a failed reset reloads the entries', async () => {
+      const calls: Array<{ limit?: number }> = [];
+      const all = pageEntries(120);
+      resetRefOpLocks();
+      mockInvoke = async (command, args) => {
+        if (command === 'get_reflog') {
+          const limit = (args as { limit?: number }).limit;
+          calls.push({ limit });
+          return all.slice(0, limit ?? 120);
+        }
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'reset_to_reflog') throw new Error('reflog moved');
+        return null;
+      };
+
+      const el = await openDialog();
+      showMore(el)!.click();
+      await settle(el);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(100);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleReset(all[5], 'mixed');
+      await settle(el);
+
+      expect(calls[calls.length - 1].limit, 'the refresh keeps the expansion').to.equal(100);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(100);
+      resetRefOpLocks();
+    });
+
+    it('starts a reopened dialog back at the first page', async () => {
+      const calls: Array<{ limit?: number }> = [];
+      mockReflogOfSize(120, calls);
+
+      const el = await openDialog();
+      showMore(el)!.click();
+      await settle(el);
+      expect(calls[calls.length - 1].limit, 'expanded before closing').to.equal(100);
+
+      el.open = false;
+      await el.updateComplete;
+      el.open = true;
+      await settle(el);
+
+      expect(calls[calls.length - 1].limit, 'a new session starts fresh').to.equal(50);
+      expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+    });
+
+    // Two reads of the SAME repo can be in flight at once, because every read
+    // here re-fetches from HEAD@{0} at the current limit. If the superseded one
+    // lands last, `entries` and `entryLimit` end up describing different reads
+    // and hasMoreEntries goes false on a list that is still truncated — the
+    // recovery surface then tells the user there is nothing older when there is.
+    describe('superseded reads', () => {
+      /** get_reflog reads that are held open until the test releases them. */
+      function deferredReflog(total: number): {
+        pending: Array<{ limit: number; release: () => void }>;
+        defer: () => void;
+      } {
+        const all = pageEntries(total);
+        const pending: Array<{ limit: number; release: () => void }> = [];
+        let deferring = false;
+        mockInvoke = async (command, args) => {
+          if (command === 'get_reflog') {
+            const limit = (args as { limit?: number }).limit ?? total;
+            const page = all.slice(0, limit);
+            if (!deferring) return page;
+            return new Promise((resolve) => {
+              pending.push({ limit, release: () => resolve(page) });
+            });
+          }
+          if (command === 'plugin:dialog|message') return 'Ok';
+          if (command === 'reset_to_reflog') throw new Error('reflog moved');
+          return null;
+        };
+        return { pending, defer: () => { deferring = true; } };
+      }
+
+      /** Let queued microtasks reach the mock before inspecting it. */
+      async function flush(): Promise<void> {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      it('discards a page belonging to a session the user already closed', async () => {
+        const { pending, defer } = deferredReflog(120);
+        const el = await openDialog();
+        expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+
+        defer();
+        showMore(el)!.click();
+        await flush();
+        expect(pending.map((p) => p.limit), 'the 100-entry page is in flight').to.deep.equal([100]);
+
+        // Escape, then reopen on the SAME repo: `open` and the pinned repo both
+        // match again, so the old guards no longer reject the stale page.
+        el.open = false;
+        await el.updateComplete;
+        el.open = true;
+        await el.updateComplete;
+        await flush();
+        expect(pending.map((p) => p.limit), 'the new session re-reads page one').to.deep.equal([100, 50]);
+
+        pending[0].release(); // the abandoned page lands first...
+        await settle(el);
+        pending[1].release(); // ...and the live one last.
+        await settle(el);
+
+        expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+        expect(showMore(el), 'a truncated list must keep offering older entries').to.not.be.null;
+        expect(note(el)).to.match(/first 50/);
+      });
+
+      it('keeps the footer honest when a failed reset refreshes over a page in flight', async () => {
+        resetRefOpLocks();
+        const all = pageEntries(120);
+        const { pending, defer } = deferredReflog(120);
+        const el = await openDialog();
+        expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+
+        defer();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        void (el as any).loadMoreEntries();
+        await flush();
+        expect(pending.map((p) => p.limit)).to.deep.equal([100]);
+
+        // The reset fails, and its "refresh and try again" reload reads at the
+        // limit the in-flight page has not advanced yet.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const reset = (el as any).handleReset(all[5], 'mixed') as Promise<void>;
+        await flush();
+        expect(pending.map((p) => p.limit), 'the refresh re-reads page one').to.deep.equal([100, 50]);
+
+        pending[0].release();
+        await settle(el);
+        pending[1].release();
+        await reset;
+        await settle(el);
+
+        expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+        expect(showMore(el), 'a truncated list must keep offering older entries').to.not.be.null;
+        expect(note(el)).to.match(/first 50/);
+        resetRefOpLocks();
+      });
+
+      // Closing the trigger as well as the race: a click here starts a read the
+      // reset's own refresh will supersede, so the page the user asked for is
+      // thrown away and the control does nothing they can see.
+      it('does not offer Show more while a reset is running', async () => {
+        const calls: Array<{ limit?: number }> = [];
+        mockReflogOfSize(120, calls);
+        const el = await openDialog();
+
+        expect(showMore(el)!.disabled, 'available while the dialog is idle').to.be.false;
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (el as any).resetting = true;
+        await el.updateComplete;
+
+        expect(showMore(el)!.disabled, 'a read racing the reset is not a live option').to.be.true;
+      });
     });
   });
 });
