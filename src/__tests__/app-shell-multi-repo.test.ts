@@ -1861,6 +1861,151 @@ describe('closing the last repository closes its dialogs', () => {
 
     el.remove();
   });
+
+  // The mirror image: these dialogs render OUTSIDE the activeRepository block,
+  // so their element is never destroyed and the spring-back-open failure the
+  // sweep exists to prevent cannot happen to them. Every one is reachable with
+  // zero repositories — the welcome screen offers the profile manager, and the
+  // palette's SSH, profiles and provider entries are not repo-guarded — so
+  // clearing their flags only kills a session the user deliberately started.
+  it('leaves repo-independent dialogs open when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const repoIndependent = [
+      'showSsh',
+      'showProfileManager',
+      'showMigrationDialog',
+      'showGitHub',
+      'showGitLab',
+      'showBitbucket',
+      'showAzureDevOps',
+      'showOidc',
+    ];
+    const internal = el as unknown as Record<string, unknown>;
+    for (const key of repoIndependent) internal[key] = true;
+    // Control: GPG renders inside the activeRepository block, so it must still
+    // be swept — proof the exclusion did not simply disable the sweep.
+    internal.showGpg = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    for (const key of repoIndependent) {
+      expect(internal[key], `${key} is not repo-scoped`).to.be.true;
+    }
+    expect(internal.showGpg, 'GPG must not outlive its repository').to.be.false;
+
+    el.remove();
+  });
+
+  it('keeps an in-progress account connect alive when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as Record<string, unknown>;
+    internal.showProfileManager = true;
+    await el.updateComplete;
+
+    // Drive the REAL handler: the manager stacks a provider dialog on itself to
+    // connect an account to a profile. The listener is bound directly on the
+    // element, so the event does not need to bubble.
+    el.shadowRoot!.querySelector('lv-profile-manager-dialog')!.dispatchEvent(
+      new CustomEvent('open-github', {
+        detail: {
+          returnTo: 'profile-manager',
+          integrationType: 'github',
+          profileId: 'p1',
+          profileName: 'Work',
+          attach: true,
+        },
+      })
+    );
+    await el.updateComplete;
+
+    expect(internal.showGitHub, 'the connect flow opened the provider dialog').to.be.true;
+    expect(internal.integrationContext, 'the connect flow recorded its return context').to.not.be
+      .null;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    const gh = el.shadowRoot!.querySelector('lv-github-dialog') as HTMLElement & {
+      open: boolean;
+    };
+    expect(gh.open, 'the connect dialog survives the tab close').to.be.true;
+    const pm = el.shadowRoot!.querySelector('lv-profile-manager-dialog') as HTMLElement & {
+      open: boolean;
+    };
+    expect(pm.open, 'the manager underneath stays open').to.be.true;
+    expect(internal.integrationContext, 'return context is not stranded without a dialog').to.not
+      .be.null;
+
+    el.remove();
+  });
+
+  // Over-reach guard. This passes with or without the exclusions above; it is
+  // here so that widening REPO_INDEPENDENT_DIALOGS to a dialog that really does
+  // render inside the activeRepository block fails loudly.
+  it('still sweeps every dialog that renders inside the repository block', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const repoScoped = [
+      'showRemotes',
+      'showClean',
+      'showBisect',
+      'showSubmodules',
+      'showWorktrees',
+      'showLfs',
+      'showGpg',
+      'showConfig',
+      'showCredentials',
+      'showHooksDialog',
+      'showRepositoryHealth',
+      'showReflog',
+    ];
+    const internal = el as unknown as Record<string, unknown>;
+    for (const key of repoScoped) internal[key] = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    for (const key of repoScoped) {
+      expect(internal[key], `${key} must not outlive its repository`).to.be.false;
+    }
+
+    el.remove();
+  });
 });
 describe('the toolbar command-palette button loads the active repo', () => {
   // Setting showCommandPalette directly skipped openCommandPalette(), the only
