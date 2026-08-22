@@ -22,6 +22,15 @@ pub struct RemoteOperationResult {
     pub repo_path: String,
     pub success: bool,
     pub message: String,
+    /// The IPC error code of a FAILED completion, when there is one — the same
+    /// code the command would have returned to its caller.
+    ///
+    /// A late pull that ends in conflicts is not just "a pull that failed":
+    /// MERGE_HEAD (or the rebase state) is on disk and the user needs the
+    /// conflict dialog. The frontend keys that flow off `MERGE_CONFLICT` /
+    /// `REBASE_CONFLICT`, so flattening the error to a message string alone
+    /// left a conflicted repository with nothing but a red toast.
+    pub error_code: Option<String>,
     /// This completion arrived AFTER the command had already reported a
     /// timeout to its caller, so nothing on the frontend is waiting to
     /// refresh. See `await_remote_task` in commands/remote.rs.

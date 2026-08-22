@@ -114,6 +114,91 @@ describe('git.service late remote-operation completions', () => {
     expect(newestToast()).to.include({ type: 'error', message });
   });
 
+  it('routes a late pull that ended in conflicts into the conflict dialog', () => {
+    // MERGE_HEAD is on disk: the user needs the dialog's Complete/Abort, which
+    // a red toast plus a plain refresh does not offer. app-shell listens for
+    // `merge-conflict` on ITSELF, so the dispatch has to target that element.
+    const shell = document.createElement('app-shell');
+    document.body.appendChild(shell);
+    const conflicts: Array<{ repositoryPath?: string; operationType?: string }> = [];
+    shell.addEventListener('merge-conflict', (e: Event) => {
+      conflicts.push((e as CustomEvent).detail);
+    });
+
+    try {
+      const message = 'Pull failed after it was reported as timed out: Merge conflict';
+      emit('remote-operation-completed', {
+        operation: 'pull',
+        remote: 'origin',
+        repoPath: '/repos/alpha',
+        success: false,
+        message,
+        errorCode: 'MERGE_CONFLICT',
+        late: true,
+      });
+
+      expect(conflicts, 'the conflict dialog must be opened for the right repo').to.deep.equal([
+        { repositoryPath: '/repos/alpha', operationType: 'merge' },
+      ]);
+      // Not an error: the pull landed and now needs resolving.
+      expect(newestToast()).to.include({ type: 'warning', message });
+    } finally {
+      shell.remove();
+    }
+  });
+
+  it('opens a late rebase conflict as a rebase, not a merge', () => {
+    const shell = document.createElement('app-shell');
+    document.body.appendChild(shell);
+    const conflicts: Array<{ repositoryPath?: string; operationType?: string }> = [];
+    shell.addEventListener('merge-conflict', (e: Event) => {
+      conflicts.push((e as CustomEvent).detail);
+    });
+
+    try {
+      emit('remote-operation-completed', {
+        operation: 'pull',
+        remote: 'origin',
+        repoPath: '/repos/alpha',
+        success: false,
+        message: 'Pull failed after it was reported as timed out: Rebase conflict',
+        errorCode: 'REBASE_CONFLICT',
+        late: true,
+      });
+
+      expect(conflicts).to.deep.equal([
+        { repositoryPath: '/repos/alpha', operationType: 'rebase' },
+      ]);
+    } finally {
+      shell.remove();
+    }
+  });
+
+  it('still refreshes a late failure that is not a conflict', () => {
+    const shell = document.createElement('app-shell');
+    document.body.appendChild(shell);
+    const conflicts: unknown[] = [];
+    shell.addEventListener('merge-conflict', () => conflicts.push(true));
+
+    try {
+      emit('remote-operation-completed', {
+        operation: 'pull',
+        remote: 'origin',
+        repoPath: '/repos/alpha',
+        success: false,
+        message: 'Pull failed after it was reported as timed out: Authentication required',
+        errorCode: 'AUTH_REQUIRED',
+        late: true,
+      });
+
+      expect(conflicts, 'only a conflict opens the conflict dialog').to.deep.equal([]);
+      expect(refreshes).to.deep.equal(['/repos/alpha']);
+      expect(newestToast()?.type).to.equal('error');
+    } finally {
+      shell.remove();
+    }
+  });
+
   it('leaves an ordinary completion alone', () => {
     // The caller that issued the push already refreshes; a second refresh from
     // here would be the overreach.

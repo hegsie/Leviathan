@@ -172,7 +172,8 @@ pub async fn fetch(
             .find_remote(&remote_name_owned)
             .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
 
-        let mut fetch_opts = credentials_service::get_fetch_options_with_deadline(token, deadline);
+        let (mut fetch_opts, aborted) =
+            credentials_service::get_fetch_options_with_deadline(token, deadline);
         if prune_val {
             fetch_opts.prune(git2::FetchPrune::On);
         }
@@ -188,7 +189,13 @@ pub async fn fetch(
             .fetch(&refspec_strs, Some(&mut fetch_opts), None)
             .map_err(|e| {
                 // libgit2 reports a deadline abort as a generic error; name it.
-                if crate::utils::deadline_passed(deadline) {
+                // ONLY a transfer the deadline callback actually aborted, though
+                // — asking `deadline_passed` here relabelled every failure that
+                // happened to surface after the deadline (a wrong credential, a
+                // protocol error, a full disk) as "timed out", and on the pull
+                // path such an error is then dropped as an already-reported
+                // timeout, so the real cause never reached the user.
+                if aborted.load(std::sync::atomic::Ordering::SeqCst) {
                     LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
                 } else {
                     e.into()
@@ -208,30 +215,9 @@ pub async fn fetch(
             // A background fetch stays silent, but one the user asked for that
             // lands after its timeout error must say so: the caller already
             // returned an error and will never refresh.
-            if quiet {
-                return;
+            if let Some(event) = fetch_late_event(quiet, late, remote_late, repo_late) {
+                let _ = app_late.emit("remote-operation-completed", event);
             }
-            let (success, message) = match late {
-                Ok(()) => (
-                    true,
-                    "Fetch finished after it was reported as timed out".to_string(),
-                ),
-                Err(e) => (
-                    false,
-                    format!("Fetch failed after it was reported as timed out: {}", e),
-                ),
-            };
-            let _ = app_late.emit(
-                "remote-operation-completed",
-                RemoteOperationResult {
-                    operation: "fetch".to_string(),
-                    remote: remote_late,
-                    repo_path: repo_late,
-                    success,
-                    message,
-                    late: true,
-                },
-            );
         },
     )
     .await?;
@@ -246,12 +232,62 @@ pub async fn fetch(
                 repo_path,
                 success: true,
                 message: "Fetch completed successfully".to_string(),
+                error_code: None,
                 late: false,
             },
         );
     }
 
     Ok(())
+}
+
+/// The message and IPC error code for a failure reported through an EVENT
+/// rather than as a command result.
+///
+/// The code is what the frontend already switches on (MERGE_CONFLICT,
+/// REBASE_CONFLICT, ...); a late completion that carried only prose lost it.
+fn late_failure(prefix: &str, error: LeviathanError) -> (String, Option<String>) {
+    let message = format!("{}: {}", prefix, error);
+    (message, Some(crate::error::ErrorResponse::from(error).code))
+}
+
+/// The event a fetch that landed after its reported timeout should emit, if
+/// any.
+///
+/// A free function rather than a closure body so both branches are testable:
+/// whether a background fetch stays silent, and what a user-initiated one says
+/// when it lands late, are user-visible decisions.
+fn fetch_late_event(
+    quiet: bool,
+    late: Result<()>,
+    remote: String,
+    repo_path: String,
+) -> Option<RemoteOperationResult> {
+    // A fetch the user did not ask for must not announce itself, late or not.
+    if quiet {
+        return None;
+    }
+    let (success, message, error_code) = match late {
+        Ok(()) => (
+            true,
+            "Fetch finished after it was reported as timed out".to_string(),
+            None,
+        ),
+        Err(e) => {
+            let (message, code) =
+                late_failure("Fetch failed after it was reported as timed out", e);
+            (false, message, code)
+        }
+    };
+    Some(RemoteOperationResult {
+        operation: "fetch".to_string(),
+        remote,
+        repo_path,
+        success,
+        message,
+        error_code,
+        late: true,
+    })
 }
 
 /// Refuse a pull while another operation is unresolved, the way merge() does.
@@ -298,8 +334,10 @@ fn network_deadline(timeout_secs: Option<u64>) -> Option<std::time::Instant> {
 /// to a detached reporter that announces the real outcome when it lands.
 ///
 /// `on_late` is skipped when the abandoned task ends in `OperationTimeout`:
-/// that is the in-task deadline stopping the work cleanly — the very outcome
-/// the caller was already told about — so there is nothing new to report.
+/// that is the in-task deadline stopping the work cleanly, before anything was
+/// written — the very outcome the caller was already told about — so there is
+/// nothing new to report. `OperationTimeoutAfterChange` is deliberately NOT
+/// suppressed: it means the work had already changed the repository.
 async fn await_remote_task<T: Send + 'static>(
     timeout: Option<std::time::Duration>,
     label: &str,
@@ -307,6 +345,7 @@ async fn await_remote_task<T: Send + 'static>(
     on_late: impl FnOnce(Result<T>) + Send + 'static,
 ) -> Result<T> {
     let label_owned = label.to_string();
+    let late_label = label.to_string();
     let join_failed = move |e: tokio::task::JoinError| {
         LeviathanError::Custom(format!("{} task failed: {}", label_owned, e))
     };
@@ -324,7 +363,17 @@ async fn await_remote_task<T: Send + 'static>(
                 match handle.await {
                     Ok(Err(LeviathanError::OperationTimeout(_))) => {}
                     Ok(result) => on_late(result),
-                    Err(e) => tracing::warn!("abandoned remote task failed to join: {}", e),
+                    // A panic AFTER the task moved refs or rewrote the working
+                    // tree is exactly the silent mutation this reporter exists
+                    // to prevent, so a log line is not enough: report it like
+                    // any other late failure so the frontend refreshes.
+                    Err(e) => {
+                        tracing::warn!("abandoned remote task failed to join: {}", e);
+                        on_late(Err(LeviathanError::Custom(format!(
+                            "{} task failed: {}",
+                            late_label, e
+                        ))));
+                    }
                 }
             });
             Err(LeviathanError::OperationTimeout(format!(
@@ -676,8 +725,14 @@ pub(crate) fn pull_branch(
     // thread would otherwise rewrite refs and the working tree minutes later,
     // with the user looking at a "Pull operation timed out" error and the
     // retry hitting ensure_pullable's "another operation is in progress".
+    //
+    // Reported as OperationTimeoutAfterChange, NOT OperationTimeout: the fetch
+    // above already wrote the remote-tracking refs and FETCH_HEAD, so this
+    // repository DID change. await_remote_task suppresses a plain
+    // OperationTimeout as an outcome the caller was already told about, which
+    // would leave those writes with no late event and no refresh anywhere.
     if crate::utils::deadline_passed(deadline) {
-        return Err(LeviathanError::OperationTimeout(
+        return Err(LeviathanError::OperationTimeoutAfterChange(
             "Pull operation timed out".to_string(),
         ));
     }
@@ -785,7 +840,7 @@ pub async fn pull(
             // The merge or rebase landed after the caller was told the pull
             // timed out: refs and the working tree changed with nothing on the
             // frontend waiting to refresh. Announce the real outcome.
-            let (remote, success, message) = match late {
+            let (remote, success, message, error_code) = match late {
                 Ok((remote, message)) => (
                     remote,
                     true,
@@ -793,12 +848,18 @@ pub async fn pull(
                         "Pull finished after it was reported as timed out: {}",
                         message
                     ),
+                    None,
                 ),
-                Err(e) => (
-                    "unknown".to_string(),
-                    false,
-                    format!("Pull failed after it was reported as timed out: {}", e),
-                ),
+                // With the code, not just the text: a late pull that ends in
+                // MergeConflict/RebaseConflict leaves MERGE_HEAD (or the rebase
+                // state) on disk, and the frontend needs the code to open the
+                // conflict dialog for it — the same thing the normal pull path
+                // does with the command's own error.
+                Err(e) => {
+                    let (message, code) =
+                        late_failure("Pull failed after it was reported as timed out", e);
+                    ("unknown".to_string(), false, message, code)
+                }
             };
             let _ = app_late.emit(
                 "remote-operation-completed",
@@ -808,6 +869,7 @@ pub async fn pull(
                     repo_path: repo_late,
                     success,
                     message,
+                    error_code,
                     late: true,
                 },
             );
@@ -823,6 +885,7 @@ pub async fn pull(
             repo_path,
             success: true,
             message,
+            error_code: None,
             late: false,
         },
     );
@@ -844,7 +907,8 @@ fn fetch_internal(
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options_with_deadline(token, deadline);
+    let (mut fetch_opts, aborted) =
+        credentials_service::get_fetch_options_with_deadline(token, deadline);
 
     if prune {
         fetch_opts.prune(git2::FetchPrune::On);
@@ -862,8 +926,9 @@ fn fetch_internal(
         .fetch(&refspec_strs, Some(&mut fetch_opts), None)
         .map_err(|e| {
             // libgit2 reports a deadline abort as a generic indexer error;
-            // name it for what it is.
-            if crate::utils::deadline_passed(deadline) {
+            // name it for what it is — but only when the deadline callback is
+            // what aborted this transfer. See the same guard in `fetch`.
+            if aborted.load(std::sync::atomic::Ordering::SeqCst) {
                 LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
             } else {
                 e.into()
@@ -1107,7 +1172,7 @@ pub async fn push(
             // git2 offers no way to abort a push in flight, so a slow push can
             // land — force push included — after the caller was told it timed
             // out. Say what actually happened to the remote branch.
-            let (remote, success, message) = match late {
+            let (remote, success, message, error_code) = match late {
                 Ok((remote, branch)) => {
                     let done = push_message(
                         &remote,
@@ -1120,13 +1185,14 @@ pub async fn push(
                         remote,
                         true,
                         format!("Push finished after it was reported as timed out: {}", done),
+                        None,
                     )
                 }
-                Err(e) => (
-                    "unknown".to_string(),
-                    false,
-                    format!("Push failed after it was reported as timed out: {}", e),
-                ),
+                Err(e) => {
+                    let (message, code) =
+                        late_failure("Push failed after it was reported as timed out", e);
+                    ("unknown".to_string(), false, message, code)
+                }
             };
             let _ = app_late.emit(
                 "remote-operation-completed",
@@ -1136,6 +1202,7 @@ pub async fn push(
                     repo_path: repo_late,
                     success,
                     message,
+                    error_code,
                     late: true,
                 },
             );
@@ -1159,6 +1226,7 @@ pub async fn push(
             repo_path,
             success: true,
             message,
+            error_code: None,
             late: false,
         },
     );
@@ -1443,6 +1511,7 @@ pub async fn push_to_multiple_remotes(
                 "Pushed to {} remote(s) ({} failed)",
                 total_success, total_failed
             ),
+            error_code: None,
             late: false,
         },
     );
@@ -1527,6 +1596,7 @@ pub async fn fetch_all_remotes(
                 "Fetched from {} remotes ({} failed)",
                 total_fetched, total_failed
             ),
+            error_code: None,
             late: false,
         },
     );
@@ -1681,6 +1751,18 @@ mod tests {
         })
     }
 
+    /// Wait for the detached reporter to hand something over, rather than
+    /// pinning the test to a fixed sleep the machine may not honour.
+    async fn late_outcome<T: Send + 'static>(seen: &LateSlot<T>) -> Option<Result<T>> {
+        for _ in 0..250 {
+            if seen.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        seen.lock().unwrap().take()
+    }
+
     /// `tokio::time::timeout` only DROPS the future it wraps — a
     /// `spawn_blocking` task keeps running. The merge landed minutes after the
     /// user was told the pull timed out, with no event and no refresh.
@@ -1761,6 +1843,133 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(seen.lock().unwrap().is_none());
+    }
+
+    /// A timeout raised AFTER the fetch already wrote refs and FETCH_HEAD is
+    /// not the "nothing happened" outcome the caller was told about: the
+    /// repository changed, so the late reporter must still fire and the
+    /// frontend must still refresh it.
+    #[tokio::test]
+    async fn test_a_timeout_after_the_repository_changed_is_still_reported() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(120));
+            Err(LeviathanError::OperationTimeoutAfterChange(
+                "Pull operation timed out".to_string(),
+            ))
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+        assert!(matches!(result, Err(LeviathanError::OperationTimeout(_))));
+
+        match late_outcome(&seen).await {
+            Some(Err(LeviathanError::OperationTimeoutAfterChange(_))) => {}
+            Some(other) => panic!("unexpected late outcome: {:?}", other.err()),
+            None => panic!("a timeout that had already changed the repo went unreported"),
+        }
+    }
+
+    /// ...and it still reads as an ordinary timeout to the frontend, so the
+    /// distinction stays internal to `await_remote_task`.
+    #[test]
+    fn test_a_post_fetch_timeout_reports_the_ordinary_timeout_code() {
+        let response = crate::error::ErrorResponse::from(
+            LeviathanError::OperationTimeoutAfterChange("Pull operation timed out".to_string()),
+        );
+        assert_eq!(response.code, "OPERATION_TIMEOUT");
+    }
+
+    /// A panic inside an abandoned task can land after it moved refs or
+    /// rewrote the working tree. A log line reaches nobody; the frontend needs
+    /// the event to refresh.
+    #[tokio::test]
+    async fn test_a_panicking_abandoned_task_is_reported_not_just_logged() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| -> Result<()> {
+            std::thread::sleep(Duration::from_millis(120));
+            panic!("boom")
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+        assert!(matches!(result, Err(LeviathanError::OperationTimeout(_))));
+
+        match late_outcome(&seen).await {
+            Some(Err(LeviathanError::Custom(m))) => assert!(
+                m.starts_with("Pull task failed:"),
+                "unexpected late join failure: {}",
+                m
+            ),
+            Some(other) => panic!("unexpected late outcome: {:?}", other.err()),
+            None => panic!("the abandoned task's panic was never reported"),
+        }
+    }
+
+    // ---- what a fetch says when it lands after its timeout ----
+
+    /// A fetch the user never asked for stays silent, late or not — the
+    /// window-focus refresh runs this same command.
+    #[test]
+    fn test_a_background_fetch_says_nothing_when_it_lands_late() {
+        assert!(
+            fetch_late_event(true, Ok(()), "origin".to_string(), "/repos/a".to_string()).is_none()
+        );
+        assert!(fetch_late_event(
+            true,
+            Err(LeviathanError::OperationFailed("boom".to_string())),
+            "origin".to_string(),
+            "/repos/a".to_string(),
+        )
+        .is_none());
+    }
+
+    /// A fetch the user asked for that lands after its timeout error must say
+    /// so: the caller already returned an error and will never refresh.
+    #[test]
+    fn test_a_user_fetch_reports_the_outcome_it_actually_had() {
+        let done = fetch_late_event(false, Ok(()), "origin".to_string(), "/repos/a".to_string())
+            .expect("a user-initiated fetch must report its late completion");
+        assert_eq!(done.operation, "fetch");
+        assert_eq!(done.remote, "origin");
+        assert_eq!(done.repo_path, "/repos/a");
+        assert!(done.success);
+        assert!(done.late);
+        assert_eq!(done.error_code, None);
+
+        let failed = fetch_late_event(
+            false,
+            Err(LeviathanError::OperationFailed("boom".to_string())),
+            "origin".to_string(),
+            "/repos/a".to_string(),
+        )
+        .expect("a late failure must be reported too");
+        assert!(!failed.success);
+        assert!(failed.late);
+        assert!(failed.message.contains("boom"), "{}", failed.message);
+        assert_eq!(failed.error_code.as_deref(), Some("OPERATION_FAILED"));
+    }
+
+    /// Only a transfer the deadline callback aborted is a timeout. Anything
+    /// else that fails while the deadline happens to be in the past keeps its
+    /// own error — relabelling it hid auth and protocol failures behind
+    /// "timed out", and on the pull path suppressed them entirely.
+    #[test]
+    fn test_a_fetch_failure_that_is_not_a_deadline_abort_keeps_its_error() {
+        let local = TestRepo::new();
+        local.add_remote("origin", "/does/not/exist/upstream.git");
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("a deadline in the past");
+
+        let err = fetch_internal(&local.path_str(), "origin", false, None, Some(past))
+            .expect_err("fetching a remote that does not exist must fail");
+
+        assert!(
+            !matches!(err, LeviathanError::OperationTimeout(_)),
+            "a connection failure must not be relabelled as a timeout: {}",
+            err
+        );
     }
 
     /// A panicking task keeps today's message, so the restructure is not a
@@ -1868,8 +2077,11 @@ mod tests {
             Some(Instant::now() - Duration::from_secs(1)),
         );
 
+        // AfterChange, not a plain timeout: the fetch above already wrote the
+        // remote-tracking refs, so this outcome must still reach the late
+        // reporter (await_remote_task suppresses a plain OperationTimeout).
         match result {
-            Err(LeviathanError::OperationTimeout(m)) => {
+            Err(LeviathanError::OperationTimeoutAfterChange(m)) => {
                 assert_eq!(m, "Pull operation timed out");
             }
             other => panic!("expected a Pull timeout, got {:?}", other.map(|_| ())),

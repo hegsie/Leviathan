@@ -5,7 +5,8 @@
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Service name for keychain storage
@@ -414,17 +415,21 @@ fn extract_host(url: &str) -> Option<String> {
 
 /// Get fetch options with credential and progress callbacks
 pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
-    get_fetch_options_with_deadline(token, None)
+    get_fetch_options_with_deadline(token, None).0
 }
 
 /// Same, but the transfer aborts itself once `deadline` passes.
+///
+/// Returns the abort flag alongside the options — see
+/// `get_callbacks_with_deadline` for why the caller needs it.
 pub fn get_fetch_options_with_deadline<'a>(
     token: Option<String>,
     deadline: Option<std::time::Instant>,
-) -> git2::FetchOptions<'a> {
+) -> (git2::FetchOptions<'a>, Arc<AtomicBool>) {
     let mut fetch_opts = git2::FetchOptions::new();
-    fetch_opts.remote_callbacks(get_callbacks_with_deadline(token, deadline));
-    fetch_opts
+    let (callbacks, aborted) = get_callbacks_with_deadline(token, deadline);
+    fetch_opts.remote_callbacks(callbacks);
+    (fetch_opts, aborted)
 }
 
 /// Get push options with credential and progress callbacks
@@ -452,7 +457,7 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
 
 /// Get remote callbacks with both credential and progress support
 pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
-    get_callbacks_with_deadline(token, None)
+    get_callbacks_with_deadline(token, None).0
 }
 
 /// Same, but the transfer aborts itself once `deadline` passes.
@@ -461,15 +466,28 @@ pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks
 /// libgit2 offers, and it is the one `clone_repository` already uses: without
 /// it a fetch keeps downloading long after the caller's `tokio::time::timeout`
 /// gave up, because dropping that future does not cancel the blocking task.
+///
+/// The returned flag is set at the moment the callback aborts the transfer,
+/// and is the ONLY way the error site can tell that abort apart from any other
+/// libgit2 failure that merely happened to surface after the deadline. Asking
+/// `deadline_passed` there instead relabelled auth failures, protocol errors
+/// and disk errors as "timed out" — and on the pull path such a relabelled
+/// error is then suppressed as an already-reported timeout, so the real
+/// failure never reached the user at all.
 pub fn get_callbacks_with_deadline<'a>(
     token: Option<String>,
     deadline: Option<std::time::Instant>,
-) -> RemoteCallbacks<'a> {
+) -> (RemoteCallbacks<'a>, Arc<AtomicBool>) {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let abort_flag = Arc::clone(&aborted);
 
     // Add transfer progress callback
     callbacks.transfer_progress(move |stats| {
         if crate::utils::deadline_passed(deadline) {
+            // Recorded BEFORE the abort, so the error libgit2 raises for it is
+            // already attributable by the time the caller inspects it.
+            abort_flag.store(true, Ordering::SeqCst);
             return false;
         }
 
@@ -516,7 +534,7 @@ pub fn get_callbacks_with_deadline<'a>(
         }
     });
 
-    callbacks
+    (callbacks, aborted)
 }
 
 #[cfg(test)]
