@@ -188,9 +188,10 @@ describe('VirtualScrollManager wide-graph lane culling', () => {
   const ROW_HEIGHT = 22;
   const LANE_WIDTH = 14;
   const PADDING = 20;
-  const MAX_LANE = 60; // content width = 61 * 14 + 40 = 894
-  const VIEW_W = 400; // maxScrollX = 494
-  const SCROLL_RIGHT = 494; // scrolled fully right, to the message column
+  const MAX_LANE = 60;
+  const VIEW_W = 400;
+  const CONTENT_W = (MAX_LANE + 1) * LANE_WIDTH + PADDING * 2;
+  const SCROLL_RIGHT = CONTENT_W - VIEW_W; // scrolled fully right, to the message column
 
   /**
    * Wide layout: rows alternate between the mainline (lane 0, drawn at the
@@ -257,7 +258,10 @@ describe('VirtualScrollManager wide-graph lane culling', () => {
       height: 10 * ROW_HEIGHT,
     });
 
-    // Columns 31..65 are on screen; mirrored, those are lanes 0..29
+    // The computed column window is 31..65 (viewport plus the +/-2 overscan and
+    // ceil() slack; the graph itself only has drawn columns 0..60). Mirrored
+    // back, maxLane - endColumn clamps to lane 0 and maxLane - startColumn
+    // gives lane 29.
     expect(range.startLane).to.equal(0);
     expect(range.endLane).to.equal(29);
   });
