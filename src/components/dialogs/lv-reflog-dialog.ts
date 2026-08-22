@@ -415,6 +415,22 @@ export class LvReflogDialog extends LitElement {
    */
   private pinnedRepoPath = '';
 
+  /**
+   * Identifies the listing a reflog read belongs to, so a read that has been
+   * superseded cannot write its page into a listing that no longer wants it.
+   *
+   * Pinning the repo was not enough: every read here re-fetches from HEAD@{0}
+   * at the CURRENT limit, so two reads of the SAME repo can be in flight at
+   * once — a "Show more" (100) racing the fresh 50-entry read of a reopened
+   * session, or racing the refresh a failed reset fires. Whichever lands last
+   * wins `entries`, while `entryLimit` keeps the other read's number; the two
+   * then disagree and `hasMoreEntries` goes false on a list that is still
+   * truncated, so the footer claims "Showing all 50" and withdraws Show more
+   * on a reflog that demonstrably holds more. Every fetch takes a generation
+   * and discards its result if a newer one has started since.
+   */
+  private fetchGeneration = 0;
+
   /** The repo this dialog is pinned to while open, or null when closed. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.open ? this.pinnedRepoPath : null;
@@ -485,24 +501,36 @@ export class LvReflogDialog extends LitElement {
   private async loadReflog(): Promise<void> {
     if (!this.pinnedRepoPath) return;
 
+    const gen = ++this.fetchGeneration;
+    const repoPath = this.pinnedRepoPath;
+    // The limit this read actually asked for. `entryLimit` can move under the
+    // await (a concurrent "Show more" advances it on success), and publishing
+    // a page under someone else's number is exactly what makes the footer lie.
+    const requestedLimit = this.entryLimit;
+
     this.loading = true;
     this.entries = [];
 
     try {
-      const result = await gitService.getReflog(this.pinnedRepoPath, this.entryLimit);
+      const result = await gitService.getReflog(repoPath, requestedLimit);
+      if (gen !== this.fetchGeneration) return;
       if (result.success && result.data) {
         this.entries = result.data;
+        // Keep the two halves of `hasMoreEntries` describing the SAME read.
+        this.entryLimit = requestedLimit;
       } else if (!result.success) {
         showToast(`Failed to load reflog: ${result.error?.message ?? 'Unknown error'}`, 'error');
       }
     } catch (err) {
+      if (gen !== this.fetchGeneration) return;
       console.error('Failed to load reflog:', err);
       showToast(
         `Failed to load reflog: ${err instanceof Error ? err.message : 'Unknown error'}`,
         'error',
       );
     } finally {
-      this.loading = false;
+      // A superseded read must not clear the spinner the live read raised.
+      if (gen === this.fetchGeneration) this.loading = false;
     }
   }
 
@@ -524,10 +552,12 @@ export class LvReflogDialog extends LitElement {
     // stale page must not overwrite the fresh listing.
     const repoPath = this.pinnedRepoPath;
     const nextLimit = this.entryLimit + REFLOG_PAGE_SIZE;
+    const gen = ++this.fetchGeneration;
     this.loadingMore = true;
 
     try {
       const result = await gitService.getReflog(repoPath, nextLimit);
+      if (gen !== this.fetchGeneration) return;
       if (!this.open || this.pinnedRepoPath !== repoPath) return;
       if (result.success && result.data) {
         this.entries = result.data;
@@ -539,6 +569,7 @@ export class LvReflogDialog extends LitElement {
         );
       }
     } catch (err) {
+      if (gen !== this.fetchGeneration) return;
       console.error('Failed to load more reflog entries:', err);
       showToast(
         `Failed to load more reflog entries: ${err instanceof Error ? err.message : 'Unknown error'}`,
@@ -596,6 +627,11 @@ export class LvReflogDialog extends LitElement {
 
   public close(): void {
     this.open = false;
+    // Closing ends the session, so nothing still in flight for it may land:
+    // without this a "Show more" left running would be free to publish its
+    // page into the next session the moment that session reopens the SAME
+    // repo, since `open` and `pinnedRepoPath` both match again by then.
+    this.fetchGeneration++;
     // Only handleDocumentClick clears this, and Escape is not a click — so a
     // menu left open at dismissal was repainted at its old coordinates over
     // the next session's freshly loaded list, still holding the PREVIOUS
@@ -974,7 +1010,7 @@ export class LvReflogDialog extends LitElement {
                           <button
                             class="show-more-btn"
                             @click=${this.loadMoreEntries}
-                            ?disabled=${this.loadingMore}
+                            ?disabled=${this.loadingMore || this.resetting}
                           >
                             ${this.loadingMore ? 'Loading...' : 'Show more'}
                           </button>
