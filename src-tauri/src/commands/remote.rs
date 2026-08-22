@@ -1017,17 +1017,22 @@ fn push_via_cli(
     // The net effect was that Force Push — the only route through this
     // function — failed to authenticate on HTTPS precisely BECAUSE a token was
     // found, while pushing with no token stored worked.
+    //
+    // Scoped to the remote's own host, so the token is offered to the host it
+    // belongs to and nowhere else.
     if let Some(ref token_value) = token {
-        cmd.env("LEVIATHAN_PUSH_TOKEN", token_value);
-        cmd.env("GIT_CONFIG_COUNT", "1");
-        cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
-        // `git` as the username matches the git2 path's fallback; every
-        // provider we support authenticates a token as the password and
-        // ignores the username.
-        cmd.env(
-            "GIT_CONFIG_VALUE_0",
-            "!f() { echo username=git; echo \"password=$LEVIATHAN_PUSH_TOKEN\"; }; f",
-        );
+        let remote_url: Option<String> = git2::Repository::open(path).ok().and_then(|repo| {
+            let remote = repo.find_remote(remote_name).ok()?;
+            remote
+                .pushurl()
+                .ok()
+                .flatten()
+                .or_else(|| remote.url().ok())
+                .map(|u| u.to_string())
+        });
+        if let Some(remote_url) = remote_url {
+            crate::utils::apply_token_credential_helper(&mut cmd, token_value, &remote_url);
+        }
     }
 
     let output = cmd.output().map_err(|e| {
