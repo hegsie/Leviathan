@@ -255,6 +255,45 @@ describe('lv-gitlab-dialog', () => {
       }
     });
 
+    // Regression: these provider dialogs are repo-independent (they stay open
+    // when the last repository tab closes), at which point repositoryPath goes
+    // to ''. The detected repo must be cleared, or the dialog keeps showing --
+    // and acting on -- the repository whose tab was just closed.
+    it('clears the detected repo when repositoryPath becomes empty', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header with a repository open'
+      ).to.equal(1);
+
+      // Last repository tab closed: the host rebinds repositoryPath to ''.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'stale repo header after the last repository tab closed'
+      ).to.equal(0);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const repoTab = Array.from(tabs).find(
+        (t) => t.textContent?.trim() === 'Merge Requests'
+      ) as HTMLButtonElement;
+      repoTab.click();
+      await waitForLoad(el);
+
+      const emptyText = el.shadowRoot!.querySelector('.empty-state')?.textContent?.trim() ?? '';
+      expect(emptyText, 'repo-backed tab after the last repository tab closed').to.contain(
+        'No GitLab repository detected'
+      );
+    });
+
     it('shows account selector when accounts exist', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);
 

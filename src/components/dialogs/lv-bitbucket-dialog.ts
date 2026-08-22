@@ -724,8 +724,15 @@ export class LvBitbucketDialog extends LitElement {
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
-    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
-      await this.detectRepo();
+    if (changedProperties.has('repositoryPath')) {
+      // The dialog is repo-independent (it stays open across the last tab close),
+      // so an empty path must clear the previously detected repo. Otherwise the
+      // repo-backed tabs keep rendering and acting on the closed repository.
+      if (!this.repositoryPath) {
+        this.detectedRepo = null;
+      } else if (this.open) {
+        await this.detectRepo();
+      }
     }
   }
 
