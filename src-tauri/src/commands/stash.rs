@@ -130,6 +130,87 @@ pub async fn pop_stash(path: String, index: usize) -> Result<()> {
     Ok(())
 }
 
+/// Append one diff's files (with per-file line counts) to `files`, returning
+/// that diff's total insertions and deletions.
+///
+/// The per-file line map is built and applied per diff — the entries this diff
+/// contributed are `files[start..]` — so a path present in two diffs keeps two
+/// independent sets of counts.
+fn collect_diff_files(diff: &git2::Diff<'_>, files: &mut Vec<StashFile>) -> Result<(u32, u32)> {
+    let stats = diff.stats()?;
+    let start = files.len();
+
+    diff.foreach(
+        &mut |delta, _| {
+            let file_path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let status = match delta.status() {
+                git2::Delta::Added => "added",
+                git2::Delta::Deleted => "deleted",
+                git2::Delta::Modified => "modified",
+                git2::Delta::Renamed => "renamed",
+                git2::Delta::Copied => "copied",
+                git2::Delta::Typechange => "typechange",
+                _ => "modified",
+            };
+
+            files.push(StashFile {
+                path: file_path,
+                additions: 0, // Will be filled in later
+                deletions: 0,
+                status: status.to_string(),
+            });
+            true
+        },
+        None,
+        None,
+        None,
+    )?;
+
+    // Get per-file stats by iterating through lines
+    // Use RefCell to allow mutable borrow inside closures
+    let file_stats: std::cell::RefCell<std::collections::HashMap<String, (u32, u32)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    diff.foreach(
+        &mut |_delta, _| true,
+        None,
+        None,
+        Some(&mut |delta, _hunk, line| {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let mut stats = file_stats.borrow_mut();
+            let entry = stats.entry(path).or_insert((0, 0));
+            match line.origin() {
+                '+' => entry.0 += 1,
+                '-' => entry.1 += 1,
+                _ => {}
+            }
+            true
+        }),
+    )?;
+    let file_stats = file_stats.into_inner();
+
+    // Update the entries this diff contributed with their stats
+    for file in &mut files[start..] {
+        if let Some((adds, dels)) = file_stats.get(&file.path) {
+            file.additions = *adds;
+            file.deletions = *dels;
+        }
+    }
+
+    Ok((stats.insertions() as u32, stats.deletions() as u32))
+}
+
 /// Show stash contents
 #[command]
 pub async fn stash_show(
@@ -170,6 +251,22 @@ pub async fn stash_show(
 
     let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&stash_tree), None)?;
 
+    // Untracked files stashed with INCLUDE_UNTRACKED are not in the stash
+    // commit's tree — git records them in a third parent commit whose tree holds
+    // only those files. Diff an empty tree against it so the preview shows what
+    // `git stash show -u` would; the app's stash-creation surfaces request
+    // untracked capture, so without this a stash of nothing but new files
+    // reports no files at all. `create_stash` leaves `include_untracked`
+    // optional (defaulting to false), so a stash created without untracked
+    // capture has only two parents — hence the guard below. libgit2 also
+    // writes an EMPTY third parent when untracked capture was
+    // requested but nothing was untracked — which simply yields no deltas.
+    let mut diffs = vec![diff];
+    if stash_commit.parent_count() >= 3 {
+        let untracked_tree = stash_commit.parent(2)?.tree()?;
+        diffs.push(repo.diff_tree_to_tree(None, Some(&untracked_tree), None)?);
+    }
+
     // Collect file stats
     let mut files: Vec<StashFile> = Vec::new();
     let mut total_additions: u32 = 0;
@@ -177,92 +274,27 @@ pub async fn stash_show(
 
     // Get stats if requested (default true)
     if stat.unwrap_or(true) {
-        let stats = diff.stats()?;
-
-        diff.foreach(
-            &mut |delta, _| {
-                let file_path = delta
-                    .new_file()
-                    .path()
-                    .or_else(|| delta.old_file().path())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let status = match delta.status() {
-                    git2::Delta::Added => "added",
-                    git2::Delta::Deleted => "deleted",
-                    git2::Delta::Modified => "modified",
-                    git2::Delta::Renamed => "renamed",
-                    git2::Delta::Copied => "copied",
-                    git2::Delta::Typechange => "typechange",
-                    _ => "modified",
-                };
-
-                files.push(StashFile {
-                    path: file_path,
-                    additions: 0, // Will be filled in later
-                    deletions: 0,
-                    status: status.to_string(),
-                });
-                true
-            },
-            None,
-            None,
-            None,
-        )?;
-
-        // Get per-file stats by iterating through lines
-        // Use RefCell to allow mutable borrow inside closures
-        let file_stats: std::cell::RefCell<std::collections::HashMap<String, (u32, u32)>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
-        diff.foreach(
-            &mut |_delta, _| true,
-            None,
-            None,
-            Some(&mut |delta, _hunk, line| {
-                let path = delta
-                    .new_file()
-                    .path()
-                    .or_else(|| delta.old_file().path())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let mut stats = file_stats.borrow_mut();
-                let entry = stats.entry(path).or_insert((0, 0));
-                match line.origin() {
-                    '+' => entry.0 += 1,
-                    '-' => entry.1 += 1,
-                    _ => {}
-                }
-                true
-            }),
-        )?;
-        let file_stats = file_stats.into_inner();
-
-        // Update file entries with stats
-        for file in &mut files {
-            if let Some((adds, dels)) = file_stats.get(&file.path) {
-                file.additions = *adds;
-                file.deletions = *dels;
-            }
+        for diff in &diffs {
+            let (additions, deletions) = collect_diff_files(diff, &mut files)?;
+            total_additions += additions;
+            total_deletions += deletions;
         }
-
-        total_additions = stats.insertions() as u32;
-        total_deletions = stats.deletions() as u32;
     }
 
     // Generate patch if requested
     let patch_output = if patch.unwrap_or(false) {
         let mut patch_buf = Vec::new();
-        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-            // Add the origin character for context/add/delete lines
-            let origin = line.origin();
-            if origin == '+' || origin == '-' || origin == ' ' {
-                patch_buf.push(origin as u8);
-            }
-            patch_buf.extend_from_slice(line.content());
-            true
-        })?;
+        for diff in &diffs {
+            diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+                // Add the origin character for context/add/delete lines
+                let origin = line.origin();
+                if origin == '+' || origin == '-' || origin == ' ' {
+                    patch_buf.push(origin as u8);
+                }
+                patch_buf.extend_from_slice(line.content());
+                true
+            })?;
+        }
         Some(String::from_utf8_lossy(&patch_buf).to_string())
     } else {
         None
@@ -719,5 +751,124 @@ mod tests {
         let deleted_file = show.files.iter().find(|f| f.path == "to_delete.txt");
         assert!(deleted_file.is_some());
         assert_eq!(deleted_file.unwrap().status, "deleted");
+    }
+
+    #[tokio::test]
+    async fn test_stash_show_includes_untracked_files() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "tracked.txt", "content");
+
+        // The ONLY change is a brand-new untracked file — exactly what the UI
+        // stashes (both creation paths force includeUntracked).
+        repo.create_file("untracked.txt", "brand new\n");
+        create_stash(
+            repo.path_str(),
+            Some("Untracked stash".to_string()),
+            Some(true),
+        )
+        .await
+        .unwrap()
+        .expect("an untracked-only change must still produce a stash");
+
+        let show = stash_show(repo.path_str(), 0, Some(true), Some(false))
+            .await
+            .unwrap();
+
+        let untracked = show
+            .files
+            .iter()
+            .find(|f| f.path == "untracked.txt")
+            .expect("untracked file must appear in the stash preview");
+        assert_eq!(untracked.status, "added");
+        assert_eq!(untracked.additions, 1);
+        assert_eq!(untracked.deletions, 0);
+        assert_eq!(show.total_additions, 1);
+        assert_eq!(show.total_deletions, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stash_show_untracked_alongside_tracked_changes() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "tracked.txt", "line1\nline2\n");
+
+        // Size-changing edit: a same-size rewrite can be judged racily-clean and
+        // captured as nothing (see the note on test_stash_show_basic).
+        repo.create_file("tracked.txt", "line1\nline2 changed and longer\n");
+        repo.create_file("new.txt", "new line\n");
+        create_stash(repo.path_str(), Some("Mixed stash".to_string()), Some(true))
+            .await
+            .unwrap()
+            .expect("expected a stash");
+
+        let show = stash_show(repo.path_str(), 0, Some(true), Some(true))
+            .await
+            .unwrap();
+
+        let paths: Vec<&str> = show.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.contains(&"tracked.txt"),
+            "tracked change missing: {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"new.txt"),
+            "untracked file missing: {:?}",
+            paths
+        );
+        assert_eq!(
+            show.files
+                .iter()
+                .find(|f| f.path == "tracked.txt")
+                .unwrap()
+                .status,
+            "modified"
+        );
+        assert_eq!(
+            show.files
+                .iter()
+                .find(|f| f.path == "new.txt")
+                .unwrap()
+                .status,
+            "added"
+        );
+
+        // The patch must cover the untracked file too (`git stash show -p -u`).
+        let patch = show.patch.expect("patch requested");
+        assert!(
+            patch.contains("+line2 changed and longer"),
+            "patch: {}",
+            patch
+        );
+        assert!(patch.contains("+new line"), "patch: {}", patch);
+
+        // Totals sum both diffs: 1 tracked addition + 1 untracked line.
+        assert_eq!(show.total_additions, 2);
+        assert_eq!(show.total_deletions, 1);
+    }
+
+    #[tokio::test]
+    async fn test_stash_show_include_untracked_with_no_untracked_files() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "file.txt", "line1\nline2\n");
+
+        // includeUntracked is on, but there is nothing untracked. libgit2 still
+        // writes an (empty) untracked parent, which must contribute no files.
+        repo.create_file("file.txt", "line1\nline2 changed and longer\n");
+        create_stash(
+            repo.path_str(),
+            Some("No untracked".to_string()),
+            Some(true),
+        )
+        .await
+        .unwrap()
+        .expect("expected a stash");
+
+        let show = stash_show(repo.path_str(), 0, Some(true), Some(false))
+            .await
+            .unwrap();
+
+        assert_eq!(show.files.len(), 1, "unexpected files: {:?}", show.files);
+        assert_eq!(show.files[0].path, "file.txt");
+        assert_eq!(show.files[0].status, "modified");
     }
 }
