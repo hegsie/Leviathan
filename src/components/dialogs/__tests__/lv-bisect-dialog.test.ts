@@ -39,6 +39,13 @@ import '../lv-bisect-dialog.ts';
 const REPO_A = '/repo/a';
 const REPO_B = '/repo/b';
 
+interface CulpritCommit {
+  oid: string;
+  summary: string;
+  author: string;
+  email: string;
+}
+
 interface BisectStatus {
   active: boolean;
   currentCommit?: string | null;
@@ -47,6 +54,8 @@ interface BisectStatus {
   remaining?: number | null;
   currentStep?: number | null;
   totalSteps?: number | null;
+  /** Set by git once the search has converged; the session stays active. */
+  culprit?: CulpritCommit | null;
 }
 
 function status(overrides: Partial<BisectStatus> = {}): BisectStatus {
@@ -58,9 +67,17 @@ function status(overrides: Partial<BisectStatus> = {}): BisectStatus {
     remaining: 3,
     currentStep: 1,
     totalSteps: 2,
+    culprit: null,
     ...overrides,
   };
 }
+
+const CULPRIT: CulpritCommit = {
+  oid: 'deadbeefcafe',
+  summary: 'Broke the parser',
+  author: 'A',
+  email: 'a@b.c',
+};
 
 /** Status per repository path, so a tab switch yields a different session. */
 let statusByPath: Record<string, BisectStatus> = {};
@@ -319,6 +336,76 @@ describe('lv-bisect-dialog repository targeting', () => {
 
       expect(dialogPrompts.length, 'one prompt, not two').to.equal(1);
       expect(invokeCalls.filter((c) => c.command === 'bisect_reset').length).to.equal(1);
+    });
+  });
+
+  /**
+   * git keeps the session active until `bisect reset`, which only Finish runs.
+   * Closing the result screen any other way (X, Escape, overlay click) left the
+   * culprit in component state alone, so reopening — including from the
+   * operation banner's "Manage Bisect" — showed Good/Bad/Skip again and the
+   * answer the whole search existed to produce was gone.
+   */
+  describe('reopening a finished search', () => {
+    beforeEach(() => {
+      invokeCalls.length = 0;
+      statusByPath = { [REPO_A]: status(), [REPO_B]: { active: false } };
+      installMock();
+    });
+
+    it('reopens on the result, not back on Good/Bad/Skip', async () => {
+      statusByPath = { [REPO_A]: status({ culprit: CULPRIT }) };
+      const el = await openOn(REPO_A);
+
+      const card = el.shadowRoot!.querySelector('.culprit-card');
+      expect(card, 'the recorded culprit is shown again').to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.culprit-oid')!.textContent).to.contain(CULPRIT.oid);
+      expect(
+        el.shadowRoot!.querySelectorAll('.action-btn').length,
+        'a finished search must not ask for another verdict',
+      ).to.equal(0);
+
+      const footer = [...el.shadowRoot!.querySelectorAll('.dialog-footer button')];
+      expect(footer.map((b) => b.textContent?.trim()).join(' ')).to.contain('Finish');
+    });
+
+    it('a search still in flight stays on Good/Bad/Skip', async () => {
+      statusByPath = { [REPO_A]: status() };
+      const el = await openOn(REPO_A);
+
+      expect(el.shadowRoot!.querySelector('.current-commit'), 'still testing').to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.culprit-card')).to.be.null;
+
+      const footer = [...el.shadowRoot!.querySelectorAll('.dialog-footer button')];
+      expect(footer.map((b) => b.textContent?.trim()).join(' ')).to.contain('Abort Bisect');
+    });
+
+    it('switching repositories drops the finished session', async () => {
+      statusByPath = { [REPO_A]: status({ culprit: CULPRIT }), [REPO_B]: { active: false } };
+      const el = await openOn(REPO_A);
+      expect(el.shadowRoot!.querySelector('.culprit-card')).to.not.be.null;
+
+      el.repositoryPath = REPO_B;
+      await settle(el);
+
+      expect(el.shadowRoot!.querySelector('.culprit-card'), 'repo B has no result').to.be.null;
+      expect(
+        el.shadowRoot!.querySelectorAll('.commit-input input').length,
+        'repo B is back at setup',
+      ).to.equal(2);
+    });
+
+    it('uses the recorded culprit when the step output could not be parsed', async () => {
+      const el = await openOn(REPO_A);
+
+      // The step reports no culprit of its own (git's wording changed, say),
+      // but the refreshed status carries git's record of the result.
+      statusByPath[REPO_A] = status({ culprit: CULPRIT });
+      clickAction(el, 'Good');
+      await settle(el);
+
+      expect(el.shadowRoot!.querySelector('.culprit-card'), 'the answer is shown').to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.culprit-oid')!.textContent).to.contain(CULPRIT.oid);
     });
   });
 });

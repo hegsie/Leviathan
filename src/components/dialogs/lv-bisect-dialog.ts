@@ -524,10 +524,23 @@ export class LvBisectDialog extends LitElement {
     if (result.success && result.data) {
       this.status = result.data;
       if (result.data.active) {
-        this.step = 'in-progress';
-        // Fetch current commit info
-        if (result.data.currentCommit) {
-          await this.fetchCurrentCommitInfo(result.data.currentCommit);
+        // The session stays active in git until Finish runs `bisect reset`, so
+        // a dialog closed at the result screen (X, Escape, overlay click) must
+        // reopen ON the result. Mapping every active session to 'in-progress'
+        // presented the finished search as unfinished and lost the answer.
+        // Only when a culprit is actually recorded, though: renderComplete
+        // shows nothing but the log without one.
+        if (result.data.culprit) {
+          this.culprit = result.data.culprit;
+          this.currentCommitInfo = null;
+          this.step = 'complete';
+        } else {
+          this.culprit = null;
+          this.step = 'in-progress';
+          // Fetch current commit info
+          if (result.data.currentCommit) {
+            await this.fetchCurrentCommitInfo(result.data.currentCommit);
+          }
         }
       } else {
         this.step = 'setup';
@@ -632,8 +645,13 @@ export class LvBisectDialog extends LitElement {
         this.status = result.data.status;
         this.message = result.data.message;
 
-        if (result.data.culprit) {
-          this.culprit = result.data.culprit;
+        // Either source: the parsed step output, or git's own record of the
+        // result on the refreshed status. Reading only the output meant a
+        // format git changed left the live step disagreeing with what a reopen
+        // would show.
+        const culprit = result.data.culprit ?? result.data.status.culprit;
+        if (culprit) {
+          this.culprit = culprit;
           this.step = 'complete';
         } else if (result.data.status.currentCommit) {
           await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
@@ -671,8 +689,10 @@ export class LvBisectDialog extends LitElement {
         this.status = result.data.status;
         this.message = result.data.message;
 
-        if (result.data.culprit) {
-          this.culprit = result.data.culprit;
+        // Either source — see handleBad.
+        const culprit = result.data.culprit ?? result.data.status.culprit;
+        if (culprit) {
+          this.culprit = culprit;
           this.step = 'complete';
         } else if (result.data.status.currentCommit) {
           await this.fetchCurrentCommitInfo(result.data.status.currentCommit);
