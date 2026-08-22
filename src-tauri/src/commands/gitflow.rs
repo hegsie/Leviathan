@@ -142,13 +142,23 @@ pub async fn init_gitflow(
     // half-written gitflow config still reads as initialized, so an init that
     // errored after this point used to leave the repository permanently stuck
     // with a config pointing at branches that were never created.
-    config.set_str("gitflow.branch.master", &master)?;
+    //
+    // Each set_str is its own write to .git/config, so the sequence is not
+    // atomic: any of them can fail on its own (a lock held by another process,
+    // a disk that just filled, a key a hand-edit left as a multivar).
+    // gitflow.branch.master is the key get_gitflow_config keys `initialized`
+    // off, so it goes LAST — writing the marker before the six values it
+    // vouches for would let a failure part-way through leave the repository
+    // flagged initialized while develop and the prefixes silently fall back to
+    // defaults at read time, and the panel would never offer the init section
+    // again.
     config.set_str("gitflow.branch.develop", &develop)?;
     config.set_str("gitflow.prefix.feature", &feature)?;
     config.set_str("gitflow.prefix.release", &release)?;
     config.set_str("gitflow.prefix.hotfix", &hotfix)?;
     config.set_str("gitflow.prefix.support", &support)?;
     config.set_str("gitflow.prefix.versiontag", &version_tag)?;
+    config.set_str("gitflow.branch.master", &master)?;
 
     Ok(GitFlowConfig {
         initialized: true,
@@ -1187,6 +1197,52 @@ mod tests {
             err.to_string().contains("main or master"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    /// The seven config writes are seven separate writes to .git/config, so
+    /// one of them can fail on its own. gitflow.branch.master is the key
+    /// `initialized` is read off, so it has to be the last one written — if it
+    /// goes first, a failure part-way through leaves the repo flagged
+    /// initialized while develop and the prefixes fall back to defaults, and
+    /// the panel never offers the init section again.
+    ///
+    /// A duplicated key is the cheapest real way to make exactly one write
+    /// fail: libgit2 refuses set_str on a multivar.
+    #[tokio::test]
+    async fn test_init_gitflow_partial_config_write_leaves_the_repo_uninitialized() {
+        let repo = TestRepo::with_initial_commit();
+
+        // A hand-edited (or merge-mangled) config with gitflow.prefix.feature
+        // listed twice. Every other gitflow write still succeeds.
+        let config_path = repo.path.join(".git").join("config");
+        let mut existing = std::fs::read_to_string(&config_path).unwrap();
+        existing.push_str("[gitflow \"prefix\"]\n\tfeature = a/\n\tfeature = b/\n");
+        std::fs::write(&config_path, existing).unwrap();
+
+        let err = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect_err("init must fail when a gitflow config key cannot be written");
+        assert!(
+            err.to_string().contains("multivar"),
+            "expected the multivar write to be what failed, got: {}",
+            err
+        );
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(
+            !config.initialized,
+            "an init that failed part-way through the config writes must not \
+             leave the repo looking initialized — the panel would never offer \
+             the init section again"
+        );
+        assert!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.master")
+                .is_err(),
+            "the initialized marker must not be persisted by a failed init"
         );
     }
 
