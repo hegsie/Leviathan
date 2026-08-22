@@ -49,6 +49,7 @@ function deleteFlowMock(options: {
   remotes?: MockRemote[];
   answers?: string[];
   deleteRemoteTag?: () => Promise<unknown>;
+  getRemotes?: () => Promise<unknown>;
 }) {
   const dialogMessages: string[] = [];
   const invokes: Array<{ command: string; args?: unknown }> = [];
@@ -61,7 +62,9 @@ function deleteFlowMock(options: {
       dialogMessages.push(String((args as { message?: string } | undefined)?.message ?? ''));
       return Promise.resolve(answers[dialogIndex++] ?? 'Cancel');
     }
-    if (command === 'get_remotes') return Promise.resolve(options.remotes ?? []);
+    if (command === 'get_remotes') {
+      return options.getRemotes ? options.getRemotes() : Promise.resolve(options.remotes ?? []);
+    }
     if (command === 'delete_tag') return Promise.resolve(null);
     if (command === 'delete_remote_tag') {
       return options.deleteRemoteTag ? options.deleteRemoteTag() : Promise.resolve(null);
@@ -228,6 +231,42 @@ describe('lv-tag-list feedback', () => {
 
     expect(flow.dialogMessages[0]).to.match(/stays on the remote/);
     expect(flow.dialogMessages.length, 'nothing to ask about').to.equal(1);
+    expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+  });
+
+  it('the local confirm does not promise a follow-up it may never show', async () => {
+    // The follow-up is offered only when the repo HAS a remote, so the confirm
+    // must not state unconditionally that one is coming — the no-remotes case
+    // above ends after a single dialog.
+    const el = await createComponent();
+    const flow = deleteFlowMock({ remotes: [], answers: ['Ok'] });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    expect(flow.dialogMessages[0], 'no unconditional promise of a next question').to.not.match(
+      /asked about deleting it there next/
+    );
+  });
+
+  it('an unreadable remote list warns instead of silently skipping the follow-up', async () => {
+    // A failed get_remotes is not "no remotes": the local delete already
+    // toasted success, so a silent return tells the user the tag is gone while
+    // the remote copy survives and the next fetch restores it.
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      answers: ['Ok'],
+      getRemotes: () =>
+        Promise.reject({ code: 'COMMAND_ERROR', message: 'could not read remote config' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v3.0.0');
+
+    const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+    expect(warning, 'the user is told the remote copy may survive').to.not.be.undefined;
+    expect(warning!.message).to.contain('v3.0.0');
+    expect(warning!.message).to.contain('remote');
     expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
   });
 

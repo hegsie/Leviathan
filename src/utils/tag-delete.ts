@@ -20,8 +20,7 @@ export function confirmDeleteTag(tagName: string): Promise<boolean> {
     'Delete Tag',
     `Are you sure you want to delete tag "${tagName}"?\n\n` +
       'This removes it from this repository only and cannot be undone. If the ' +
-      'tag was pushed, it stays on the remote and the next fetch restores it — ' +
-      'you will be asked about deleting it there next.',
+      'tag was pushed, it stays on the remote and the next fetch restores it.',
     'warning'
   );
 }
@@ -29,12 +28,25 @@ export function confirmDeleteTag(tagName: string): Promise<boolean> {
 /**
  * Offer to delete the tag on the remote after a successful local delete.
  *
- * Silent no-op when the repo has no remote (or the remote list cannot be
- * read): there is nothing to ask about, and the local delete already reported.
+ * Silent no-op when the repo has no remote: there is nothing to ask about, and
+ * the local delete already reported.
+ *
+ * A FAILED remote lookup is NOT the same as "no remotes" and must not be
+ * collapsed into one: the local delete already toasted success, so silently
+ * skipping the follow-up tells the user the tag is gone while the remote copy
+ * survives and the tag fetch refspec restores it on the next fetch — exactly
+ * the failure this follow-up exists to prevent. Warn instead.
  */
 export async function offerRemoteTagDelete(repoPath: string, tagName: string): Promise<void> {
   const remotesResult = await gitService.getRemotes(repoPath);
-  const remotes = remotesResult.success ? remotesResult.data ?? [] : [];
+  if (!remotesResult.success) {
+    showToast(
+      `Deleted tag ${tagName} locally, but the remote list could not be read — it may still exist on the remote`,
+      'warning'
+    );
+    return;
+  }
+  const remotes = remotesResult.data ?? [];
   if (remotes.length === 0) return;
   // The remote push_tag targets by default, named so the confirm can say it.
   const remote = (remotes.find((r) => r.name === 'origin') ?? remotes[0]).name;
