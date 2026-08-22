@@ -56,7 +56,33 @@ pub fn create_command(program: &str) -> Command {
     cmd
 }
 
-/// Feed a token to a `git` subprocess as a one-shot credential helper.
+/// The `credential.<url>.helper` config key the token helper is installed
+/// under for `remote_url`, or `None` when the URL is not one git asks HTTP
+/// credentials for (SSH, `git://`, a local path) and a token means nothing.
+///
+/// The port is kept when it is not the scheme's default, because git includes
+/// it in the `host=` field of a credential request and only a config URL
+/// carrying the same port matches.
+fn credential_url_key(remote_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(remote_url).ok()?;
+    let scheme = match parsed.scheme() {
+        "https" => "https",
+        "http" => "http",
+        _ => return None,
+    };
+    let host = parsed.host_str()?.to_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let authority = match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host,
+    };
+    Some(format!("credential.{}://{}.helper", scheme, authority))
+}
+
+/// Feed a token to a `git` subprocess as a one-shot credential helper, scoped
+/// to the host `remote_url` points at.
 ///
 /// `create_command` sets GIT_TERMINAL_PROMPT=0, so a git subprocess that needs
 /// HTTPS credentials and has none simply fails — there is no prompt to fall
@@ -68,19 +94,131 @@ pub fn create_command(program: &str) -> Command {
 /// submodule update` clones and fetches each submodule in a child process, and
 /// a `-c` on the outer command would not reach them.
 ///
-/// This ADDS to the user's credential.helper list rather than replacing it —
-/// clearing the list would also disable their own helper, so a token that is
-/// wrong or expired could no longer be recovered from the keychain.
-pub fn apply_token_credential_helper(cmd: &mut Command, token: &str) {
+/// That inheritance is also why the helper MUST be url-scoped rather than
+/// installed as a plain `credential.helper`. The helper snippet never reads the
+/// credential request on stdin, so an unscoped one answers with this token for
+/// whatever host git happens to ask about — and the children `git submodule
+/// update` spawns ask for each submodule's OWN url from .gitmodules, which the
+/// superproject does not control. Scoped to `credential.https://<host>.helper`,
+/// git offers the token only for the host it belongs to and leaves every other
+/// host to the user's own helpers.
+///
+/// Two entries are exported for that one url: an empty value first (git treats
+/// an empty `helper` as "clear the list", and because the key is url-scoped it
+/// clears only the helpers inherited FOR THIS URL — the user's helpers stay
+/// intact for every other host), then the token helper. Without the reset the
+/// injected helper is queried last, since GIT_CONFIG_* is applied after the
+/// user's config; git stops at the first helper returning a complete
+/// credential, so a stale or wrong-account entry in the user's keychain would
+/// win and the app's token would never be tried.
+pub fn apply_token_credential_helper(cmd: &mut Command, token: &str, remote_url: &str) {
+    let Some(key) = credential_url_key(remote_url) else {
+        return;
+    };
+
     cmd.env("LEVIATHAN_GIT_TOKEN", token);
-    cmd.env("GIT_CONFIG_COUNT", "1");
-    cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+    cmd.env("GIT_CONFIG_COUNT", "2");
+    cmd.env("GIT_CONFIG_KEY_0", &key);
+    cmd.env("GIT_CONFIG_VALUE_0", "");
+    cmd.env("GIT_CONFIG_KEY_1", &key);
     // `git` as the username matches the git2 path's fallback; every provider we
     // support authenticates a token as the password and ignores the username.
     // The token stays in the environment and never enters the URL, so it cannot
     // leak into .git/config, the reflog, or a git error message.
     cmd.env(
-        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_VALUE_1",
         "!f() { echo username=git; echo \"password=$LEVIATHAN_GIT_TOKEN\"; }; f",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_credential_url_key_scopes_to_the_host() {
+        assert_eq!(
+            credential_url_key("https://github.com/owner/repo.git").as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+    }
+
+    /// Userinfo must not end up in the config key — git's own credential
+    /// request carries the host alone in `host=`.
+    #[test]
+    fn test_credential_url_key_drops_userinfo_and_normalizes_case() {
+        assert_eq!(
+            credential_url_key("https://someone@GitHub.COM/owner/repo.git").as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+    }
+
+    /// A non-default port is part of git's `host=` field, so it has to be part
+    /// of the config url too or the scope never matches.
+    #[test]
+    fn test_credential_url_key_keeps_a_non_default_port() {
+        assert_eq!(
+            credential_url_key("https://gitlab.example.com:8443/group/repo.git").as_deref(),
+            Some("credential.https://gitlab.example.com:8443.helper")
+        );
+    }
+
+    /// Protocols git never asks HTTP credentials for get nothing injected — a
+    /// token is meaningless there and would only widen its exposure.
+    #[test]
+    fn test_credential_url_key_ignores_non_http_urls() {
+        assert!(credential_url_key("git@github.com:owner/repo.git").is_none());
+        assert!(credential_url_key("ssh://git@github.com/owner/repo.git").is_none());
+        assert!(credential_url_key("/srv/git/repo.git").is_none());
+        assert!(credential_url_key("").is_none());
+    }
+
+    /// The whole point of the scoping: the injected keys must name the host, so
+    /// git cannot offer the token for a request about any other one.
+    #[test]
+    fn test_apply_token_credential_helper_exports_url_scoped_keys() {
+        let mut cmd = Command::new("git");
+        apply_token_credential_helper(&mut cmd, "ghp_secret", "https://example.com/super.git");
+
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+
+        assert_eq!(envs.get("GIT_CONFIG_COUNT").map(String::as_str), Some("2"));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("credential.https://example.com.helper")
+        );
+        // The url-scoped reset, so the injected helper is not queried last.
+        assert_eq!(envs.get("GIT_CONFIG_VALUE_0").map(String::as_str), Some(""));
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_1").map(String::as_str),
+            Some("credential.https://example.com.helper")
+        );
+        assert_eq!(
+            envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+            Some("ghp_secret")
+        );
+    }
+
+    /// Nothing may be injected for a URL git will not use it for — in
+    /// particular the token must not be exported into the environment.
+    #[test]
+    fn test_apply_token_credential_helper_injects_nothing_for_ssh() {
+        let mut cmd = Command::new("git");
+        apply_token_credential_helper(&mut cmd, "ghp_secret", "git@github.com:owner/repo.git");
+
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(!keys.iter().any(|k| k == "GIT_CONFIG_COUNT"));
+        assert!(!keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"));
+    }
 }

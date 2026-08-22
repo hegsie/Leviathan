@@ -1017,8 +1017,22 @@ fn push_via_cli(
     // The net effect was that Force Push — the only route through this
     // function — failed to authenticate on HTTPS precisely BECAUSE a token was
     // found, while pushing with no token stored worked.
+    //
+    // Scoped to the remote's own host, so the token is offered to the host it
+    // belongs to and nowhere else.
     if let Some(ref token_value) = token {
-        crate::utils::apply_token_credential_helper(&mut cmd, token_value);
+        let remote_url: Option<String> = git2::Repository::open(path).ok().and_then(|repo| {
+            let remote = repo.find_remote(remote_name).ok()?;
+            remote
+                .pushurl()
+                .ok()
+                .flatten()
+                .or_else(|| remote.url().ok())
+                .map(|u| u.to_string())
+        });
+        if let Some(remote_url) = remote_url {
+            crate::utils::apply_token_credential_helper(&mut cmd, token_value, &remote_url);
+        }
     }
 
     let output = cmd.output().map_err(|e| {
