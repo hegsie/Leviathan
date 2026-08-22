@@ -761,24 +761,82 @@ pub async fn get_commit_file_diff(
     // rename-aware result — the same view the file list gets from
     // `get_commit_files`. Only those two statuses can be half of a rename, so
     // every other file still costs a single path-filtered diff.
-    if filtered
-        .as_ref()
-        .is_some_and(|f| matches!(f.status, FileStatus::New | FileStatus::Deleted))
+    //
+    // A root commit has no parent tree, so its diff holds nothing but `Added`
+    // deltas; a rename needs a deleted side, and `detect_renames` does not
+    // enable copy detection, so no `Renamed`/`Copied` delta can exist. Skip the
+    // whole fallback there rather than re-diffing the largest tree in the repo
+    // only to hand back what `filtered` already holds.
+    if parent_tree.is_some()
+        && filtered
+            .as_ref()
+            .is_some_and(|f| matches!(f.status, FileStatus::New | FileStatus::Deleted))
     {
         let mut full_diff =
             repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
         detect_renames(&mut full_diff)?;
 
-        // `parse_diff` fills `old_path` for every delta (libgit2 reports the
-        // new path there for a plain addition), so the old-path match must stay
-        // gated on Renamed/Copied or unrelated added files would match it.
-        let matched = parse_diff(&full_diff)?.into_iter().find(|f| {
-            f.path == normalized_file_path
-                || (matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
-                    && f.old_path.as_deref() == Some(normalized_file_path.as_str()))
-        });
-        if let Some(found) = matched {
-            return Ok(maybe_truncate_diff(found, max_lines));
+        // Decide from delta metadata alone. `deltas()` walks the delta list
+        // without generating a patch, whereas `parse_diff` prints every hunk of
+        // every file in the commit — so resolving one path used to cost a full
+        // render of the whole commit, which `max_lines` (applied only after the
+        // parse) could not bound.
+        //
+        // libgit2 reports the new path in `old_file()` for a plain addition, so
+        // the old-path match must stay gated on Renamed/Copied or unrelated
+        // added files would match it. Prefer a delta owning this path as its
+        // new path: only when that delta is itself a rename/copy, or no such
+        // delta exists, does the old-path side apply.
+        let target = normalized_file_path.as_str();
+        let rename_paths = full_diff
+            .deltas()
+            .find(|delta| {
+                delta
+                    .new_file()
+                    .path()
+                    .map(|p| p.to_string_lossy())
+                    .as_deref()
+                    == Some(target)
+            })
+            .filter(|delta| matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied))
+            .or_else(|| {
+                full_diff.deltas().find(|delta| {
+                    matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
+                        && delta
+                            .old_file()
+                            .path()
+                            .map(|p| p.to_string_lossy())
+                            .as_deref()
+                            == Some(target)
+                })
+            })
+            .and_then(|delta| {
+                let old_path = delta.old_file().path()?.to_string_lossy().into_owned();
+                let new_path = delta.new_file().path()?.to_string_lossy().into_owned();
+                Some((old_path, new_path))
+            });
+
+        // Both halves of the pair are in this diff, so `find_similar` can still
+        // match them, but the patch we render is bounded to the one file.
+        if let Some((old_path, new_path)) = rename_paths {
+            let mut pair_opts = git2::DiffOptions::new();
+            pair_opts.pathspec(&old_path);
+            pair_opts.pathspec(&new_path);
+            let mut pair_diff = repo.diff_tree_to_tree(
+                parent_tree.as_ref(),
+                Some(&commit_tree),
+                Some(&mut pair_opts),
+            )?;
+            detect_renames(&mut pair_diff)?;
+
+            let matched = parse_diff(&pair_diff)?.into_iter().find(|f| {
+                f.path == normalized_file_path
+                    || (matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
+                        && f.old_path.as_deref() == Some(target))
+            });
+            if let Some(found) = matched {
+                return Ok(maybe_truncate_diff(found, max_lines));
+            }
         }
     }
 
@@ -2315,6 +2373,148 @@ mod tests {
             "dissimilar add must not be paired as a rename"
         );
         assert_eq!(f.additions, 4);
+        assert_eq!(f.deletions, 0);
+    }
+
+    /// Build a commit that rewrites `bulk` large files wholesale and renames
+    /// `old` to `new`. Every bulk file is a full-file rewrite, so the commit's
+    /// patch is large while the rename's own patch stays tiny.
+    fn commit_bulk_rewrite_with_rename(
+        repo: &TestRepo,
+        bulk: usize,
+        lines: usize,
+        old: &str,
+        new: &str,
+        new_content: &str,
+    ) -> git2::Oid {
+        let git = repo.repo();
+        let mut index = git.index().unwrap();
+
+        for i in 0..bulk {
+            let name = format!("bulk/f{i:04}.txt");
+            let body: String = (0..lines)
+                .map(|l| format!("v2 file {i} line {l}\n"))
+                .collect();
+            repo.create_file(&name, &body);
+            index.add_path(Path::new(&name)).unwrap();
+        }
+
+        repo.create_file(new, new_content);
+        std::fs::remove_file(repo.path.join(old)).unwrap();
+        index.remove_path(Path::new(old)).unwrap();
+        index.add_path(Path::new(new)).unwrap();
+        index.write().unwrap();
+
+        let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git.signature().unwrap();
+        let parent = git.head().unwrap().peel_to_commit().unwrap();
+        git.commit(Some("HEAD"), &sig, &sig, "bulk rewrite", &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Opening one renamed file must not render the whole commit's patch. The
+    /// rename fallback used to `parse_diff` the entire whole-tree diff — every
+    /// hunk of every file — and throw all but one entry away, so viewing a
+    /// single file in a large commit cost as much as viewing the whole commit.
+    ///
+    /// The budget is measured against `get_diff` on the same commit rather than
+    /// a fixed duration, so it tracks the machine's own speed instead of
+    /// flaking on a slow runner. The single-file call runs first, on the colder
+    /// object cache, so the comparison never flatters it.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_rename_does_not_render_whole_commit() {
+        const BULK_FILES: usize = 150;
+        const BULK_LINES: usize = 400;
+
+        let repo = TestRepo::with_initial_commit();
+
+        // Base commit: the bulk files plus the file that will be renamed.
+        {
+            let git = repo.repo();
+            let mut index = git.index().unwrap();
+            for i in 0..BULK_FILES {
+                let name = format!("bulk/f{i:04}.txt");
+                let body: String = (0..BULK_LINES)
+                    .map(|l| format!("v1 file {i} line {l}\n"))
+                    .collect();
+                repo.create_file(&name, &body);
+                index.add_path(Path::new(&name)).unwrap();
+            }
+            repo.create_file("old_name.txt", "alpha\nbeta\ngamma\ndelta\n");
+            index.add_path(Path::new("old_name.txt")).unwrap();
+            index.write().unwrap();
+            let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = git.signature().unwrap();
+            let parent = git.head().unwrap().peel_to_commit().unwrap();
+            git.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[&parent])
+                .unwrap();
+        }
+
+        let oid = commit_bulk_rewrite_with_rename(
+            &repo,
+            BULK_FILES,
+            BULK_LINES,
+            "old_name.txt",
+            "new_name.txt",
+            "alpha\nbeta-edited\ngamma\ndelta\n",
+        );
+
+        let started = std::time::Instant::now();
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "new_name.txt".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let single_file = started.elapsed();
+
+        // The rename must still resolve correctly — the fast path is only worth
+        // anything if it returns the same answer.
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.path, "new_name.txt");
+        assert_eq!(f.old_path.as_deref(), Some("old_name.txt"));
+        assert_eq!(f.additions, 1, "only the edited line is added");
+        assert_eq!(f.deletions, 1, "only the edited line is removed");
+
+        let started = std::time::Instant::now();
+        let whole = get_diff(repo.path_str(), None, Some(oid.to_string()), None)
+            .await
+            .unwrap();
+        let whole_commit = started.elapsed();
+        assert_eq!(
+            whole.len(),
+            BULK_FILES + 1,
+            "whole-commit diff must cover every rewritten file plus the rename"
+        );
+
+        assert!(
+            single_file * 4 < whole_commit,
+            "one renamed file took {single_file:?}, nearly as long as rendering the \
+             whole {BULK_FILES}-file commit ({whole_commit:?}) — the fallback is \
+             still parsing the entire commit patch"
+        );
+    }
+
+    /// A root commit has no parent, so it can hold no rename: every file is an
+    /// addition. Skipping the rename fallback there must not change what the
+    /// caller sees for an added file in an initial commit.
+    #[tokio::test]
+    async fn test_get_commit_file_diff_added_file_in_root_commit() {
+        let repo = TestRepo::new();
+        let oid = repo.create_commit(
+            "initial",
+            &[("a.txt", "one\ntwo\nthree\n"), ("b.txt", "other\n")],
+        );
+
+        let f = get_commit_file_diff(repo.path_str(), oid.to_string(), "a.txt".to_string(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(f.status, FileStatus::New);
+        assert_eq!(f.path, "a.txt");
+        assert_eq!(f.additions, 3);
         assert_eq!(f.deletions, 0);
     }
 
