@@ -5,6 +5,7 @@ import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 import {
@@ -926,7 +927,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private viewMode: DiffViewMode = 'unified';
-  @state() private wordWrap: boolean = false;
+  // Word wrap is an app setting (Settings > Editor); the toolbar button below is
+  // the same preference, not a second one.
+  @state() private wordWrap: boolean = settingsStore.getState().wordWrap;
   @state() private editMode = false;
   @state() private editContent = '';
   @state() private originalContent = '';
@@ -946,6 +949,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   // When true, load the diff without a line cap (set by "Load full diff").
   @state() private showFullDiff = false;
 
+  private settingsUnsubscribe: (() => void) | null = null;
   private virtualScrollManager = new DiffVirtualScrollManager();
   private flatLines: FlatDiffItem[] = [];
   private diffScrollTop = 0;
@@ -979,11 +983,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('click', this.handleDocumentClick);
-    // Restore word wrap preference from localStorage
-    const savedWordWrap = localStorage.getItem('leviathan-diff-word-wrap');
-    if (savedWordWrap !== null) {
-      this.wordWrap = savedWordWrap === 'true';
-    }
+    // Word wrap comes from the shared setting, so the Settings dialog toggle and
+    // the toolbar button below stay in step.
+    this.wordWrap = settingsStore.getState().wordWrap;
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.wordWrap = state.wordWrap;
+    });
     this.addEventListener('keydown', this.handleKeydown);
     // Make host focusable for keyboard shortcuts
     if (!this.hasAttribute('tabindex')) {
@@ -995,6 +1000,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
     this.removeEventListener('keydown', this.handleKeydown);
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
   }
 
   willUpdate(changedProperties: Map<string, unknown>): void {
@@ -1136,8 +1143,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   private toggleWordWrap(): void {
-    this.wordWrap = !this.wordWrap;
-    localStorage.setItem('leviathan-diff-word-wrap', String(this.wordWrap));
+    // Writing the shared setting keeps the Settings dialog toggle and this button
+    // in step; the store subscription updates `this.wordWrap`.
+    settingsStore.getState().setWordWrap(!this.wordWrap);
   }
 
   /**
