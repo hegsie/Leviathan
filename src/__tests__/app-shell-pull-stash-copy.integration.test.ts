@@ -334,6 +334,69 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
     });
   });
 
+  describe('handleShowFileHistory (show-file-history from the right panel)', () => {
+    it('opens the history pane and closes an open working-tree diff', () => {
+      // The right panel stays clickable while a diff covers the center pane,
+      // and the center pane renders the diff ahead of file history — so
+      // leaving the diff up means the History click shows the user nothing.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showDiff = true;
+      shell.diffFile = { path: 'src/x.ts', status: 'modified', isStaged: false, isConflicted: false };
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/x.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/x.ts');
+      expect(shell.showDiff, 'the diff no longer covers the history pane').to.be.false;
+      expect(shell.diffFile).to.be.null;
+    });
+
+    it('closes a commit-file diff and an open blame view too', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showDiff = true;
+      shell.diffFile = null;
+      shell.diffCommitFile = { commitOid: 'abc123', filePath: 'src/x.ts' };
+      shell.showBlame = true;
+      shell.blameFile = 'src/y.ts';
+      shell.blameCommitOid = 'abc123';
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/z.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/z.ts');
+      expect(shell.showDiff).to.be.false;
+      expect(shell.diffCommitFile).to.be.null;
+      // Blame also outranks file history in the center pane
+      expect(shell.showBlame).to.be.false;
+      expect(shell.blameFile).to.be.null;
+      expect(shell.blameCommitOid).to.be.null;
+    });
+
+    it('leaves the other panes alone when nothing else is open', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/a.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/a.ts');
+      expect(shell.showDiff).to.be.false;
+      expect(shell.showBlame).to.be.false;
+      expect(uiStore.getState().toasts.length, 'nothing was lost, so nothing is said').to.equal(0);
+    });
+  });
+
   describe('handleCloseDiff (file-cleared from diff-view)', () => {
     it('closes the diff overlay and clears diff state', () => {
       const el = createAppShell();

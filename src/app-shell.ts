@@ -4893,6 +4893,23 @@ export class AppShell extends LitElement {
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
+    // The center pane renders one view at a time — diff first, then blame,
+    // then file history — while the right panel that raises this event stays
+    // interactive underneath a diff. So opening history has to close whatever
+    // is already up, exactly like handleShowBlame does; otherwise the click
+    // does nothing the user can see and the history pane ambushes them later,
+    // when closing the diff (or Escape) uncovers it. Dropping the diff
+    // unmounts the inline editor with it, same teardown as the x button.
+    this.warnIfDiscardingEdits();
+    // Close diff if open
+    this.showDiff = false;
+    this.diffFile = null;
+    this.diffCommitFile = null;
+    // Close blame if open
+    this.showBlame = false;
+    this.blameFile = null;
+    this.blameCommitOid = null;
+    // Open file history
     this.fileHistoryPath = e.detail.filePath;
     this.showFileHistory = true;
   }
