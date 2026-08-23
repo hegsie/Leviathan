@@ -2272,8 +2272,20 @@ export class LvGraphCanvas extends LitElement {
     if (result.type === 'node' && result.node) {
       const commit = this.realCommits.get(result.node.oid);
       if (commit) {
-        // Select the commit on right-click
+        // A right-click is a selection too, so it has to move ALL of the
+        // selection state, not just the primary one. `selectedNodes` drives
+        // both the painted highlight and the `commits` array on
+        // `commit-selected`, and `lastClickedNode` is the Shift+click range
+        // anchor — leaving them behind highlighted one commit while the menu
+        // and the details panel named another. Right-clicking a commit that is
+        // already part of a multi-selection keeps that selection: acting on the
+        // whole set is exactly why the user built it.
         this.selectedNode = result.node;
+        if (!this.selectedNodes.has(result.node.oid)) {
+          this.selectedNodes.clear();
+          this.selectedNodes.add(result.node.oid);
+        }
+        this.lastClickedNode = result.node;
         this.dispatchSelectionEvent();
 
         // Dispatch context menu event
