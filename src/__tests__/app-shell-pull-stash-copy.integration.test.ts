@@ -37,6 +37,30 @@ import { uiStore } from '../stores/ui.store.ts';
 // Import the real component
 import '../app-shell.ts';
 
+// Side-effect import so showPrompt finds the singleton already in the DOM.
+import '../components/dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../components/dialogs/lv-prompt-dialog.ts';
+
+/**
+ * The stash shortcut/palette path now asks for an optional stash message, so
+ * these tests install a stub that answers it immediately. '' is "OK with
+ * nothing typed", which keeps git's default naming and the exact behaviour
+ * asserted below.
+ */
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  const dialog = document.querySelector('lv-prompt-dialog');
+  if (dialog) dialog.remove();
+}
+
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
 
@@ -97,6 +121,11 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
     clearHistory();
     setupDefaultMocks();
     uiStore.setState({ toasts: [] });
+    setupMockPrompt('');
+  });
+
+  afterEach(() => {
+    cleanupMockPrompt();
   });
 
   describe('handlePull', () => {

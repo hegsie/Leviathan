@@ -29,11 +29,33 @@ let cbId = 0;
 import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
+// Side-effect import so showPrompt finds the singleton already in the DOM.
+import '../components/dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../components/dialogs/lv-prompt-dialog.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
 import type { Repository } from '../types/git.types.ts';
 import { tryAcquireRefOp, isRefOpRunning, resetRefOpLocks } from '../utils/ref-lock.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+/**
+ * The stash shortcut/palette path asks for an optional stash message. '' is
+ * "OK with nothing typed", which keeps git's default naming; null is a
+ * dismissal.
+ */
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  const dialog = document.querySelector('lv-prompt-dialog');
+  if (dialog) dialog.remove();
+}
 
 function mockRepo(path: string, name: string, state = 'clean'): Repository {
   return {
@@ -60,10 +82,12 @@ describe('app-shell destructive guards', () => {
     for (const k of Object.keys(mockResponses)) delete mockResponses[k];
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().reset();
+    setupMockPrompt('');
   });
 
   afterEach(() => {
     repositoryStore.getState().reset();
+    cleanupMockPrompt();
   });
 
   function shellOnRepo(state = 'clean'): AppShell {
@@ -504,6 +528,34 @@ describe('app-shell destructive guards', () => {
         uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
         'the refusal must be audible',
       ).to.equal(true);
+    });
+
+    // Without `-m` every stash falls back to git's "WIP on <branch>: <sha>
+    // <subject>" — the commit it was based on, not the stashed work. The panel
+    // button and this shortcut run the same operation and report the same
+    // "Stash created", so both must be nameable.
+    it('a stash started from the shortcut/palette can be named', async () => {
+      setupMockPrompt('hotfix wip');
+      const el = shellOnRepo();
+
+      await (el as any).handleCreateStash();
+
+      const calls = invokeCallArgs.filter((c) => c.command === 'create_stash');
+      expect(calls.length, 'the stash must still be created').to.equal(1);
+      expect(calls[0].args.message, 'the typed name must reach git').to.equal('hotfix wip');
+    });
+
+    it('cancelling the stash prompt creates no stash and frees the lock', async () => {
+      setupMockPrompt(null);
+      const el = shellOnRepo();
+
+      await (el as any).handleCreateStash();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'create_stash'),
+        'a dismissed prompt must not reset the working tree',
+      ).to.equal(false);
+      expect(isRefOpRunning('/repo/one'), 'a stuck lock would wedge the repo').to.equal(false);
     });
 
     it('create stash holds and releases the lock', async () => {
