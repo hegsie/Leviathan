@@ -13,8 +13,19 @@ type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 let cbId = 0;
 let mockInvoke: MockInvoke = () => Promise.resolve(null);
 
+/** Every invoke made during a test, so a restore can be asserted end to end. */
+const invokeHistory: Array<{ command: string; args?: unknown }> = [];
+/** Button label the mocked confirm resolves with. 'Ok' means accepted. */
+let confirmAnswer = 'Ok';
+
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: (command: string, args?: unknown) => mockInvoke(command, args),
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    // plugin-dialog 2.x routes confirm() through `message` and reads true only
+    // from the OK button label.
+    if (command === 'plugin:dialog|message') return Promise.resolve(confirmAnswer);
+    return mockInvoke(command, args);
+  },
   transformCallback: () => cbId++,
 };
 
@@ -24,6 +35,7 @@ import { uiStore } from '../../../stores/ui.store.ts';
 import type { Commit } from '../../../types/git.types.ts';
 import type { LvFileHistory } from '../lv-file-history.ts';
 import '../lv-file-history.ts';
+import { resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 const REPO_PATH = '/test/repo';
 
@@ -54,6 +66,13 @@ describe('lv-file-history', () => {
   beforeEach(() => {
     uiStore.setState({ toasts: [] });
     mockInvoke = async () => null;
+    invokeHistory.length = 0;
+    confirmAnswer = 'Ok';
+    resetRefOpLocks();
+  });
+
+  afterEach(() => {
+    resetRefOpLocks();
   });
 
   describe('show-blame event', () => {
@@ -92,6 +111,89 @@ describe('lv-file-history', () => {
 
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'error' && /copy hash/i.test(t.message))).to.be.true;
+    });
+  });
+  describe('restore this version', () => {
+    const RESTORE_LABEL = /restore this version/i;
+
+    async function renderWithCommits(): Promise<LvFileHistory> {
+      mockInvoke = async (command: string) =>
+        command === 'get_file_history' ? [mockCommit] : null;
+      const el = await renderHistory();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).loadHistory();
+      await el.updateComplete;
+      return el;
+    }
+
+    async function openMenu(el: LvFileHistory): Promise<HTMLButtonElement[]> {
+      const row = el.shadowRoot!.querySelector('.commit-item');
+      expect(row, 'no commit row rendered').to.not.be.null;
+      row!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await el.updateComplete;
+      return Array.from(el.shadowRoot!.querySelectorAll('.context-menu .context-menu-item'));
+    }
+
+    function restoreCalls(): Array<{ command: string; args?: unknown }> {
+      return invokeHistory.filter((c) => c.command === 'checkout_file_from_commit');
+    }
+
+    it("restores the panel's file from the right-clicked commit", async () => {
+      const el = await renderWithCommits();
+
+      const items = await openMenu(el);
+      const restore = items.find((i) => RESTORE_LABEL.test(i.textContent ?? ''));
+      expect(restore, 'the commit menu offers a restore').to.not.be.undefined;
+      restore!.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      // File comes from the panel, version from the clicked row.
+      const calls = restoreCalls();
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].args).to.deep.equal({
+        path: REPO_PATH,
+        filePath: 'src/main.ts',
+        commit: mockCommit.oid,
+      });
+      expect(
+        uiStore.getState().toasts.some((t) => t.type === 'success' && t.message.includes('src/main.ts'))
+      ).to.be.true;
+    });
+
+    it('reports a commit that does not contain the file', async () => {
+      const el = await renderWithCommits();
+      mockInvoke = async (command: string) => {
+        if (command === 'checkout_file_from_commit') {
+          throw {
+            code: 'COMMAND_ERROR',
+            message: `File 'src/main.ts' not found in commit ${mockCommit.shortId}`,
+          };
+        }
+        return command === 'get_file_history' ? [mockCommit] : null;
+      };
+
+      const items = await openMenu(el);
+      items.find((i) => RESTORE_LABEL.test(i.textContent ?? ''))!.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /not found in commit/.test(t.message))).to.be
+        .true;
+    });
+
+    it('does nothing when the confirm is declined', async () => {
+      const el = await renderWithCommits();
+      confirmAnswer = 'Cancel';
+
+      const items = await openMenu(el);
+      items.find((i) => RESTORE_LABEL.test(i.textContent ?? ''))!.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(restoreCalls()).to.have.lengthOf(0);
+      expect(uiStore.getState().toasts).to.have.lengthOf(0);
     });
   });
 });
