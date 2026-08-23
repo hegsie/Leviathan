@@ -878,6 +878,55 @@ describe('lv-gitflow-panel', () => {
         cleanupMockPrompt();
       }
     });
+
+    it('shows the tag-collision error in the banner and does not open the conflict dialog when finish release fails', async () => {
+      // The backend refuses a finish whose version tag already exists on an
+      // unrelated commit. That is OPERATION_FAILED, not MERGE_CONFLICT, so it
+      // must land in the inline banner — routing it to the conflict dialog
+      // would offer a resolution flow for a merge that never started.
+      const collision =
+        "Tag 'v1.0.0' already exists and does not contain 'release/1.0.0'. "
+        + 'Delete or rename the tag, or finish with a different version.';
+      setupMockPrompt('Release 1.0.0');
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return releaseBranches;
+          case 'gitflow_finish_release':
+            throw { code: 'OPERATION_FAILED', message: collision };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictOpened = false;
+      el.addEventListener('open-conflict-dialog', () => {
+        conflictOpened = true;
+      });
+
+      try {
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
+        (finishBtns[0] as HTMLButtonElement).click();
+        await new Promise((r) => setTimeout(r, 150));
+        await el.updateComplete;
+
+        const errorEl = el.shadowRoot!.querySelector('.error-banner');
+        expect(errorEl, 'error banner should be shown').to.not.be.null;
+        expect(errorEl!.textContent).to.include("Tag 'v1.0.0' already exists");
+        expect(conflictOpened, 'conflict dialog must not open').to.be.false;
+
+        // The release is still listed — the finish was refused, not applied.
+        const items = Array.from(el.shadowRoot!.querySelectorAll('.item-name'))
+          .map((n) => n.textContent?.trim());
+        expect(items).to.include('1.0.0');
+      } finally {
+        cleanupMockPrompt();
+      }
+    });
   });
 
   // ── Loading state ──────────────────────────────────────────────────────

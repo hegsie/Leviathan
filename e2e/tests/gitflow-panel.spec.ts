@@ -632,6 +632,86 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
 });
 
 // --------------------------------------------------------------------------
+// Operations - Release Finish Refused (version tag collision)
+// --------------------------------------------------------------------------
+test.describe('GitFlow Panel - Release Finish Tag Collision', () => {
+  const COLLISION =
+    "Tag 'v2.0.0' already exists and does not contain 'release/2.0.0'. "
+    + 'Delete or rename the tag, or finish with a different version.';
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'develop',
+          shorthand: 'develop',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'release/2.0.0',
+          shorthand: 'release/2.0.0',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'rel1',
+          isStale: false,
+        },
+      ],
+      gitflow_finish_release: { __error__: COLLISION },
+    });
+
+    await injectGitflowPanel(page);
+  });
+
+  test('should show the tag-collision error and keep the release listed', async ({ page }) => {
+    const releaseSection = page.locator('lv-gitflow-panel#e2e-gitflow .section').nth(1);
+    await expect(releaseSection.locator('.item-name')).toHaveText('2.0.0');
+
+    await releaseSection.locator('.item-finish-btn:not(.item-squash-btn)').first().click();
+
+    // Finishing a release prompts for the tag message first.
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible({ timeout: 3000 });
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    const banner = page.locator('lv-gitflow-panel#e2e-gitflow .error-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("Tag 'v2.0.0' already exists");
+
+    // The refusal is not a merge conflict — no resolution dialog.
+    await expect(page.locator('lv-conflict-resolution-dialog[open]')).toHaveCount(0);
+
+    // The release survives the refused finish.
+    await expect(releaseSection.locator('.item-name')).toHaveText('2.0.0');
+  });
+});
+
+// --------------------------------------------------------------------------
 // Loading State
 // --------------------------------------------------------------------------
 test.describe('GitFlow Panel - Loading State', () => {
