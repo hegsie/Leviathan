@@ -1944,4 +1944,190 @@ describe('lv-graph-canvas', () => {
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
   });
+  // ── Refresh while scrolled past the loaded rows ─────────────────────
+  describe('reload while scrolled past the loaded rows', () => {
+    type PaginationInternals = {
+      scrollState: {
+        setScroll(top: number, left: number): void;
+        getScroll(): { scrollTop: number; scrollLeft: number };
+      };
+      virtualScroll: {
+        getRenderData(viewport: unknown): { nodes: unknown[] };
+        getContentSize(): { width: number; height: number };
+      };
+      getViewport(): { height: number };
+      sortedNodesByRow: unknown[];
+      hasMoreCommits: boolean;
+      isLoading: boolean;
+      loadError: string | null;
+      PADDING: number;
+      ROW_HEIGHT: number;
+    };
+
+    function internalsOf(el: LvGraphCanvas): PaginationInternals {
+      return el as unknown as PaginationInternals;
+    }
+
+    async function waitUntil(pred: () => boolean, what: string): Promise<void> {
+      for (let i = 0; i < 300; i++) {
+        if (pred()) return;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      throw new Error(`timed out waiting for ${what}`);
+    }
+
+    /** Backend mock that serves real pages of a `total`-commit history */
+    function setupPaginatedMocks(total: number, pageSize: number): void {
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_commit_history': {
+            const a = args as { skip?: number; limit?: number } | undefined;
+            const skip = a?.skip ?? 0;
+            const limit = a?.limit ?? pageSize;
+            return makeMoreCommits(Math.max(0, Math.min(limit, total - skip)), skip);
+          }
+          case 'get_commit_total':
+            return total;
+          case 'get_refs_by_commit':
+            return {};
+          case 'get_commits_stats':
+          case 'get_commits_signatures':
+          case 'search_commits':
+            return [];
+          default:
+            return null;
+        }
+      };
+    }
+
+    /** Like renderCanvas, but with a real viewport height to paint into */
+    async function renderSizedCanvas(commitCount: number): Promise<LvGraphCanvas> {
+      const el = await fixture<LvGraphCanvas>(
+        html`<lv-graph-canvas
+          style="height: 400px"
+          .repositoryPath=${REPO_PATH}
+          .commitCount=${commitCount}
+        ></lv-graph-canvas>`
+      );
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+      return el;
+    }
+
+    /** Nodes the renderer would actually paint for the current viewport */
+    function visibleNodeCount(el: LvGraphCanvas): number {
+      const internals = internalsOf(el);
+      return internals.virtualScroll.getRenderData(internals.getViewport()).nodes.length;
+    }
+
+    function scrollToRow(el: LvGraphCanvas, row: number): void {
+      const internals = internalsOf(el);
+      internals.scrollState.setScroll(internals.PADDING + row * internals.ROW_HEIGHT, 0);
+    }
+
+    function catchUpPageCalls(): number {
+      return findCommands('get_commit_history').filter(
+        (c) => ((c.args as { skip?: number } | undefined)?.skip ?? 0) > 0
+      ).length;
+    }
+
+    it('repaints the viewport after a refresh while scrolled deep into the history', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      // Paginate deep: the catch-up chain fills in rows up to the viewport
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+
+      // A commit/pull/watcher refresh replaces the loaded set with page 1
+      clearHistory();
+      el.refresh();
+      // The reload has replaced the loaded set with page 1 by the time the
+      // foreground spinner clears — that is the moment the viewport goes blank
+      await waitUntil(() => !internals.isLoading, 'the reload to finish');
+
+      await waitUntil(
+        () => visibleNodeCount(el) > 0,
+        'the viewport to repaint after the refresh'
+      );
+      expect(internals.sortedNodesByRow.length).to.equal(500);
+      expect(catchUpPageCalls()).to.be.greaterThan(0);
+    });
+
+    it('pulls the viewport back onto the rows when the reloaded history is shorter', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+
+      // The history shrinks under the user (hard reset / branch switch)
+      setupPaginatedMocks(50, 100);
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => internals.sortedNodesByRow.length === 50, 'the shortened reload');
+      await el.updateComplete;
+
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+      const maxScrollY = Math.max(
+        0,
+        internals.virtualScroll.getContentSize().height - internals.getViewport().height
+      );
+      expect(internals.scrollState.getScroll().scrollTop).to.be.at.most(maxScrollY);
+      // Nothing left to load — recovery must not fetch a pointless page
+      expect(catchUpPageCalls()).to.equal(0);
+    });
+
+    it('makes a single catch-up attempt when the next page fails after a refresh', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+
+      // The first page still loads, but the catch-up page fails
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const a = args as { skip?: number } | undefined;
+        if (command === 'get_commit_history' && (a?.skip ?? 0) > 0) {
+          throw { code: 'GIT_ERROR', message: 'network blip' };
+        }
+        return previousMock(command, args);
+      };
+
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => catchUpPageCalls() > 0, 'the catch-up attempt');
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // The failed page stops the chain instead of retrying in a hot loop
+      expect(catchUpPageCalls()).to.equal(1);
+      // A transient failure must not mark the history exhausted
+      expect(internals.hasMoreCommits).to.be.true;
+      // ...and must not paint the reload error banner
+      expect(internals.loadError).to.be.null;
+      expect(el.shadowRoot!.querySelector('.info-panel')).to.be.null;
+    });
+
+    it('does not paginate on a refresh while the graph is at the top', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => !internals.isLoading, 'the reload to finish');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(internals.sortedNodesByRow.length).to.equal(100);
+
+      expect(catchUpPageCalls()).to.equal(0);
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+    });
+  });
 });

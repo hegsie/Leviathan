@@ -1262,6 +1262,12 @@ export class LvGraphCanvas extends LitElement {
       // would otherwise leave the error panel painted over a healthy graph
       this.loadError = null;
       this.processLayout();
+      // A reload replaces the loaded set with just the FIRST page while the
+      // scrollbar still spans the whole history, so a viewport that had been
+      // paginated deep now sits below the last loaded row with nothing
+      // painted in it — and checkLoadMore only ever runs from a scroll, so
+      // it would stay blank until the user nudged the wheel
+      this.recoverViewportAfterReload();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
@@ -1385,6 +1391,37 @@ export class LvGraphCanvas extends LitElement {
     if (loadedBottom - (scrollTop + viewportHeight) < 500) {
       this.loadMoreCommits();
     }
+  }
+
+  /**
+   * Bring the viewport back onto real rows after a full reload. Restart the
+   * catch-up chain so the loaded rows reach the viewport again, or — when
+   * there is nothing left to load — pull the scroll back onto the rows that
+   * remain, so a reload can never leave a blank canvas behind.
+   */
+  private recoverViewportAfterReload(): void {
+    if (!this.scrollState || !this.virtualScroll) return;
+    const { scrollTop, scrollLeft } = this.scrollState.getScroll();
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    // Only when the WHOLE viewport is past the loaded rows: a viewport that
+    // still shows rows recovers on the next scroll, which runs checkLoadMore
+    if (scrollTop < loadedBottom) return;
+
+    // Only paginate while unfiltered — with a branch filter or an active
+    // search the scrollbar does not span the full history
+    // (updateVirtualTotalRows), so chaining pages there would pull in the
+    // whole repository; clamping is the right recovery instead
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    if (this.hasMoreCommits && unfiltered) {
+      this.checkLoadMore();
+      return;
+    }
+
+    const size = this.virtualScroll.getContentSize();
+    const viewport = this.getViewport();
+    const maxScrollY = Math.max(0, size.height - viewport.height);
+    this.scrollState.setScroll(Math.min(scrollTop, maxScrollY), scrollLeft);
+    this.syncScrollbarPosition();
   }
 
   /**

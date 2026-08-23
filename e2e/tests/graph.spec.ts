@@ -827,3 +827,131 @@ test.describe('Branch Visibility Filtering', () => {
     expect(oids).toContain('commit0');
   });
 });
+
+/**
+ * A refresh (commit, pull, merge, or the file watcher's refs-changed) reloads
+ * the graph from page 1 while the scrollbar still spans the whole history.
+ * A viewport that had been paginated deep must not be left staring at rows
+ * that are no longer loaded.
+ */
+test.describe('Graph refresh while scrolled deep', () => {
+  const TOTAL = 500;
+  const PAGE_SIZE = 100;
+
+  /**
+   * Serve `get_commit_history` in real pages (injectCommandMock can only
+   * return a static value, and this needs to honour skip/limit).
+   */
+  async function installPaginatedHistoryMock(
+    page: import('@playwright/test').Page,
+    opts: { total: number; pageSize: number }
+  ): Promise<void> {
+    await page.evaluate(({ total, pageSize }) => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_history') {
+          const a = args as { skip?: number; limit?: number } | undefined;
+          const skip = a?.skip ?? 0;
+          const limit = a?.limit ?? pageSize;
+          const count = Math.max(0, Math.min(limit, total - skip));
+          const now = Date.now() / 1000;
+          const commits = [];
+          for (let i = skip; i < skip + count; i++) {
+            commits.push({
+              oid: `commit${i}`,
+              shortId: `commit${i}`.slice(0, 7),
+              message: `Commit ${i}`,
+              summary: `Commit ${i}`,
+              body: null,
+              author: { name: 'Test User', email: 'test@example.com', timestamp: now - i * 3600 },
+              committer: { name: 'Test User', email: 'test@example.com', timestamp: now - i * 3600 },
+              parentIds: i + 1 < total ? [`commit${i + 1}`] : [],
+              timestamp: now - i * 3600,
+            });
+          }
+          return commits;
+        }
+        if (command === 'get_commit_total') {
+          return total;
+        }
+        return originalInvoke(command, args);
+      };
+    }, opts);
+  }
+
+  /** Commits the renderer would actually paint for the current viewport */
+  async function paintedNodeCount(page: import('@playwright/test').Page): Promise<number> {
+    const handle = await getGraphCanvasHandle(page);
+    return page.evaluate((el) => {
+      const canvas = el as HTMLElement & {
+        virtualScroll?: { getRenderData(v: unknown): { nodes: unknown[] } };
+        getViewport?: () => unknown;
+      };
+      if (!canvas.virtualScroll || !canvas.getViewport) return 0;
+      return canvas.virtualScroll.getRenderData(canvas.getViewport()).nodes.length;
+    }, handle);
+  }
+
+  test('repaints the graph after a refresh while scrolled deep into the history', async ({ page }) => {
+    const graph = new GraphPanelPage(page);
+    await setupOpenRepository(page);
+    await expect(graph.canvas).toBeVisible();
+
+    await installPaginatedHistoryMock(page, { total: TOTAL, pageSize: PAGE_SIZE });
+
+    // Reload against the paginated history: page 1 only
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate(
+      ([el, pageSize]) => {
+        const canvas = el as HTMLElement & { commitCount: number; refresh(): void };
+        canvas.commitCount = pageSize as number;
+        canvas.refresh();
+      },
+      [handle, PAGE_SIZE] as const
+    );
+    await waitForNodeCount(page, PAGE_SIZE);
+
+    // Scroll deep into the unloaded region; the catch-up chain fills it in
+    await page.evaluate(
+      ([el, row]) => {
+        const canvas = el as HTMLElement & {
+          scrollState: { setScroll(top: number, left: number): void };
+          PADDING: number;
+          ROW_HEIGHT: number;
+        };
+        canvas.scrollState.setScroll(canvas.PADDING + (row as number) * canvas.ROW_HEIGHT, 0);
+      },
+      [handle, 300] as const
+    );
+    await waitForNodeCount(page, TOTAL);
+    expect(await paintedNodeCount(page)).toBeGreaterThan(0);
+
+    // A commit/pull/watcher refresh — exactly what app-shell's handleRefresh does
+    await startCommandCapture(page);
+    await page.evaluate((el) => {
+      (el as HTMLElement & { refresh(): void }).refresh();
+    }, handle);
+
+    // The viewport must show commits again, not a blank canvas
+    await page.waitForFunction((el) => {
+      const canvas = el as HTMLElement & {
+        virtualScroll?: { getRenderData(v: unknown): { nodes: unknown[] } };
+        getViewport?: () => unknown;
+      };
+      if (!canvas.virtualScroll || !canvas.getViewport) return false;
+      return canvas.virtualScroll.getRenderData(canvas.getViewport()).nodes.length > 0;
+    }, handle);
+
+    // ...because the catch-up chain restarted, not because nothing reloaded
+    const historyCalls = await findCommand(page, 'get_commit_history');
+    const catchUpCalls = historyCalls.filter(
+      (c) => ((c.args as { skip?: number } | undefined)?.skip ?? 0) > 0
+    );
+    expect(catchUpCalls.length).toBeGreaterThan(0);
+    await expect(page.locator('lv-graph-canvas .info-panel')).toHaveCount(0);
+  });
+});
