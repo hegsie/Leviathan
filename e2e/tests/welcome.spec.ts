@@ -394,6 +394,45 @@ test.describe('Init Dialog - Command Verification', () => {
     // Verify the dialog remains open
     await expect(dialogs.init.dialog).toBeVisible();
   });
+
+  test('should pass the configured default branch name to init_repository', async ({ page }) => {
+    // The dialog reads the setting when it opens, so change it and reopen
+    await dialogs.init.closeWithEscape();
+    await page.evaluate(() => {
+      (window as any).__LEVIATHAN_STORES__.settingsStore.getState().setDefaultBranchName('trunk');
+    });
+    await app.initButton.click();
+    await dialogs.init.waitForOpen();
+
+    await expect(dialogs.init.initialBranchInput).toHaveValue('trunk');
+
+    await dialogs.init.fillPath('/home/user/trunk-project');
+
+    await startCommandCapture(page);
+    await dialogs.init.init();
+    await waitForCommand(page, 'init_repository');
+
+    const initCmds = await findCommand(page, 'init_repository');
+    expect(initCmds.length).toBeGreaterThanOrEqual(1);
+
+    const args = initCmds[0].args as { path?: string; initialBranch?: string };
+    expect(args.path).toBe('/home/user/trunk-project');
+    expect(args.initialBranch).toBe('trunk');
+  });
+
+  test('should show an error and keep the init dialog open for an invalid initial branch', async ({ page }) => {
+    await dialogs.init.fillPath('/home/user/bad-branch-project');
+    await dialogs.init.fillInitialBranch('bad name');
+
+    await injectCommandError(page, 'init_repository', 'Invalid initial branch name: bad name');
+
+    await dialogs.init.init();
+
+    const errorMessage = page.locator('lv-init-dialog .error-message');
+    await expect(errorMessage).toBeVisible();
+    await expect(errorMessage).toContainText('Invalid initial branch name: bad name');
+    await expect(dialogs.init.dialog).toBeVisible();
+  });
 });
 
 test.describe('Init Dialog - Error Handling', () => {

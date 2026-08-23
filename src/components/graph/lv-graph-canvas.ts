@@ -941,13 +941,19 @@ export class LvGraphCanvas extends LitElement {
         // The "Show Avatars" app setting controls whether author avatars
         // are fetched from Gravatar (off = colored initials only)
         fetchAvatars: settingsStore.getState().showAvatars,
+        // The "Show Commit Size" app setting scales node radius by how much
+        // each commit changed (off = uniform nodes)
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );
 
-    // Keep avatar fetching in sync with the settings toggle
+    // Keep avatar fetching and node scaling in sync with the settings toggles
     this.settingsUnsubscribe = settingsStore.subscribe((state) => {
-      this.renderer?.setConfig({ fetchAvatars: state.showAvatars });
+      this.renderer?.setConfig({
+        fetchAvatars: state.showAvatars,
+        scaleNodesByCommitSize: state.showCommitSize,
+      });
       this.renderer?.markDirty();
       this.scheduleRender();
     });
@@ -2981,6 +2987,7 @@ export class LvGraphCanvas extends LitElement {
         statsColumnWidth: this.statsColumnWidth,
         showAuthorColumn: this.showAuthorColumn,
         showDateColumn: this.showDateColumn,
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );

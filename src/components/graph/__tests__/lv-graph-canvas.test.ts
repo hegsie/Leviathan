@@ -33,6 +33,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
 import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -1943,5 +1944,35 @@ describe('lv-graph-canvas', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
+  });
+});
+
+describe('lv-graph-canvas commit-size setting', () => {
+  type RendererInternals = { renderer: { config: { scaleNodesByCommitSize: boolean } } };
+
+  afterEach(() => {
+    settingsStore.getState().setShowCommitSize(true);
+  });
+
+  it('initialises the renderer from the Show Commit Size setting', async () => {
+    settingsStore.getState().setShowCommitSize(false);
+
+    const el = await renderCanvas(10);
+
+    const { config } = (el as unknown as RendererInternals).renderer;
+    expect(config.scaleNodesByCommitSize).to.be.false;
+  });
+
+  it('updates the renderer when Show Commit Size is toggled', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const { renderer } = el as unknown as RendererInternals;
+    expect(renderer.config.scaleNodesByCommitSize).to.be.true;
+
+    settingsStore.getState().setShowCommitSize(false);
+    await el.updateComplete;
+
+    expect(renderer.config.scaleNodesByCommitSize).to.be.false;
   });
 });

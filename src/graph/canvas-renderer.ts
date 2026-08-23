@@ -22,6 +22,12 @@ export interface RenderConfig {
   minNodeRadius: number;
   /** Maximum node radius for size scaling */
   maxNodeRadius: number;
+  /**
+   * Scale node radius by the commit's change volume. Driven by the
+   * "Show Commit Size" app setting; when false every node is drawn at
+   * `nodeRadius` regardless of stats.
+   */
+  scaleNodesByCommitSize: boolean;
   /** Line width for edges */
   lineWidth: number;
   /** Show node labels */
@@ -113,6 +119,7 @@ const DEFAULT_CONFIG: RenderConfig = {
   nodeRadius: 6,
   minNodeRadius: 5,
   maxNodeRadius: 10,
+  scaleNodesByCommitSize: true,
   lineWidth: 2,
   showLabels: false,
   showFps: false,
@@ -630,6 +637,10 @@ export class CanvasRenderer {
    * Get node radius based on commit stats (if available)
    */
   private getNodeRadius(oid: string): number {
+    if (!this.config.scaleNodesByCommitSize) {
+      return this.config.nodeRadius;
+    }
+
     const stats = this.commitStats.get(oid);
     if (!stats) {
       return this.config.nodeRadius;
