@@ -4834,10 +4834,19 @@ export class AppShell extends LitElement {
 
   private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
     if (!this.activeRepository) return;
-    try {
-      await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
-    } catch {
-      showToast('Failed to open file in editor', 'error');
+    // gitService.openInConfiguredEditor returns a CommandResult (invokeCommand
+    // never throws), so we must inspect result.success — the catch-only path
+    // could never fire, so a file deleted since the palette listed it, or an
+    // editor that fails to launch, closed the palette and did nothing at all.
+    const result = await gitService.openInConfiguredEditor(
+      this.activeRepository.repository.path,
+      e.detail.path,
+    );
+    if (!result.success || !result.data?.success) {
+      const message =
+        result.data?.message || result.error?.message || 'Failed to open file in editor';
+      log.error('Failed to open file in editor:', message);
+      showToast(message, 'error');
     }
   }
 
