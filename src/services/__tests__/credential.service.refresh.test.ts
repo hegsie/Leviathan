@@ -12,6 +12,8 @@ const keyring = new Map<string, string>();
 let refreshCalls = 0;
 /** Raw object returned for `oauth_refresh_token`; null → the refresh call fails. */
 let refreshResponse: unknown = null;
+/** Args of the most recent `oauth_refresh_token` invoke. */
+let lastRefreshArgs: Record<string, unknown> | undefined;
 
 (globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => mockInvoke(command, args),
@@ -40,6 +42,7 @@ function installMock(): void {
         return null;
       case 'oauth_refresh_token':
         refreshCalls++;
+        lastRefreshArgs = a;
         return refreshResponse;
       default:
         return null;
@@ -52,6 +55,7 @@ describe('credential.service - getFreshAccountToken', () => {
     keyring.clear();
     refreshCalls = 0;
     refreshResponse = null;
+    lastRefreshArgs = undefined;
     installMock();
   });
 
@@ -105,6 +109,31 @@ describe('credential.service - getFreshAccountToken', () => {
     const token = await getFreshAccountToken('azure-devops', 'pat1', 'azure');
     expect(token).to.equal('my-pat');
     expect(refreshCalls).to.equal(0);
+  });
+
+  // Regression: storing a PAT / app password over a previously OAuth-connected
+  // account must retire the OAuth bundle, otherwise getFreshAccountToken keeps
+  // returning the superseded access token from the leftover `_oauth` blob.
+  it('a PAT stored over an OAuth account supersedes the stale bundle', async () => {
+    await storeAccountOAuthToken('gitlab', 'g1', 'oauth-access', 'r1', 3600);
+    await storeAccountToken('gitlab', 'g1', 'glpat-new');
+
+    expect(await getFreshAccountToken('gitlab', 'g1', 'gitlab')).to.equal('glpat-new');
+    expect(keyring.has('gitlab_token_g1_oauth'), 'stale OAuth bundle removed').to.be.false;
+    expect(refreshCalls, 'a PAT is never refreshed').to.equal(0);
+  });
+
+  // Contract for the GitLab dialog: a self-hosted account must refresh against
+  // its OWN instance, never the default gitlab.com endpoint.
+  it('refreshes a self-hosted GitLab account against its own instance', async () => {
+    await storeAccountOAuthToken('gitlab', 'g1', 'old-access', 'old-refresh', 60);
+    refreshResponse = { accessToken: 'fresh', refreshToken: 'r2', expiresIn: 3600 };
+
+    const token = await getFreshAccountToken('gitlab', 'g1', 'gitlab', 'https://gitlab.example.com');
+
+    expect(token).to.equal('fresh');
+    expect(lastRefreshArgs?.provider).to.equal('gitlab');
+    expect(lastRefreshArgs?.instanceUrl).to.equal('https://gitlab.example.com');
   });
 
   it('coalesces concurrent refreshes into a single call (single-flight)', async () => {

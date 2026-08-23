@@ -217,7 +217,13 @@ export const AccountCredentials = {
   },
 
   /**
-   * Store a token for a specific account
+   * Store a token for a specific account.
+   *
+   * Also removes the `${key}_oauth` companion blob written by
+   * storeAccountOAuthToken: this token supersedes any earlier OAuth sign-in for
+   * the account (e.g. the user switched it to a PAT / app password), and a
+   * leftover bundle would make getFreshAccountToken keep handing back the
+   * superseded access token.
    */
   async setToken(
     integrationType: IntegrationType,
@@ -225,7 +231,8 @@ export const AccountCredentials = {
     token: string
   ): Promise<void> {
     const key = getAccountCredentialKey(integrationType, accountId);
-    return keyringStore(key, token);
+    await keyringStore(key, token);
+    await keyringDelete(`${key}_oauth`);
   },
 
   /**

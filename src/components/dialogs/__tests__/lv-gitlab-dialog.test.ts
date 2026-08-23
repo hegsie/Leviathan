@@ -150,6 +150,10 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+/** Raw result of `oauth_refresh_token`; null → the refresh fails. */
+let refreshResponse: unknown = null;
+/** Accounts returned by `get_unified_profiles_config`. */
+let accountsResponse: IntegrationAccount[] = [];
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -179,7 +183,7 @@ function setupMockInvoke(): void {
       return {
         version: 3,
         profiles: [],
-        accounts: [mockAccount],
+        accounts: accountsResponse,
         repositoryAssignments: {},
       };
     }
@@ -200,6 +204,7 @@ function setupMockInvoke(): void {
 
     // OAuth
     if (command === 'get_oauth_client_id') return null;
+    if (command === 'oauth_refresh_token') return refreshResponse;
 
     return null;
   };
@@ -210,6 +215,8 @@ describe('lv-gitlab-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    refreshResponse = null;
+    accountsResponse = [mockAccount];
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
   });
@@ -869,6 +876,126 @@ describe('lv-gitlab-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+  });
+  // Regression: GitLab OAuth access tokens expire in ~2h. The dialog used to read
+  // the raw stored access token, so a signed-in account read as disconnected on
+  // the next open (and was marked disconnected app-wide) despite a valid stored
+  // refresh token. The token read must be refresh-aware, like Azure DevOps'.
+  describe('OAuth token refresh (regression)', () => {
+    /** Seed an OAuth bundle whose access token expires within the 5-min window. */
+    function seedExpiringOAuthToken(accountId = 'gl-acc-1'): void {
+      keyringStore.set(`gitlab_token_${accountId}`, 'stale-access');
+      keyringStore.set(
+        `gitlab_token_${accountId}_oauth`,
+        JSON.stringify({
+          accessToken: 'stale-access',
+          refreshToken: 'r1',
+          expiresAt: Date.now() + 60_000,
+        })
+      );
+    }
+
+    function findInvoke(command: string): { command: string; args: unknown } | undefined {
+      return invokeHistory.find((h) => h.command === command);
+    }
+
+    it('refreshes an expiring OAuth access token before checking the connection', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const check = findInvoke('check_gitlab_connection');
+      expect(check, 'connection was checked').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('fresh-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status
+      ).to.equal('connected');
+    });
+
+    it("refreshes against the account's instance, not the detected repo's", async () => {
+      const selfHosted = createTestAccount({
+        id: 'gl-acc-1',
+        name: 'Self-hosted GitLab',
+        integrationType: 'gitlab',
+        config: { type: 'gitlab', instanceUrl: 'https://gitlab.example.com' },
+        isDefault: true,
+      });
+      accountsResponse = [selfHosted];
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([selfHosted]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      // A detected repo (or a typed-in URL) on gitlab.com must not redirect the
+      // refresh grant away from the instance the account belongs to.
+      const priv = el as unknown as {
+        instanceUrlInput: string;
+        checkConnection: () => Promise<void>;
+      };
+      priv.instanceUrlInput = 'https://gitlab.com';
+      // The open-load already rotated the bundle; make it expiring again so this
+      // check has to refresh.
+      seedExpiringOAuthToken();
+      invokeHistory.length = 0;
+      await priv.checkConnection();
+
+      const refresh = findInvoke('oauth_refresh_token');
+      expect(refresh, 'a refresh was attempted').to.not.be.undefined;
+      expect((refresh!.args as { instanceUrl?: string }).instanceUrl).to.equal(
+        'https://gitlab.example.com'
+      );
+    });
+
+    it('falls back to the stored token and reports disconnected when the refresh fails', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = null; // invokeCommand treats null as a failed command
+      connectionResponse = mockDisconnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect(findInvoke('oauth_refresh_token'), 'a refresh was attempted').to.not.be.undefined;
+      const check = findInvoke('check_gitlab_connection');
+      expect(
+        (check!.args as { token: string }).token,
+        'falls back to the stored token rather than dead-ending'
+      ).to.equal('stale-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status
+      ).to.equal('disconnected');
+      // The user is offered the connect form instead of a silent failure.
+      expect(el.shadowRoot!.querySelector('input[type="password"]')).to.not.be.null;
+    });
+
+    it('does not attempt a refresh for a personal access token account', async () => {
+      keyringStore.set('gitlab_token_gl-acc-1', 'glpat-plain');
+      keyringStore.delete('gitlab_token_gl-acc-1_oauth');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect(findInvoke('oauth_refresh_token'), 'PATs are never refreshed').to.be.undefined;
+      const check = findInvoke('check_gitlab_connection');
+      expect((check!.args as { token: string }).token).to.equal('glpat-plain');
     });
   });
 });
