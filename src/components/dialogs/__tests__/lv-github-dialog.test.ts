@@ -192,6 +192,46 @@ let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
 let appConfigResponse: unknown = { connected: true, user: null, scopes: ['app-installation'] };
 
+// --- Page-aware list responses (pagination tests) ---
+// When set, the list mocks answer from the requested `page` argument instead of
+// returning the same fixture for every call.
+let prPages: Record<number, unknown[]> | null = null;
+let prPageThatFails: number | null = null;
+let issuePages: Record<number, { issues: unknown[]; nextPage: number | null }> | null = null;
+let releasePages: Record<number, unknown[]> | null = null;
+let runPages: Record<number, unknown[]> | null = null;
+
+function requestedPage(params: Record<string, unknown> | undefined): number {
+  return Number((params as { page?: number } | undefined)?.page ?? 1);
+}
+
+/** `count` synthetic pull requests numbered downwards from `startNumber`. */
+function makePullRequests(count: number, startNumber: number): unknown[] {
+  return Array.from({ length: count }, (_, i) => ({
+    ...mockPullRequests[0],
+    number: startNumber - i,
+    title: `Generated PR ${startNumber - i}`,
+    htmlUrl: `https://github.com/test-owner/test-repo/pull/${startNumber - i}`,
+  }));
+}
+
+function makeReleases(count: number, startIndex: number): unknown[] {
+  return Array.from({ length: count }, (_, i) => ({
+    ...mockReleases[0],
+    id: startIndex + i,
+    tagName: `v${startIndex + i}.0.0`,
+    name: `Version ${startIndex + i}`,
+  }));
+}
+
+function makeWorkflowRuns(count: number, startIndex: number): unknown[] {
+  return Array.from({ length: count }, (_, i) => ({
+    ...mockWorkflowRuns[0],
+    id: startIndex + i,
+    runNumber: startIndex + i,
+  }));
+}
+
 function setupMockInvoke(): void {
   keyringStore.clear();
   keyringStore.set('github_token_gh-acc-1', 'ghp_testtoken123456');
@@ -237,10 +277,27 @@ function setupMockInvoke(): void {
     if (command === 'check_github_connection') return connectionResponse;
     if (command === 'check_github_connection_with_token') return connectionResponse;
     if (command === 'detect_github_repo') return detectedRepoResponse;
-    if (command === 'list_pull_requests') return mockPullRequests;
-    if (command === 'list_issues' || command === 'list_github_issues') return mockIssues;
-    if (command === 'get_workflow_runs') return mockWorkflowRuns;
-    if (command === 'list_releases') return mockReleases;
+    if (command === 'list_pull_requests') {
+      const page = requestedPage(params);
+      if (prPageThatFails !== null && page === prPageThatFails) {
+        throw new Error('Rate limit exceeded');
+      }
+      return prPages ? (prPages[page] ?? []) : mockPullRequests;
+    }
+    if (command === 'list_issues' || command === 'list_github_issues') {
+      const page = requestedPage(params);
+      return issuePages
+        ? (issuePages[page] ?? { issues: [], nextPage: null })
+        : { issues: mockIssues, nextPage: null };
+    }
+    if (command === 'get_workflow_runs') {
+      const page = requestedPage(params);
+      return runPages ? (runPages[page] ?? []) : mockWorkflowRuns;
+    }
+    if (command === 'list_releases') {
+      const page = requestedPage(params);
+      return releasePages ? (releasePages[page] ?? []) : mockReleases;
+    }
     if (command === 'get_github_labels' || command === 'get_repo_labels') return mockLabels;
     if (command === 'create_pull_request') return mockPullRequests[0];
     if (command === 'create_issue' || command === 'create_github_issue') return mockIssues[0];
@@ -259,6 +316,11 @@ describe('lv-github-dialog', () => {
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
     appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+    prPages = null;
+    prPageThatFails = null;
+    issuePages = null;
+    releasePages = null;
+    runPages = null;
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
   });
@@ -1069,6 +1131,168 @@ describe('lv-github-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { isAddingAccount: boolean }).isAddingAccount).to.equal(false);
+    });
+  });
+
+  // Lists used to stop dead at the first page: the backend never sent a `page`
+  // param and no tab offered a way to ask for more, so a repository with more
+  // than one page of PRs/issues/releases/runs simply hid the rest.
+  describe('list pagination', () => {
+    async function openOnTab(tabLabel: string): Promise<LvGitHubDialog> {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const tab = Array.from(tabs).find((t) => t.textContent?.trim() === tabLabel) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+      return el;
+    }
+
+    function loadMoreButton(el: LvGitHubDialog): HTMLButtonElement | null {
+      return el.shadowRoot!.querySelector('.load-more .btn');
+    }
+
+    async function clickLoadMore(el: LvGitHubDialog): Promise<void> {
+      loadMoreButton(el)!.click();
+      await waitForLoad(el);
+    }
+
+    function callsTo(command: string): Array<Record<string, unknown>> {
+      return invokeHistory
+        .filter((c) => c.command === command)
+        .map((c) => (c.args ?? {}) as Record<string, unknown>);
+    }
+
+    it('shows Load more in the pull requests tab when a full page came back', async () => {
+      prPages = { 1: makePullRequests(30, 100) };
+
+      const el = await openOnTab('Pull Requests');
+
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(30);
+      const button = loadMoreButton(el);
+      expect(button, 'a full page must offer a way to reach the next one').to.not.be.null;
+      expect(button!.textContent?.trim()).to.equal('Load more');
+    });
+
+    it('appends the next page and asks GitHub for page 2', async () => {
+      prPages = { 1: makePullRequests(30, 100), 2: makePullRequests(5, 70) };
+
+      const el = await openOnTab('Pull Requests');
+      await clickLoadMore(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(35);
+      expect(el.shadowRoot!.textContent).to.contain('Generated PR 70');
+
+      const calls = callsTo('list_pull_requests');
+      expect(calls.length).to.be.at.least(2);
+      expect(calls[0].page, 'the first load starts at page 1').to.equal(1);
+      const latest = calls[calls.length - 1];
+      expect(latest.page, 'Load more must request the next page').to.equal(2);
+      expect(latest.perPage).to.equal(30);
+    });
+
+    it('hides Load more once a short page comes back', async () => {
+      prPages = { 1: makePullRequests(30, 100), 2: makePullRequests(5, 70) };
+
+      const el = await openOnTab('Pull Requests');
+      await clickLoadMore(el);
+
+      expect(loadMoreButton(el), 'a short page is the end of the list').to.be.null;
+    });
+
+    it('keeps the loaded pull requests and shows an error when the next page fails', async () => {
+      prPages = { 1: makePullRequests(30, 100) };
+      prPageThatFails = 2;
+
+      const el = await openOnTab('Pull Requests');
+      await clickLoadMore(el);
+
+      const banner = el.shadowRoot!.querySelector('.error-message');
+      expect(banner, 'a failed page must not fail silently').to.not.be.null;
+      expect(banner!.textContent).to.contain('Rate limit exceeded');
+      // The pages already on screen survive, and the button stays for a retry.
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(30);
+      expect(loadMoreButton(el)).to.not.be.null;
+    });
+
+    it('offers Load more instead of an empty state when the first issue page held only pull requests', async () => {
+      // /issues returns pull requests too and the backend filters them out, so
+      // page 1 can legitimately contain no issues while page 2 does.
+      issuePages = {
+        1: { issues: [], nextPage: 2 },
+        2: { issues: [mockIssues[0]], nextPage: null },
+      };
+
+      const el = await openOnTab('Issues');
+
+      expect(el.shadowRoot!.querySelectorAll('.issue-item').length).to.equal(0);
+      const emptyState = el.shadowRoot!.querySelector('.empty-state');
+      expect(
+        emptyState?.textContent?.trim(),
+        'a dead-end "No open issues" must not be claimed while pages remain'
+      ).to.not.equal('No open issues');
+      expect(loadMoreButton(el)).to.not.be.null;
+
+      await clickLoadMore(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.issue-item').length).to.equal(1);
+      expect(loadMoreButton(el)).to.be.null;
+
+      const calls = callsTo('list_issues');
+      expect(calls[calls.length - 1].page).to.equal(2);
+    });
+
+    it('resets to the first page when the pull request filter changes', async () => {
+      prPages = { 1: makePullRequests(30, 100), 2: makePullRequests(5, 70) };
+
+      const el = await openOnTab('Pull Requests');
+      await clickLoadMore(el);
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(35);
+
+      const select = el.shadowRoot!.querySelector('.filter-select') as HTMLSelectElement;
+      select.value = 'closed';
+      select.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      const calls = callsTo('list_pull_requests');
+      expect(calls[calls.length - 1].page, 'a filter change starts the list over').to.equal(1);
+      expect(calls[calls.length - 1].state).to.equal('closed');
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(30);
+    });
+
+    it('shows Load more for releases when a full page came back', async () => {
+      releasePages = { 1: makeReleases(20, 1), 2: makeReleases(3, 21) };
+
+      const el = await openOnTab('Releases');
+      expect(el.shadowRoot!.querySelectorAll('.release-item').length).to.equal(20);
+
+      await clickLoadMore(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.release-item').length).to.equal(23);
+      expect(loadMoreButton(el)).to.be.null;
+      const calls = callsTo('list_releases');
+      expect(calls[calls.length - 1].page).to.equal(2);
+      expect(calls[calls.length - 1].perPage).to.equal(20);
+    });
+
+    it('shows Load more for workflow runs when a full page came back', async () => {
+      runPages = { 1: makeWorkflowRuns(20, 1), 2: makeWorkflowRuns(4, 21) };
+
+      const el = await openOnTab('Actions');
+      expect(el.shadowRoot!.querySelectorAll('.workflow-item').length).to.equal(20);
+
+      await clickLoadMore(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.workflow-item').length).to.equal(24);
+      expect(loadMoreButton(el)).to.be.null;
+      const calls = callsTo('get_workflow_runs');
+      expect(calls[calls.length - 1].page).to.equal(2);
     });
   });
 
