@@ -1277,6 +1277,162 @@ describe('lv-graph-canvas', () => {
     });
   });
 
+  // ── Selection validation after a reload ──────────────────────────────
+  describe('selection validation after reload', () => {
+    type SelectionInternals = {
+      selectedNode: { oid: string; row: number } | null;
+      selectedNodes: Set<string>;
+      lastClickedNode: { oid: string; row: number } | null;
+    };
+
+    /** Trigger refresh() and let the reload + relayout settle */
+    async function reload(el: LvGraphCanvas): Promise<void> {
+      el.refresh();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    function captureSelectionEvents(
+      el: LvGraphCanvas
+    ): Array<{ commit: Commit | null; commits: Commit[] }> {
+      const events: Array<{ commit: Commit | null; commits: Commit[] }> = [];
+      el.addEventListener('commit-selected', (e) => {
+        const detail = (e as CustomEvent<{ commit: Commit | null; commits: Commit[] }>).detail;
+        events.push({ commit: detail.commit, commits: detail.commits });
+      });
+      return events;
+    }
+
+    it('clears the selection and notifies listeners when a reload rewrites away the selected commit', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      expect(el.selectCommit(commit3.oid)).to.be.true;
+
+      // The tip commit is amended: the old OID is gone from the rewritten history
+      const amended = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Third commit (amended)',
+        message: 'Third commit (amended)',
+        timestamp: 1700002500,
+        parentIds: [commit2.oid],
+      });
+      setupDefaultMocks({
+        commits: [amended, commit2, commit1],
+        refs: {
+          [amended.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      expect(events).to.have.length(1);
+      expect(events[0].commit).to.be.null;
+      expect(events[0].commits).to.have.length(0);
+
+      const internals = el as unknown as SelectionInternals;
+      expect(internals.selectedNode).to.be.null;
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(internals.lastClickedNode).to.be.null;
+    });
+
+    it('prunes only the vanished OIDs from a multi-selection and keeps the rest', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+      internals.selectedNodes.add(commit3.oid);
+      expect(internals.selectedNodes.size).to.equal(2);
+
+      // The branch holding commit3 is deleted: only commit3 leaves the graph
+      setupDefaultMocks({
+        commits: [commit2, commit1],
+        refs: {
+          [commit2.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      expect(events).to.have.length(1);
+      expect(events[0].commit?.oid).to.equal(commit2.oid);
+      expect(events[0].commits).to.have.length(1);
+      expect([...internals.selectedNodes]).to.deep.equal([commit2.oid]);
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+    });
+
+    it('rebinds a surviving selection to its node in the new layout', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+      expect(internals.selectedNode?.row).to.equal(1);
+
+      // A new commit lands on top, shifting every existing row down by one
+      const commit4 = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Fourth commit',
+        message: 'Fourth commit',
+        timestamp: 1700003000,
+        parentIds: [commit3.oid],
+      });
+      setupDefaultMocks({
+        commits: [commit4, commit3, commit2, commit1],
+        refs: {
+          [commit4.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // Same commit, new row — range-select and the SR position read this row
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(internals.selectedNode?.row).to.equal(2);
+      expect(internals.lastClickedNode?.oid).to.equal(commit2.oid);
+      expect(internals.lastClickedNode?.row).to.equal(2);
+      // An ordinary reload that keeps the selection must not churn the panel
+      expect(events).to.have.length(0);
+    });
+
+    it('keeps the selection when a reload fails', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_history') {
+          throw new Error('walk failed');
+        }
+        return previous(command, args);
+      };
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // A failed load never rebuilds the layout, so the details panel must
+      // keep showing exactly what it showed before
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(internals.selectedNodes.size).to.equal(1);
+      expect(events).to.have.length(0);
+    });
+  });
+
   describe('pull request loading race', () => {
     it('discards PRs fetched for a previously active repository', async () => {
       let resolvePrs: ((v: unknown) => void) | null = null;

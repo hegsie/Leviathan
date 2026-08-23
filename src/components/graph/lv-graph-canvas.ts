@@ -1591,6 +1591,9 @@ export class LvGraphCanvas extends LitElement {
     this.resizeMinimap();
     this.rebuildMinimapDots();
 
+    // Drop/rebind the selection against the new layout before painting
+    this.validateSelection();
+
     // Set highlighted commits for search results
     this.renderer?.setHighlightedCommits(this.matchedCommitOids);
 
@@ -1601,6 +1604,44 @@ export class LvGraphCanvas extends LitElement {
     // Fetch stats and signatures for the visible rows asynchronously
     // (don't block initial render). Debounced to let rapid changes settle.
     this.scheduleVisibleDataFetch();
+  }
+
+  /**
+   * Reconcile the selection with the layout that was just built. A reload
+   * after an amend, rebase, squash or branch delete (and a branch-filter
+   * change) rebuilds the graph around different OIDs and different rows:
+   * without this the details panel would keep showing a commit that is gone
+   * from the repository — and its actions would run against a dead OID —
+   * while survivors would keep pointing at their OLD nodes, so range-select
+   * and the screen-reader position would work off stale rows.
+   */
+  private validateSelection(): void {
+    if (!this.layout) return;
+
+    let selectionChanged = false;
+    for (const oid of [...this.selectedNodes]) {
+      if (!this.layout.nodes.has(oid)) {
+        this.selectedNodes.delete(oid);
+        selectionChanged = true;
+      }
+    }
+    if (this.selectedNode) {
+      // Rebind a survivor to its node in the NEW layout (same commit, new row)
+      const node = this.layout.nodes.get(this.selectedNode.oid) ?? null;
+      if (!node) selectionChanged = true;
+      this.selectedNode = node;
+    }
+    if (this.lastClickedNode) {
+      this.lastClickedNode = this.layout.nodes.get(this.lastClickedNode.oid) ?? null;
+    }
+
+    // Only a real change is announced — an ordinary reload that keeps the
+    // selection must not churn the details panel. markDirty/scheduleRender
+    // are left to applyLayout(), which runs them on the very next lines.
+    if (selectionChanged) {
+      this.dispatchSelectionEvent();
+      this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
+    }
   }
 
   /**
@@ -2880,30 +2921,10 @@ export class LvGraphCanvas extends LitElement {
 
   private applyBranchFilter(): void {
     // processLayout() applies the branch-visibility filter via
-    // getVisibleCommits(), rebuilds the indices, and schedules a render
+    // getVisibleCommits(), rebuilds the indices, drops a selection the
+    // filter just hid (applyLayout -> validateSelection), and schedules a
+    // render
     this.processLayout();
-
-    // A commit hidden by the filter must not stay selected
-    if (this.layout) {
-      let selectionChanged = false;
-      for (const oid of [...this.selectedNodes]) {
-        if (!this.layout.nodes.has(oid)) {
-          this.selectedNodes.delete(oid);
-          selectionChanged = true;
-        }
-      }
-      if (this.selectedNode && !this.layout.nodes.has(this.selectedNode.oid)) {
-        this.selectedNode = null;
-        this.lastClickedNode = null;
-        selectionChanged = true;
-      }
-      if (selectionChanged) {
-        this.dispatchSelectionEvent();
-        this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
-        this.renderer?.markDirty();
-        this.scheduleRender();
-      }
-    }
   }
 
   // Export methods

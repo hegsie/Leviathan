@@ -395,6 +395,88 @@ test.describe('Graph Commit Selection', () => {
     await expect(commitMessage).toContainText('Commit 1');
   });
 
+  test('a refresh that rewrites away the selected commit empties the commit details panel', async ({ page }) => {
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { selectCommit: (oid: string) => boolean };
+        canvas?.selectCommit('commit1');
+      },
+      handle
+    );
+    await waitForSelectedNode(page, 'commit1');
+
+    const commitDetails = page.locator('lv-commit-details');
+    await expect(commitDetails.locator('.commit-message')).toContainText('Commit 1');
+
+    // The history is rewritten (amend/rebase/squash): commit1 and commit2 are
+    // gone, replaced by commit3 on top of commit0
+    await injectCommandMock(page, {
+      get_commit_history: [makeCommit(3, ['commit0']), makeCommit(0, [])],
+      get_refs_by_commit: {
+        commit3: [
+          { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+        ],
+      },
+      get_commit_total: 2,
+    });
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { refresh: () => void };
+        canvas?.refresh();
+      },
+      handle
+    );
+    await waitForNodeCount(page, 2);
+
+    // The panel must not keep showing a commit that no longer exists
+    await expect(commitDetails.locator('.empty-state')).toBeVisible();
+    await expect(commitDetails.locator('.empty-state')).toContainText('Select a commit to view details');
+    await expect(commitDetails.locator('.commit-message')).toHaveCount(0);
+    expect(await getSelectedNodeOid(page)).toBeNull();
+  });
+
+  test('a refresh that keeps the selected commit keeps the commit details panel', async ({ page }) => {
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { selectCommit: (oid: string) => boolean };
+        canvas?.selectCommit('commit1');
+      },
+      handle
+    );
+    await waitForSelectedNode(page, 'commit1');
+
+    // An ordinary refresh (pull, fetch, watcher refs-changed): a new commit
+    // lands on top and every existing commit survives
+    await injectCommandMock(page, {
+      get_commit_history: [
+        makeCommit(3, ['commit2']),
+        makeCommit(2, ['commit1']),
+        makeCommit(1, ['commit0']),
+        makeCommit(0, []),
+      ],
+      get_refs_by_commit: {
+        commit3: [
+          { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+        ],
+      },
+      get_commit_total: 4,
+    });
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { refresh: () => void };
+        canvas?.refresh();
+      },
+      handle
+    );
+    await waitForNodeCount(page, 4);
+
+    const commitDetails = page.locator('lv-commit-details');
+    await expect(commitDetails.locator('.commit-message')).toContainText('Commit 1');
+    expect(await getSelectedNodeOid(page)).toBe('commit1');
+  });
+
   test('Escape should deselect the current commit', async ({ page }) => {
     await graph.navigateDown();
     await waitForAnySelectedNode(page);
