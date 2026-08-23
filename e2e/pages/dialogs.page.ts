@@ -342,6 +342,13 @@ export class GitHubDialogPage extends BaseDialog {
   readonly oauthStatus: Locator;
   readonly oauthDivider: Locator;
 
+  // GitHub App elements
+  readonly appButton: Locator;
+  readonly appIdInput: Locator;
+  readonly appPrivateKeyInput: Locator;
+  readonly appInstallationInput: Locator;
+  readonly connectAppButton: Locator;
+
   // Pull requests tab
   readonly prList: Locator;
   readonly createPrButton: Locator;
@@ -375,6 +382,13 @@ export class GitHubDialogPage extends BaseDialog {
     this.oauthSpinner = page.locator('lv-github-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-github-dialog .oauth-status');
     this.oauthDivider = page.locator('lv-github-dialog .oauth-divider');
+
+    // GitHub App elements
+    this.appButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("GitHub App")');
+    this.appIdInput = page.locator('lv-github-dialog input[placeholder="123456"]');
+    this.appPrivateKeyInput = page.locator('lv-github-dialog textarea[placeholder^="Paste your private key"]');
+    this.appInstallationInput = page.locator('lv-github-dialog input[placeholder^="Installation ID"]');
+    this.connectAppButton = page.locator('lv-github-dialog button:has-text("Connect via GitHub App")');
 
     // PRs
     this.prList = page.locator('lv-github-dialog .pr-list');
@@ -420,6 +434,21 @@ export class GitHubDialogPage extends BaseDialog {
 
   async selectPATMethod(): Promise<void> {
     await this.patButton.click();
+  }
+
+  async selectAppMethod(): Promise<void> {
+    await this.appButton.click();
+  }
+
+  async connectViaApp(
+    appId: string,
+    privateKey: string,
+    installationId: string
+  ): Promise<void> {
+    await this.appIdInput.fill(appId);
+    await this.appPrivateKeyInput.fill(privateKey);
+    await this.appInstallationInput.fill(installationId);
+    await this.connectAppButton.click();
   }
 
   async isOAuthConfigured(): Promise<boolean> {

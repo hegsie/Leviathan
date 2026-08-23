@@ -20,7 +20,7 @@ const keyringStore = new Map<string, string>();
 };
 
 import { expect, fixture, html } from '@open-wc/testing';
-import { unifiedProfileStore } from '../../../stores/unified-profile.store.ts';
+import { unifiedProfileStore, selectDefaultGlobalAccount } from '../../../stores/unified-profile.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
 import * as oauthService from '../../../services/oauth.service.ts';
 import { createEmptyIntegrationAccount } from '../../../types/unified-profile.types.ts';
@@ -1069,6 +1069,152 @@ describe('lv-github-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { isAddingAccount: boolean }).isAddingAccount).to.equal(false);
+    });
+  });
+
+  describe('GitHub App account identity', () => {
+    // Accounts the backend reports for this describe. The dialog reloads the
+    // config on open, so the backend mock — not just the store — has to carry
+    // them.
+    let existingAccounts: IntegrationAccount[] = [];
+
+    // The real Rust `save_global_account` command returns the saved account;
+    // the shared harness echoes the raw args instead, which the service cannot
+    // fold into the store. Narrow the mock here so the store assertions below
+    // observe what the app would really see.
+    beforeEach(() => {
+      existingAccounts = [];
+      const base = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'save_global_account') {
+          return (args as { account: IntegrationAccount }).account;
+        }
+        if (command === 'get_unified_profiles_config') {
+          return {
+            version: 3,
+            profiles: [],
+            accounts: existingAccounts,
+            repositoryAssignments: {},
+          };
+        }
+        return base(command, args);
+      };
+    });
+
+    const seedAccounts = (accounts: IntegrationAccount[]): void => {
+      existingAccounts = accounts;
+      unifiedProfileStore.getState().setAccounts(accounts);
+    };
+
+    const savedAccounts = (): IntegrationAccount[] =>
+      invokeHistory
+        .filter((h) => h.command === 'save_global_account')
+        .map((h) => (h.args as { account: IntegrationAccount }).account);
+
+    const fillAppForm = (dialog: Record<string, unknown>): void => {
+      dialog.appId = '12345';
+      dialog.appPrivateKey = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+      dialog.appInstallationId = '67890';
+    };
+
+    it('connecting a GitHub App creates its own account instead of overwriting the selected one', async () => {
+      seedAccounts([mockAccount]);
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      // The dialog auto-selects the existing PAT account when it opens — that
+      // is exactly the state in which the App connect used to clobber it.
+      expect(dialog.selectedAccountId, 'existing account is auto-selected').to.equal('gh-acc-1');
+
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      const saved = savedAccounts();
+      expect(saved).to.have.lengthOf(1);
+      expect(saved[0].id).to.equal('github-app-12345');
+      expect(saved.some((a) => a.id === 'gh-acc-1'), 'never writes onto the PAT account').to.be
+        .false;
+
+      const pat = unifiedProfileStore.getState().accounts.find((a) => a.id === 'gh-acc-1');
+      expect(pat, 'the PAT account still exists').to.exist;
+      expect(pat!.name).to.equal('Work GitHub');
+      expect(pat!.cachedUser?.username).to.equal('octocat');
+      expect(pat!.isDefault, 'the PAT account keeps its Default flag').to.be.true;
+      expect(selectDefaultGlobalAccount('github')?.id).to.equal('gh-acc-1');
+
+      expect(dialog.selectedAccountId).to.equal('github-app-12345');
+    });
+
+    it('reconnecting an existing GitHub App account keeps its name, colour, patterns and Default flag', async () => {
+      const appAccount = createTestAccount({
+        id: 'github-app-12345',
+        name: 'Acme App',
+        integrationType: 'github',
+        color: '#3b82f6',
+        urlPatterns: ['github.com/acme/*'],
+        isDefault: true,
+      });
+      seedAccounts([appAccount]);
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      expect(dialog.selectedAccountId).to.equal('github-app-12345');
+
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      const saved = savedAccounts();
+      expect(saved).to.have.lengthOf(1);
+      expect(saved[0].id).to.equal('github-app-12345');
+      expect(saved[0].name, 'user-set name survives a reconnect').to.equal('Acme App');
+      expect(saved[0].color).to.equal('#3b82f6');
+      expect(saved[0].urlPatterns).to.deep.equal(['github.com/acme/*']);
+      expect(saved[0].isDefault, 'the App account keeps its Default flag').to.be.true;
+
+      const stored = unifiedProfileStore
+        .getState()
+        .accounts.find((a) => a.id === 'github-app-12345');
+      expect(stored!.name).to.equal('Acme App');
+      expect(stored!.isDefault).to.be.true;
+    });
+
+    it('a rejected GitHub App configuration saves nothing and leaves the selected account intact', async () => {
+      seedAccounts([mockAccount]);
+      appConfigResponse = { connected: false, user: null, scopes: [] };
+      uiStore.getState().toasts.length = 0;
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      expect(dialog.selectedAccountId).to.equal('gh-acc-1');
+
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      expect(savedAccounts(), 'a rejected config persists nothing').to.be.empty;
+      expect(dialog.error).to.be.a('string').and.not.empty;
+      expect(uiStore.getState().toasts.some((t) => t.type === 'error')).to.be.true;
+
+      const pat = unifiedProfileStore.getState().accounts.find((a) => a.id === 'gh-acc-1');
+      expect(pat!.name).to.equal('Work GitHub');
+      expect(pat!.isDefault).to.be.true;
+      expect(dialog.selectedAccountId).to.equal('gh-acc-1');
     });
   });
 

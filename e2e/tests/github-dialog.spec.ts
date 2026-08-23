@@ -276,3 +276,129 @@ test.describe('GitHub Dialog - Extended Scenarios', () => {
     await expect(errorText).toBeVisible({ timeout: 5000 });
   });
 });
+
+/**
+ * GitHub App connection.
+ *
+ * The dialog auto-selects an existing account when it opens, and the GitHub
+ * App form sits on the same Connection tab. Connecting an App must therefore
+ * write its OWN account record instead of replacing whichever account happens
+ * to be selected.
+ */
+test.describe('GitHub Dialog - GitHub App', () => {
+  const defaultProfile = {
+    id: 'profile-1',
+    name: 'Default',
+    gitName: 'Test User',
+    gitEmail: 'test@example.com',
+    signingKey: null,
+    urlPatterns: [],
+    isDefault: true,
+    color: '#4f46e5',
+    defaultAccounts: { github: 'gh-acc-1' },
+  };
+
+  const existingGitHubAccount = {
+    id: 'gh-acc-1',
+    name: 'GitHub (testuser)',
+    integrationType: 'github',
+    config: { type: 'github' },
+    color: '#4f46e5',
+    cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+    urlPatterns: [],
+    isDefault: true,
+  };
+
+  const PEM = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [defaultProfile],
+        accounts: [existingGitHubAccount],
+        repositoryAssignments: {},
+      },
+      get_integration_accounts: [existingGitHubAccount],
+      get_profiles: [defaultProfile],
+      get_active_profile: defaultProfile,
+    });
+  });
+
+  test('connecting a GitHub App does not overwrite the selected account', async ({ page }) => {
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    const selector = page.locator('lv-github-dialog lv-account-selector');
+    await expect(selector).toContainText('GitHub (testuser)');
+
+    await startCommandCaptureWithMocks(page, {
+      configure_github_app: { connected: true, user: null, scopes: ['app-installation'] },
+      save_global_account: {
+        id: 'github-app-123456',
+        name: 'GitHub App 123456',
+        integrationType: 'github',
+        config: { type: 'github' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+    });
+
+    await dialogs.github.selectAppMethod();
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await dialogs.github.connectViaApp('123456', PEM, '7890');
+
+    await waitForCommand(page, 'save_global_account');
+
+    const saves = await findCommand(page, 'save_global_account');
+    expect(saves.length).toBeGreaterThan(0);
+    for (const call of saves) {
+      const account = (call.args as { account: { id: string } }).account;
+      expect(account.id).toBe('github-app-123456');
+    }
+
+    // The existing PAT account survives, both as a record and in the selector.
+    await expect(page.locator('lv-toast-container .toast.success').first()).toBeVisible({
+      timeout: 5000,
+    });
+    // The App becomes the selected account, but the existing PAT account is
+    // still listed intact — name and cached user untouched.
+    await selector.locator('.selector-btn').click();
+    const dropdown = selector.locator('.dropdown');
+    await expect(dropdown).toBeVisible();
+    await expect(dropdown).toContainText('GitHub (testuser)');
+    await expect(dropdown).toContainText('@testuser');
+    await expect(dropdown).toContainText('GitHub App 123456');
+  });
+
+  test('shows an error and saves nothing when the App configuration is rejected', async ({
+    page,
+  }) => {
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await startCommandCaptureWithMocks(page, {});
+    await injectCommandError(page, 'configure_github_app', 'Invalid private key');
+
+    await dialogs.github.selectAppMethod();
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await dialogs.github.connectViaApp('123456', PEM, '7890');
+
+    await expect(
+      page
+        .locator('lv-github-dialog .error-message, lv-toast-container .toast.error')
+        .first()
+    ).toBeVisible({ timeout: 5000 });
+
+    const saves = await findCommand(page, 'save_global_account');
+    expect(saves).toHaveLength(0);
+  });
+});
