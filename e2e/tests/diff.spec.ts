@@ -638,6 +638,68 @@ test.describe('Diff View - Stage Hunk', () => {
     const stageLineCommands = await findCommand(page, 'stage_lines');
     expect(stageHunkCommands.length + stageFileCommands.length + stageLineCommands.length).toBeGreaterThan(0);
   });
+
+  // Split view used to be read-only — no stage buttons and no way to act on a
+  // line selection — so a user who preferred it could not stage at all.
+  test('should stage a hunk from split view', async ({ page }) => {
+    await startCommandCapture(page);
+
+    const file = rightPanel.getUnstagedFile('src/main.ts');
+    await file.click();
+
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page.locator('lv-diff-view .view-btn[title="Split view"]').click();
+    await expect(page.locator('lv-diff-view .split-pane')).toHaveCount(2);
+
+    await page
+      .locator('lv-diff-view .split-pane')
+      .nth(1)
+      .locator('button.stage-btn.stage[title="Stage this hunk"]')
+      .first()
+      .click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+
+    const stageHunkCommands = await findCommand(page, 'stage_hunk');
+    expect(stageHunkCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should stage a single line from split view', async ({ page }) => {
+    await startCommandCapture(page);
+
+    const file = rightPanel.getUnstagedFile('src/main.ts');
+    await file.click();
+
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page
+      .locator(
+        'lv-diff-view .view-btn[title="Toggle line selection mode for staging individual lines"]'
+      )
+      .click();
+    await page.locator('lv-diff-view .view-btn[title="Split view"]').click();
+    await expect(page.locator('lv-diff-view .split-pane')).toHaveCount(2);
+
+    await page.locator('lv-diff-view .split-line.code-addition').first().click();
+
+    const selectionActions = page.locator('lv-diff-view .selection-actions');
+    await expect(selectionActions).toBeVisible();
+    await expect(selectionActions).toContainText('1 line selected');
+
+    await selectionActions.locator('.selection-btn.primary').click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+
+    const stageHunkCommands = await findCommand(page, 'stage_hunk');
+    expect(stageHunkCommands.length).toBeGreaterThan(0);
+  });
 });
 
 test.describe('Diff Error Scenarios', () => {
