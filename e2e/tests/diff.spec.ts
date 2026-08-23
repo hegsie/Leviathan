@@ -822,3 +822,153 @@ test.describe('Diff - UI Outcome Verification', () => {
     await expect(onionSkinBtn).not.toHaveClass(/active/);
   });
 });
+
+// Large diffs are truncated at 3000 lines with a "Load full diff" affordance.
+// Loading the full diff flips the unified view into its virtualized renderer,
+// which must keep the staging affordances the user loaded the diff for.
+function buildLargeDiff() {
+  const padLines: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 5100; i++) {
+    padLines.push({ content: `pad ${i}`, origin: 'context', oldLineNo: 900 + i, newLineNo: 900 + i });
+  }
+  return {
+    path: 'src/main.ts',
+    oldPath: null,
+    status: 'modified',
+    isBinary: false,
+    isImage: false,
+    imageType: null,
+    additions: 2,
+    deletions: 2,
+    truncated: false,
+    hunks: [
+      {
+        header: '@@ -1,4 +1,5 @@',
+        oldStart: 1,
+        oldLines: 4,
+        newStart: 1,
+        newLines: 5,
+        lines: [
+          { content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+          { content: 'old first', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+          { content: 'first hunk change', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+          { content: 'omega', origin: 'context', oldLineNo: 3, newLineNo: 3 },
+        ],
+      },
+      {
+        header: '@@ -80,4 +81,5 @@',
+        oldStart: 80,
+        oldLines: 4,
+        newStart: 81,
+        newLines: 5,
+        lines: [
+          { content: 'beta', origin: 'context', oldLineNo: 80, newLineNo: 81 },
+          { content: 'old second', origin: 'deletion', oldLineNo: 81, newLineNo: null },
+          { content: 'second hunk change', origin: 'addition', oldLineNo: null, newLineNo: 82 },
+          { content: 'zeta', origin: 'context', oldLineNo: 82, newLineNo: 83 },
+        ],
+      },
+      {
+        header: '@@ -900,5100 +900,5100 @@',
+        oldStart: 900,
+        oldLines: 5100,
+        newStart: 900,
+        newLines: 5100,
+        lines: padLines,
+      },
+    ],
+  };
+}
+
+test.describe('Diff View - Large diff staging after Load full diff', () => {
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+
+    // First load is capped by the backend, so the view is truncated.
+    await injectCommandMock(page, {
+      get_file_diff: {
+        path: 'src/main.ts',
+        oldPath: null,
+        status: 'modified',
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 1,
+        deletions: 1,
+        truncated: true,
+        totalLines: 60000,
+        hunks: [
+          {
+            header: '@@ -1,4 +1,5 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 5,
+            lines: [
+              { content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'old first', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'first hunk change', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'omega', origin: 'context', oldLineNo: 3, newLineNo: 3 },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  async function loadFullDiff(page: import('@playwright/test').Page) {
+    await rightPanel.getUnstagedFile('src/main.ts').click();
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    const loadFullBtn = page.locator('lv-diff-view .large-diff-info .btn-link');
+    await expect(loadFullBtn).toBeVisible();
+
+    await startCommandCapture(page);
+    await injectCommandMock(page, { get_file_diff: buildLargeDiff(), stage_hunk: null });
+
+    await loadFullBtn.click();
+    await expect(page.locator('lv-diff-view .diff-virtualized-container')).toBeVisible();
+  }
+
+  test('staging a hunk still works after Load full diff on a large file', async ({ page }) => {
+    await loadFullDiff(page);
+
+    const stageBtn = page
+      .locator('lv-diff-view .diff-virtualized-container button.stage-btn.stage[title="Stage this hunk"]')
+      .first();
+    await expect(stageBtn).toBeVisible();
+    await stageBtn.click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+    const calls = await findCommand(page, 'stage_hunk');
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  test('line selection is available in the virtualized view', async ({ page }) => {
+    await loadFullDiff(page);
+
+    await page.locator('lv-diff-view button.view-btn[title^="Toggle line selection"]').click();
+    await page
+      .locator('lv-diff-view .diff-virtualized-container .line.code-addition')
+      .first()
+      .click();
+
+    const bar = page.locator('lv-diff-view .selection-actions');
+    await expect(bar).toBeVisible();
+    await expect(bar).toContainText('Stage Selected');
+  });
+});
