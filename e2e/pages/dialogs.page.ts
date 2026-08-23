@@ -337,6 +337,10 @@ export class GitHubDialogPage extends BaseDialog {
   readonly authMethodToggle: Locator;
   readonly oauthButton: Locator;
   readonly patButton: Locator;
+  readonly appButton: Locator;
+  readonly appIdInput: Locator;
+  readonly appPrivateKeyInput: Locator;
+  readonly connectViaAppButton: Locator;
   readonly oauthSignInButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
@@ -371,6 +375,10 @@ export class GitHubDialogPage extends BaseDialog {
     this.authMethodToggle = page.locator('lv-github-dialog .auth-method-toggle');
     this.oauthButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Sign in with GitHub")');
     this.patButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.appButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("GitHub App")');
+    this.appIdInput = page.locator('lv-github-dialog input[placeholder="123456"]');
+    this.appPrivateKeyInput = page.locator('lv-github-dialog textarea');
+    this.connectViaAppButton = page.locator('lv-github-dialog button:has-text("Connect via GitHub App")');
     this.oauthSignInButton = page.locator('lv-github-dialog .btn-oauth');
     this.oauthSpinner = page.locator('lv-github-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-github-dialog .oauth-status');
@@ -420,6 +428,10 @@ export class GitHubDialogPage extends BaseDialog {
 
   async selectPATMethod(): Promise<void> {
     await this.patButton.click();
+  }
+
+  async selectAppMethod(): Promise<void> {
+    await this.appButton.click();
   }
 
   async isOAuthConfigured(): Promise<boolean> {
