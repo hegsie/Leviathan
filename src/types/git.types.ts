@@ -8,6 +8,12 @@ export interface Repository {
   isValid: boolean;
   isBare: boolean;
   headRef: string | null;
+  /**
+   * Commit HEAD points at when detached; null when HEAD is on a branch or
+   * unborn. `headRef` is the literal 'HEAD' while detached, so it names no
+   * commit.
+   */
+  detachedHeadOid: string | null;
   state: RepositoryState;
   isShallow: boolean;
   isPartialClone: boolean;

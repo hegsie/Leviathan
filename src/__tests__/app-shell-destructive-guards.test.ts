@@ -42,6 +42,7 @@ function mockRepo(path: string, name: string, state = 'clean'): Repository {
     isValid: true,
     isBare: false,
     headRef: 'main',
+    detachedHeadOid: null,
     state,
     isShallow: false,
     isPartialClone: false,
