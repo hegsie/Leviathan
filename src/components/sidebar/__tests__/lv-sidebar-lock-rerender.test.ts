@@ -74,8 +74,20 @@ function defaultMockInvoke(command: string): Promise<unknown> {
     case 'get_branch_sort_mode':
     case 'get_tag_sort_mode':
       return Promise.resolve('name');
+    case 'get_gitflow_config':
+      // An UNINITIALIZED repo (a read that succeeded), so the gitflow panel
+      // renders the init section. A null here would mean the read FAILED.
+      return Promise.resolve({
+        initialized: false,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      });
     default:
-      // get_git_flow_config included: null config renders the init section.
       return Promise.resolve(null);
   }
 }

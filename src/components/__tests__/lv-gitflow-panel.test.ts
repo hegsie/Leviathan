@@ -657,21 +657,98 @@ describe('lv-gitflow-panel', () => {
 
   // ── Error handling ─────────────────────────────────────────────────────
   describe('error handling', () => {
-    it('shows init section when config load returns failure', async () => {
+    it('reports a failed config load instead of the init screen', async () => {
       // When get_gitflow_config throws, invokeCommand catches it and returns
-      // { success: false }. loadConfig sees !result.success, sets config=null,
-      // so the init section renders.
+      // { success: false, error: { message } } — it never throws, so this is
+      // the path a real backend Err takes. A read that FAILED is not the same
+      // as a repo that is not initialized: showing the init screen here would
+      // invite the user to run `git flow init` to "fix" a read failure.
       mockInvoke = async (command: string) => {
         if (command === 'get_gitflow_config') {
-          throw new Error('Config load failed');
+          throw new Error('failed to open repository');
         }
         return null;
       };
 
       const el = await renderPanel();
 
-      const initSection = el.shadowRoot!.querySelector('.init-section');
-      expect(initSection).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
+      expect(errorEl).to.not.be.null;
+      expect(errorEl!.textContent).to.include('failed to open repository');
+    });
+
+    it('retries the config load and renders the sections on success', async () => {
+      let failNext = true;
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            if (failNext) throw new Error('failed to open repository');
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return emptyBranches;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
+
+      failNext = false;
+      const retryBtn = el.shadowRoot!.querySelector('.load-error .btn') as HTMLButtonElement;
+      expect(retryBtn).to.not.be.null;
+      retryBtn.click();
+
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.load-error')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.section-header').length).to.equal(3);
+      expect(findCommands('get_gitflow_config').length).to.be.greaterThan(1);
+    });
+
+    it('reports a config load that succeeds with no payload as a failure', async () => {
+      // { success: true, data: null } lands in the same else branch as an Err.
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return null;
+          case 'get_branches':
+            return emptyBranches;
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
+      const errorEl = el.shadowRoot!.querySelector('.error-banner');
+      expect(errorEl).to.not.be.null;
+      expect(errorEl!.textContent).to.include('Failed to load Git Flow configuration');
+    });
+
+    it('keeps the read-failure screen after the error banner is dismissed', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'get_gitflow_config') {
+          throw new Error('failed to open repository');
+        }
+        return null;
+      };
+
+      const el = await renderPanel();
+
+      const dismiss = el.shadowRoot!.querySelector('.error-banner-dismiss') as HTMLButtonElement;
+      expect(dismiss).to.not.be.null;
+      dismiss.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
     });
 
     it('shows error when init_gitflow fails', async () => {
@@ -699,6 +776,10 @@ describe('lv-gitflow-panel', () => {
       const errorEl = el.shadowRoot!.querySelector('.error-banner');
       expect(errorEl).to.not.be.null;
       expect(errorEl!.textContent).to.include('Init failed: no main branch');
+      // An init that failed on a genuinely uninitialized repo must KEEP the
+      // Initialize button — it is not a config read failure.
+      expect(el.shadowRoot!.querySelector('.init-section')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.load-error')).to.be.null;
     });
 
     it('shows error when start feature fails', async () => {

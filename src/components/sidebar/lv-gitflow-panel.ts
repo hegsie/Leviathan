@@ -40,7 +40,8 @@ export class LvGitflowPanel extends LitElement {
         padding: var(--spacing-sm);
       }
 
-      .init-section {
+      .init-section,
+      .load-error {
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -49,7 +50,8 @@ export class LvGitflowPanel extends LitElement {
         text-align: center;
       }
 
-      .init-description {
+      .init-description,
+      .load-error-message {
         font-size: var(--font-size-sm);
         color: var(--color-text-muted);
       }
@@ -281,6 +283,14 @@ export class LvGitflowPanel extends LitElement {
   @state() private config: GitFlowConfig | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
+  /**
+   * The last config read FAILED, as opposed to the read succeeding and
+   * reporting an uninitialized repo. Both leave `config` null, but they are
+   * not the same thing: without this flag a failed read fell through to the
+   * init screen and offered to run `git flow init` on a repository whose real
+   * state was never read.
+   */
+  @state() private configLoadFailed = false;
   @state() private activeFeatures: ActiveItem[] = [];
   @state() private activeReleases: ActiveItem[] = [];
   @state() private activeHotfixes: ActiveItem[] = [];
@@ -376,6 +386,7 @@ export class LvGitflowPanel extends LitElement {
 
     this.loading = true;
     this.error = null;
+    this.configLoadFailed = false;
 
     try {
       const result = await gitService.getGitFlowConfig(loadedPath);
@@ -386,11 +397,21 @@ export class LvGitflowPanel extends LitElement {
           await this.loadActiveItems(loadedPath, isLatest);
         }
       } else {
+        // A read that FAILED is not "not initialized" — reporting it as such
+        // offers `git flow init` as the fix for an unreadable repository, and
+        // would write branch/prefix config into a repo whose state we never
+        // managed to read. invokeCommand never throws, so this branch (not the
+        // catch below) is where a backend Err actually lands.
         this.config = null;
+        this.configLoadFailed = true;
+        this.error = result.error?.message || 'Failed to load Git Flow configuration';
       }
     } catch (err) {
       console.error('Failed to load git flow config:', err);
-      if (isLatest()) this.error = 'Failed to load Git Flow configuration';
+      if (isLatest()) {
+        this.configLoadFailed = true;
+        this.error = 'Failed to load Git Flow configuration';
+      }
     } finally {
       if (isLatest()) this.loading = false;
     }
@@ -870,6 +891,24 @@ export class LvGitflowPanel extends LitElement {
     this.expandedSections = next;
   }
 
+  /**
+   * A failed config read, not an uninitialized repo: offer a Retry rather than
+   * an Initialize button, which would write git-flow config into a repository
+   * whose state could not be read.
+   */
+  private renderLoadErrorSection() {
+    return html`
+      <div class="load-error">
+        <div class="load-error-message">
+          Git Flow status could not be read for this repository.
+        </div>
+        <button class="btn btn-secondary" @click=${() => void this.loadConfig()}>
+          Retry
+        </button>
+      </div>
+    `;
+  }
+
   private renderInitSection() {
     return html`
       <div class="init-section">
@@ -1030,6 +1069,13 @@ export class LvGitflowPanel extends LitElement {
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading Git Flow...</div>`;
+    }
+
+    if (this.configLoadFailed) {
+      return html`
+        ${this.renderErrorBanner()}
+        ${this.renderLoadErrorSection()}
+      `;
     }
 
     if (!this.config || !this.config.initialized) {
