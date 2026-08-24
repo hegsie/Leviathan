@@ -54,6 +54,7 @@ import './components/dialogs/lv-lfs-dialog.ts';
 import './components/dialogs/lv-gpg-dialog.ts';
 import './components/dialogs/lv-ssh-dialog.ts';
 import './components/dialogs/lv-config-dialog.ts';
+import './components/dialogs/lv-gitignore-dialog.ts';
 import './components/dialogs/lv-credentials-dialog.ts';
 import './components/dialogs/lv-github-dialog.ts';
 import './components/dialogs/lv-gitlab-dialog.ts';
@@ -737,6 +738,7 @@ export class AppShell extends LitElement {
   // Workspace Manager dialog
   @state() private showWorkspaceManager = false;
   @state() private showHooksDialog = false;
+  @state() private showGitignoreDialog = false;
 
   // Right panel tab tracking
   @state() private activeRightPanelTab: string | undefined;
@@ -1497,6 +1499,11 @@ export class AppShell extends LitElement {
             dismissed: 'hooks closed',
             running: 'hook save',
             clearFlag: () => { this.showHooksDialog = false; },
+          },
+          'lv-gitignore-dialog': {
+            dismissed: 'ignore rules closed',
+            running: 'ignore rule update',
+            clearFlag: () => { this.showGitignoreDialog = false; },
           },
           'lv-changelog-dialog': {
             dismissed: 'changelog closed',
@@ -4221,6 +4228,13 @@ export class AppShell extends LitElement {
         icon: 'terminal',
         action: this.requiresRepository(() => { this.showHooksDialog = true; }),
       },
+      {
+        id: 'gitignore',
+        label: 'Edit .gitignore & .gitattributes',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() => { this.showGitignoreDialog = true; }),
+      },
     ];
 
     return commands;
@@ -5665,6 +5679,20 @@ export class AppShell extends LitElement {
           .repoPath=${this.activeRepository.repository.path}
           @close=${() => { this.showHooksDialog = false; }}
         ></lv-hooks-dialog>
+      ` : ''}
+
+      ${this.activeRepository ? html`
+        <lv-gitignore-dialog
+          ?open=${this.showGitignoreDialog}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showGitignoreDialog = false; }}
+          @ignore-rules-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            // Writing .gitignore/.gitattributes changes the working tree, so the
+            // file list must be reloaded. Routed to the repo the write RAN ON:
+            // handleRefresh resolves activeRepository at call time, so a Ctrl+Tab
+            // during the write would otherwise refresh the wrong repository.
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
+        ></lv-gitignore-dialog>
       ` : ''}
 
       ${this.activeRepository ? html`

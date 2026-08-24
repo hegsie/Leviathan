@@ -27,6 +27,35 @@ interface FileContextMenuState {
 }
 
 /**
+ * Render a working-tree path as a .gitignore pattern that matches THAT file and
+ * nothing else.
+ *
+ * Anchored with a leading slash so it resolves against the repo-root
+ * .gitignore — a bare `notes.txt` would also ignore `docs/notes.txt`. Glob
+ * metacharacters are escaped so a file literally called `a[1].txt` is not read
+ * back as a character class, and a trailing space is escaped because git strips
+ * unescaped trailing whitespace from a pattern (the rule would then miss the
+ * very file it was written for).
+ */
+function gitignorePatternForPath(path: string): string {
+  const escaped = path
+    .replace(/[\\*?[\]]/g, (c) => `\\${c}`)
+    .replace(/ $/, "\\ ");
+  return `/${escaped}`;
+}
+
+/**
+ * `*.log` for `logs/run.log`. Null when the file name carries no usable
+ * extension — `Makefile`, a dotfile like `.env`, or a name ending in a dot.
+ */
+function gitignoreExtensionPattern(path: string): string | null {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return null;
+  return `*.${name.slice(dot + 1).replace(/[\\*?[\]]/g, (c) => `\\${c}`)}`;
+}
+
+/**
  * File status component
  * Displays staged and unstaged changes with staging functionality
  */
@@ -1719,6 +1748,30 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  /**
+   * Write a .gitignore rule for the context-menu file.
+   *
+   * Shaped like every sibling handler: the menu closes synchronously before the
+   * await, the working tree is reloaded on success, and a failure speaks
+   * through a toast rather than the console.
+   */
+  private async handleContextIgnore(pattern: string): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const result = await gitService.addToGitignore(this.repositoryPath, [
+      pattern,
+    ]);
+    if (result.success) {
+      // add_to_gitignore skips a pattern that is already present, so this reads
+      // true whether the rule was written now or was already in the file.
+      showToast(`"${file.path}" is now ignored`, "success");
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? "Failed to update .gitignore", "error");
+    }
+  }
+
   private handleContextViewDiff(): void {
     const file = this.contextMenu.file;
     if (!file) return;
@@ -2223,6 +2276,9 @@ export class LvFileStatus extends LitElement {
     if (!this.contextMenu.visible || !this.contextMenu.file) return nothing;
 
     const { x, y, isStaged } = this.contextMenu;
+    // Non-null past the early return above.
+    const file = this.contextMenu.file;
+    const extensionPattern = gitignoreExtensionPattern(file.path);
 
     return html`
       <div class="context-menu" role="menu" aria-label="File actions" style="left: ${x}px; top: ${y}px"
@@ -2329,6 +2385,48 @@ export class LvFileStatus extends LitElement {
           </svg>
           Copy file path
         </button>
+        ${!isStaged && file.status === "untracked"
+          ? html`
+              <div class="context-menu-divider" role="separator"></div>
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                @click=${() =>
+                  this.handleContextIgnore(gitignorePatternForPath(file.path))}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="4.9" y1="4.9" x2="19.1" y2="19.1"></line>
+                </svg>
+                Add to .gitignore
+              </button>
+              ${extensionPattern
+                ? html`
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      @click=${() => this.handleContextIgnore(extensionPattern)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                      >
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="4.9" y1="4.9" x2="19.1" y2="19.1"></line>
+                      </svg>
+                      Ignore all ${extensionPattern} files
+                    </button>
+                  `
+                : nothing}
+            `
+          : nothing}
         ${isStaged
           ? nothing
           : html`

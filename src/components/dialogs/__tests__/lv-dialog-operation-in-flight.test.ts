@@ -29,6 +29,7 @@ import '../lv-reflog-dialog.ts';
 import '../lv-remote-dialog.ts';
 import '../lv-config-dialog.ts';
 import '../lv-hooks-dialog.ts';
+import '../lv-gitignore-dialog.ts';
 import '../lv-create-tag-dialog.ts';
 import '../lv-create-branch-dialog.ts';
 import '../lv-credentials-dialog.ts';
@@ -56,6 +57,7 @@ const IN_FLIGHT_FIELDS: Array<[string, string, unknown]> = [
   ['lv-remote-dialog', 'fetchingRemote', 'origin'],
   ['lv-config-dialog', 'saving', true],
   ['lv-hooks-dialog', 'saving', true],
+  ['lv-gitignore-dialog', 'saving', true],
   ['lv-create-tag-dialog', 'isCreating', true],
   ['lv-create-branch-dialog', 'isCreating', true],
   ['lv-credentials-dialog', 'testing', true],
