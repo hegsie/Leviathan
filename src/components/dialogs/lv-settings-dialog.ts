@@ -605,8 +605,19 @@ export class LvSettingsDialog extends LitElement {
     if (!repo) return;
 
     if (value === '') {
+      // "None" must actually clear merge.tool in the repo config. Clearing only
+      // local state leaves git (and launch_merge_tool) on the old tool, and the
+      // next loadExternalToolsConfig() reads it back, undoing the user's choice.
+      const result = await gitService.unsetGitConfig(repo.repository.path, 'merge.tool');
+      if (!result.success) {
+        // Keep the select showing the tool that is still configured.
+        select.value = this.mergeToolName ?? '';
+        showToast(result.error?.message ?? 'Failed to clear merge tool', 'error');
+        return;
+      }
       this.mergeToolName = null;
       this.mergeToolCmd = null;
+      window.dispatchEvent(new CustomEvent('settings-changed'));
       return;
     }
 
@@ -639,8 +650,19 @@ export class LvSettingsDialog extends LitElement {
     if (!repo) return;
 
     if (value === '') {
+      // "None" must actually clear diff.tool in the repo config, otherwise git
+      // (and launch_diff_tool) keeps using the old tool and reopening Settings
+      // reloads it, silently reverting the user's choice.
+      const result = await gitService.unsetGitConfig(repo.repository.path, 'diff.tool');
+      if (!result.success) {
+        // Keep the select showing the tool that is still configured.
+        select.value = this.diffToolName ?? '';
+        showToast(result.error?.message ?? 'Failed to clear diff tool', 'error');
+        return;
+      }
       this.diffToolName = null;
       this.diffToolCmd = null;
+      window.dispatchEvent(new CustomEvent('settings-changed'));
       return;
     }
 
