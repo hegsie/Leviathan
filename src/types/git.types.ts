@@ -634,6 +634,7 @@ export interface WorkspaceRepoStatus {
   isValidRepo: boolean;
   changedFilesCount: number;
   currentBranch: string | null;
+  isDetached: boolean;
   ahead: number;
   behind: number;
 }
