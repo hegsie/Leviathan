@@ -10,6 +10,25 @@ import './lv-modal.ts';
 type TabId = 'identity' | 'settings' | 'aliases';
 
 /**
+ * The values git accepts for the common settings that take a fixed set. Keys
+ * absent from this map are free-form (an editor command, a branch name) and
+ * get a text input instead.
+ */
+const SETTING_CHOICES: Record<string, readonly string[]> = {
+  'core.autocrlf': ['true', 'false', 'input'],
+  'core.filemode': ['true', 'false'],
+  'core.ignorecase': ['true', 'false'],
+  'pull.rebase': ['true', 'false', 'merges', 'interactive'],
+  'push.default': ['nothing', 'current', 'upstream', 'simple', 'matching'],
+  'push.autoSetupRemote': ['true', 'false'],
+  'fetch.prune': ['true', 'false'],
+  'merge.ff': ['true', 'false', 'only'],
+  'merge.conflictstyle': ['merge', 'diff3', 'zdiff3'],
+  'rebase.autoStash': ['true', 'false'],
+  'diff.colorMoved': ['no', 'default', 'plain', 'blocks', 'zebra', 'dimmed-zebra'],
+};
+
+/**
  * Git Configuration Dialog
  * Manage git configuration settings, identity, and aliases
  */
@@ -218,7 +237,8 @@ export class LvConfigDialog extends LitElement {
         gap: var(--spacing-sm);
       }
 
-      .setting-value input {
+      .setting-value input,
+      .setting-value select {
         width: 200px;
         padding: var(--spacing-xs) var(--spacing-sm);
         border: 1px solid var(--color-border);
@@ -485,8 +505,11 @@ export class LvConfigDialog extends LitElement {
         showToast('Setting saved', 'success');
         // Update the in-memory value so re-renders don't snap the input back
         // to the stale value.
+        // The write always lands in this repository's config, so the scope
+        // badge has to follow it — a row that was "not set" a moment ago must
+        // not keep saying so next to the value the user just chose.
         this.settings = this.settings.map((s) =>
-          s.key === key ? { ...s, value } : s
+          s.key === key ? { ...s, value, scope: 'local' } : s
         );
       } else {
         this.error = result.error?.message || 'Failed to save setting';
@@ -611,6 +634,50 @@ export class LvConfigDialog extends LitElement {
     `;
   }
 
+  /**
+   * Editor for one common setting. Keys with a fixed set of accepted values get
+   * a dropdown — including a "Not set" entry, so the state of an unconfigured
+   * key is representable — and everything else a free-text input. A value that
+   * came from outside the known set (a legacy or hand-edited config) is added
+   * as an extra option, so the dropdown shows what is really configured instead
+   * of silently reading back as something else.
+   */
+  private renderSettingControl(setting: ConfigEntry) {
+    const choices = SETTING_CHOICES[setting.key];
+
+    if (!choices) {
+      return html`
+        <input
+          type="text"
+          placeholder="Not set"
+          .value=${setting.value}
+          @change=${(e: Event) =>
+            this.handleSaveSetting(setting.key, (e.target as HTMLInputElement).value)}
+        />
+      `;
+    }
+
+    const options =
+      setting.value && !choices.includes(setting.value) ? [...choices, setting.value] : choices;
+
+    // Selectedness is bound per option rather than with `.value` on the select:
+    // the property is committed before the options exist, so the configured
+    // value would not stick on first render.
+    return html`
+      <select
+        @change=${(e: Event) =>
+          this.handleSaveSetting(setting.key, (e.target as HTMLSelectElement).value)}
+      >
+        <option value="" .selected=${setting.value === ''}>Not set</option>
+        ${options.map(
+          (choice) => html`
+            <option value=${choice} .selected=${setting.value === choice}>${choice}</option>
+          `
+        )}
+      </select>
+    `;
+  }
+
   private renderSettingsTab() {
     if (this.loading) {
       return html`<div class="loading-indicator">Loading...</div>`;
@@ -631,16 +698,11 @@ export class LvConfigDialog extends LitElement {
             <div class="setting-item">
               <div>
                 <span class="setting-key">${setting.key}</span>
-                <span class="scope-badge">${setting.scope}</span>
+                <span class="scope-badge"
+                  >${setting.scope === 'unset' ? 'not set' : setting.scope}</span
+                >
               </div>
-              <div class="setting-value">
-                <input
-                  type="text"
-                  .value=${setting.value}
-                  @change=${(e: Event) =>
-                    this.handleSaveSetting(setting.key, (e.target as HTMLInputElement).value)}
-                />
-              </div>
+              <div class="setting-value">${this.renderSettingControl(setting)}</div>
             </div>
           `
         )}
@@ -649,7 +711,8 @@ export class LvConfigDialog extends LitElement {
       <div class="form-group" style="margin-top: var(--spacing-md)">
         <div class="hint">
           Changes are saved automatically when you modify a value.
-          Configure additional settings via git config command.
+          A setting that is not configured yet shows as "Not set" — pick or type a
+          value to set it for this repository.
         </div>
       </div>
     `;

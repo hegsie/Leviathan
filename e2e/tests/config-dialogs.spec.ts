@@ -109,6 +109,8 @@ test.describe('Config Dialog - Settings Tab', () => {
       get_common_settings: [
         { key: 'core.autocrlf', value: 'input', scope: 'local' },
         { key: 'push.default', value: 'current', scope: 'global' },
+        { key: 'pull.rebase', value: '', scope: 'unset' },
+        { key: 'core.editor', value: '', scope: 'unset' },
       ],
       get_aliases: [],
       set_config_value: null,
@@ -121,7 +123,62 @@ test.describe('Config Dialog - Settings Tab', () => {
   });
 
   test('should display setting items loaded from backend', async ({ page }) => {
-    await expect(page.locator('lv-config-dialog .setting-item')).toHaveCount(2);
+    await expect(page.locator('lv-config-dialog .setting-item')).toHaveCount(4);
+  });
+
+  test('should render an editor for settings that are not configured yet', async ({ page }) => {
+    const items = page.locator('lv-config-dialog .setting-item');
+
+    // An enumerated key gets a dropdown of the values git accepts...
+    const rebase = items.nth(2);
+    await expect(rebase.locator('.setting-key')).toHaveText('pull.rebase');
+    await expect(rebase.locator('.scope-badge')).toHaveText('not set');
+    await expect(rebase.locator('.setting-value select')).toHaveValue('');
+    await expect(rebase.locator('.setting-value select option')).toContainText([
+      'Not set',
+      'true',
+      'false',
+      'merges',
+      'interactive',
+    ]);
+
+    // ...and a free-form key an empty text box.
+    const editor = items.nth(3);
+    await expect(editor.locator('.scope-badge')).toHaveText('not set');
+    await expect(editor.locator('.setting-value input')).toHaveValue('');
+  });
+
+  test('should set a previously unset setting from its dropdown', async ({ page }) => {
+    const rebase = page.locator('lv-config-dialog .setting-item').nth(2);
+    await rebase.locator('.setting-value select').selectOption('true');
+
+    const commands = await findCommand(page, 'set_config_value');
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands[commands.length - 1].args).toMatchObject({
+      key: 'pull.rebase',
+      value: 'true',
+      global: false,
+    });
+
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
+    await expect(rebase.locator('.setting-value select')).toHaveValue('true');
+    await expect(rebase.locator('.scope-badge')).toHaveText('local');
+  });
+
+  test('should set a previously unset free-form setting by typing', async ({ page }) => {
+    const editor = page.locator('lv-config-dialog .setting-item').nth(3);
+    const input = editor.locator('.setting-value input');
+    await input.fill('code --wait');
+    await input.dispatchEvent('change');
+
+    const commands = await findCommand(page, 'set_config_value');
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands[commands.length - 1].args).toMatchObject({
+      key: 'core.editor',
+      value: 'code --wait',
+    });
+
+    await expect(editor.locator('.scope-badge')).toHaveText('local');
   });
 
   test('each setting should show its key and scope badge', async ({ page }) => {
@@ -134,9 +191,9 @@ test.describe('Config Dialog - Settings Tab', () => {
   });
 
   test('changing a setting value should call set_config_value', async ({ page }) => {
-    const input = page.locator('lv-config-dialog .setting-value input').first();
-    await input.fill('true');
-    await input.dispatchEvent('change');
+    // core.autocrlf takes a fixed set of values, so it is edited as a dropdown.
+    const select = page.locator('lv-config-dialog .setting-value select').first();
+    await select.selectOption('true');
 
     const commands = await findCommand(page, 'set_config_value');
     expect(commands.length).toBeGreaterThan(0);
@@ -144,16 +201,15 @@ test.describe('Config Dialog - Settings Tab', () => {
     // Verify UI: no error banner should appear after successful save
     await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
 
-    // Verify UI: the input should reflect the updated value
-    await expect(input).toHaveValue('true');
+    // Verify UI: the control should reflect the updated value
+    await expect(select).toHaveValue('true');
   });
 
   test('should show error banner when setting save fails', async ({ page }) => {
     await injectCommandError(page, 'set_config_value', 'Failed to write config');
 
-    const input = page.locator('lv-config-dialog .setting-value input').first();
-    await input.fill('true');
-    await input.dispatchEvent('change');
+    const select = page.locator('lv-config-dialog .setting-value select').first();
+    await select.selectOption('true');
 
     await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
   });

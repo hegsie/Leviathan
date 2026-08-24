@@ -4,14 +4,25 @@
  * Tests success toasts on identity save, alias add/delete operations.
  */
 
-import { expect, fixture, html } from '@open-wc/testing';
+import { expect, fixture, html, waitUntil } from '@open-wc/testing';
 
 let failingCommands: Set<string> = new Set();
 
+/**
+ * Common settings the mocked backend reports. null means "this test does not
+ * drive the Settings tab", so the component keeps whatever it was seeded with.
+ */
+let commonSettings: Array<{ key: string; value: string; scope: string }> | null = null;
+
+/** Every command the component invoked, so tests can assert on the arguments. */
+let invoked: Array<{ command: string; args?: unknown }> = [];
+
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
-const mockInvoke: MockInvoke = async (command: string) => {
+const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  invoked.push({ command, args });
 
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Operation failed' };
@@ -24,6 +35,10 @@ const mockInvoke: MockInvoke = async (command: string) => {
       return null;
     case 'get_config_entries':
       return [];
+    case 'get_common_settings':
+      return commonSettings;
+    case 'unset_config_value':
+      return null;
     case 'get_aliases':
       return [];
     case 'set_alias':
@@ -53,9 +68,24 @@ import { uiStore } from '../../../stores/ui.store.ts';
 describe('lv-config-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
+    commonSettings = null;
+    invoked = [];
     const state = uiStore.getState();
     state.toasts.forEach(t => state.removeToast(t.id));
   });
+
+  /** Open the dialog on the Settings tab with the backend data already loaded. */
+  async function openSettingsTab(): Promise<LvConfigDialog> {
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await waitUntil(() => (el as any).loading === false, 'config data loaded');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).activeTab = 'settings';
+    await el.updateComplete;
+    return el;
+  }
 
   it('renders when open', async () => {
     const el = await fixture<LvConfigDialog>(
@@ -160,6 +190,99 @@ describe('lv-config-dialog', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const setting = (el as any).settings.find((s: { key: string }) => s.key === 'core.editor');
     expect(setting.value).to.equal('vim');
+  });
+
+  it('renders a dropdown for a setting that is not configured yet', async () => {
+    commonSettings = [{ key: 'pull.rebase', value: '', scope: 'unset' }];
+
+    const el = await openSettingsTab();
+
+    const item = el.shadowRoot!.querySelector('.setting-item')!;
+    const select = item.querySelector<HTMLSelectElement>('.setting-value select');
+    expect(select, 'an unset enumerated setting must still be editable').to.not.be.null;
+    expect(select!.value).to.equal('');
+
+    const options = [...select!.options].map(o => o.textContent!.trim());
+    expect(options).to.include.members(['Not set', 'true', 'false', 'merges', 'interactive']);
+    expect(item.querySelector('.scope-badge')!.textContent!.trim()).to.equal('not set');
+  });
+
+  it('renders a text input for an unconfigured free-form setting', async () => {
+    commonSettings = [{ key: 'core.editor', value: '', scope: 'unset' }];
+
+    const el = await openSettingsTab();
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input');
+    expect(input).to.not.be.null;
+    expect(input!.value).to.equal('');
+    expect(input!.placeholder).to.equal('Not set');
+    expect(el.shadowRoot!.querySelector('.setting-value select')).to.be.null;
+  });
+
+  it('preselects the configured value in a dropdown', async () => {
+    commonSettings = [{ key: 'pull.rebase', value: 'merges', scope: 'global' }];
+
+    const el = await openSettingsTab();
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select');
+    expect(select!.value).to.equal('merges');
+    expect(el.shadowRoot!.querySelector('.scope-badge')!.textContent!.trim()).to.equal('global');
+  });
+
+  it('keeps a configured value outside the known set visible', async () => {
+    commonSettings = [{ key: 'merge.ff', value: 'weird', scope: 'local' }];
+
+    const el = await openSettingsTab();
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select');
+    expect(select!.value).to.equal('weird');
+    expect([...select!.options].map(o => o.value)).to.include('weird');
+  });
+
+  it('writes the chosen value when a dropdown changes', async () => {
+    commonSettings = [{ key: 'pull.rebase', value: '', scope: 'unset' }];
+
+    const el = await openSettingsTab();
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select')!;
+    select.value = 'true';
+    select.dispatchEvent(new Event('change'));
+
+    await waitUntil(
+      () => uiStore.getState().toasts.some(t => t.type === 'success'),
+      'the save completed',
+    );
+    const call = invoked.find(i => i.command === 'set_config_value')!;
+    expect(call.args).to.deep.equal({
+      path: '/test/repo',
+      key: 'pull.rebase',
+      value: 'true',
+      global: false,
+    });
+
+    const toasts = uiStore.getState().toasts;
+    expect(toasts.find(t => t.type === 'success')!.message).to.equal('Setting saved');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = (el as any).settings.find((s: { key: string }) => s.key === 'pull.rebase');
+    expect(updated.value).to.equal('true');
+    expect(updated.scope).to.equal('local');
+  });
+
+  it('marks a saved setting as repository-scoped', async () => {
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).settings = [{ key: 'push.default', value: 'current', scope: 'global' }];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('push.default', 'simple');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = (el as any).settings.find((s: { key: string }) => s.key === 'push.default');
+    expect(updated.value).to.equal('simple');
+    expect(updated.scope, 'the value now lives in this repository').to.equal('local');
   });
 
   it('shows success toast on alias delete', async () => {
