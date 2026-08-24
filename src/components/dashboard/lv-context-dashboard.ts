@@ -876,13 +876,26 @@ export class LvContextDashboard extends LitElement {
     if (!this.activeRepository || this.isApplyingProfile) return;
 
     this.isProfileDropdownOpen = false;
+    // Captured before the await: applying is an IPC round-trip, and the
+    // refresh must name the repo the switch ran ON, not whichever tab is
+    // active when it returns.
+    const repoPath = this.activeRepository.repository.path;
     this.isApplyingProfile = true;
 
     try {
-      await unifiedProfileService.applyUnifiedProfile(
-        this.activeRepository.repository.path,
-        profile.id
-      );
+      await unifiedProfileService.applyUnifiedProfile(repoPath, profile.id);
+      showToast(`Applied profile "${profile.name}"`, 'success');
+      // Applying a profile rewrites the repo's local git identity/signing
+      // config. Refresh so listeners re-read it now (the commit panel reloads
+      // the author behind its ${author} commit-template placeholder) instead
+      // of only after the tab is re-switched — the same reason the profile
+      // manager's Apply refreshes. Inside the try, so a failed apply never
+      // announces success or refreshes.
+      this.dispatchEvent(new CustomEvent('repository-refresh', {
+        bubbles: true,
+        composed: true,
+        detail: { repoPath },
+      }));
     } catch (err) {
       // Surface the failure via a visible toast — the repository store's error
       // field has no render sink, so setError alone would be silent (CLAUDE.md
