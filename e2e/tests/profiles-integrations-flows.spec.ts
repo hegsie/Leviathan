@@ -607,6 +607,43 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
     expect(applyArgs.profileId).toBe('profile-personal');
   });
 
+  test("switching profile from the dashboard dropdown flips the profile card to 'Manually assigned'", async ({ page }) => {
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile, personalProfile],
+      accounts: [githubWork],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile, personalProfile],
+        accounts: [githubWork],
+        repositoryAssignments: {},
+      },
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+    });
+
+    // Expand the dashboard so the profile card (and its assignment badge) render.
+    const dashboard = page.locator('lv-context-dashboard');
+    await expect(dashboard).toBeVisible({ timeout: 5000 });
+    await dashboard.locator('.expand-btn').click();
+    await expect(dashboard.locator('.card-grid')).toBeVisible({ timeout: 5000 });
+
+    // workProfile is the default profile and has no repository assignment.
+    const badge = page.locator('lv-context-dashboard lv-profile-card .assignment-source');
+    await expect(badge).toHaveText('Default profile', { timeout: 5000 });
+
+    // Switch to a non-default profile with no URL patterns. The only thing that
+    // can justify a badge now is the repo assignment the backend just saved.
+    await dashboard.locator('.profile-selector-btn').click();
+    await dashboard.locator('.profile-dropdown .dropdown-item', { hasText: 'Personal' }).click();
+
+    await expect(badge).toHaveText('Manually assigned', { timeout: 5000 });
+    await expect(
+      page.locator('lv-context-dashboard lv-profile-card .assignment-source.fallback')
+    ).toHaveCount(0);
+  });
+
   test('saving a PAT in the GitHub dialog flips the toolbar dot from Reconnect to connected', async ({ page }) => {
     // Real production path: toolbar starts in Reconnect → user opens GitHub
     // dialog (no stored token → shows PAT form) → enters PAT → handleSaveToken
