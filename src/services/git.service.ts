@@ -2903,6 +2903,8 @@ export interface CredentialHelper {
   name: string;
   command: string;
   scope: string;
+  /** Config file the helper lives in: "system" | "global" | "local" | ... */
+  configScope: string;
   urlPattern: string | null;
 }
 

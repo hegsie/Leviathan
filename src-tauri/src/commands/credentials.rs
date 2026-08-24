@@ -4,6 +4,7 @@
 use std::path::Path;
 use tauri::command;
 
+use crate::commands::config::{run_git_config_raw, run_git_config_unset};
 use crate::error::{LeviathanError, Result};
 use crate::utils::create_command;
 
@@ -54,6 +55,10 @@ pub struct CredentialHelper {
     pub command: String,
     /// Scope (global, local, or url-specific)
     pub scope: String,
+    /// Config file the helper is written in ("system", "global", "local", ...),
+    /// as reported by `git config --show-scope`. A URL-scoped helper can live
+    /// in any file, and that is the file a removal has to target.
+    pub config_scope: String,
     /// URL pattern if url-specific
     pub url_pattern: Option<String>,
 }
@@ -130,6 +135,7 @@ pub async fn get_credential_helpers(path: String) -> Result<Vec<CredentialHelper
                 name: extract_helper_name(&helper),
                 command: helper,
                 scope: "global".to_string(),
+                config_scope: "global".to_string(),
                 url_pattern: None,
             });
         }
@@ -143,33 +149,50 @@ pub async fn get_credential_helpers(path: String) -> Result<Vec<CredentialHelper
                 name: extract_helper_name(&helper),
                 command: helper,
                 scope: "local".to_string(),
+                config_scope: "local".to_string(),
                 url_pattern: None,
             });
         }
     }
 
-    // Get URL-specific credential helpers
-    if let Ok(config) = run_git_config(
+    // Get URL-specific credential helpers. They can be written in any config
+    // file, so ask git which one each came from — `--unset` has to be aimed at
+    // that exact scope. `--show-scope --null` emits `scope\0key\nvalue` records.
+    if let Ok(raw) = run_git_config_raw(
         Some(repo_path),
-        &["--get-regexp", "^credential\\..+\\.helper"],
+        &[
+            "--show-scope",
+            "--null",
+            "--get-regexp",
+            "^credential\\..+\\.helper",
+        ],
     ) {
-        for line in config.lines() {
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
-            if parts.len() == 2 {
-                // Extract URL pattern from key (credential.https://github.com.helper)
-                let key = parts[0];
-                if let Some(url) = key
-                    .strip_prefix("credential.")
-                    .and_then(|s| s.strip_suffix(".helper"))
-                {
-                    helpers.push(CredentialHelper {
-                        name: extract_helper_name(parts[1]),
-                        command: parts[1].to_string(),
-                        scope: "url".to_string(),
-                        url_pattern: Some(url.to_string()),
-                    });
-                }
+        let mut fields = raw.split('\0');
+        while let Some(scope) = fields.next() {
+            if scope.is_empty() {
+                continue;
             }
+            let Some(record) = fields.next() else {
+                break;
+            };
+            let (key, command) = match record.split_once('\n') {
+                Some((k, v)) => (k, v),
+                None => (record, ""),
+            };
+            // Extract URL pattern from key (credential.https://github.com.helper)
+            let Some(url) = key
+                .strip_prefix("credential.")
+                .and_then(|s| s.strip_suffix(".helper"))
+            else {
+                continue;
+            };
+            helpers.push(CredentialHelper {
+                name: extract_helper_name(command),
+                command: command.to_string(),
+                scope: "url".to_string(),
+                config_scope: scope.to_string(),
+                url_pattern: Some(url.to_string()),
+            });
         }
     }
 
@@ -310,27 +333,27 @@ pub async fn unset_credential_helper(
     url_pattern: Option<String>,
 ) -> Result<()> {
     let repo_path = path.as_ref().map(|p| Path::new(p.as_str()));
+    let global = global.unwrap_or(false);
 
-    if let Some(url) = url_pattern {
-        // URL-specific helper
-        let key = format!("credential.{}.helper", url);
-        let scope = if global.unwrap_or(false) {
-            "--global"
-        } else {
-            "--local"
-        };
-        let _ = run_git_config(repo_path, &[scope, "--unset", &key]);
-    } else {
-        // Global or local helper
-        let scope = if global.unwrap_or(false) {
-            "--global"
-        } else {
-            "--local"
-        };
-        let _ = run_git_config(repo_path, &[scope, "--unset", "credential.helper"]);
+    // Without `--global`, git config edits the repository's own file — which,
+    // with no path, is whatever directory the app process happens to be in,
+    // not the repository on screen. Refuse instead of guessing.
+    if !global && repo_path.is_none() {
+        return Err(LeviathanError::OperationFailed(
+            "A repository path is required to remove a repository-scoped credential helper"
+                .to_string(),
+        ));
     }
 
-    Ok(())
+    let scope = if global { "--global" } else { "--local" };
+    let key = match url_pattern {
+        Some(url) => format!("credential.{}.helper", url),
+        None => "credential.helper".to_string(),
+    };
+
+    // Surface git's failure: the dialog reloads the list right after this
+    // returns, so a swallowed error is indistinguishable from a dead button.
+    run_git_config_unset(repo_path, &[scope, "--unset", &key])
 }
 
 /// Get available credential helpers on this system
@@ -781,6 +804,7 @@ pub async fn delete_keyring_token(key: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+    use tempfile::TempDir;
 
     #[test]
     fn test_extract_helper_name_simple() {
@@ -944,6 +968,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_url_credential_helper_reports_config_scope() {
+        let repo = TestRepo::with_initial_commit();
+
+        set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            Some("https://leviathan-scope.example".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let helpers = get_credential_helpers(repo.path_str()).await.unwrap();
+        let url_helper = helpers
+            .iter()
+            .find(|h| {
+                h.scope == "url"
+                    && h.url_pattern.as_deref() == Some("https://leviathan-scope.example")
+            })
+            .expect("URL-scoped helper should be listed");
+
+        // The helper was written to the repository's own config file, so that
+        // is the file a removal has to target.
+        assert_eq!(url_helper.config_scope, "local");
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_requires_repo_path() {
+        // No path and not global: there is no repository to edit, and git would
+        // fall back to the process's working directory.
+        let result = unset_credential_helper(
+            None,
+            Some(false),
+            Some("https://leviathan-scope.example".to_string()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "removal without a repository must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_surfaces_git_failure() {
+        // A plain directory, not a repository: `git config --local` fails here.
+        let dir = TempDir::new().unwrap();
+
+        let result = unset_credential_helper(
+            Some(dir.path().to_string_lossy().into_owned()),
+            Some(false),
+            Some("https://leviathan-scope.example".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("git's failure must reach the caller");
+        assert!(
+            !err.to_string().is_empty(),
+            "the error must carry a message for the UI"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_missing_key_is_noop() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Removing a helper that was never configured is a no-op, not an error
+        // (git exits 5 for an unset key).
+        let result = unset_credential_helper(
+            Some(repo.path_str()),
+            Some(false),
+            Some("https://never.example".to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok(), "unsetting a missing key should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_unset_url_credential_helper_removes_local_entry() {
+        let repo = TestRepo::with_initial_commit();
+
+        set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            Some("https://leviathan-remove.example".to_string()),
+        )
+        .await
+        .unwrap();
+
+        unset_credential_helper(
+            Some(repo.path_str()),
+            Some(false),
+            Some("https://leviathan-remove.example".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let helpers = get_credential_helpers(repo.path_str()).await.unwrap();
+        assert!(
+            !helpers
+                .iter()
+                .any(|h| h.url_pattern.as_deref() == Some("https://leviathan-remove.example")),
+            "the URL-scoped helper should be gone from the listing"
+        );
+    }
+
+    #[tokio::test]
     async fn test_set_credential_helper_with_url_pattern() {
         let repo = TestRepo::with_initial_commit();
 
@@ -1001,11 +1134,13 @@ mod tests {
             name: "cache".to_string(),
             command: "cache --timeout=3600".to_string(),
             scope: "local".to_string(),
+            config_scope: "local".to_string(),
             url_pattern: None,
         };
 
         assert_eq!(helper.name, "cache");
         assert_eq!(helper.scope, "local");
+        assert_eq!(helper.config_scope, "local");
         assert!(helper.url_pattern.is_none());
     }
 
