@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import type { GpgConfig, GpgKey } from '../../services/git.service.ts';
+import type { GpgConfig, GpgKey, SshKey } from '../../services/git.service.ts';
 import { getPlatform, type Platform } from '../../utils/platform.ts';
 import { openExternalUrl } from '../../utils/external-link.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
@@ -641,6 +641,7 @@ export class LvGpgDialog extends LitElement {
 
   @state() private config: GpgConfig | null = null;
   @state() private keys: GpgKey[] = [];
+  @state() private sshKeys: SshKey[] = [];
   @state() private selectedKey: string | null = null;
   @state() private loading = false;
   @state() private error = '';
@@ -736,10 +737,49 @@ export class LvGpgDialog extends LitElement {
       this.keys = keysResult.data;
     }
 
+    // gpg.format=ssh means git signs with an SSH key and never consults the
+    // GPG keyring, so the list of keys to choose from has to come from ~/.ssh.
+    if (this.config?.gpgFormat === 'ssh') {
+      const sshResult = await gitService.getSshKeys();
+      if (sshResult.success && sshResult.data) {
+        this.sshKeys = sshResult.data;
+      } else {
+        this.sshKeys = [];
+        // Never silent: without a key list this step has nothing to offer.
+        // Keeps an earlier config-load error rather than overwriting it.
+        if (!this.error) {
+          this.error = sshResult.error?.message || 'Failed to load SSH keys';
+        }
+      }
+    } else {
+      this.sshKeys = [];
+    }
+
     // Auto-detect setup state
     this.detectSetupState();
 
     this.loading = false;
+  }
+
+  /** True when this repository signs with SSH (gpg.format=ssh) rather than GPG. */
+  private get isSshFormat(): boolean {
+    return this.config?.gpgFormat === 'ssh';
+  }
+
+  /**
+   * Whether `key` is the key `user.signingkey` currently names. Git accepts
+   * either the public or the private key path there, and the value may still
+   * be the unexpanded "~/" form that the backend expands at sign time.
+   */
+  private isSshKeySelected(key: SshKey): boolean {
+    const configured = (this.selectedKey ?? '').trim();
+    if (!configured) return false;
+    if (configured === key.publicPath || configured === key.path) return true;
+    if (configured.startsWith('~/')) {
+      const tail = configured.slice(1); // "/.ssh/id_ed25519.pub"
+      return key.publicPath.endsWith(tail) || key.path.endsWith(tail);
+    }
+    return false;
   }
 
   private detectSetupState(): void {
@@ -914,7 +954,9 @@ export class LvGpgDialog extends LitElement {
       case 'generate-guide':
         return 'GPG Setup - Generate Key';
       case 'configure':
-        return 'GPG Setup - Select Key';
+        return this.isSshFormat
+          ? 'SSH Signing Setup - Select Key'
+          : 'GPG Setup - Select Key';
       case 'complete':
         return 'GPG Setup - Complete';
     }
@@ -1164,6 +1206,10 @@ export class LvGpgDialog extends LitElement {
   }
 
   private renderConfigureStep() {
+    // An SSH signer must pick an SSH key: writing a GPG key id into
+    // user.signingkey while gpg.format=ssh makes every signed commit fail.
+    if (this.isSshFormat) return this.renderSshConfigureStep();
+
     return html`
       <div class="setup-header">
         <svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -1207,6 +1253,62 @@ export class LvGpgDialog extends LitElement {
     `;
   }
 
+  private renderSshConfigureStep() {
+    return html`
+      <div class="setup-header">
+        <svg class="setup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <div class="setup-title">Select Your SSH Signing Key</div>
+        <div class="setup-description">
+          This repository signs with SSH (gpg.format=ssh), so Git needs an SSH
+          key &mdash; not a GPG key. Choose one of your ~/.ssh keys.
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Available SSH Keys</div>
+        ${this.renderSshKeyList()}
+      </div>
+    `;
+  }
+
+  /**
+   * The ~/.ssh key picker, shared by the setup wizard and the normal view.
+   * Selecting writes the PUBLIC key path into user.signingkey, which is what
+   * git (and the backend's usability check) accepts for SSH signing.
+   */
+  private renderSshKeyList() {
+    if (this.sshKeys.length === 0) {
+      return html`
+        <div class="empty-text">
+          No SSH keys found in ~/.ssh. Generate one, then refresh:
+        </div>
+        ${this.renderCommandBlock('ssh-keygen -t ed25519 -C "your@email.com"')}
+      `;
+    }
+    return html`
+      <div class="key-list">
+        ${this.sshKeys.map(
+          (key) => html`
+            <div
+              class="key-item ${this.isSshKeySelected(key) ? 'selected' : ''}"
+              @click=${() => this.handleSelectKey(key.publicPath)}
+            >
+              <div class="key-radio"></div>
+              <div class="key-info">
+                <div class="key-user">${key.comment || key.name}</div>
+                <div class="key-details">${key.keyType} / ${key.fingerprint || key.publicPath}</div>
+              </div>
+              <span class="key-badge">${key.name}</span>
+            </div>
+          `
+        )}
+      </div>
+    `;
+  }
+
   private renderSetupComplete() {
     return html`
       <div class="complete-content">
@@ -1214,10 +1316,12 @@ export class LvGpgDialog extends LitElement {
           <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
           <polyline points="22 4 12 14.01 9 11.01"></polyline>
         </svg>
-        <div class="complete-title">GPG is Ready!</div>
+        <div class="complete-title">
+          ${this.isSshFormat ? 'SSH Signing is Ready!' : 'GPG is Ready!'}
+        </div>
         <div class="complete-description">
-          Your GPG signing is now configured. You can enable automatic commit
-          signing in the settings below.
+          Your ${this.isSshFormat ? 'SSH' : 'GPG'} signing is now configured. You
+          can enable automatic commit signing in the settings below.
         </div>
       </div>
     `;
@@ -1228,14 +1332,23 @@ export class LvGpgDialog extends LitElement {
 
     return html`
       <div class="status-section">
-        <div class="status-row">
-          <span class="status-label">GPG Status</span>
-          <span class="status-badge available">Available</span>
-        </div>
-        <div class="status-row" style="margin-top: var(--spacing-xs);">
-          <span class="status-label">Version</span>
-          <span class="status-value">${this.config.gpgVersion || 'Unknown'}</span>
-        </div>
+        ${this.isSshFormat
+          ? html`
+              <div class="status-row">
+                <span class="status-label">Signature Format</span>
+                <span class="status-value">SSH</span>
+              </div>
+            `
+          : html`
+              <div class="status-row">
+                <span class="status-label">GPG Status</span>
+                <span class="status-badge available">Available</span>
+              </div>
+              <div class="status-row" style="margin-top: var(--spacing-xs);">
+                <span class="status-label">Version</span>
+                <span class="status-value">${this.config.gpgVersion || 'Unknown'}</span>
+              </div>
+            `}
       </div>
 
       <div class="scope-toggle">
@@ -1258,7 +1371,10 @@ export class LvGpgDialog extends LitElement {
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Sign commits</div>
-            <div class="toggle-desc">Automatically sign all commits with GPG</div>
+            <div class="toggle-desc">
+              Automatically sign all commits with
+              ${this.isSshFormat ? 'your SSH key' : 'GPG'}
+            </div>
           </div>
           <label class="toggle">
             <input
@@ -1273,7 +1389,10 @@ export class LvGpgDialog extends LitElement {
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Sign tags</div>
-            <div class="toggle-desc">Automatically sign all tags with GPG</div>
+            <div class="toggle-desc">
+              Automatically sign all tags with
+              ${this.isSshFormat ? 'your SSH key' : 'GPG'}
+            </div>
           </div>
           <label class="toggle">
             <input
@@ -1288,8 +1407,12 @@ export class LvGpgDialog extends LitElement {
       </div>
 
       <div class="section">
-        <div class="section-title">Signing Key</div>
-        ${this.keys.length === 0
+        <div class="section-title">
+          ${this.isSshFormat ? 'Signing Key (SSH)' : 'Signing Key'}
+        </div>
+        ${this.isSshFormat
+          ? this.renderSshKeyList()
+          : this.keys.length === 0
           ? html`
               <div class="empty-text">
                 No GPG keys found. Generate a key with:<br>
@@ -1384,9 +1507,22 @@ export class LvGpgDialog extends LitElement {
         return html`
           <div class="dialog-footer wizard">
             <div class="footer-left">
-              <button class="btn btn-secondary" @click=${this.handleSetupBack}>
-                Back
-              </button>
+              ${
+                // Back would lead to the GPG key-generation guide, which an SSH
+                // signer must never be sent to. Refresh is what turns the
+                // zero-key case into a real flow: run ssh-keygen in a terminal,
+                // refresh, pick a key, complete.
+                this.isSshFormat
+                ? html`
+                    <button class="btn btn-secondary" @click=${this.handleRefreshAndCheck}>
+                      Refresh
+                    </button>
+                  `
+                : html`
+                    <button class="btn btn-secondary" @click=${this.handleSetupBack}>
+                      Back
+                    </button>
+                  `}
             </div>
             <div class="footer-right">
               <button
@@ -1430,6 +1566,9 @@ export class LvGpgDialog extends LitElement {
   }
 
   private handleSetupBack(): void {
+    // No Back for an SSH signer: every earlier step is GPG installation and
+    // GPG key generation, neither of which applies when gpg.format=ssh.
+    if (this.isSshFormat) return;
     switch (this.setupStep) {
       case 'generate-guide':
         this.setupStep = 'install-guide';

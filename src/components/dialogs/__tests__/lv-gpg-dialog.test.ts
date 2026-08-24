@@ -11,8 +11,15 @@
 let failingCommands: Set<string> = new Set();
 /** Config the backend reports, per repository path. */
 const configByRepo = new Map<string, unknown>();
+/** GPG keyring contents the backend reports. */
+let gpgKeys: unknown[] = [];
+/** ~/.ssh contents the backend reports. */
+let sshKeys: unknown[] = [];
+/** Every command the component issued, in order. */
+let invoked: { command: string; args: unknown }[] = [];
 
 const mockInvoke = (command: string, args?: unknown): Promise<unknown> => {
+  invoked.push({ command, args });
   if (failingCommands.has(command)) {
     return Promise.reject({ code: 'COMMAND_ERROR', message: 'could not lock config file' });
   }
@@ -20,7 +27,8 @@ const mockInvoke = (command: string, args?: unknown): Promise<unknown> => {
     const path = ((args as { path?: string }) ?? {}).path ?? '';
     return Promise.resolve(configByRepo.get(path) ?? null);
   }
-  if (command === 'get_gpg_keys') return Promise.resolve([]);
+  if (command === 'get_gpg_keys') return Promise.resolve(gpgKeys);
+  if (command === 'get_ssh_keys') return Promise.resolve(sshKeys);
   return Promise.resolve(null);
 };
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
@@ -30,7 +38,7 @@ const mockInvoke = (command: string, args?: unknown): Promise<unknown> => {
 import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-gpg-dialog.ts';
 import type { LvGpgDialog } from '../lv-gpg-dialog.ts';
-import type { GpgConfig } from '../../../services/git.service.ts';
+import type { GpgConfig, SshKey } from '../../../services/git.service.ts';
 
 function makeConfig(overrides: Partial<GpgConfig>): GpgConfig {
   return {
@@ -219,5 +227,193 @@ describe('lv-gpg-dialog banner lifecycle', () => {
     await el.updateComplete;
 
     expect(banners(el).success, 'still on screen after a reload').to.contain('Commit signing');
+  });
+});
+
+
+/**
+ * gpg.format=ssh means git signs with an SSH key from ~/.ssh and never touches
+ * the GPG keyring. The setup wizard used to render the OpenPGP key list here:
+ * with a GPG key present, picking one wrote a GPG key id into user.signingkey
+ * and broke every signed commit ("failed to read ssh signing key"); with no
+ * GPG keys — the common case — it was a dead end that told the user to run
+ * `gpg --full-generate-key` and left Complete Setup disabled forever.
+ */
+describe('lv-gpg-dialog SSH signing key picker', () => {
+  const REPO = '/repo/ssh';
+  const ED25519: SshKey = {
+    name: 'id_ed25519',
+    path: '/home/u/.ssh/id_ed25519',
+    publicPath: '/home/u/.ssh/id_ed25519.pub',
+    keyType: 'ssh-ed25519',
+    fingerprint: 'SHA256:abc',
+    comment: 'me@example.com',
+    publicKey: 'ssh-ed25519 AAAA me@example.com',
+  };
+  const RSA: SshKey = {
+    name: 'id_rsa',
+    path: '/home/u/.ssh/id_rsa',
+    publicPath: '/home/u/.ssh/id_rsa.pub',
+    keyType: 'ssh-rsa',
+    fingerprint: 'SHA256:def',
+    comment: null,
+    publicKey: null,
+  };
+
+  beforeEach(() => {
+    failingCommands = new Set();
+    configByRepo.clear();
+    gpgKeys = [];
+    sshKeys = [];
+    invoked = [];
+  });
+
+  /** Wait for any in-flight load to finish and the render to catch up. */
+  async function settle(el: LvGpgDialog): Promise<void> {
+    for (let i = 0; i < 500; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      if (!(el as unknown as { loading: boolean }).loading) break;
+    }
+    await el.updateComplete;
+  }
+
+  async function open(): Promise<LvGpgDialog> {
+    // The host keeps this dialog mounted and only toggles ?open, and the
+    // repository is pinned on that transition — open it the same way so the
+    // load runs against REPO rather than an unpinned empty path.
+    const el = await fixture<LvGpgDialog>(
+      html`<lv-gpg-dialog .repositoryPath=${REPO}></lv-gpg-dialog>`,
+    );
+    el.open = true;
+    await el.updateComplete;
+    await settle(el);
+    return el;
+  }
+
+  it('offers the ~/.ssh keys, not the GPG keyring, when gpg.format=ssh', async () => {
+    configByRepo.set(REPO, makeConfig({
+      gpgFormat: 'ssh',
+      gpgAvailable: true,
+      gpgVersion: 'gpg (GnuPG) 2.2.27',
+      signingKey: null,
+    }));
+    sshKeys = [ED25519, RSA];
+
+    const el = await open();
+
+    const items = el.shadowRoot!.querySelectorAll('.key-item');
+    expect(items, 'both ~/.ssh keys are offered').to.have.length(2);
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text).to.contain('me@example.com');
+    expect(text, 'the GPG keyring is irrelevant here').to.not.contain('No GPG keys found');
+  });
+
+  it("writes the chosen key's public-key path to user.signingkey", async () => {
+    configByRepo.set(REPO, makeConfig({
+      gpgFormat: 'ssh',
+      gpgAvailable: true,
+      gpgVersion: 'gpg (GnuPG) 2.2.27',
+      signingKey: null,
+    }));
+    sshKeys = [ED25519, RSA];
+
+    const el = await open();
+    let changed = 0;
+    el.addEventListener('gpg-changed', () => { changed++; });
+
+    const first = el.shadowRoot!.querySelector('.key-item') as HTMLElement | null;
+    expect(first, 'there is a key to pick').to.not.be.null;
+    first!.click();
+    await settle(el);
+
+    const call = invoked.find((c) => c.command === 'set_signing_key');
+    expect(call, 'the key was persisted').to.not.be.undefined;
+    const args = call!.args as { path: string; keyId: string };
+    expect(args.keyId, 'an SSH public-key path, never a GPG key id')
+      .to.equal('/home/u/.ssh/id_ed25519.pub');
+    expect(args.path).to.equal(REPO);
+    expect(
+      el.shadowRoot!.querySelector('.message.success')?.textContent ?? '',
+    ).to.contain('Signing key');
+    expect(changed, 'gpg-changed is dispatched like every sibling handler').to.equal(1);
+  });
+
+  it('marks the configured SSH key as selected in the normal view', async () => {
+    // A configured signing key leaves setupMode false, so this is the view the
+    // wizard hands off into.
+    configByRepo.set(REPO, makeConfig({
+      gpgFormat: 'ssh',
+      gpgAvailable: true,
+      gpgVersion: 'gpg (GnuPG) 2.2.27',
+      signingKey: '~/.ssh/id_ed25519.pub',
+    }));
+    sshKeys = [ED25519, RSA];
+
+    const el = await open();
+
+    const selected = el.shadowRoot!.querySelector('.key-item.selected');
+    expect(selected, 'the configured key is shown as chosen').to.not.be.null;
+    expect(selected!.textContent).to.contain('me@example.com');
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text, 'no GPG key generation advice for an SSH signer')
+      .to.not.contain('gpg --full-generate-key');
+  });
+
+  it('an SSH signer with no keys gets ssh-keygen guidance, never a GPG key', async () => {
+    configByRepo.set(REPO, makeConfig({ gpgFormat: 'ssh', signingKey: null }));
+    sshKeys = [];
+
+    const el = await open();
+
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text).to.contain('ssh-keygen');
+    expect(text).to.not.contain('No GPG keys found');
+    const back = el.shadowRoot!.querySelector('.dialog-footer.wizard .btn-secondary');
+    expect(back, 'the wizard footer has a left button').to.not.be.null;
+    expect(
+      back!.textContent!.trim(),
+      'Back would lead to the GPG generate guide; Refresh is the real flow',
+    ).to.equal('Refresh');
+    const complete = el.shadowRoot!.querySelector(
+      '.dialog-footer.wizard .btn-primary',
+    ) as HTMLButtonElement;
+    expect(complete.disabled, 'nothing to complete until a key is picked').to.equal(true);
+  });
+
+  it('a failing get_ssh_keys is reported, not silently empty', async () => {
+    configByRepo.set(REPO, makeConfig({ gpgFormat: 'ssh', signingKey: null }));
+    failingCommands.add('get_ssh_keys');
+
+    const el = await open();
+
+    expect(
+      el.shadowRoot!.querySelector('.message.error')?.textContent ?? '',
+    ).to.contain('could not lock config file');
+  });
+
+  it('openpgp repos still get the GPG keyring and never query ~/.ssh', async () => {
+    // Guard against over-reach — this passes before and after the fix.
+    configByRepo.set(REPO, makeConfig({
+      gpgFormat: null,
+      gpgAvailable: true,
+      gpgVersion: 'gpg (GnuPG) 2.2.27',
+      signingKey: 'LONGKEY1',
+    }));
+    gpgKeys = [{
+      keyId: 'KEY1',
+      keyIdLong: 'LONGKEY1',
+      userId: 'Test User',
+      email: 'test@example.com',
+      keyType: 'rsa',
+      keySize: 4096,
+      trust: 'ultimate',
+      expires: null,
+    }];
+    sshKeys = [ED25519];
+
+    const el = await open();
+
+    expect(el.shadowRoot!.textContent ?? '').to.contain('Test User');
+    expect(invoked.some((c) => c.command === 'get_ssh_keys')).to.equal(false);
   });
 });
