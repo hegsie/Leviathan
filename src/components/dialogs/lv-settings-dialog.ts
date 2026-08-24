@@ -616,19 +616,49 @@ export class LvSettingsDialog extends LitElement {
       return;
     }
 
+    const previousName = this.mergeToolName;
+    const previousCmd = this.mergeToolCmd;
     this.mergeToolName = value;
     this.mergeToolCmd = null;
-    await gitService.setMergeToolConfig(repo.repository.path, value);
+    const result = await gitService.setMergeToolConfig(repo.repository.path, value);
+    if (!result.success) {
+      // The write never landed, so put the control back on what git still holds
+      // instead of letting the choice silently snap back on the next open.
+      this.mergeToolName = previousName;
+      this.mergeToolCmd = previousCmd;
+      select.value = previousName ?? '';
+      showToast(
+        `Failed to save merge tool: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleMergeToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const previousCmd = this.mergeToolCmd;
     this.mergeToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo || !this.mergeToolCmd) return;
 
-    await gitService.setMergeToolConfig(repo.repository.path, 'custom', this.mergeToolCmd);
+    const result = await gitService.setMergeToolConfig(
+      repo.repository.path,
+      'custom',
+      this.mergeToolCmd,
+    );
+    if (!result.success) {
+      // Keep mergeToolName on '__custom__' so the command row stays on screen
+      // and the user can retry rather than hitting a dead end.
+      this.mergeToolCmd = previousCmd;
+      input.value = previousCmd ?? '';
+      showToast(
+        `Failed to save merge tool command: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
@@ -650,19 +680,49 @@ export class LvSettingsDialog extends LitElement {
       return;
     }
 
+    const previousName = this.diffToolName;
+    const previousCmd = this.diffToolCmd;
     this.diffToolName = value;
     this.diffToolCmd = null;
-    await gitService.setDiffTool(repo.repository.path, value);
+    const result = await gitService.setDiffTool(repo.repository.path, value);
+    if (!result.success) {
+      // The write never landed, so put the control back on what git still holds
+      // instead of letting the choice silently snap back on the next open.
+      this.diffToolName = previousName;
+      this.diffToolCmd = previousCmd;
+      select.value = previousName ?? '';
+      showToast(
+        `Failed to save diff tool: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleDiffToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const previousCmd = this.diffToolCmd;
     this.diffToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo || !this.diffToolCmd) return;
 
-    await gitService.setDiffTool(repo.repository.path, 'custom', this.diffToolCmd);
+    const result = await gitService.setDiffTool(
+      repo.repository.path,
+      'custom',
+      this.diffToolCmd,
+    );
+    if (!result.success) {
+      // Keep diffToolName on '__custom__' so the command row stays on screen
+      // and the user can retry rather than hitting a dead end.
+      this.diffToolCmd = previousCmd;
+      input.value = previousCmd ?? '';
+      showToast(
+        `Failed to save diff tool command: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
