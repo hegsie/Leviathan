@@ -176,6 +176,197 @@ pub async fn cancel_clone() -> Result<()> {
     Ok(())
 }
 
+/// Build the `git clone` argv for the CLI fallback (everything up to the `--`
+/// that guards the URL and destination).
+///
+/// `--progress` is not cosmetic: git only writes transfer progress to stderr
+/// when stderr is a terminal, and here it is a pipe — without the flag the
+/// clone reports nothing at all until it exits.
+fn cli_clone_flags(
+    depth: Option<u32>,
+    filter: Option<&str>,
+    single_branch: bool,
+    bare: bool,
+    branch: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["clone".to_string(), "--progress".to_string()];
+
+    if let Some(depth_val) = depth {
+        args.push("--depth".to_string());
+        args.push(depth_val.to_string());
+    }
+
+    if let Some(filter_spec) = filter {
+        args.push("--filter".to_string());
+        args.push(filter_spec.to_string());
+    }
+
+    if single_branch {
+        args.push("--single-branch".to_string());
+    }
+
+    if bare {
+        args.push("--bare".to_string());
+    }
+
+    if let Some(branch_name) = branch {
+        args.push("--branch".to_string());
+        args.push(branch_name.to_string());
+    }
+
+    args
+}
+
+/// Parse the `(received/total)` group of a `git clone --progress` line.
+fn parse_progress_counts(rest: &str) -> Option<(usize, usize)> {
+    let open = rest.find('(')?;
+    let close = rest[open..].find(')')? + open;
+    let (a, b) = rest[open + 1..close].split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parse the transferred size that follows the count group, e.g. the
+/// `1.50 MiB` of `Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s`.
+/// Returns 0 when the line carries no size (git omits it before the first
+/// bytes arrive, and always for `Resolving deltas`).
+fn parse_progress_bytes(rest: &str) -> usize {
+    let Some(idx) = rest.find("), ") else {
+        return 0;
+    };
+    let mut tokens = rest[idx + 3..].split_whitespace();
+    let Some(value) = tokens.next().and_then(|v| v.parse::<f64>().ok()) else {
+        return 0;
+    };
+    let unit = tokens.next().unwrap_or("bytes");
+    let multiplier = match unit.trim_end_matches(',') {
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "KiB" => 1024.0,
+        // `bytes` and the bare `B` git uses in some locales
+        _ => 1.0,
+    };
+    (value * multiplier) as usize
+}
+
+/// Turn one `git clone --progress` stderr line into a `CloneProgress`.
+///
+/// Percentages are mapped onto the same 0-80 (receiving) / 80-100 (indexing)
+/// bands the git2 clone path uses, so the dialog's bar behaves identically
+/// whichever path performed the clone. Lines that are not progress reports —
+/// `Cloning into 'x'...`, `fatal: ...` — yield `None`.
+fn parse_cli_clone_progress(line: &str) -> Option<CloneProgress> {
+    let line = line.trim();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    let (name, rest) = line.split_once(':')?;
+    let name = name.trim();
+    let rest = rest.trim();
+
+    let percent_in_phase = rest
+        .split('%')
+        .next()
+        .and_then(|p| p.trim().parse::<u32>().ok());
+    let (count, total) = parse_progress_counts(rest).unwrap_or((0, 0));
+
+    match name {
+        "Receiving objects" => {
+            let pct = percent_in_phase?.min(100);
+            Some(CloneProgress {
+                stage: "Receiving objects".to_string(),
+                received_objects: count,
+                total_objects: total,
+                indexed_objects: 0,
+                received_bytes: parse_progress_bytes(rest),
+                percent: (pct * 80 / 100) as u8,
+            })
+        }
+        "Resolving deltas" => {
+            let pct = percent_in_phase?.min(100);
+            Some(CloneProgress {
+                stage: "Resolving deltas".to_string(),
+                received_objects: count,
+                total_objects: total,
+                indexed_objects: count,
+                received_bytes: 0,
+                percent: (80 + pct * 20 / 100) as u8,
+            })
+        }
+        // Remote-side work: there is nothing local to count yet, so these move
+        // the label rather than the bar.
+        "Counting objects" | "Compressing objects" => Some(CloneProgress {
+            stage: name.to_string(),
+            received_objects: 0,
+            total_objects: 0,
+            indexed_objects: 0,
+            received_bytes: 0,
+            percent: 0,
+        }),
+        _ => None,
+    }
+}
+
+/// Drain `git clone`'s stderr, emitting a `CloneProgress` for every progress
+/// update it reports, and return the full text for the failure message.
+///
+/// Draining is mandatory (an unread pipe deadlocks the child once its buffer
+/// fills); parsing while draining is what gives shallow/partial/single-branch
+/// clones the progress the git2 path already has.
+fn drain_clone_stderr<R: std::io::Read>(
+    mut pipe: R,
+    mut emit: impl FnMut(CloneProgress),
+) -> String {
+    // Bytes, not read_to_string: git may emit a non-UTF-8 path or remote
+    // message, and read_to_string aborts on the first invalid sequence —
+    // leaving the pipe undrained (the very deadlock this exists to prevent)
+    // and the error lost.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    // Offset of the first not-yet-parsed byte. `buf` is never drained, so the
+    // complete text survives for `git clone failed: {stderr}`.
+    let mut parsed_from = 0usize;
+    let mut last_emitted: Option<(String, u8)> = None;
+    let mut max_bytes = 0usize;
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..read]);
+
+        // git overwrites an in-place progress update with `\r` and terminates a
+        // finished phase with `\n`; a trailing partial segment stays buffered
+        // until its terminator arrives with a later chunk.
+        let mut segment_start = parsed_from;
+        for i in parsed_from..buf.len() {
+            if buf[i] != b'\r' && buf[i] != b'\n' {
+                continue;
+            }
+            let segment = String::from_utf8_lossy(&buf[segment_start..i]).into_owned();
+            segment_start = i + 1;
+
+            let Some(mut progress) = parse_cli_clone_progress(&segment) else {
+                continue;
+            };
+            // Carry the transferred size forward so later phases report what
+            // was downloaded instead of `0 B`.
+            max_bytes = max_bytes.max(progress.received_bytes);
+            progress.received_bytes = max_bytes;
+
+            // Same "only emit when it changed" discipline as the git2 callback,
+            // so a percent repeated across refreshes is not re-broadcast.
+            let key = (progress.stage.clone(), progress.percent);
+            if last_emitted.as_ref() == Some(&key) {
+                continue;
+            }
+            last_emitted = Some(key);
+            emit(progress);
+        }
+        parsed_from = segment_start;
+    }
+
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Clone a repository with progress reporting
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -228,27 +419,13 @@ pub async fn clone_repository(
             // git2 doesn't support --depth, --filter, or --single-branch, so fall back to git CLI
             let result = tokio::task::spawn_blocking(move || {
                 let mut cmd = std::process::Command::new("git");
-                cmd.arg("clone");
-
-                if let Some(depth_val) = depth {
-                    cmd.arg("--depth").arg(depth_val.to_string());
-                }
-
-                if let Some(ref filter_spec) = filter {
-                    cmd.arg("--filter").arg(filter_spec);
-                }
-
-                if single_branch {
-                    cmd.arg("--single-branch");
-                }
-
-                if bare {
-                    cmd.arg("--bare");
-                }
-
-                if let Some(ref branch) = branch {
-                    cmd.arg("--branch").arg(branch);
-                }
+                cmd.args(cli_clone_flags(
+                    depth,
+                    filter.as_deref(),
+                    single_branch,
+                    bare,
+                    branch.as_deref(),
+                ));
 
                 // If a token is provided, inject it into the URL for HTTPS authentication
                 let effective_url = if let Some(ref token) = token_clone {
@@ -284,16 +461,13 @@ pub async fn clone_repository(
 
                 let stderr_pipe = child.stderr.take();
                 let stderr_reader = std::thread::spawn(move || {
-                    use std::io::Read;
-                    // Bytes, not read_to_string: git may emit a non-UTF-8 path or
-                    // remote message, and read_to_string aborts on the first
-                    // invalid sequence — leaving the pipe undrained (the very
-                    // deadlock this thread exists to prevent) and the error lost.
-                    let mut buf = Vec::new();
-                    if let Some(mut pipe) = stderr_pipe {
-                        let _ = pipe.read_to_end(&mut buf);
+                    if let Some(pipe) = stderr_pipe {
+                        drain_clone_stderr(pipe, |progress| {
+                            let _ = app_for_progress.emit("clone-progress", progress);
+                        })
+                    } else {
+                        String::new()
                     }
-                    String::from_utf8_lossy(&buf).into_owned()
                 });
 
                 enum CloneOutcome {
@@ -732,6 +906,280 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
     use tempfile::TempDir;
+
+    /// Feeds a canned transcript in small pieces so `drain_clone_stderr` has to
+    /// cope with reads that split a progress update mid-line, exactly as a real
+    /// pipe does.
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.data.len() - self.pos;
+            let n = remaining.min(self.chunk).min(out.len());
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn drain(transcript: &[u8], chunk: usize) -> (String, Vec<CloneProgress>) {
+        let reader = ChunkedReader {
+            data: transcript.to_vec(),
+            pos: 0,
+            chunk,
+        };
+        let mut events = Vec::new();
+        let text = drain_clone_stderr(reader, |p| events.push(p));
+        (text, events)
+    }
+
+    #[test]
+    fn test_cli_clone_flags_requests_progress_and_maps_options() {
+        assert_eq!(
+            cli_clone_flags(Some(1), Some("blob:none"), true, true, Some("dev")),
+            vec![
+                "clone",
+                "--progress",
+                "--depth",
+                "1",
+                "--filter",
+                "blob:none",
+                "--single-branch",
+                "--bare",
+                "--branch",
+                "dev"
+            ]
+        );
+        // git suppresses progress entirely when stderr is a pipe, so
+        // `--progress` must be present even in the minimal invocation.
+        assert_eq!(
+            cli_clone_flags(Some(1), None, false, false, None),
+            vec!["clone", "--progress", "--depth", "1"]
+        );
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_maps_receiving_to_first_80_percent() {
+        let p =
+            parse_cli_clone_progress("Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s")
+                .expect("receiving line is progress");
+        assert_eq!(p.stage, "Receiving objects");
+        assert_eq!(p.percent, 40);
+        assert_eq!(p.received_objects, 500);
+        assert_eq!(p.total_objects, 1000);
+        assert_eq!(p.received_bytes, 1_572_864);
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_maps_resolving_deltas_to_last_20_percent() {
+        let p = parse_cli_clone_progress("Resolving deltas:  50% (250/500)")
+            .expect("resolving line is progress");
+        assert_eq!(p.stage, "Resolving deltas");
+        assert_eq!(p.percent, 90);
+        assert_eq!(p.indexed_objects, 250);
+        assert_eq!(p.total_objects, 500);
+
+        let done = parse_cli_clone_progress("Resolving deltas: 100% (500/500), done.")
+            .expect("resolving line is progress");
+        assert_eq!(done.percent, 100);
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_reports_remote_phases_without_moving_the_bar() {
+        let p = parse_cli_clone_progress("remote: Compressing objects:  40% (4/10)")
+            .expect("compressing line is progress");
+        assert_eq!(p.stage, "Compressing objects");
+        assert_eq!(p.percent, 0);
+        assert_eq!(p.total_objects, 0);
+
+        assert!(parse_cli_clone_progress("Cloning into 'foo'...").is_none());
+        assert!(parse_cli_clone_progress("remote: Enumerating objects: 40, done.").is_none());
+        // An error line must never be mistaken for a progress update.
+        assert!(parse_cli_clone_progress("fatal: repository 'x' not found").is_none());
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_parses_byte_units() {
+        let bytes = |line: &str| {
+            parse_cli_clone_progress(line)
+                .expect("receiving line is progress")
+                .received_bytes
+        };
+        assert_eq!(
+            bytes("Receiving objects: 100% (3/3), 226 bytes | 226.00 KiB/s, done."),
+            226
+        );
+        assert_eq!(
+            bytes("Receiving objects:   5% (50/1000), 12.50 KiB | 1.00 MiB/s"),
+            12_800
+        );
+        assert_eq!(
+            bytes("Receiving objects: 100% (1000/1000), 4.19 MiB | 3.00 MiB/s, done."),
+            4_393_533
+        );
+        assert_eq!(
+            bytes("Receiving objects: 100% (9/9), 2.00 GiB | 3.00 MiB/s, done."),
+            2_147_483_648
+        );
+        // No size field yet — report 0 rather than inventing a number.
+        assert_eq!(bytes("Receiving objects:  10% (100/1000)"), 0);
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_emits_progress_across_carriage_returns_and_chunk_boundaries() {
+        let transcript = concat!(
+            "Cloning into 'r'...\n",
+            "remote: Compressing objects:  40% (4/10)\r",
+            "Receiving objects:   5% (50/1000), 12.50 KiB | 1.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects: 100% (1000/1000), 4.19 MiB | 3.00 MiB/s, done.\r",
+            "Resolving deltas:  50% (250/500)\r",
+            "Resolving deltas: 100% (500/500), done.\n",
+        );
+        // 7-byte reads guarantee updates are split mid-line.
+        let (text, events) = drain(transcript.as_bytes(), 7);
+
+        assert_eq!(text, transcript);
+        assert!(
+            events.len() >= 5,
+            "expected a stream of updates, got {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(events[0].stage, "Compressing objects");
+        assert!(events[1..events.len() - 2]
+            .iter()
+            .all(|e| e.stage == "Receiving objects"));
+        assert_eq!(events.last().unwrap().stage, "Resolving deltas");
+        assert_eq!(events.last().unwrap().percent, 100);
+        assert!(
+            events.windows(2).all(|w| w[0].percent <= w[1].percent),
+            "percent must never go backwards"
+        );
+        // Every `\r`-separated update is emitted exactly once despite the splits.
+        let receiving: Vec<u8> = events
+            .iter()
+            .filter(|e| e.stage == "Receiving objects")
+            .map(|e| e.percent)
+            .collect();
+        assert_eq!(receiving, vec![4, 40, 80]);
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_dedupes_repeated_percentages_and_carries_received_bytes() {
+        let transcript = concat!(
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Resolving deltas:  50% (250/500)\n",
+        );
+        let (_, events) = drain(transcript.as_bytes(), 4096);
+
+        assert_eq!(
+            events.len(),
+            2,
+            "the repeated percent must not be re-emitted"
+        );
+        assert_eq!(events[0].stage, "Receiving objects");
+        assert_eq!(events[0].percent, 40);
+        assert_eq!(events[1].stage, "Resolving deltas");
+        // Carried forward, so the dialog keeps showing the downloaded size.
+        assert_eq!(events[1].received_bytes, 1_572_864);
+    }
+
+    /// The parser reads real `git clone --progress` output, so pin it against
+    /// the git binary on this machine rather than only against canned text:
+    /// clone a local repository over the git transport (`--no-local` forces the
+    /// pack path that reports progress) and drain the process's own stderr.
+    #[test]
+    fn test_drain_clone_stderr_emits_progress_for_a_real_shallow_clone() {
+        let source = TestRepo::with_initial_commit();
+        for i in 0..20 {
+            source.create_commit(
+                &format!("commit {}", i),
+                &[(&format!("file{}.txt", i), &"x".repeat(4096))],
+            );
+        }
+        let dest = TempDir::new().expect("temp dir");
+        let dest_path = dest.path().join("clone");
+
+        let mut child = std::process::Command::new("git")
+            .args(cli_clone_flags(Some(1), None, false, false, None))
+            .arg("--no-local")
+            .arg("--")
+            .arg(format!("file://{}", source.path.display()))
+            .arg(&dest_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git clone spawns");
+
+        let pipe = child.stderr.take().expect("stderr is piped");
+        let mut events = Vec::new();
+        let text = drain_clone_stderr(pipe, |p| events.push(p));
+        let status = child.wait().expect("git clone finishes");
+
+        assert!(status.success(), "clone failed: {}", text);
+        assert!(
+            !events.is_empty(),
+            "no progress parsed from real git output: {:?}",
+            text
+        );
+        assert!(
+            events.iter().any(|e| e.stage == "Receiving objects"),
+            "expected a receiving update, got {:?}",
+            events.iter().map(|e| &e.stage).collect::<Vec<_>>()
+        );
+        assert!(
+            events.windows(2).all(|w| w[0].percent <= w[1].percent),
+            "percent must never go backwards: {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        let last = events.last().expect("at least one event");
+        assert!(
+            last.percent >= 80,
+            "the final update should reach the end of the receiving band, got {}",
+            last.percent
+        );
+        assert!(dest_path.join(".git").exists());
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_keeps_full_text_and_never_reads_progress_from_an_error() {
+        // A clone that dies mid-transfer: the updates it managed to report are
+        // real progress, the failure lines are not, and the whole text must
+        // survive for `git clone failed: {stderr}`. The invalid UTF-8 byte is
+        // what forced this drain to be byte-based in the first place.
+        let transcript = b"Receiving objects:  30% (300/1000), 1.50 MiB | 3.00 MiB/s\rfatal: could not read Username for 'https://host': \xff\nfatal: the remote end hung up unexpectedly\n";
+        let (text, events) = drain(transcript, 5);
+
+        assert!(
+            text.contains("fatal: could not read Username"),
+            "stderr text lost: {}",
+            text
+        );
+        assert!(text.contains("fatal: the remote end hung up unexpectedly"));
+        assert_eq!(
+            events.len(),
+            1,
+            "only the transfer update is progress, got {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(events[0].stage, "Receiving objects");
+        assert_eq!(events[0].percent, 24);
+    }
 
     #[test]
     fn test_validate_clone_url_accepts_https_and_ssh_schemes() {
