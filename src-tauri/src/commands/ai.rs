@@ -108,11 +108,12 @@ pub async fn generate_commit_message(
         .map_err(LeviathanError::OperationFailed)
 }
 
-/// Check if AI is available (any provider is configured and available)
+/// Check if AI is available (a provider is configured and reachable, or a
+/// local model is downloaded and will be loaded on the first request)
 #[command]
 pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     let service = state.read().await;
-    let result = service.find_available_provider().await.is_some();
+    let result = service.has_available_provider().await;
     tracing::debug!("is_ai_available check: {}", result);
     Ok(result)
 }
