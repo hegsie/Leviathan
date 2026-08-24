@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository, withVimMode } from '../fixtures/tauri-mock';
+import { setupOpenRepository, initializeRepositoryStore, withVimMode } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import { GraphPanelPage, RightPanelPage } from '../pages/panels.page';
@@ -84,6 +84,36 @@ test.describe('Keyboard Shortcuts', () => {
 
     await page.keyboard.press('?');
     await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+  });
+
+  // keyboardService's localStorage store is the only place a customized
+  // binding lives, so a reload is the honest proof that it is a real
+  // persistence layer and not just in-memory state for the session.
+  test('a rebound shortcut survives a reload', async ({ page }) => {
+    const row = () =>
+      page
+        .locator('lv-keyboard-shortcuts-dialog[open] .shortcut-row')
+        .filter({ hasText: 'Toggle left panel' });
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('B');
+
+    // Ctrl+Alt+Y: no default binding uses Alt, so this cannot collide.
+    await row().locator('.shortcut-keys.editable').click();
+    await expect(row().locator('.shortcut-keys.recording')).toBeVisible();
+    await page.keyboard.press('Control+Alt+KeyY');
+
+    await expect(row()).toHaveClass(/customized/);
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('Y');
+
+    await page.reload();
+    await initializeRepositoryStore(page);
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await expect(row()).toHaveClass(/customized/);
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('Y');
   });
 });
 
