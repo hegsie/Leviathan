@@ -10,7 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
-use crate::utils::{create_command, reject_flag_like};
+use crate::utils::{apply_token_credentials, create_command, reject_flag_like};
 
 /// Add a new remote
 #[command]
@@ -1018,16 +1018,7 @@ fn push_via_cli(
     // function — failed to authenticate on HTTPS precisely BECAUSE a token was
     // found, while pushing with no token stored worked.
     if let Some(ref token_value) = token {
-        cmd.env("LEVIATHAN_PUSH_TOKEN", token_value);
-        cmd.env("GIT_CONFIG_COUNT", "1");
-        cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
-        // `git` as the username matches the git2 path's fallback; every
-        // provider we support authenticates a token as the password and
-        // ignores the username.
-        cmd.env(
-            "GIT_CONFIG_VALUE_0",
-            "!f() { echo username=git; echo \"password=$LEVIATHAN_PUSH_TOKEN\"; }; f",
-        );
+        apply_token_credentials(&mut cmd, token_value);
     }
 
     let output = cmd.output().map_err(|e| {

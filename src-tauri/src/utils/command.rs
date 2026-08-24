@@ -55,3 +55,34 @@ pub fn create_command(program: &str) -> Command {
 
     cmd
 }
+
+/// Feed a token to a `git` child process as a credential helper, the way the
+/// git2 paths do with `Cred::userpass_plaintext`.
+///
+/// The token goes in an env var and the helper reads it from there, so it never
+/// appears in the process's argv (readable by every other user on the machine)
+/// nor in any config file on disk. The helper is APPENDED via `GIT_CONFIG_*`
+/// rather than replacing `credential.helper`: clearing that key would also
+/// disable the user's own helper, so a credential it could have supplied — or
+/// saved — would be lost.
+///
+/// A blank token is ignored. Installing a helper that answers with an empty
+/// password would shadow a real failure with a rejected login, giving the user
+/// a wronger error than no token at all.
+///
+/// Owns `GIT_CONFIG_*` index 0; no other caller may set it on the same child.
+pub fn apply_token_credentials(cmd: &mut Command, token: &str) {
+    if token.trim().is_empty() {
+        return;
+    }
+
+    cmd.env("LEVIATHAN_GIT_TOKEN", token);
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+    // `git` as the username matches the git2 path's fallback; every provider we
+    // support authenticates a token as the password and ignores the username.
+    cmd.env(
+        "GIT_CONFIG_VALUE_0",
+        "!f() { echo username=git; echo \"password=$LEVIATHAN_GIT_TOKEN\"; }; f",
+    );
+}

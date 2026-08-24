@@ -5,7 +5,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
+use crate::utils::{apply_token_credentials, create_command};
 
 /// LFS file tracking pattern
 #[derive(Debug, Clone, serde::Serialize)]
@@ -47,12 +47,38 @@ pub struct LfsStatus {
     pub total_size: u64,
 }
 
+/// Build the `git lfs <args>` invocation, optionally authenticated.
+///
+/// `git lfs` resolves credentials by shelling out to `git credential`, which
+/// inherits this process's environment — so the helper installed here reaches
+/// the LFS API endpoint as well as the transfer itself.
+fn build_lfs_command(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path).arg("lfs").args(args);
+
+    if let Some(token_value) = token {
+        apply_token_credentials(&mut cmd, token_value);
+    }
+
+    cmd
+}
+
 /// Helper to run git-lfs commands
 fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = create_command("git")
-        .current_dir(repo_path)
-        .arg("lfs")
-        .args(args)
+    run_lfs_command_with_token(repo_path, args, None)
+}
+
+/// Helper to run git-lfs commands against an authenticated remote
+fn run_lfs_command_with_token(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+) -> Result<String> {
+    let output = build_lfs_command(repo_path, args, token)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git-lfs: {}", e)))?;
 
@@ -272,13 +298,7 @@ pub async fn get_lfs_files(path: String) -> Result<Vec<LfsFile>> {
 pub async fn lfs_pull(path: String, token: Option<String>) -> Result<String> {
     let repo_path = Path::new(&path);
 
-    // Similar to submodules, LFS commands shell out to `git lfs`.
-    // Passing the token directly is tricky without setting up a temporary credential helper.
-    if token.is_some() {
-        tracing::warn!("Token provided for lfs_pull but explicit token injection is not yet fully supported for LFS commands.");
-    }
-
-    run_lfs_command(repo_path, &["pull"])
+    run_lfs_command_with_token(repo_path, &["pull"], token.as_deref())
 }
 
 /// Fetch LFS files from remote
@@ -289,10 +309,7 @@ pub async fn lfs_fetch(
     token: Option<String>,
 ) -> Result<String> {
     let repo_path = Path::new(&path);
-
-    if token.is_some() {
-        tracing::warn!("Token provided for lfs_fetch but explicit token injection is not yet fully supported for LFS commands.");
-    }
+    let token = token.as_deref();
 
     let mut args = vec!["fetch"];
 
@@ -304,7 +321,7 @@ pub async fn lfs_fetch(
         }
     }
 
-    run_lfs_command(repo_path, &args)
+    run_lfs_command_with_token(repo_path, &args, token)
 }
 
 /// Prune old LFS files
@@ -565,5 +582,174 @@ mod tests {
         let json = serde_json::to_string(&pattern);
         assert!(json.is_ok());
         assert!(json.unwrap().contains("\"pattern\":\"*.psd\""));
+    }
+
+    /// Value of `key` in the env `cmd` will spawn with, as a String.
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn test_lfs_pull_command_carries_the_token_credential_helper() {
+        // The frontend looks the repo's credential up and sends it, so a pull
+        // that drops it dead-ends on every private LFS remote: the child runs
+        // unauthenticated with GIT_TERMINAL_PROMPT=0 and the dialog shows a raw
+        // "could not read Username" in a repo the app can otherwise push.
+        let repo = TestRepo::with_initial_commit();
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_COUNT").as_deref(),
+            Some("1"),
+            "a token must install exactly one config override"
+        );
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper"),
+            "the override must be the credential helper git asks for auth"
+        );
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            Some("s3cr3t"),
+            "the helper reads the token from this env var"
+        );
+
+        // The token must reach git ONLY through the env var: argv is readable
+        // by every other user on the machine.
+        let helper = env_of(&cmd, "GIT_CONFIG_VALUE_0").expect("helper must be set");
+        assert!(helper.contains("LEVIATHAN_GIT_TOKEN"));
+        assert!(!helper.contains("s3cr3t"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["lfs", "pull"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_injected_helper_answers_git_with_the_token() {
+        // Env vars being present proves nothing if the helper string is not one
+        // real git honours. Ask git itself.
+        let repo = TestRepo::with_initial_commit();
+        let built = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        let mut probe = create_command("git");
+        probe.current_dir(&repo.path);
+        for (key, value) in built.get_envs() {
+            if let Some(value) = value {
+                probe.env(key, value);
+            }
+        }
+
+        let mut child = probe
+            .arg("credential")
+            .arg("fill")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git credential fill must start");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin is piped")
+                .write_all(b"protocol=https\nhost=example.com\n\n")
+                .expect("the request must be writable");
+        }
+        let out = child.wait_with_output().expect("git must terminate");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            stdout.contains("password=s3cr3t"),
+            "git must resolve the token as the password, got: {}",
+            stdout
+        );
+        assert!(stdout.contains("username=git"), "got: {}", stdout);
+    }
+
+    #[test]
+    fn test_lfs_fetch_with_refs_still_authenticates() {
+        let repo = TestRepo::with_initial_commit();
+        let cmd = build_lfs_command(&repo.path, &["fetch", "main"], Some("tok"));
+
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper"),
+            "fetch shares the runner, so it must authenticate too"
+        );
+
+        // Authenticating must not disturb ref assembly.
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["lfs", "fetch", "main"]);
+    }
+
+    #[test]
+    fn test_lfs_command_without_a_token_installs_no_helper() {
+        // Local-only commands (prune, track, ls-files) must never override the
+        // user's own credential helper.
+        let repo = TestRepo::with_initial_commit();
+        let cmd = build_lfs_command(&repo.path, &["prune"], None);
+
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "LEVIATHAN_GIT_TOKEN",
+        ] {
+            assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
+        }
+    }
+
+    #[test]
+    fn test_blank_token_installs_no_helper() {
+        // A helper answering with an empty password turns "no credentials" into
+        // "login rejected" — a wronger error than no token at all.
+        let repo = TestRepo::with_initial_commit();
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("   "));
+
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "LEVIATHAN_GIT_TOKEN",
+        ] {
+            assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lfs_pull_error_does_not_leak_the_token() {
+        // No remote is configured, so this pull fails (with git's "not a git
+        // command" where LFS is absent). Either way the text goes straight to
+        // the dialog's error banner, so it must never carry the token.
+        //
+        // Deliberately not gated on is_lfs_installed(): the leak guard is worth
+        // more when it actually runs, and both failure modes exercise it.
+        let repo = TestRepo::with_initial_commit();
+
+        let result = lfs_pull(repo.path_str(), Some("s3cr3t".to_string())).await;
+
+        let text = match result {
+            Ok(output) => output,
+            Err(err) => {
+                let message = err.to_string();
+                assert!(!message.is_empty(), "the failure must say something");
+                message
+            }
+        };
+        assert!(
+            !text.contains("s3cr3t"),
+            "the token must not reach a user-visible message: {}",
+            text
+        );
     }
 }
