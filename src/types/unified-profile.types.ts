@@ -344,6 +344,52 @@ export function resolveProfilePreferredAccount(
 }
 
 /**
+ * V5: Pure helper (scope: "resolve" — operates on explicitly-passed values).
+ * Match a repository remote URL against a profile/account URL pattern.
+ *
+ * Faithful port of `url_matches_pattern` in
+ * `src-tauri/src/models/unified_profile.rs`: the UI uses it to predict which
+ * profile/account the backend will resolve, so the two must agree exactly.
+ * That includes the quirks — a trailing `/*` is a plain prefix match (it spans
+ * nested path segments), and pattern normalization deliberately leaves `git@`
+ * prefixes and `.git` suffixes in the pattern untouched. If the Rust matcher
+ * changes, change this with it.
+ */
+export function matchesUrlPattern(url: string, pattern: string): boolean {
+  // Normalize the URL exactly as the backend does (trims run before lowercasing).
+  const normalizedUrl = url
+    .replace(/^(?:https:\/\/)+/, '')
+    .replace(/^(?:http:\/\/)+/, '')
+    .replace(/^(?:git@)+/, '')
+    .replace(/:/g, '/')
+    .replace(/\/+$/, '')
+    .replace(/(?:\.git)+$/, '')
+    .toLowerCase();
+
+  const normalizedPattern = pattern
+    .replace(/^(?:https:\/\/)+/, '')
+    .replace(/^(?:http:\/\/)+/, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+
+  // Trailing "/*" — prefix match (spans nested path segments).
+  if (normalizedPattern.endsWith('/*')) {
+    return normalizedUrl.startsWith(normalizedPattern.replace(/(?:\/\*)+$/, ''));
+  }
+
+  // Single embedded wildcard, e.g. "github.com/*/repo".
+  if (normalizedPattern.includes('*')) {
+    const parts = normalizedPattern.split('*');
+    if (parts.length === 2) {
+      return normalizedUrl.startsWith(parts[0]) && normalizedUrl.endsWith(parts[1]);
+    }
+    return normalizedUrl === normalizedPattern;
+  }
+
+  return normalizedUrl === normalizedPattern || normalizedUrl.startsWith(`${normalizedPattern}/`);
+}
+
+/**
  * Get account count by type from global accounts
  */
 export function getGlobalAccountCountByType(

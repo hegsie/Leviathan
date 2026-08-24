@@ -15,7 +15,12 @@ import * as unifiedProfileService from '../../services/unified-profile.service.t
 import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus, isNetworkGateRefusal } from '../../services/git.service.ts';
 import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import { INTEGRATION_TYPE_NAMES } from '../../types/unified-profile.types.ts';
+import {
+  INTEGRATION_TYPE_NAMES,
+  matchesUrlPattern,
+  resolveDefaultGlobalAccount,
+  resolveProfilePreferredAccount,
+} from '../../types/unified-profile.types.ts';
 import { loggers } from '../../utils/index.ts';
 import type { UnifiedProfile, IntegrationAccount, IntegrationType, ProfileAssignmentSource } from '../../types/unified-profile.types.ts';
 import './lv-profile-card.ts';
@@ -929,9 +934,7 @@ export class LvContextDashboard extends LitElement {
     // Check if matched by URL pattern against remote URLs
     if (this.activeProfile.urlPatterns.length > 0 && this.activeRepository.remotes?.length) {
       const matchesPattern = this.activeRepository.remotes.some((remote) =>
-        this.activeProfile!.urlPatterns.some((pattern) =>
-          this.matchUrlPattern(remote.url, pattern)
-        )
+        this.activeProfile!.urlPatterns.some((pattern) => matchesUrlPattern(remote.url, pattern))
       );
       if (matchesPattern) {
         return 'url-pattern';
@@ -944,35 +947,6 @@ export class LvContextDashboard extends LitElement {
     }
 
     return 'none';
-  }
-
-  /**
-   * Match a URL against a pattern with glob-style wildcards
-   * Supports * for single segment and ** for multiple segments
-   */
-  private matchUrlPattern(url: string, pattern: string): boolean {
-    // Normalize URL - remove protocol, .git suffix, and convert to lowercase
-    const normalizedUrl = url.toLowerCase()
-      .replace(/^(https?:\/\/|git@|ssh:\/\/)/, '')
-      .replace(/\.git$/, '')
-      .replace(':', '/'); // Convert git@host:path to host/path
-
-    // Normalize pattern similarly
-    const normalizedPattern = pattern.toLowerCase()
-      .replace(/^(https?:\/\/|git@|ssh:\/\/)/, '')
-      .replace(/\.git$/, '')
-      .replace(':', '/');
-
-    // Convert glob pattern to regex
-    // Escape special regex chars except *
-    const regexPattern = normalizedPattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*/g, '{{GLOBSTAR}}')
-      .replace(/\*/g, '[^/]*')
-      .replace(/{{GLOBSTAR}}/g, '.*');
-
-    const regex = new RegExp(`^${regexPattern}$`);
-    return regex.test(normalizedUrl);
   }
 
   private detectProvider(): IntegrationType | null {
@@ -997,7 +971,8 @@ export class LvContextDashboard extends LitElement {
    * 1. An account of the detected provider whose `urlPatterns` match one of the
    *    repository's remote URLs (account-level auto-detection).
    * 2. The active profile's explicit default account for the provider.
-   * 3. Any account of the provider type (global fallback).
+   * 3. The global default account for the provider (`isDefault`), falling back
+   *    to the first account of that type.
    *
    * Returns null if no account is configured for the detected provider.
    */
@@ -1013,21 +988,18 @@ export class LvContextDashboard extends LitElement {
           a.integrationType === provider &&
           a.urlPatterns.length > 0 &&
           remotes.some((remote) =>
-            a.urlPatterns.some((pattern) => this.matchUrlPattern(remote.url, pattern))
+            a.urlPatterns.some((pattern) => matchesUrlPattern(remote.url, pattern))
           )
       );
       if (patternMatch) return patternMatch;
     }
 
-    // 2. The active profile's explicit default account for this provider.
-    const defaultAccountId = this.activeProfile?.defaultAccounts[provider];
-    if (defaultAccountId) {
-      const account = this.accounts.find((a) => a.id === defaultAccountId);
-      if (account) return account;
-    }
-
-    // 3. Fall back to any account of this provider type.
-    return this.accounts.find((a) => a.integrationType === provider) ?? null;
+    // Tiers 2 & 3: the profile's explicit default, then the global default —
+    // the same delegation the backend does via get_profile_preferred_account.
+    const preferred = this.activeProfile
+      ? resolveProfilePreferredAccount(this.activeProfile, this.accounts, provider)
+      : resolveDefaultGlobalAccount(this.accounts, provider);
+    return preferred ?? null;
   }
 
   private getProviderIcon(type: IntegrationType) {
