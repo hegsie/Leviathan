@@ -1127,6 +1127,7 @@ export class LvAzureDevOpsDialog extends LitElement {
       const result = await gitService.listAdoPipelineRuns(
         this.detectedRepo.organization,
         this.detectedRepo.project,
+        this.detectedRepo.repository,
         20,
         token
       );

@@ -1095,22 +1095,104 @@ pub async fn create_azure_devops_work_item(
 // Pipeline Commands
 // ============================================================================
 
-/// List pipeline runs
+/// Path of the repository-metadata endpoint for `repository` (name or GUID).
+///
+/// Encoded because Azure DevOps repository names may contain spaces.
+fn ado_repository_lookup_path(repository: &str) -> String {
+    format!("git/repositories/{}", urlencoding::encode(repository))
+}
+
+/// Build the `build/builds` query fragment for a repository-scoped run listing.
+///
+/// Without a repository filter Azure DevOps returns builds for *every* repository
+/// in the project, so `$top` fills with unrelated repos' runs. `repositoryId` is
+/// matched by GUID only (never by name) and the API ignores it unless
+/// `repositoryType` is sent alongside it.
+fn ado_pipeline_query_params(top: u32, repository_id: &str) -> String {
+    format!(
+        "$top={}&queryOrder=queueTimeDescending&repositoryId={}&repositoryType=TfsGit",
+        top,
+        urlencoding::encode(repository_id)
+    )
+}
+
+/// Frame a repository-lookup failure so the Pipelines tab names the repository.
+fn map_repository_lookup_error(repository: &str, detail: &str) -> String {
+    format!("Failed to resolve repository '{}': {}", repository, detail)
+}
+
+/// Resolve an Azure DevOps repository name (or GUID) to its GUID.
+///
+/// The build API matches `repositoryId` by GUID only, so the Pipelines listing
+/// has to translate the detected repository name first. Passing an already
+/// resolved GUID is a no-op — `git/repositories/{x}` accepts either form.
+async fn resolve_ado_repository_id(
+    organization: &str,
+    project: &str,
+    repository: &str,
+    token: &str,
+) -> Result<String> {
+    let url = build_api_url(
+        organization,
+        project,
+        &ado_repository_lookup_path(repository),
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("Authorization", get_auth_header(token))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            LeviathanError::OperationFailed(map_repository_lookup_error(repository, &e.to_string()))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(LeviathanError::OperationFailed(
+            map_repository_lookup_error(
+                repository,
+                &format!("Azure DevOps API error {}: {}", status, body),
+            ),
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct ApiRepositoryRef {
+        id: String,
+    }
+
+    let repo: ApiRepositoryRef = response.json().await.map_err(|e| {
+        LeviathanError::OperationFailed(map_repository_lookup_error(repository, &e.to_string()))
+    })?;
+
+    Ok(repo.id)
+}
+
+/// List pipeline runs for a repository
 #[command]
 pub async fn list_ado_pipeline_runs(
     organization: String,
     project: String,
+    repository: String,
     top: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<AdoPipelineRun>> {
     let token = resolve_ado_token(token)?;
 
     let top = top.unwrap_or(20);
+    // Scope the listing to this repository — an Azure DevOps project commonly
+    // hosts many repos, and an unfiltered listing fills `$top` with their builds.
+    let repository_id =
+        resolve_ado_repository_id(&organization, &project, &repository, &token).await?;
     let url = build_api_url_with_params(
         &organization,
         &project,
         "build/builds",
-        &format!("$top={}&queryOrder=queueTimeDescending", top),
+        &ado_pipeline_query_params(top, &repository_id),
     );
 
     let client = reqwest::Client::new();
@@ -1489,6 +1571,50 @@ mod tests {
         assert!(url.contains("dev.azure.com/myorg/myproject"));
         assert!(url.contains("_apis/git/repositories"));
         assert!(url.contains("api-version=7.1"));
+    }
+
+    #[test]
+    fn test_ado_pipeline_query_params_scopes_to_repository() {
+        let params = ado_pipeline_query_params(20, "0d1a2b3c-4d5e-6f70-8191-a2b3c4d5e6f7");
+
+        assert!(
+            params.contains("repositoryId=0d1a2b3c-4d5e-6f70-8191-a2b3c4d5e6f7"),
+            "expected a repositoryId filter, got: {}",
+            params
+        );
+        assert!(
+            params.contains("repositoryType=TfsGit"),
+            "repositoryId is ignored without repositoryType, got: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_ado_pipeline_query_params_keeps_top_and_order() {
+        let params = ado_pipeline_query_params(5, "0d1a2b3c-4d5e-6f70-8191-a2b3c4d5e6f7");
+
+        assert!(params.contains("$top=5"), "got: {}", params);
+        assert!(
+            params.contains("queryOrder=queueTimeDescending"),
+            "got: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_ado_repository_lookup_path_encodes_name() {
+        assert_eq!(
+            ado_repository_lookup_path("my repo"),
+            "git/repositories/my%20repo"
+        );
+    }
+
+    #[test]
+    fn test_map_repository_lookup_error_names_repository() {
+        let msg = map_repository_lookup_error("test-repo", "Azure DevOps API error 404: not found");
+
+        assert!(msg.contains("test-repo"), "got: {}", msg);
+        assert!(msg.contains("404"), "got: {}", msg);
     }
 
     #[test]
