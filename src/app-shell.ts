@@ -47,6 +47,7 @@ import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
 import './components/dialogs/lv-remote-dialog.ts';
 import './components/dialogs/lv-changelog-dialog.ts';
 import './components/dialogs/lv-clean-dialog.ts';
+import './components/dialogs/lv-export-import-dialog.ts';
 import './components/dialogs/lv-bisect-dialog.ts';
 import './components/dialogs/lv-submodule-dialog.ts';
 import './components/dialogs/lv-worktree-dialog.ts';
@@ -84,6 +85,7 @@ import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interact
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
+import type { LvExportImportDialog } from './components/dialogs/lv-export-import-dialog.ts';
 import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
 import type { LvRepositoryHealthDialog } from './components/dialogs/lv-repository-health-dialog.ts';
 import type { LvChangelogDialog } from './components/dialogs/lv-changelog-dialog.ts';
@@ -760,6 +762,7 @@ export class AppShell extends LitElement {
   @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
   @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
+  @query('lv-export-import-dialog') private exportImportDialog?: LvExportImportDialog;
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
@@ -1444,6 +1447,12 @@ export class AppShell extends LitElement {
             dismissed: 'clean cancelled',
             running: 'clean',
             clearFlag: () => { this.showClean = false; },
+          },
+          // No clearFlag: this dialog owns its own open state via open()/close(),
+          // like lv-create-branch-dialog.
+          'lv-export-import-dialog': {
+            dismissed: 'export/import cancelled',
+            running: 'patch/bundle operation',
           },
           'lv-reflog-dialog': {
             dismissed: 'undo history closed',
@@ -3078,6 +3087,24 @@ export class AppShell extends LitElement {
     }
   }
 
+  /** Not gated on isRefOperationInFlight(): opening the dialog writes no git
+   * state, same as Create tag / Create branch above. */
+  private handleCreatePatchFromContext(): void {
+    const commit = this.contextMenu.commit;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    if (commit) {
+      this.exportImportDialog?.open({ tab: 'patch', patchMode: 'create', commitOid: commit.oid });
+    }
+  }
+
+  private handleExportArchiveFromContext(): void {
+    const refName = this.refContextMenu.refName;
+    this.refContextMenu = { ...this.refContextMenu, visible: false };
+    if (refName) {
+      this.exportImportDialog?.open({ tab: 'archive', ref: refName });
+    }
+  }
+
   /**
    * Create a fixup commit targeting the selected commit
    * Requires staged changes. The fixup commit will be marked with "fixup! <original-message>"
@@ -3911,6 +3938,53 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'tag',
         action: this.requiresRepository(() => this.createTagDialog?.open()),
+      },
+      {
+        id: 'export-archive',
+        label: 'Export archive…',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() => this.exportImportDialog?.open({ tab: 'archive' })),
+      },
+      {
+        id: 'create-patch',
+        label: 'Create patch from commits…',
+        category: 'action',
+        icon: 'commit',
+        action: this.requiresRepository(() =>
+          this.exportImportDialog?.open({
+            tab: 'patch',
+            patchMode: 'create',
+            commitOid: this.selectedCommit?.oid,
+          }),
+        ),
+      },
+      {
+        id: 'apply-patch',
+        label: 'Apply patch file…',
+        category: 'action',
+        icon: 'commit',
+        action: this.requiresRepository(() =>
+          this.exportImportDialog?.open({ tab: 'patch', patchMode: 'apply' }),
+        ),
+      },
+      {
+        id: 'create-bundle',
+        label: 'Create bundle…',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() =>
+          this.exportImportDialog?.open({ tab: 'bundle', bundleMode: 'create' }),
+        ),
+      },
+      {
+        id: 'import-bundle',
+        label: 'Import bundle…',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() =>
+          this.exportImportDialog?.open({ tab: 'bundle', bundleMode: 'import' }),
+        ),
       },
       {
         id: 'settings',
@@ -5280,6 +5354,15 @@ export class AppShell extends LitElement {
                 </svg>
                 Create branch
               </button>
+              <button class="context-menu-item" @click=${this.handleCreatePatchFromContext}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="12" y1="18" x2="12" y2="12"></line>
+                  <line x1="9" y1="15" x2="15" y2="15"></line>
+                </svg>
+                Create patch…
+              </button>
               <div class="context-menu-divider"></div>
               <div class="context-menu-submenu">
                 <span class="context-menu-label">Reset to this commit</span>
@@ -5426,6 +5509,19 @@ export class AppShell extends LitElement {
                         Delete tag
                       </button>
                     `}
+              <!-- Rendered for local branches, remote branches AND tags: an
+                   archive is a read-only export of whatever tree the ref points
+                   at, so offering it for only one ref type would be an
+                   inconsistency the user has to discover by right-clicking. -->
+              <div class="context-menu-divider"></div>
+              <button class="context-menu-item" @click=${this.handleExportArchiveFromContext}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                  <rect x="1" y="3" width="22" height="5"></rect>
+                  <line x1="10" y1="12" x2="14" y2="12"></line>
+                </svg>
+                Export archive…
+              </button>
             </div>
           `
         : ''}
@@ -5678,6 +5774,16 @@ export class AppShell extends LitElement {
           @branch-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-branch-dialog>
+        <lv-export-import-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          .branches=${this.branches}
+          .tags=${this.graphCanvas?.getTagTips() ?? []}
+          .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
+          @patch-applied=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
+          @bundle-imported=${(e: CustomEvent<{ repositoryPath?: string }>) =>
+            this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
+        ></lv-export-import-dialog>
         <lv-cherry-pick-dialog
           .repositoryPath=${this.activeRepository.repository.path}
           .currentBranch=${this.activeRepository.currentBranch?.shorthand ?? 'HEAD'}
