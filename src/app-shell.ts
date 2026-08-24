@@ -124,6 +124,7 @@ import {
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
+import * as localAiService from './services/local-ai.service.ts';
 import { emit, type UnlistenFn } from '@tauri-apps/api/event';
 
 /**
@@ -1709,6 +1710,9 @@ export class AppShell extends LitElement {
     // Set up update notification listeners
     this.setupUpdateListeners();
 
+    // Surface background model-download failures even when Settings is closed
+    this.setupModelDownloadListeners();
+
     // Initialize OAuth deep link listener
     initOAuthListener().catch((e) => {
       log.warn('Failed to initialize OAuth listener:', e);
@@ -1859,6 +1863,15 @@ export class AppShell extends LitElement {
       showToast(`Update failed: ${error.message}`, 'error', 8000);
     });
     this.updateUnlisteners.push(unlistenError);
+  }
+
+  /**
+   * Model downloads run in a backend task and outlive the Settings dialog that
+   * started them, so the shell - not the dialog - owns the failure listener.
+   * Without it a download that fails after Settings is closed is silent.
+   */
+  private async setupModelDownloadListeners(): Promise<void> {
+    this.updateUnlisteners.push(await localAiService.listenForModelDownloadFailures());
   }
 
   /**

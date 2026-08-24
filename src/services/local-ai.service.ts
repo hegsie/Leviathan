@@ -3,8 +3,10 @@
  * Manages local model inference, downloads, and system capabilities
  */
 
-import { invokeCommand } from './tauri-api.ts';
+import { invokeCommand, listenToEvent } from './tauri-api.ts';
+import { showToast } from './notification.service.ts';
 import type { CommandResult } from '../types/api.types.ts';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 /**
  * GPU vendor types
@@ -169,6 +171,55 @@ export async function unloadModel(): Promise<CommandResult<void>> {
     window.dispatchEvent(new CustomEvent('ai-settings-changed'));
   }
   return result;
+}
+
+/**
+ * The backend's error text for a download the user asked to cancel.
+ * A cancel is reported on the same event as a genuine failure, so it has to be
+ * recognised by its message and left un-toasted.
+ */
+const CANCELLED_ERROR = 'Download cancelled';
+
+/**
+ * Report background model download/load failures for the life of the app.
+ *
+ * `download_model` returns as soon as the download is spawned and only reports
+ * the outcome minutes later over a Tauri event. The Settings dialog that
+ * started the download is destroyed when it closes, taking its listeners with
+ * it, so without an app-level listener a failed download is completely silent
+ * and the user is left with no model and no explanation.
+ *
+ * Returns a single unlisten that removes both listeners.
+ */
+export async function listenForModelDownloadFailures(): Promise<UnlistenFn> {
+  const unlistenError = await listenToEvent<{ modelId: string; error: string }>(
+    'model-download-error',
+    ({ modelId, error }) => {
+      // A user-requested cancel arrives on this event too - not a failure.
+      if (error === CANCELLED_ERROR) return;
+      showToast(`Model download failed for ${modelId}: ${error}`, 'error', 8000);
+    }
+  );
+
+  const unlistenComplete = await listenToEvent<{
+    modelId: string;
+    loaded?: boolean;
+    loadError?: string;
+  }>('model-download-complete', ({ modelId, loaded, loadError }) => {
+    // Only an explicit `loaded: false` is a failure; the success emitters send
+    // `loaded: true` and other callers may omit the flag entirely.
+    if (loaded !== false) return;
+    showToast(
+      `${modelId} downloaded but failed to load: ${loadError ?? 'unknown error'}`,
+      'error',
+      8000
+    );
+  });
+
+  return () => {
+    unlistenError();
+    unlistenComplete();
+  };
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   injectCommandError,
   findCommand,
   waitForCommand,
+  emitBackendEvent,
 } from '../fixtures/test-helpers';
 import { RightPanelPage } from '../pages/panels.page';
 
@@ -114,6 +115,12 @@ function localAiMocks(overrides: Record<string, unknown> = {}) {
 async function openSettings(page: Page) {
   await page.keyboard.press('Meta+,');
   await expect(page.locator('lv-settings-dialog')).toBeVisible();
+}
+
+/** Close the settings dialog, which unmounts it along with its listeners */
+async function closeSettings(page: Page) {
+  await page.locator('lv-modal:has(lv-settings-dialog) .close-btn[aria-label="Close"]').click();
+  await expect(page.locator('lv-settings-dialog')).toHaveCount(0);
 }
 
 /** Force the commit panel to re-check AI availability */
@@ -362,6 +369,70 @@ test.describe('Settings Dialog — Local AI', () => {
     // Both should show Load buttons since model status is 'unloaded'
     const loadButtons = page.locator('lv-settings-dialog .setting-row button', { hasText: 'Load' });
     await expect(loadButtons).toHaveCount(2);
+  });
+
+  // A model download runs for minutes in a backend task and reports its outcome
+  // only over a Tauri event. Users routinely close Settings while it runs, and
+  // closing Settings unmounts the dialog along with its listeners — so the
+  // failure has to be reported by something that outlives the dialog.
+  test('a download that fails after Settings is closed still tells the user', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    await emitBackendEvent(page, 'model-download-error', {
+      modelId: 'gemma-3-1b-q4km',
+      error: 'Network unreachable',
+    });
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Network unreachable');
+  });
+
+  test('a model that downloads but fails to load is reported after Settings is closed', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    await emitBackendEvent(page, 'model-download-complete', {
+      modelId: 'gemma-3-1b-q4km',
+      loaded: false,
+      loadError: 'Out of memory',
+    });
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Out of memory');
+  });
+
+  test('cancelling a download after Settings is closed does not look like a failure', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    // The backend reports a user-requested cancel on the failure event too.
+    await emitBackendEvent(page, 'model-download-error', {
+      modelId: 'gemma-3-1b-q4km',
+      error: 'Download cancelled',
+    });
+
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
   });
 });
 
