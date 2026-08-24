@@ -4,11 +4,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::error::{LeviathanError, Result};
-use crate::services::loopback_server::LoopbackServer;
+use crate::services::loopback_server::{CancelHandle, LoopbackServer};
 use crate::services::oauth::{
     generate_state, OAuthConfig, OAuthProvider, OAuthTokenResponse, PKCEChallenge,
 };
@@ -28,6 +29,74 @@ struct PendingServer {
 /// Global storage for pending loopback servers (GitHub OAuth)
 static PENDING_SERVERS: Lazy<Mutex<HashMap<u16, PendingServer>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// A loopback wait already in flight, with the handle that can abort it.
+///
+/// `oauth_wait_for_callback` REMOVES the server from `PENDING_SERVERS` and moves
+/// it into a blocking wait, so that map can no longer release the port. This
+/// registry keeps the detached cancel handle so an abandoned sign-in can free
+/// its socket instead of holding it until the callback timeout.
+struct ActiveWait {
+    /// Identifies this specific wait, so a finishing wait cannot deregister the
+    /// handle belonging to a newer wait that reused the same port.
+    id: u64,
+    cancel: CancelHandle,
+}
+
+/// In-flight loopback waits, keyed by port.
+static ACTIVE_WAITS: Lazy<Mutex<HashMap<u16, ActiveWait>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Monotonic id source for `ActiveWait`.
+static NEXT_WAIT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Deregister a finished wait, but ONLY if the registered entry is still the
+/// same wait. A cancelled wait can return AFTER the user's retry registered a
+/// new wait on the same port; removing blindly would strip the new flow's
+/// ability to cancel.
+fn unregister_wait(port: u16, id: u64) {
+    if let Ok(mut waits) = ACTIVE_WAITS.lock() {
+        if waits.get(&port).is_some_and(|w| w.id == id) {
+            waits.remove(&port);
+        }
+    }
+}
+
+/// Release the loopback server bound to `port`, whether it is still parked in
+/// `PENDING_SERVERS` or already moved into a blocking wait. Returns `true` if
+/// something of ours was released, `false` if we hold nothing on that port.
+///
+/// The teardown blocks until the accept loop confirms its listeners are closed
+/// (~100 ms worst case), so it runs on a blocking task and the port is
+/// re-bindable as soon as this returns.
+async fn release_loopback_port(port: u16) -> Result<bool> {
+    let parked = PENDING_SERVERS
+        .lock()
+        .map_err(|e| LeviathanError::OAuth(format!("Failed to access server storage: {}", e)))?
+        .remove(&port);
+    let in_flight = ACTIVE_WAITS
+        .lock()
+        .map_err(|e| LeviathanError::OAuth(format!("Failed to access OAuth waits: {}", e)))?
+        .remove(&port);
+
+    if parked.is_none() && in_flight.is_none() {
+        return Ok(false);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        if let Some(pending) = parked {
+            pending.server.shutdown();
+        }
+        if let Some(wait) = in_flight {
+            wait.cancel.cancel();
+        }
+    })
+    .await
+    .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))?;
+
+    tracing::debug!("Released OAuth loopback server on port {}", port);
+    Ok(true)
+}
 
 /// Remove expired entries from the pending servers map.
 fn cleanup_expired_pending_servers(map: &mut HashMap<u16, PendingServer>) {
@@ -236,7 +305,23 @@ pub async fn oauth_get_authorize_url(
             // Bitbucket requires http/https redirect URIs and only allows ONE callback URL
             // We use a dedicated port (8085) to avoid conflicts with GitHub/GitLab
             const BITBUCKET_PORT: u16 = 8085;
-            let server = LoopbackServer::new_with_port(BITBUCKET_PORT)?;
+            // The port is pinned by Bitbucket's registered redirect, so a flow
+            // abandoned without a cancel (or a retry that races one) would leave
+            // OUR OWN listener holding 8085 and the user would be told to close
+            // whatever application is using the port. A new sign-in supersedes
+            // the old one — the frontend already drops a superseded flow's late
+            // callback silently — so release ours and re-bind. A genuine
+            // third-party occupant still yields the original error.
+            let server = match LoopbackServer::new_with_port(BITBUCKET_PORT) {
+                Ok(server) => server,
+                Err(bind_error) => {
+                    if release_loopback_port(BITBUCKET_PORT).await? {
+                        LoopbackServer::new_with_port(BITBUCKET_PORT)?
+                    } else {
+                        return Err(bind_error);
+                    }
+                }
+            };
             let port = server.port();
             let config = OAuthConfig::bitbucket(&client_id, port);
 
@@ -562,19 +647,42 @@ pub struct CallbackResponse {
 #[tauri::command]
 pub async fn oauth_wait_for_callback(port: u16) -> Result<CallbackResponse> {
     // Retrieve the stored server for this port
-    let pending = PENDING_SERVERS
+    let mut pending = PENDING_SERVERS
         .lock()
         .map_err(|e| LeviathanError::OAuth(format!("Failed to access server storage: {}", e)))?
         .remove(&port)
         .ok_or_else(|| LeviathanError::OAuth(format!("No server found for port {}", port)))?;
 
+    // Detach a cancel handle BEFORE the server is consumed by the wait, and
+    // register it so `oauth_cancel_flow` can free the port if the user abandons
+    // the sign-in instead of waiting out the timeout.
+    let wait_id = NEXT_WAIT_ID.fetch_add(1, Ordering::Relaxed);
+    if let Some(cancel) = pending.server.take_cancel_handle() {
+        ACTIVE_WAITS
+            .lock()
+            .map_err(|e| LeviathanError::OAuth(format!("Failed to access OAuth waits: {}", e)))?
+            .insert(
+                port,
+                ActiveWait {
+                    id: wait_id,
+                    cancel,
+                },
+            );
+    }
+
     // Use the server's wait_for_callback method
     // This runs in a blocking thread to avoid blocking the async runtime
     let timeout = Duration::from_secs(300); // 5 minutes
 
-    let callback = tokio::task::spawn_blocking(move || pending.server.wait_for_callback(timeout))
-        .await
-        .map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))??;
+    let joined =
+        tokio::task::spawn_blocking(move || pending.server.wait_for_callback(timeout)).await;
+
+    // Deregister before propagating, so an errored/cancelled/aborted wait still
+    // clears its registry entry.
+    unregister_wait(port, wait_id);
+
+    let callback =
+        joined.map_err(|e| LeviathanError::OAuth(format!("Task join error: {}", e)))??;
 
     // Validate the returned `state` against an in-flight flow. We only PEEK here
     // (the flow is consumed later by `oauth_exchange_code`), so confirm a match
@@ -611,6 +719,19 @@ fn validate_callback_state(state: &str) -> Result<()> {
 #[tauri::command]
 pub async fn oauth_wait_for_github_callback(port: u16) -> Result<CallbackResponse> {
     oauth_wait_for_callback(port).await
+}
+
+/// Cancel an in-flight OAuth flow and release its loopback server.
+///
+/// `oauth_wait_for_callback` consumes the pending server, so without this the
+/// listener stays bound until the 5-minute callback timeout. That blocks a
+/// retry for providers pinned to a fixed port (Bitbucket's registered redirect
+/// is `127.0.0.1:8085`) with a "port is not available" error that points the
+/// user at the wrong application. Cancelling a port with nothing in flight is a
+/// no-op, so cancelling twice — or after the flow already completed — is safe.
+#[tauri::command]
+pub async fn oauth_cancel_flow(port: u16) -> Result<()> {
+    release_loopback_port(port).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -839,8 +960,14 @@ mod tests {
         );
     }
 
+    /// Bitbucket's redirect is pinned to the fixed port 8085, so the tests that
+    /// exercise it must not run concurrently with each other.
+    /// An async mutex: the guard is held across `.await` points.
+    static BITBUCKET_PORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn test_oauth_get_authorize_url_bitbucket() {
+        let _guard = BITBUCKET_PORT_TEST_LOCK.lock().await;
         let result =
             oauth_get_authorize_url("bitbucket".to_string(), None, "test-client-id".to_string())
                 .await;
@@ -1249,6 +1376,147 @@ mod tests {
             deserialized.instance_url,
             Some("https://auth.example.com".to_string())
         );
+    }
+
+    // ==========================================================================
+    // Cancelling an in-flight OAuth flow (loopback port release)
+    // ==========================================================================
+
+    /// Park a server the way `oauth_get_authorize_url` does.
+    fn park_server(server: LoopbackServer) -> u16 {
+        let port = server.port();
+        PENDING_SERVERS.lock().unwrap().insert(
+            port,
+            PendingServer {
+                server,
+                created_at: std::time::Instant::now(),
+            },
+        );
+        port
+    }
+
+    /// Register an in-flight wait exactly the way `oauth_wait_for_callback`
+    /// does — detach the cancel handle, record it under the port, and move the
+    /// server into a blocking wait that keeps the socket bound.
+    fn register_wait(
+        mut server: LoopbackServer,
+    ) -> (
+        u16,
+        u64,
+        std::thread::JoinHandle<Result<crate::services::loopback_server::CallbackResult>>,
+    ) {
+        let port = server.port();
+        let id = NEXT_WAIT_ID.fetch_add(1, Ordering::Relaxed);
+        let cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+        ACTIVE_WAITS
+            .lock()
+            .unwrap()
+            .insert(port, ActiveWait { id, cancel });
+        let handle = std::thread::spawn(move || server.wait_for_callback(Duration::from_secs(300)));
+        (port, id, handle)
+    }
+
+    fn port_is_free(port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+
+    /// The core bug: `oauth_wait_for_callback` consumes the pending server, so a
+    /// cancelled sign-in used to hold its port until the 5-minute timeout.
+    #[tokio::test]
+    async fn test_oauth_cancel_flow_releases_a_port_held_by_an_in_flight_wait() {
+        let port = park_server(LoopbackServer::new_with_port(0).unwrap());
+
+        let waiting = tokio::spawn(oauth_wait_for_callback(port));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !port_is_free(port),
+            "the in-flight wait should own the port before the cancel"
+        );
+
+        oauth_cancel_flow(port).await.unwrap();
+
+        assert!(
+            port_is_free(port),
+            "cancelling must free the port for an immediate retry"
+        );
+        assert!(
+            waiting.await.unwrap().is_err(),
+            "the cancelled wait must not report a callback"
+        );
+    }
+
+    /// A flow abandoned before the frontend started waiting is still parked in
+    /// `PENDING_SERVERS`; cancelling must evict it and free the port too.
+    #[tokio::test]
+    async fn test_oauth_cancel_flow_releases_a_server_that_never_started_waiting() {
+        let port = park_server(LoopbackServer::new_with_port(0).unwrap());
+
+        oauth_cancel_flow(port).await.unwrap();
+
+        assert!(
+            !PENDING_SERVERS.lock().unwrap().contains_key(&port),
+            "the parked server must be evicted"
+        );
+        assert!(port_is_free(port), "the parked server's port must be freed");
+
+        // Cancelling again (or after the flow already finished) is a no-op.
+        assert!(oauth_cancel_flow(port).await.is_ok());
+    }
+
+    /// Cancelling a port we hold nothing on must succeed quietly — the frontend
+    /// fires this on every cancel, including for already-completed flows.
+    #[tokio::test]
+    async fn test_oauth_cancel_flow_is_a_noop_for_an_unknown_port() {
+        assert!(oauth_cancel_flow(59998).await.is_ok());
+    }
+
+    /// A cancelled wait returns AFTER the user's retry has registered a new wait
+    /// on the same (fixed) port. Its deregistration must not strip the retry's
+    /// cancel handle, or the retry becomes uncancellable and its port leaks.
+    #[tokio::test]
+    async fn test_a_finished_wait_does_not_strip_a_retrys_cancel_handle() {
+        // Wait A takes the port, then the user cancels it.
+        let (port, id_a, handle_a) = register_wait(LoopbackServer::new_with_port(0).unwrap());
+        oauth_cancel_flow(port).await.unwrap();
+        assert!(handle_a.join().unwrap().is_err());
+
+        // The retry (wait B) reuses the same port.
+        let (_, id_b, handle_b) = register_wait(LoopbackServer::new_with_port(port).unwrap());
+        assert_ne!(id_a, id_b);
+
+        // Wait A's task only now gets around to deregistering itself.
+        unregister_wait(port, id_a);
+
+        // B is still cancellable, so its port is released on the next cancel.
+        oauth_cancel_flow(port).await.unwrap();
+        assert!(
+            port_is_free(port),
+            "the retry must still be cancellable after the older wait finishes"
+        );
+        assert!(handle_b.join().unwrap().is_err());
+    }
+
+    /// End-to-end: a Bitbucket sign-in abandoned without a cancel must not make
+    /// the next attempt fail with "Port 8085 is not available".
+    #[tokio::test]
+    async fn test_bitbucket_flow_can_restart_after_an_abandoned_sign_in() {
+        let _guard = BITBUCKET_PORT_TEST_LOCK.lock().await;
+        let first = oauth_get_authorize_url("bitbucket".to_string(), None, "cid".to_string()).await;
+        // Self-skip when another process on this host owns 8085 (same pattern as
+        // the IPv6 loopback test) — there is nothing of ours to release then.
+        let Ok(first) = first else {
+            return;
+        };
+        assert_eq!(first.loopback_port, Some(8085));
+
+        let second = oauth_get_authorize_url("bitbucket".to_string(), None, "cid".to_string())
+            .await
+            .expect("a second Bitbucket sign-in must be able to re-bind port 8085");
+        assert_eq!(second.loopback_port, Some(8085));
+
+        oauth_cancel_flow(8085).await.unwrap();
     }
 }
 

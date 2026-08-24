@@ -1082,6 +1082,81 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('Cancelling a pending OAuth sign-in', () => {
+    /** Starts a Bitbucket sign-in that hangs waiting for the browser callback. */
+    async function startPendingSignIn(options: { cancelFails?: boolean } = {}) {
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return {
+            authorizeUrl: 'https://bitbucket.org/site/oauth2/authorize',
+            state: 'bb-state-1',
+            loopbackPort: 8085,
+          };
+        }
+        // Never resolves: the flow stays pending, as it does while the user is
+        // in the browser.
+        if (command === 'oauth_wait_for_callback') return new Promise(() => {});
+        if (command === 'oauth_cancel_flow' && options.cancelFails) {
+          throw new Error('No server found for port 8085');
+        }
+        return previousMock(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await el.updateComplete;
+
+      await oauthService.startOAuth('bitbucket', 'test-client-id');
+      await el.updateComplete;
+      return el;
+    }
+
+    afterEach(() => {
+      oauthService.cancelOAuth();
+    });
+
+    it('offers a Cancel button while pending and returns the form to idle', async () => {
+      const el = await startPendingSignIn();
+
+      const signInButton = el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement;
+      expect(signInButton.disabled, 'sign in is disabled while pending').to.be.true;
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton, 'a pending sign-in must offer a way out').to.exist;
+
+      invokeHistory.length = 0;
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el as unknown as { oauthState: { status: string } }).oauthState.status).to.equal('idle');
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(el.shadowRoot!.querySelector('.oauth-cancel'), 'cancel disappears once idle').to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'spinner is gone').to.not.exist;
+
+      const release = invokeHistory.find((h) => h.command === 'oauth_cancel_flow');
+      expect(release, 'the backend loopback server is released').to.exist;
+      expect(release!.args).to.deep.equal({ port: 8085 });
+    });
+
+    it('returns the dialog to idle even when the backend release fails', async () => {
+      const el = await startPendingSignIn({ cancelFails: true });
+
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton).to.exist;
+
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'no spinner remains').to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-status.error'), 'a failed release is not user-facing').to.not.exist;
+      expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;

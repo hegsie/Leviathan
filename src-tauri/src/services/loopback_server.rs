@@ -32,6 +32,39 @@ pub struct LoopbackServer {
     shutdown_tx: Option<mpsc::Sender<()>>,
     /// Receiver for the authorization code + state
     code_rx: Option<mpsc::Receiver<Result<CallbackResult, String>>>,
+    /// Receiver acknowledging that the accept loop has released BOTH listeners.
+    /// Used by [`CancelHandle::cancel`] / [`LoopbackServer::shutdown`] to wait
+    /// until the port is actually free again.
+    closed_rx: Option<mpsc::Receiver<()>>,
+}
+
+/// How long a cancel waits for the accept loop to confirm it closed its
+/// listeners. The loop polls on a 100 ms tick, so this is generous; on timeout
+/// we give up waiting rather than block a command indefinitely.
+const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A detachable handle that can shut a [`LoopbackServer`] down AFTER the server
+/// itself has been moved into [`LoopbackServer::wait_for_callback`] (which
+/// consumes it).
+///
+/// Without this, an abandoned sign-in keeps its socket bound until the callback
+/// timeout fires — for a provider pinned to a fixed port (Bitbucket's registered
+/// redirect is `127.0.0.1:8085`) that makes an immediate retry impossible.
+pub struct CancelHandle {
+    shutdown_tx: mpsc::Sender<()>,
+    closed_rx: mpsc::Receiver<()>,
+}
+
+impl CancelHandle {
+    /// Signal the accept loop and BLOCK until it confirms both listeners are
+    /// closed, so the caller can re-bind the port as soon as this returns.
+    ///
+    /// A `Disconnected` result means the server thread is already gone, which
+    /// likewise means its sockets have been released.
+    pub fn cancel(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.closed_rx.recv_timeout(SHUTDOWN_ACK_TIMEOUT);
+    }
 }
 
 /// Preferred ports for OAuth callbacks (should match redirect URIs registered with providers)
@@ -90,9 +123,10 @@ impl LoopbackServer {
 
         let listener_v6 = Self::try_bind_ipv6_loopback(port);
 
-        // Set up channels for shutdown and code reception
+        // Set up channels for shutdown, close acknowledgement, and code reception
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
         let (code_tx, code_rx) = mpsc::channel::<Result<CallbackResult, String>>();
+        let (closed_tx, closed_rx) = mpsc::channel::<()>();
 
         // Set non-blocking mode so the accept loop can poll both listeners.
         listener
@@ -105,13 +139,14 @@ impl LoopbackServer {
 
         // Spawn server thread
         thread::spawn(move || {
-            Self::run_server(listener, listener_v6, shutdown_rx, code_tx);
+            Self::run_server(listener, listener_v6, shutdown_rx, code_tx, closed_tx);
         });
 
         Ok(Self {
             port,
             shutdown_tx: Some(shutdown_tx),
             code_rx: Some(code_rx),
+            closed_rx: Some(closed_rx),
         })
     }
 
@@ -185,19 +220,83 @@ impl LoopbackServer {
         }
     }
 
-    /// Run the server loop, polling the IPv4 listener and (when present) the IPv6
-    /// loopback listener so the callback is received on whichever family the
-    /// browser used to reach `localhost`.
+    /// Take a handle that can cancel this server later.
+    ///
+    /// MUST be taken BEFORE the server is moved into [`Self::wait_for_callback`],
+    /// which consumes it — after that there is no other way to stop the accept
+    /// loop before its timeout. The shutdown sender is cloned (not moved) so
+    /// `Drop` still signals shutdown for a server that is simply dropped.
+    /// Returns `None` if a handle was already taken.
+    pub fn take_cancel_handle(&mut self) -> Option<CancelHandle> {
+        let shutdown_tx = self.shutdown_tx.as_ref()?.clone();
+        let closed_rx = self.closed_rx.take()?;
+        Some(CancelHandle {
+            shutdown_tx,
+            closed_rx,
+        })
+    }
+
+    /// Shut the server down and wait until its listeners are actually closed,
+    /// so the caller can re-bind the port immediately afterwards.
+    ///
+    /// Plain `drop` only *signals* shutdown; the accept loop can take up to a
+    /// poll tick to notice, during which the port is still bound.
+    pub fn shutdown(mut self) {
+        match (self.shutdown_tx.take(), self.closed_rx.take()) {
+            (Some(shutdown_tx), Some(closed_rx)) => CancelHandle {
+                shutdown_tx,
+                closed_rx,
+            }
+            .cancel(),
+            // The close acknowledgement was already handed to a `CancelHandle`
+            // (or consumed): fall back to signalling shutdown without waiting,
+            // which is what `Drop` does.
+            (Some(shutdown_tx), None) => {
+                let _ = shutdown_tx.send(());
+            }
+            _ => {}
+        }
+    }
+
+    /// Run the server thread: accept until a callback arrives or shutdown is
+    /// signalled, then release BOTH listeners, announce the close, and only then
+    /// deliver any result.
+    ///
+    /// The order matters: a caller unblocked by the close acknowledgement (or by
+    /// the callback result) must be able to re-bind the port straight away, so
+    /// the sockets are dropped before either is sent.
     fn run_server(
         listener_v4: TcpListener,
-        mut listener_v6: Option<TcpListener>,
+        listener_v6: Option<TcpListener>,
         shutdown_rx: mpsc::Receiver<()>,
         code_tx: mpsc::Sender<Result<CallbackResult, String>>,
+        closed_tx: mpsc::Sender<()>,
     ) {
+        let result = Self::accept_loop(&listener_v4, listener_v6, &shutdown_rx);
+
+        drop(listener_v4);
+        let _ = closed_tx.send(());
+
+        if let Some(result) = result {
+            let _ = code_tx.send(result);
+        }
+    }
+
+    /// Poll the IPv4 listener and (when present) the IPv6 loopback listener so
+    /// the callback is received on whichever family the browser used to reach
+    /// `localhost`. Returns `None` when stopped by the shutdown signal.
+    ///
+    /// The IPv6 listener is owned here so it is dropped (releasing the port on
+    /// that family too) as soon as the loop ends.
+    fn accept_loop(
+        listener_v4: &TcpListener,
+        mut listener_v6: Option<TcpListener>,
+        shutdown_rx: &mpsc::Receiver<()>,
+    ) -> Option<Result<CallbackResult, String>> {
         loop {
             // Check for shutdown signal
             if shutdown_rx.try_recv().is_ok() {
-                break;
+                return None;
             }
 
             // Poll both loopback listeners (both non-blocking). `serviced` tracks
@@ -210,14 +309,12 @@ impl LoopbackServer {
                 Ok((stream, _)) => {
                     serviced = true;
                     if let Some(result) = Self::handle_connection(stream) {
-                        let _ = code_tx.send(result);
-                        return;
+                        return Some(result);
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
-                    let _ = code_tx.send(Err(format!("Accept error: {}", e)));
-                    return;
+                    return Some(Err(format!("Accept error: {}", e)));
                 }
             }
 
@@ -229,8 +326,7 @@ impl LoopbackServer {
                     Ok((stream, _)) => {
                         serviced = true;
                         if let Some(result) = Self::handle_connection(stream) {
-                            let _ = code_tx.send(result);
-                            return;
+                            return Some(result);
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -571,6 +667,78 @@ mod tests {
         let result = handle.join().unwrap().unwrap();
         assert_eq!(result.code, "v6code");
         assert_eq!(result.state, "v6state");
+    }
+
+    /// `shutdown` must not return until the socket is actually closed: an
+    /// abandoned OAuth sign-in has to free its port for an immediate retry.
+    /// Plain `drop` only signals the accept loop, which can take a poll tick
+    /// (100 ms) to notice — long enough for the retry's bind to fail.
+    #[test]
+    fn test_shutdown_releases_the_port_before_returning() {
+        let server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+
+        server.shutdown();
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "shutdown must confirm the socket is closed before returning"
+        );
+    }
+
+    /// A cancel handle taken before the server is consumed by `wait_for_callback`
+    /// must be able to abort that wait and free the port — otherwise the listener
+    /// is held for the full callback timeout.
+    #[test]
+    fn test_cancel_handle_aborts_an_in_flight_wait_and_frees_the_port() {
+        let mut server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(300)));
+        thread::sleep(Duration::from_millis(150));
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "the in-flight wait should still own the port"
+        );
+
+        cancel.cancel();
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "cancelling must release the port immediately"
+        );
+        assert!(
+            handle.join().unwrap().is_err(),
+            "the aborted wait must not report a successful callback"
+        );
+    }
+
+    /// Taking a cancel handle (and never using it) must not disturb normal
+    /// callback delivery — guards the run_server/accept_loop split and the
+    /// close-ack-before-result ordering.
+    #[test]
+    fn test_taking_a_cancel_handle_does_not_break_callback_delivery() {
+        let mut server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let _cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(5)));
+        thread::sleep(Duration::from_millis(150));
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "abc");
+        assert_eq!(result.state, "xyz");
     }
 
     #[test]
