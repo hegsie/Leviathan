@@ -366,6 +366,63 @@ test.describe('Settings Dialog — Local AI', () => {
 });
 
 // =========================================================================
+// Settings Dialog: Cloud provider connection test
+// =========================================================================
+
+/**
+ * `open_ai` is the serde wire value of the Rust `OpenAi` variant
+ * (`#[serde(rename_all = "snake_case")]`) — the same string the real backend
+ * puts in the get_ai_providers payload.
+ */
+const mockOpenAiProvider = {
+  providerType: 'open_ai',
+  name: 'OpenAI',
+  available: false,
+  requiresApiKey: true,
+  // The Test button is disabled until a key is stored.
+  hasApiKey: true,
+  endpoint: 'https://api.openai.com/v1',
+  models: [],
+  selectedModel: null,
+};
+
+test.describe('Settings Dialog — Cloud provider test', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('shows the provider name when an OpenAI test fails', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [...mockProvidersUnavailable, mockOpenAiProvider],
+      test_ai_provider: false,
+    }));
+    await openSettings(page);
+
+    const row = page.locator('lv-settings-dialog .setting-row', { hasText: 'OpenAI API Key' });
+    await row.getByRole('button', { name: 'Test' }).click();
+
+    await expect(page.locator('lv-settings-dialog .error-text')).toHaveText(
+      'OpenAI is not available. Check your API key and try again.'
+    );
+    await expect(row.locator('.status-indicator').last()).toContainText('Failed');
+  });
+
+  test('shows Working and no error when the OpenAI test succeeds', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [...mockProvidersUnavailable, mockOpenAiProvider],
+      test_ai_provider: true,
+    }));
+    await openSettings(page);
+
+    const row = page.locator('lv-settings-dialog .setting-row', { hasText: 'OpenAI API Key' });
+    await row.getByRole('button', { name: 'Test' }).click();
+
+    await expect(row.locator('.status-indicator').last()).toContainText('Working');
+    await expect(page.locator('lv-settings-dialog .error-text')).toHaveCount(0);
+  });
+});
+
+// =========================================================================
 // Commit Panel: AI Generate Button
 // =========================================================================
 
