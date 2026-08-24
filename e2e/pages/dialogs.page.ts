@@ -160,6 +160,7 @@ export class SettingsDialogPage extends BaseDialog {
   readonly themeSelect: Locator;
   readonly vimModeToggle: Locator;
   readonly doneButton: Locator;
+  readonly resetButton: Locator;
 
   constructor(page: Page) {
     // Settings dialog uses lv-modal which adds role="dialog" with aria-labelledby
@@ -172,6 +173,7 @@ export class SettingsDialogPage extends BaseDialog {
     // Note: vim mode toggle is in keyboard shortcuts dialog, not settings
     this.vimModeToggle = page.locator('lv-settings-dialog .toggle-switch').first();
     this.doneButton = page.locator('lv-settings-dialog button:has-text("Done")');
+    this.resetButton = page.locator('lv-settings-dialog button:has-text("Reset to Defaults")');
   }
 
   async setTheme(theme: 'light' | 'dark' | 'system'): Promise<void> {

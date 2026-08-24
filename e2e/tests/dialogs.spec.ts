@@ -2,7 +2,12 @@ import { test, expect } from '@playwright/test';
 import { setupOpenRepository, setupTauriMocks } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
-import { injectCommandError } from '../fixtures/test-helpers';
+import {
+  injectCommandError,
+  injectCommandMock,
+  autoConfirmDialogs,
+  startCommandCaptureWithMocks,
+} from '../fixtures/test-helpers';
 
 test.describe('Settings Dialog', () => {
   let app: AppPage;
@@ -532,5 +537,75 @@ test.describe('Dialogs - Error Scenarios', () => {
 
     // Dialog should still be visible (no crash)
     await expect(dialogs.settings.dialog).toBeVisible();
+  });
+});
+
+
+test.describe('Settings Dialog - Reset to Defaults', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {});
+  });
+
+  test('reset restores defaults and confirms it to the user', async ({ page }) => {
+    await autoConfirmDialogs(page);
+
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    // Move a setting off its default so the reset is observable.
+    await dialogs.settings.setTheme('light');
+    await page.waitForFunction(() => {
+      const stores = (window as any).__LEVIATHAN_STORES__;
+      return stores?.settingsStore?.getState()?.theme === 'light';
+    });
+
+    await dialogs.settings.resetButton.click();
+
+    // The store goes back to the default theme...
+    await page.waitForFunction(() => {
+      const stores = (window as any).__LEVIATHAN_STORES__;
+      return stores?.settingsStore?.getState()?.theme === 'dark';
+    });
+    // ...the dialog repaints from the store...
+    await expect(dialogs.settings.themeSelect).toHaveValue('dark');
+    // ...and the user is told it happened.
+    await expect(page.locator('lv-toast-container .toast.success')).toBeVisible();
+  });
+
+  test('cancelling the reset keeps the current settings', async ({ page }) => {
+    // plugin-dialog 2.x routes confirm() through `message`; anything other than
+    // the OK label reads as "declined".
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+
+    await page.keyboard.press('Meta+,');
+    await expect(dialogs.settings.dialog).toBeVisible();
+
+    await dialogs.settings.setTheme('light');
+    await page.waitForFunction(() => {
+      const stores = (window as any).__LEVIATHAN_STORES__;
+      return stores?.settingsStore?.getState()?.theme === 'light';
+    });
+
+    await dialogs.settings.resetButton.click();
+
+    // Wait until the prompt has actually been raised, so the assertions below
+    // are not just racing the click.
+    await page.waitForFunction(() => {
+      const commands =
+        (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+          .__INVOKED_COMMANDS__ || [];
+      return commands.some((c) => c.command === 'plugin:dialog|message');
+    });
+
+    await expect(dialogs.settings.themeSelect).toHaveValue('light');
+    const theme = await page.evaluate(
+      () => (window as any).__LEVIATHAN_STORES__?.settingsStore?.getState()?.theme
+    );
+    expect(theme).toBe('light');
+    await expect(page.locator('lv-toast-container .toast')).toHaveCount(0);
   });
 });
