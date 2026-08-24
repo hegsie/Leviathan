@@ -80,6 +80,68 @@ fn is_lfs_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether an attributes file's contents turn the LFS filter on for some
+/// pattern. Comment lines do not count: a commented-out rule is not config.
+fn enables_lfs(content: &str) -> bool {
+    content.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#') && line.contains("filter=lfs")
+    })
+}
+
+/// Whether the attributes file at `path` enables LFS. A missing or unreadable
+/// file simply does not.
+fn file_enables_lfs(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|c| enables_lfs(&c))
+        .unwrap_or(false)
+}
+
+/// Whether LFS is configured for this repository.
+///
+/// Git reads attributes from a `.gitattributes` in every directory of the
+/// tree, not just the root, plus `.git/info/attributes`. A monorepo that keeps
+/// its rules in e.g. `assets/.gitattributes` is an LFS repo just the same;
+/// looking only at the root file reported those repos as "not configured",
+/// which hid the file list and the pull/prune actions in the UI.
+fn is_lfs_enabled(repo_path: &Path) -> bool {
+    // The root file is read straight from disk: `git lfs track` writes it long
+    // before it is ever committed.
+    if file_enables_lfs(&repo_path.join(".gitattributes")) {
+        return true;
+    }
+
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return false;
+    };
+
+    // Not part of the tree; repo.path() resolves the git dir for linked
+    // worktrees too.
+    if file_enables_lfs(&repo.path().join("info").join("attributes")) {
+        return true;
+    }
+
+    // Nested attributes files, taken from the index rather than a directory
+    // walk: it costs no directory IO and still sees files that are not checked
+    // out. Prefer the working-tree copy when there is one so uncommitted edits
+    // count, and fall back to the committed blob.
+    let Ok(index) = repo.index() else {
+        return false;
+    };
+    index.iter().any(|entry| {
+        let rel = String::from_utf8_lossy(&entry.path).to_string();
+        let rel = Path::new(&rel);
+        if rel.file_name() != Some(std::ffi::OsStr::new(".gitattributes")) {
+            return false;
+        }
+        file_enables_lfs(&repo_path.join(rel))
+            || repo
+                .find_blob(entry.id)
+                .map(|b| enables_lfs(&String::from_utf8_lossy(b.content())))
+                .unwrap_or(false)
+    })
+}
+
 /// Get LFS version
 fn get_lfs_version() -> Option<String> {
     create_command("git")
@@ -116,12 +178,8 @@ pub async fn get_lfs_status(path: String) -> Result<LfsStatus> {
         });
     }
 
-    // Check if LFS is enabled (has .gitattributes with lfs filter)
-    let gitattributes = repo_path.join(".gitattributes");
-    let enabled = gitattributes.exists()
-        && std::fs::read_to_string(&gitattributes)
-            .map(|c| c.contains("filter=lfs"))
-            .unwrap_or(false);
+    // Check if LFS is enabled (attributes anywhere in the repo, not just root)
+    let enabled = is_lfs_enabled(repo_path);
 
     // Get tracked patterns
     let patterns = if enabled {
@@ -419,6 +477,101 @@ mod tests {
         if status.installed {
             assert!(status.enabled);
         }
+    }
+
+    #[test]
+    fn test_lfs_enabled_from_nested_gitattributes() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Monorepo layout: the LFS rules live in a subdirectory, with no
+        // .gitattributes at the repo root at all.
+        repo.create_commit(
+            "Track assets",
+            &[(
+                "assets/.gitattributes",
+                "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+            )],
+        );
+        assert!(!repo.path.join(".gitattributes").exists());
+
+        assert!(is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_enabled_from_nested_gitattributes_not_checked_out() {
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_commit(
+            "Track assets",
+            &[(
+                "assets/.gitattributes",
+                "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+            )],
+        );
+
+        // Sparse/partial checkout: the entry is in the index and the committed
+        // tree, but there is no file on disk to read.
+        std::fs::remove_file(repo.path.join("assets/.gitattributes")).unwrap();
+
+        assert!(is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_enabled_from_info_attributes() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Repo-local attributes, deliberately not part of the tree.
+        std::fs::create_dir_all(repo.path.join(".git/info")).unwrap();
+        std::fs::write(
+            repo.path.join(".git/info/attributes"),
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        assert!(!repo.path.join(".gitattributes").exists());
+
+        assert!(is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_enabled_from_root_gitattributes() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Uncommitted, as `git lfs track` leaves it.
+        repo.create_file(
+            ".gitattributes",
+            "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+        );
+
+        assert!(is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_not_enabled_without_lfs_filter() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Attributes files exist at the root and nested, but none of them
+        // mention the LFS filter.
+        repo.create_file(".gitattributes", "*.txt text\n");
+        repo.create_commit("Docs attributes", &[("docs/.gitattributes", "*.md text\n")]);
+
+        assert!(!is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_not_enabled_for_commented_out_filter() {
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_file(
+            ".gitattributes",
+            "# *.psd filter=lfs diff=lfs merge=lfs -text\n",
+        );
+
+        assert!(!is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_enabled_false_for_missing_repo() {
+        assert!(!is_lfs_enabled(std::path::Path::new("/nonexistent/path")));
     }
 
     #[tokio::test]
