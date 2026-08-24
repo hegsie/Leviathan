@@ -1272,7 +1272,7 @@ export class LvCommitPanel extends LitElement {
     try {
       const message = this.buildCommitMessage();
 
-      const result = await gitService.createCommit(this.repositoryPath, {
+      const result = await gitService.createCommit(repoPath, {
         message,
         amend: this.amend,
       });
@@ -1287,9 +1287,10 @@ export class LvCommitPanel extends LitElement {
         this.originalSummary = '';
         this.originalDescription = '';
 
-        // Notify parent to refresh
+        // Notify parent to refresh. The originating repo rides along so
+        // forwarders can keep their own refresh pinned to it.
         this.dispatchEvent(new CustomEvent('commit-created', {
-          detail: { commit: result.data },
+          detail: { commit: result.data, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -1297,8 +1298,11 @@ export class LvCommitPanel extends LitElement {
         // Trigger file status refresh immediately
         window.dispatchEvent(new CustomEvent('status-refresh'));
 
-        // Trigger graph refresh and badge update
-        window.dispatchEvent(new CustomEvent('repository-refresh'));
+        // Trigger graph refresh and badge update. Names the repo the commit
+        // ran IN — captured before the await. Without it the host falls back to
+        // refreshing whichever tab is active, so a commit the user tabbed away
+        // from would leave its own repo stale until the file watcher noticed.
+        window.dispatchEvent(new CustomEvent('repository-refresh', { detail: { repoPath } }));
 
         // Clear success message after a delay
         setTimeout(() => {

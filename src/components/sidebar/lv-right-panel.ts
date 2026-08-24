@@ -389,9 +389,14 @@ export class LvRightPanel extends LitElement {
     }
   }
 
-  private handleCommitCreated(): void {
+  /** Forward the repo the commit ran in (captured pre-await by the commit
+   * panel) so the host pins the refresh to it, not whichever tab is active if
+   * the user switched mid-commit. */
+  private handleCommitCreated(e?: Event): void {
+    const repoPath = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail
+      ?.repositoryPath;
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+    window.dispatchEvent(new CustomEvent('repository-refresh', { detail: { repoPath } }));
   }
 }
 
