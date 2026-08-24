@@ -370,6 +370,7 @@ export class LvRightPanel extends LitElement {
           <div class="analytics-panel">
             <lv-analytics-panel
               .repositoryPath=${this.repositoryPath}
+              .active=${this.activeTab === 'analytics'}
             ></lv-analytics-panel>
           </div>
         </div>
