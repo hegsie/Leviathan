@@ -1183,18 +1183,24 @@ export class LvGraphCanvas extends LitElement {
         }
       }
       if (hasSearch && this.matchedCommitOids.size === 0 && this.searchFilter?.searchMode !== 'semantic') {
-        // Keyword search: try the search index first for faster results
-        const indexResults = await searchIndexService.search(repoPath, {
-          query: this.searchFilter?.query || undefined,
-          author: this.searchFilter?.author || undefined,
-          dateFrom: this.searchFilter?.dateFrom
-            ? new Date(this.searchFilter.dateFrom).getTime() / 1000
-            : undefined,
-          dateTo: this.searchFilter?.dateTo
-            ? new Date(this.searchFilter.dateTo).getTime() / 1000
-            : undefined,
-          limit: this.commitCount,
-        });
+        // Keyword search: try the search index first for faster results.
+        // The index has no file or branch dimension, so a path/branch filter
+        // must go straight to the direct search below — asking the index
+        // would silently drop that filter and highlight every loaded commit.
+        const indexCanAnswer = !this.searchFilter?.filePath && !this.searchFilter?.branch;
+        const indexResults = indexCanAnswer
+          ? await searchIndexService.search(repoPath, {
+              query: this.searchFilter?.query || undefined,
+              author: this.searchFilter?.author || undefined,
+              dateFrom: this.searchFilter?.dateFrom
+                ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+                : undefined,
+              dateTo: this.searchFilter?.dateTo
+                ? new Date(this.searchFilter.dateTo).getTime() / 1000
+                : undefined,
+              limit: this.commitCount,
+            })
+          : null;
 
         // Abort if a newer load has started
         if (this.loadVersion !== currentVersion) return;

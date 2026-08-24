@@ -33,6 +33,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
 import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
+import { searchIndexService } from '../../../services/search-index.service.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -1942,6 +1943,162 @@ describe('lv-graph-canvas', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
+    });
+  });
+
+  // ── Search filters the commit index cannot express ────────────────────
+  describe('search filters vs the commit index', () => {
+    type GraphSearchFilter = {
+      query: string;
+      author: string;
+      dateFrom: string;
+      dateTo: string;
+      filePath: string;
+      branch: string;
+      searchMode?: string;
+    };
+
+    function setupIndexedSearchMocks(opts: { searchCommitsFails?: boolean } = {}): void {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_commit_total':
+            return defaultCommits.length;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'get_commits_stats':
+            return [];
+          case 'get_commits_signatures':
+            return [];
+          case 'build_search_index':
+            return defaultCommits.length;
+          case 'search_index':
+            // The index has no file/branch dimension, so it answers a
+            // path/branch filter with every commit it holds
+            return defaultCommits.map((c) => ({
+              oid: c.oid,
+              shortOid: c.shortId,
+              summary: c.summary,
+              messageLower: c.message.toLowerCase(),
+              authorName: c.author.name,
+              authorEmail: c.author.email,
+              authorDate: c.timestamp,
+              parentCount: c.parentIds.length,
+            }));
+          case 'search_commits':
+            if (opts.searchCommitsFails) throw new Error('bad pathspec');
+            return [commit2];
+          default:
+            return null;
+        }
+      };
+    }
+
+    async function renderWithReadyIndex(): Promise<LvGraphCanvas> {
+      await searchIndexService.buildIndex(REPO_PATH);
+      const el = await renderCanvas();
+      clearHistory();
+      return el;
+    }
+
+    async function applyFilter(
+      el: LvGraphCanvas,
+      filter: Partial<GraphSearchFilter>
+    ): Promise<void> {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).searchFilter = {
+        query: '',
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'keyword',
+        ...filter,
+      };
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    beforeEach(() => {
+      // Readiness and the shared search-result cache are module-level state
+      searchIndexService.invalidate();
+      clearGraphCacheForTests();
+      setupIndexedSearchMocks();
+      clearHistory();
+    });
+
+    afterEach(() => {
+      searchIndexService.invalidate();
+    });
+
+    it('a file-path filter searches git directly even when the index is ready', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      expect((direct[0].args as { filePath?: string }).filePath).to.equal('src/app.ts');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matched = (el as any).matchedCommitOids as Set<string>;
+      expect(matched.size).to.equal(1);
+      expect(matched.has(commit2.oid)).to.be.true;
+    });
+
+    it('a branch filter searches git directly even when the index is ready', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { branch: 'feature/x' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      expect((direct[0].args as { branch?: string }).branch).to.equal('feature/x');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(1);
+    });
+
+    it('a query combined with a file-path filter keeps the path restriction', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { query: 'Second', filePath: 'src/app.ts' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      const args = direct[0].args as { query?: string; filePath?: string };
+      expect(args.query).to.equal('Second');
+      expect(args.filePath).to.equal('src/app.ts');
+    });
+
+    it('a query-only search still uses the fast index', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { query: 'commit' });
+
+      expect(findCommands('search_index').length).to.equal(1);
+      expect(findCommands('search_commits').length).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(defaultCommits.length);
+    });
+
+    it('a failed direct search with a file-path filter highlights nothing', async () => {
+      setupIndexedSearchMocks({ searchCommitsFails: true });
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(0);
+      // A failed match must not blank the graph
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
     });
   });
 });
