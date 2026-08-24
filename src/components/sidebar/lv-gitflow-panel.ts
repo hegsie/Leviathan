@@ -419,7 +419,18 @@ export class LvGitflowPanel extends LitElement {
       // Discard a stale response — the Finish buttons bind directly to these
       // items, so writing repo A's items under repo B's tab could
       // finish/delete the wrong branch.
-      if (!latest() || !branchResult.success || !branchResult.data) return;
+      if (!latest()) return;
+
+      if (!branchResult.success || !branchResult.data) {
+        // Keeping the last good listing is the same hazard by another route:
+        // the rows would still be the previous repo's while the panel already
+        // shows this one's config, and a Finish would run against whatever
+        // branch here carries that name. Show nothing rather than something
+        // wrong — and say why.
+        this.clearActiveItems();
+        this.error = branchResult.error?.message || 'Failed to load Git Flow branches';
+        return;
+      }
 
       const branches = branchResult.data.filter((b: Branch) => !b.isRemote);
 
@@ -428,7 +439,20 @@ export class LvGitflowPanel extends LitElement {
       this.activeHotfixes = this.extractActiveItems(branches, this.config.hotfixPrefix);
     } catch (err) {
       console.error('Failed to load active git flow items:', err);
+      // Re-check: a failure for a repo the user has navigated AWAY from must
+      // not wipe the current repo's rows or raise a banner about a repo that
+      // is no longer shown.
+      if (!latest()) return;
+      this.clearActiveItems();
+      this.error = 'Failed to load Git Flow branches';
     }
+  }
+
+  /** Drop every active item — the listing they came from is no longer trusted. */
+  private clearActiveItems(): void {
+    this.activeFeatures = [];
+    this.activeReleases = [];
+    this.activeHotfixes = [];
   }
 
   private extractActiveItems(branches: Branch[], prefix: string): ActiveItem[] {
