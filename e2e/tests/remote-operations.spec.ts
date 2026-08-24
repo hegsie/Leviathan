@@ -163,6 +163,74 @@ test.describe('Ahead/Behind Badges', () => {
 });
 
 // ============================================================================
+// Status-bar ahead/behind badge
+//
+// The status bar used to render its own copy of the counts, written only by a
+// tab switch, the fetch-on-focus handler and auto-fetch. push/pull/fetch never
+// touched it, so it kept advertising commits that had already been pushed
+// while the dashboard badge a few pixels away had already cleared. It now
+// renders the same store field every other badge does.
+// ============================================================================
+
+test.describe('Status-bar ahead/behind badge', () => {
+  const aheadBadge = (page: import('@playwright/test').Page) =>
+    page.locator('footer.status-bar .status-ahead');
+  const behindBadge = (page: import('@playwright/test').Page) =>
+    page.locator('footer.status-bar .status-behind');
+
+  test('shows the unpushed count for the open repository', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+
+    await expect(aheadBadge(page)).toHaveText('↑3');
+    await expect(behindBadge(page)).toHaveCount(0);
+  });
+
+  test('clears after a successful push, agreeing with the dashboard badge', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+    await expect(aheadBadge(page)).toHaveText('↑3');
+
+    await startCommandCapture(page);
+    await page.getByRole('button', { name: /Push/i }).click();
+    await waitForCommand(page, 'push');
+
+    await expect(aheadBadge(page)).toHaveCount(0);
+    await expect(page.locator('.badge.push')).toHaveCount(0);
+    // The status bar is still there — only the badge went away
+    await expect(page.locator('footer.status-bar')).toContainText('/tmp/test-repo');
+  });
+
+  test('clears after a successful pull', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(0, 2));
+    await expect(behindBadge(page)).toHaveText('↓2');
+
+    await startCommandCapture(page);
+    await page.getByRole('button', { name: /Pull/i }).click();
+    await waitForCommand(page, 'pull');
+
+    await expect(behindBadge(page)).toHaveCount(0);
+  });
+
+  test('survives a rejected push, so the commits stay visible', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+    await expect(aheadBadge(page)).toHaveText('↑3');
+
+    await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
+    await page.getByRole('button', { name: /Push/i }).click();
+
+    await expect(page.locator('.toast')).toBeVisible({ timeout: 5000 });
+    await expect(aheadBadge(page)).toHaveText('↑3');
+  });
+
+  test('shows no badge when up to date', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(0, 0));
+
+    await expect(page.locator('footer.status-bar')).toContainText('/tmp/test-repo');
+    await expect(aheadBadge(page)).toHaveCount(0);
+    await expect(behindBadge(page)).toHaveCount(0);
+  });
+});
+
+// ============================================================================
 // Branch List Ahead/Behind Indicator Tests
 // ============================================================================
 
