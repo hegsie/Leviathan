@@ -35,8 +35,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (command === 'get_status') return { staged: [], unstaged: [], untracked: [] };
   if (command === 'create_commit') {
-    if (commitFailure) throw commitFailure;
     if (pendingCommit) await pendingCommit.promise;
+    if (commitFailure) throw commitFailure;
     return COMMIT;
   }
   return null;
@@ -53,6 +53,7 @@ import '../lv-commit-panel.ts';
 import type { LvRightPanel } from '../lv-right-panel.ts';
 import '../lv-right-panel.ts';
 import { resetRefOpLocks } from '../../../utils/ref-lock.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 const REPO_A = '/test/repo-a';
 const REPO_B = '/test/repo-b';
@@ -60,6 +61,23 @@ const REPO_B = '/test/repo-b';
 interface Panel extends HTMLElement {
   repositoryPath: string;
   updateComplete: Promise<unknown>;
+}
+
+/** The panel's own live state, which a mid-commit tab switch rebinds. */
+interface PanelState {
+  summary: string;
+  description: string;
+  amend: boolean;
+  success: string | null;
+  error: string | null;
+}
+
+function stateOf(el: Panel): PanelState {
+  return el as unknown as PanelState;
+}
+
+function toasts(): string[] {
+  return uiStore.getState().toasts.map((t) => `${t.type}:${t.message}`);
 }
 
 type RefreshDetail = { repoPath?: string; source?: string } | undefined;
@@ -190,5 +208,110 @@ describe('lv-commit-panel pins its post-commit refresh to the committed repo', (
     expect(created, 'a failed commit created nothing to announce').to.have.length(0);
     expect(refreshes.filter((d) => d?.source !== 'app-shell')).to.have.length(0);
     expect((el as unknown as { error: string | null }).error).to.equal('pre-commit hook rejected');
+  });
+});
+
+/**
+ * Pinning the refresh EVENT was only half of it. The commit panel outlives a
+ * repository tab switch — `willUpdate` stashes the outgoing repo's draft in
+ * `draftCache` and swaps the incoming repo's draft into the live fields — so
+ * the completion path running against whatever repo happens to be on screen
+ * wiped an uncommitted draft belonging to a repo that never committed, hung
+ * the success banner off it, and left the committed repo's cached draft
+ * holding the message it had just committed.
+ */
+describe('lv-commit-panel pins its post-commit state to the committed repo', () => {
+  beforeEach(() => {
+    resetRefOpLocks();
+    invoked.length = 0;
+    refreshes = [];
+    pendingCommit = null;
+    commitFailure = null;
+    uiStore.setState({ toasts: [] });
+  });
+
+  afterEach(() => {
+    resetRefOpLocks();
+    pendingCommit = null;
+    commitFailure = null;
+    uiStore.setState({ toasts: [] });
+  });
+
+  /** Commit in A, switch to B mid-flight and type a draft there, then land. */
+  async function commitInAWhileViewingB(el: Panel, bDraft: string): Promise<void> {
+    pendingCommit = makeDeferred();
+    const inFlight = commitOf(el);
+
+    el.repositoryPath = REPO_B;
+    await el.updateComplete;
+    stateOf(el).summary = bDraft;
+    await el.updateComplete;
+
+    pendingCommit.resolve(null);
+    await inFlight;
+    await el.updateComplete;
+  }
+
+  it("leaves the repo now on screen holding its own draft", async () => {
+    const el = await renderPanel();
+
+    await commitInAWhileViewingB(el, 'wip: half-written repo-b message');
+
+    expect(stateOf(el).summary, "repo B's draft was never committed").to.equal(
+      'wip: half-written repo-b message'
+    );
+    expect(stateOf(el).success, 'no banner may claim repo B committed').to.equal(null);
+    expect(
+      toasts().some((t) => t.startsWith('success:') && t.includes('repo-a')),
+      `the result must name the repo it landed in: ${toasts().join(' | ')}`
+    ).to.equal(true);
+  });
+
+  it('does not hand the committed message back as a draft on return', async () => {
+    const el = await renderPanel();
+
+    await commitInAWhileViewingB(el, 'wip: half-written repo-b message');
+
+    el.repositoryPath = REPO_A;
+    await el.updateComplete;
+
+    expect(stateOf(el).summary, 'the committed message must not come back').to.equal('');
+  });
+
+  it('still clears its own fields when the committed repo is the one on screen', async () => {
+    const el = await renderPanel();
+
+    await commitOf(el);
+    await el.updateComplete;
+
+    expect(stateOf(el).summary, 'the committed draft is spent').to.equal('');
+    expect(stateOf(el).amend).to.equal(false);
+    expect(stateOf(el).success).to.contain('abc123d');
+    expect(
+      toasts().filter((t) => t.startsWith('success:')),
+      'the banner already says it — a toast would double-report'
+    ).to.have.length(0);
+  });
+
+  it('blames the repo that failed, not the tab now on screen', async () => {
+    const el = await renderPanel();
+    commitFailure = { code: 'COMMAND_ERROR', message: 'pre-commit hook rejected' };
+    pendingCommit = makeDeferred();
+
+    const inFlight = commitOf(el);
+    el.repositoryPath = REPO_B;
+    await el.updateComplete;
+    pendingCommit.resolve(null);
+    await inFlight;
+    await el.updateComplete;
+
+    expect(stateOf(el).error, "repo B's panel must not show repo A's failure").to.equal(null);
+    expect(
+      toasts().some(
+        (t) =>
+          t.startsWith('error:') && t.includes('repo-a') && t.includes('pre-commit hook rejected')
+      ),
+      `the failure must name the repo it happened in: ${toasts().join(' | ')}`
+    ).to.equal(true);
   });
 });
