@@ -643,6 +643,58 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
     expect(applyArgs.profileId).toBe('profile-personal');
   });
 
+  test('switching profile from the dashboard confirms it and refreshes the identity listeners', async ({ page }) => {
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile, personalProfile],
+      accounts: [githubWork],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile, personalProfile],
+        accounts: [githubWork],
+        repositoryAssignments: {},
+      },
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+    });
+
+    await expect(dashboardProfileName(page)).toHaveText('Work');
+
+    // Clears the capture buffer, so any get_user_identity seen below is a
+    // consequence of the switch, not of the initial repository load.
+    await startCommandCaptureWithMocks(page, {
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+      get_user_identity: {
+        name: 'John Personal',
+        email: 'johnd@personal.com',
+        nameIsGlobal: false,
+        emailIsGlobal: false,
+      },
+    });
+
+    await page.locator('lv-context-dashboard .profile-selector-btn').click();
+    await page.locator('lv-context-dashboard .profile-dropdown .dropdown-item', {
+      hasText: 'Personal',
+    }).click();
+
+    // The chip reflects the new profile...
+    await expect(dashboardProfileName(page)).toHaveText('Personal', { timeout: 5000 });
+
+    // ...the switch confirms itself instead of completing silently...
+    await expect(
+      page.locator('lv-toast-container .toast.success .toast-message')
+    ).toContainText('Personal', { timeout: 5000 });
+
+    // ...and the repository-refresh reaches the commit panel, which re-reads
+    // the git identity behind its commit-template author placeholder. Without
+    // it the rest of the app keeps the old identity until an unrelated refresh.
+    await expect
+      .poll(async () => (await findCommand(page, 'get_user_identity')).length, { timeout: 5000 })
+      .toBeGreaterThan(0);
+  });
+
   test('saving a PAT in the GitHub dialog flips the toolbar dot from Reconnect to connected', async ({ page }) => {
     // Real production path: toolbar starts in Reconnect → user opens GitHub
     // dialog (no stored token → shows PAT form) → enters PAT → handleSaveToken
