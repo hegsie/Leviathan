@@ -1431,6 +1431,125 @@ describe('lv-graph-canvas', () => {
       expect(internals.selectedNodes.size).to.equal(1);
       expect(events).to.have.length(0);
     });
+
+    it('promotes a surviving selected commit when the primary one is rewritten away', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      // Multi-selection with commit3 primary and commit2 also selected
+      expect(el.selectCommit(commit3.oid)).to.be.true;
+      internals.selectedNodes.add(commit2.oid);
+      expect(internals.selectedNode?.oid).to.equal(commit3.oid);
+
+      // The tip is amended away; commit2 stays in the rewritten history
+      const amended = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Third commit (amended)',
+        message: 'Third commit (amended)',
+        timestamp: 1700002500,
+        parentIds: [commit2.oid],
+      });
+      setupDefaultMocks({
+        commits: [amended, commit2, commit1],
+        refs: {
+          [amended.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // The survivor becomes the primary, so the highlighted graph and the
+      // details panel agree and keyboard navigation keeps its anchor
+      expect([...internals.selectedNodes]).to.deep.equal([commit2.oid]);
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(events).to.have.length(1);
+      expect(events[0].commit?.oid).to.equal(commit2.oid);
+      expect(events[0].commits).to.have.length(1);
+    });
+
+    it('keeps a selection from a later page when a reload only brings back the first page', async () => {
+      const deepCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Deep commit',
+        message: 'Deep commit',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      // commitCount 3 == page size, so the reload comes back truncated
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const el = await renderCanvas(3);
+      const internals = el as unknown as SelectionInternals & {
+        loadMoreCommits(): Promise<void>;
+      };
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(el.selectCommit(deepCommit.oid)).to.be.true;
+
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // The commit is still in the repository — it just sits below the
+      // reloaded page, so the details panel must not be emptied
+      expect(internals.selectedNode?.oid).to.equal(deepCommit.oid);
+      expect([...internals.selectedNodes]).to.deep.equal([deepCommit.oid]);
+      expect(events).to.have.length(0);
+
+      // The catch-up page brings it back and confirms it is still there
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(internals.selectedNode?.oid).to.equal(deepCommit.oid);
+      expect(events).to.have.length(0);
+    });
+
+    it('prunes a selection from a later page once the catch-up page proves it is gone', async () => {
+      const deepCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Deep commit',
+        message: 'Deep commit',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const el = await renderCanvas(3);
+      const internals = el as unknown as SelectionInternals & {
+        loadMoreCommits(): Promise<void>;
+      };
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(el.selectCommit(deepCommit.oid)).to.be.true;
+
+      // A rebase rewrites the deep commit: the catch-up page returns a
+      // different OID in its place
+      const rewritten = makeCommit({
+        oid: 'eee5555555555555555555555555555555555555',
+        shortId: 'eee5555',
+        summary: 'Deep commit (rewritten)',
+        message: 'Deep commit (rewritten)',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      setupDefaultMocks({ moreCommits: [rewritten], total: 4 });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+
+      expect(internals.selectedNode).to.be.null;
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(events).to.have.length(1);
+      expect(events[0].commit).to.be.null;
+    });
   });
 
   describe('pull request loading race', () => {

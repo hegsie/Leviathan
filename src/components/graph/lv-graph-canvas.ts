@@ -557,6 +557,10 @@ export class LvGraphCanvas extends LitElement {
   // True total commit count across all refs (null until fetched)
   @state() private commitTotal: number | null = null;
   private totalLoadedCommits = 0;
+  // How many commits were loaded the last time the selection was validated
+  // against the layout — the high-water mark validateSelection() needs to
+  // tell "this commit is gone" apart from "this page isn't back yet"
+  private validatedCommitCount = 0;
 
   // Screen-reader mirror of the visible rows + selection announcements.
   // The canvas itself has no DOM semantics, so a hidden listbox mirrors the
@@ -875,6 +879,9 @@ export class LvGraphCanvas extends LitElement {
       // A reload queued for the PREVIOUS repo must not leak into this one
       this.reloadQueued = false;
       this.commitTotal = null;
+      // The new repo's first page must be free to prune its own selection —
+      // the previous repo's paging depth says nothing about this one
+      this.validatedCommitCount = 0;
       // Clear any stats spinner owned by the previous repo — the new repo's
       // fetch (if any) will set it again; a repo with no stats to fetch must
       // not inherit the old spinner
@@ -1618,6 +1625,15 @@ export class LvGraphCanvas extends LitElement {
   private validateSelection(): void {
     if (!this.layout) return;
 
+    // A reload always restarts from the newest commitCount commits, so a
+    // graph that had already paged deeper is missing those rows only
+    // because they have not been fetched again yet — their absence is no
+    // proof the commits are gone. Wait for the catch-up pages (each append
+    // lands here too) to reach the depth the selection was last checked
+    // against before pruning anything.
+    if (this.hasMoreCommits && this.totalLoadedCommits < this.validatedCommitCount) return;
+    this.validatedCommitCount = this.totalLoadedCommits;
+
     let selectionChanged = false;
     for (const oid of [...this.selectedNodes]) {
       if (!this.layout.nodes.has(oid)) {
@@ -1627,8 +1643,18 @@ export class LvGraphCanvas extends LitElement {
     }
     if (this.selectedNode) {
       // Rebind a survivor to its node in the NEW layout (same commit, new row)
-      const node = this.layout.nodes.get(this.selectedNode.oid) ?? null;
-      if (!node) selectionChanged = true;
+      let node = this.layout.nodes.get(this.selectedNode.oid) ?? null;
+      if (!node) {
+        // The primary commit is gone but the rest of a multi-selection can
+        // survive: promote one (as ctrl+click does when it removes the
+        // primary) so the details panel and keyboard navigation keep an
+        // anchor matching what stays highlighted
+        const remaining = [...this.selectedNodes];
+        node = remaining.length > 0
+          ? this.layout.nodes.get(remaining[remaining.length - 1]) ?? null
+          : null;
+        selectionChanged = true;
+      }
       this.selectedNode = node;
     }
     if (this.lastClickedNode) {

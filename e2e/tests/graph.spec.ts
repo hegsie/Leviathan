@@ -436,6 +436,50 @@ test.describe('Graph Commit Selection', () => {
     expect(await getSelectedNodeOid(page)).toBeNull();
   });
 
+  test('a refresh that rewrites away the primary of a multi-selection shows a surviving commit', async ({ page }) => {
+    const handle = await getGraphCanvasHandle(page);
+    // commit2 is the primary of a two-commit selection (the canvas hit-test
+    // cannot be driven by a real ctrl+click in Playwright)
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & {
+          selectCommit: (oid: string) => boolean;
+          selectedNodes?: Set<string>;
+        };
+        canvas?.selectCommit('commit2');
+        canvas?.selectedNodes?.add('commit1');
+      },
+      handle
+    );
+    await waitForSelectedNode(page, 'commit2');
+
+    // The tip is amended away; commit1 stays in the rewritten history
+    await injectCommandMock(page, {
+      get_commit_history: [makeCommit(3, ['commit1']), makeCommit(1, ['commit0']), makeCommit(0, [])],
+      get_refs_by_commit: {
+        commit3: [
+          { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+        ],
+      },
+      get_commit_total: 3,
+    });
+    await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & { refresh: () => void };
+        canvas?.refresh();
+      },
+      handle
+    );
+    await waitForSelectedNode(page, 'commit1');
+
+    // The panel follows the survivor instead of going blank while the graph
+    // still highlights it
+    const commitDetails = page.locator('lv-commit-details');
+    await expect(commitDetails.locator('.commit-message')).toContainText('Commit 1');
+    await expect(commitDetails.locator('.empty-state')).toHaveCount(0);
+    expect(await getSelectedNodeOids(page)).toEqual(['commit1']);
+  });
+
   test('a refresh that keeps the selected commit keeps the commit details panel', async ({ page }) => {
     const handle = await getGraphCanvasHandle(page);
     await page.evaluate(
