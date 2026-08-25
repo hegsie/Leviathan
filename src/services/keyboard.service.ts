@@ -36,6 +36,13 @@ export interface KeyboardSettings {
   customBindings: Record<string, ShortcutBinding>;
 }
 
+/**
+ * The one place shortcut customizations live. Bindings, their action IDs, and
+ * their persistence all belong to this service — a second table of action IDs
+ * kept anywhere else silently drifts out of sync with what
+ * registerDefaultShortcuts actually registers, and nothing that reads it can
+ * act on the difference.
+ */
 const STORAGE_KEY = 'leviathan-keyboard-settings';
 
 class KeyboardService {

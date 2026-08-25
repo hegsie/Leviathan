@@ -742,6 +742,7 @@ test.describe('GitFlow Panel - Loading State', () => {
   });
 });
 
+
 // --------------------------------------------------------------------------
 // Config Load Failure
 // --------------------------------------------------------------------------
@@ -794,5 +795,82 @@ test.describe('GitFlow Panel - Config Load Failure', () => {
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section-header')).toHaveCount(3);
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item-name')).toContainText('x');
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .load-error')).toHaveCount(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Branch Listing Failure
+// --------------------------------------------------------------------------
+test.describe('GitFlow Panel - Branch Listing Failure', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'develop',
+          shorthand: 'develop',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'feature/existing-feature',
+          shorthand: 'feature/existing-feature',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'feat1',
+          isStale: false,
+        },
+      ],
+    });
+
+    await injectGitflowPanel(page);
+  });
+
+  test('should clear active items and show the error banner when the branch listing fails on repository switch', async ({
+    page,
+  }) => {
+    // The first repo's active feature is listed.
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item')).toHaveCount(1);
+
+    // Switch to a repo whose config loads but whose branch listing fails. The
+    // Finish buttons bind to these rows, so keeping the previous repo's items
+    // would aim a Finish at the wrong repository's branch.
+    await injectCommandError(page, 'get_branches', 'failed to open repository');
+    await page.evaluate(() => {
+      const panel = document.querySelector('lv-gitflow-panel#e2e-gitflow') as HTMLElement & {
+        repositoryPath: string;
+      };
+      panel.repositoryPath = '/tmp/other-repo';
+    });
+
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item')).toHaveCount(0);
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .error-banner')).toBeVisible();
+    await expect(
+      page.locator('lv-gitflow-panel#e2e-gitflow .empty-section').first()
+    ).toHaveText('No active items');
   });
 });
