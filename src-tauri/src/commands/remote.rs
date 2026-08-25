@@ -1,7 +1,7 @@
 //! Remote command handlers
 
 use std::path::Path;
-use tauri::{command, AppHandle, Emitter};
+use tauri::{command, AppHandle, Emitter, State};
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{
@@ -10,6 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
+use crate::services::remote_ops::{self, RemoteOp, RemoteOpRegistry};
 use crate::utils::{create_command, reject_flag_like};
 
 /// Add a new remote
@@ -158,6 +159,7 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 #[command]
 pub async fn fetch(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     prune: Option<bool>,
@@ -173,6 +175,25 @@ pub async fn fetch(
     // alt-tabbed back into the app. That is exactly the noise the background
     // fetch is documented to avoid.
     let quiet = quiet.unwrap_or(false);
+
+    // Claimed BEFORE the timeout wrapper, and handed to the blocking task
+    // below so it outlives a timed-out caller — see services/remote_ops.rs.
+    //
+    // A background fetch (window focus) YIELDS but never claims: it skips this
+    // round when the user has something running, and takes no slot of its own,
+    // so it can never refuse the user's next push. Its timer twin in
+    // services/autofetch_service.rs has always run alongside whatever the user
+    // is doing; making this one exclusive would break a working flow rather
+    // than fix the racing retry this guard is for.
+    let slot = if quiet {
+        if remote_ops_registry.running(Path::new(&path)).is_some() {
+            return Ok(());
+        }
+        None
+    } else {
+        Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
+    };
+
     let do_fetch = async move {
         let path_clone = path.clone();
         let prune_val = prune.unwrap_or(false);
@@ -180,8 +201,9 @@ pub async fn fetch(
         let remote_name_for_event = remote_name_owned.clone();
 
         // git2 fetch is blocking network I/O; offload to a blocking thread so
-        // it doesn't starve the Tokio runtime.
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        // it doesn't starve the Tokio runtime. run_holding carries the slot
+        // into that thread, so it is released when the fetch really ends.
+        remote_ops::run_holding(slot, RemoteOp::Fetch, move || -> Result<()> {
             let repo = git2::Repository::open(Path::new(&path_clone))?;
             let mut git_remote = repo
                 .find_remote(&remote_name_owned)
@@ -202,8 +224,7 @@ pub async fn fetch(
             git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
             Ok(())
         })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
+        .await?;
 
         // Emit success event, unless this fetch is a background one.
         if !quiet {
@@ -515,6 +536,7 @@ pub(crate) fn merge_fetched_commit(
 #[command]
 pub async fn pull(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -523,6 +545,12 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
+    // Claimed before the timeout wrapper and released by the blocking task,
+    // not by this future — see services/remote_ops.rs. ensure_pullable below
+    // only refuses a repository that is ALREADY mid-merge, so it cannot see a
+    // pull that timed out and is still running.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Pull)?;
+
     let do_pull = async move {
         let path_for_task = path.clone();
         // NOT defaulted to "origin" here. The branch's configured upstream is
@@ -532,8 +560,10 @@ pub async fn pull(
 
         // Whole pull is git2 / blocking network I/O. Run it on a blocking
         // thread so the Tokio runtime stays responsive.
-        let (remote_name_returned, message) =
-            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+        let (remote_name_returned, message) = remote_ops::run_holding(
+            Some(slot),
+            RemoteOp::Pull,
+            move || -> Result<(String, String)> {
                 // Refuse before the network round trip if another operation is
                 // unresolved. merge() has always had this guard; pull never
                 // did, and its normal-merge branch calls repo.merge() a SECOND
@@ -656,9 +686,9 @@ pub async fn pull(
                 }
 
                 Ok((effective_remote, message))
-            })
-            .await
-            .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
+            },
+        )
+        .await?;
 
         // Emit success event
         let _ = app_handle.emit(
@@ -876,6 +906,7 @@ pub(crate) fn push_branch(
 #[command]
 pub async fn push(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -897,6 +928,13 @@ pub async fn push(
         reject_flag_like(r, "Remote name")?;
     }
 
+    // The claim this issue is about. Push has no abort point at all, so when
+    // the network timeout fires the git2/CLI push keeps running against the
+    // remote; the frontend push slot is released on that early return and the
+    // user's retry used to overlap the original. The slot travels into the
+    // blocking task below and is released only when the push really ends.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Push)?;
+
     let do_push = async move {
         let path_for_task = path.clone();
         let requested_remote = remote.clone();
@@ -908,20 +946,20 @@ pub async fn push(
 
         // git2/git-CLI push is blocking network I/O; offload so the runtime
         // stays responsive during slow remotes.
-        let (remote_name_returned, branch_name_returned) = tokio::task::spawn_blocking(move || {
-            push_branch(
-                &path_for_task,
-                requested_remote,
-                branch_for_task,
-                force_val,
-                use_force_with_lease,
-                use_push_tags,
-                set_upstream_val,
-                token,
-            )
-        })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
+        let (remote_name_returned, branch_name_returned) =
+            remote_ops::run_holding(Some(slot), RemoteOp::Push, move || {
+                push_branch(
+                    &path_for_task,
+                    requested_remote,
+                    branch_for_task,
+                    force_val,
+                    use_force_with_lease,
+                    use_push_tags,
+                    set_upstream_val,
+                    token,
+                )
+            })
+            .await?;
 
         // Emit success event
         let mut message = format!(
