@@ -166,6 +166,28 @@ test.describe('GitHub Dialog - Connection Flow', () => {
     // The error is caught and displayed, so just verify the dialog remains open
     await expect(dialogs.github.dialog).toBeVisible();
   });
+
+  test('should replace the token form when the GitHub App method is selected', async () => {
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    // GitHub App and Personal Access Token are alternative flows: selecting one
+    // must replace the other's form, never stack both connect buttons.
+    await dialogs.github.selectAppMethod();
+
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await expect(dialogs.github.connectViaAppButton).toBeVisible();
+    await expect(dialogs.github.tokenInput).toHaveCount(0);
+    await expect(dialogs.github.connectButton).toHaveCount(0);
+
+    // ...and the swap is symmetric.
+    await dialogs.github.selectPATMethod();
+
+    await expect(dialogs.github.tokenInput).toBeVisible();
+    await expect(dialogs.github.connectButton).toBeVisible();
+    await expect(dialogs.github.appIdInput).toHaveCount(0);
+    await expect(dialogs.github.connectViaAppButton).toHaveCount(0);
+  });
 });
 
 test.describe('GitHub Dialog - Close', () => {

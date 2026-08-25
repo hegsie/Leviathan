@@ -294,6 +294,34 @@ test.describe('Staging Shortcuts', () => {
     const stageFilesCommands = await findCommand(page, 'stage_files');
     expect(stageFilesCommands.length).toBeGreaterThan(0);
   });
+
+  // The shortcuts dialog is exactly where a user presses a key to see what it
+  // does — and 's' went straight through to stage-all, behind the modal that
+  // covers the file-status panel, so nothing on screen changed.
+  test('s must not stage while the keyboard shortcuts dialog is open', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+
+    await page.keyboard.press('s');
+    // Two auto-retrying UI round trips after the press, which give a stray
+    // stage every chance to land before the count is read.
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialogs.keyboardShortcuts.dialog).not.toBeVisible();
+
+    expect(
+      (await findCommand(page, 'stage_files')).length,
+      'nothing may be staged behind the modal'
+    ).toBe(0);
+
+    // The same key with no overlay in the way does reach git — so the
+    // assertion above is about the modal, not about a dead harness.
+    await page.keyboard.press('s');
+    await waitForCommand(page, 'stage_files');
+    expect((await findCommand(page, 'stage_files')).length).toBe(1);
+  });
 });
 
 // Note: Cmd+R cannot be tested directly as it triggers browser refresh.

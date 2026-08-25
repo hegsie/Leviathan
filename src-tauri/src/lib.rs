@@ -24,6 +24,7 @@ use services::ai::AiState;
 use services::commit_index::SharedCommitIndex;
 use services::{
     create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
+    RemoteOpRegistry,
 };
 
 /// Initialize the application
@@ -122,6 +123,7 @@ pub fn run() {
         .manage(create_autofetch_state())
         .manage(create_update_state())
         .manage(CancellationRegistry::default())
+        .manage(RemoteOpRegistry::default())
         .manage(SharedCommitIndex::default())
         .setup(|app| {
             // Initialize AI state with config directory
