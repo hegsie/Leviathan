@@ -513,7 +513,7 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: renamed,
+      save_unified_profile: { profile: renamed, failedRepositories: [] },
     });
 
     await expect(dashboardProfileName(page)).toHaveText('Work');
@@ -531,6 +531,42 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
     await expect(dashboardProfileName(page)).toHaveText('Client A', { timeout: 5000 });
   });
 
+  // Saving an edited profile re-writes the git identity of every repository
+  // assigned to it. The ones the backend could not rewrite must be named, not
+  // hidden behind a generic "Profile saved".
+  test('editing a profile warns about repositories that kept the old identity', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork],
+    });
+
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork],
+        repositoryAssignments: { '/repo/personal': workProfile.id },
+      },
+      get_migration_backup_info: { hasBackup: false },
+      save_unified_profile: {
+        profile: { ...workProfile, gitEmail: 'new@company.com' },
+        failedRepositories: ['/repo/personal'],
+      },
+    });
+
+    await openProfileManager(page, dialogs);
+    await page.locator('.profile-item').first().click();
+
+    await page.getByPlaceholder(/john@example.com/i).fill('new@company.com');
+    await page.getByRole('button', { name: 'Save Profile' }).click();
+
+    const warning = page.locator('lv-toast-container .toast.warning .toast-message');
+    await expect(warning).toBeVisible({ timeout: 5000 });
+    await expect(warning).toContainText('personal');
+  });
+
   test('creating the first profile marked default makes it the active profile', async ({ page }) => {
     const dialogs = new DialogsPage(page);
 
@@ -546,7 +582,7 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: newProfile,
+      save_unified_profile: { profile: newProfile, failedRepositories: [] },
       get_unified_profile: newProfile,
       apply_unified_profile: null,
     });
@@ -1144,7 +1180,10 @@ test.describe('Workflow - Profile Manager ↔ Integration dialogs', () => {
     // Save the profile and verify the backend received the auto-attached
     // account as the profile's github default — not just UI-only state.
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { ...personalProfile, defaultAccounts: { github: newAccount.id } },
+      save_unified_profile: {
+        profile: { ...personalProfile, defaultAccounts: { github: newAccount.id } },
+        failedRepositories: [],
+      },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
     await waitForCommand(page, 'save_unified_profile');
@@ -1338,7 +1377,7 @@ test.describe('Remaining flows - Profile Manager', () => {
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: { ...profile, isDefault: true },
+      save_unified_profile: { profile: { ...profile, isDefault: true }, failedRepositories: [] },
     });
 
     await openProfileManager(page, dialogs);
@@ -1352,7 +1391,7 @@ test.describe('Remaining flows - Profile Manager', () => {
     }
 
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { ...profile, isDefault: true },
+      save_unified_profile: { profile: { ...profile, isDefault: true }, failedRepositories: [] },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
     await waitForCommand(page, 'save_unified_profile');
@@ -1387,15 +1426,18 @@ test.describe('Remaining flows - Profile Manager', () => {
 
     await startCommandCaptureWithMocks(page, {
       save_unified_profile: {
-        id: 'profile-multi',
-        name: 'Multi-Pattern',
-        gitName: 'Multi User',
-        gitEmail: 'multi@example.com',
-        signingKey: null,
-        urlPatterns: ['github.com/acme/*', 'gitlab.acme.com/*', 'bitbucket.org/team/*'],
-        isDefault: false,
-        color: '#3b82f6',
-        defaultAccounts: {},
+        profile: {
+          id: 'profile-multi',
+          name: 'Multi-Pattern',
+          gitName: 'Multi User',
+          gitEmail: 'multi@example.com',
+          signingKey: null,
+          urlPatterns: ['github.com/acme/*', 'gitlab.acme.com/*', 'bitbucket.org/team/*'],
+          isDefault: false,
+          color: '#3b82f6',
+          defaultAccounts: {},
+        },
+        failedRepositories: [],
       },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
