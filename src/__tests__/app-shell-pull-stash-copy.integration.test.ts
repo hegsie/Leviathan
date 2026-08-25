@@ -397,6 +397,84 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
     });
   });
 
+  describe('picking another file while file history is open (inverse navigation)', () => {
+    it('handleFileSelected clears the history pane so closing the diff does not uncover it', () => {
+      // Open history for one file, then click a different file in Changes.
+      // The diff outranks history in the center pane, so a stale
+      // showFileHistory is invisible right up until the diff closes — and
+      // then the old file's history appears unbidden.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+
+      shell.handleFileSelected(
+        new CustomEvent('file-selected', {
+          detail: {
+            file: { path: 'src/new.ts', status: 'modified', isStaged: false, isConflicted: false },
+          },
+        })
+      );
+
+      expect(shell.showDiff).to.be.true;
+      expect(shell.showFileHistory, 'the unrelated history pane is gone').to.be.false;
+      expect(shell.fileHistoryPath).to.be.null;
+
+      // Closing the diff must leave the center pane empty, not reveal history.
+      shell.handleCloseDiff();
+      expect(shell.showDiff).to.be.false;
+      expect(shell.showFileHistory).to.be.false;
+    });
+
+    it('handleCommitFileSelected clears the history pane too', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+
+      shell.handleCommitFileSelected(
+        new CustomEvent('commit-file-selected', {
+          detail: { commitOid: 'abc123', filePath: 'src/new.ts' },
+        })
+      );
+
+      expect(shell.showDiff).to.be.true;
+      expect(shell.diffCommitFile).to.deep.equal({ commitOid: 'abc123', filePath: 'src/new.ts' });
+      expect(shell.showFileHistory, 'the unrelated history pane is gone').to.be.false;
+      expect(shell.fileHistoryPath).to.be.null;
+    });
+
+    it('a conflicted file opens the merge editor and leaves history untouched', () => {
+      // The conflicted branch returns before any pane swap — it opens a
+      // dialog rather than replacing the center pane, so there is nothing
+      // for the history pane to hide under.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+      let openedPath: string | null = null;
+      shell.openConflictDialogFromState = (path: string) => {
+        openedPath = path;
+      };
+
+      shell.handleFileSelected(
+        new CustomEvent('file-selected', {
+          detail: {
+            file: { path: 'src/conflict.ts', status: 'conflicted', isStaged: false, isConflicted: true },
+          },
+        })
+      );
+
+      expect(openedPath).to.equal('src/conflict.ts');
+      expect(shell.showDiff, 'no diff was opened').to.be.false;
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/old.ts');
+    });
+  });
+
   describe('handleCloseDiff (file-cleared from diff-view)', () => {
     it('closes the diff overlay and clears diff state', () => {
       const el = createAppShell();

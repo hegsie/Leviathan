@@ -3470,6 +3470,14 @@ export class AppShell extends LitElement {
     this.showBlame = false;
     this.blameFile = null;
     this.blameCommitOid = null;
+    // Close file history if open. It sits last in the center pane's
+    // priority order, so leaving it set hides it under the new diff and then
+    // uncovers it — history for a file the user moved on from — the moment
+    // the diff is closed. Unlike the diff a file-history pane opens
+    // (`handleFileHistoryViewDiff`), this selection comes from the right
+    // panel, not from history, so there is no drill-down to return to.
+    this.showFileHistory = false;
+    this.fileHistoryPath = null;
     // Working directory file selected - show diff
     this.diffFile = e.detail.file;
     this.diffFilePartiallyStaged = e.detail.isPartiallyStaged ?? false;
@@ -3482,6 +3490,10 @@ export class AppShell extends LitElement {
     this.showBlame = false;
     this.blameFile = null;
     this.blameCommitOid = null;
+    // Close file history if open — same reason as handleFileSelected: it
+    // would otherwise reappear under the user when this diff is closed.
+    this.showFileHistory = false;
+    this.fileHistoryPath = null;
     // Commit file selected - show diff
     this.diffCommitFile = {
       commitOid: e.detail.commitOid,

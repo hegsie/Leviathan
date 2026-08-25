@@ -437,7 +437,10 @@ test.describe('File History - opening over another center-pane view', () => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
       get_file_history: MOCK_COMMITS,
-      get_commit_files: [{ path: 'src/main.ts', status: 'modified', additions: 10, deletions: 5 }],
+      get_commit_files: [
+        { path: 'src/main.ts', status: 'modified', additions: 10, deletions: 5 },
+        { path: 'src/other.ts', status: 'modified', additions: 2, deletions: 1 },
+      ],
       get_commit_file_diff: HISTORY_DIFF,
       get_file_blame: HISTORY_BLAME,
     });
@@ -485,6 +488,29 @@ test.describe('File History - opening over another center-pane view', () => {
     // history pane the user asked for minutes ago.
     await expect(page.locator('lv-file-history')).toHaveCount(0);
     await expect(page.locator('lv-diff-view')).toHaveCount(0);
+  });
+
+  test('picking another file closes history, and closing that diff does not bring it back', async ({
+    page,
+  }) => {
+    // The inverse of the tests above: history is already up when the user
+    // moves on to a different file. The diff outranks history, so a stale
+    // history pane stays invisible until the diff closes — and then it
+    // ambushes the user with the file they left behind.
+    const rows = page.locator('lv-commit-details .file-item');
+    const first = rows.first();
+    await first.hover();
+    await first.locator('button[title="View file history"]').click();
+    await expect(page.locator('lv-file-history')).toBeVisible();
+
+    await rows.nth(1).click();
+    await expect(page.locator('lv-diff-view')).toBeVisible();
+    await expect(page.locator('lv-file-history')).toHaveCount(0);
+
+    await page.keyboard.press('Escape');
+
+    await expect(page.locator('lv-diff-view')).toHaveCount(0);
+    await expect(page.locator('lv-file-history')).toHaveCount(0);
   });
 });
 
