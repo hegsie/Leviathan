@@ -372,6 +372,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
         font-family: var(--font-mono);
       }
 
+      .repo-branch.detached {
+        font-style: italic;
+      }
+
       .repo-status {
         font-size: var(--font-size-xs);
         padding: 1px 6px;
@@ -1425,7 +1429,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
                                   <span class="repo-name" title="${repo.path}">${repo.name}</span>
                                   ${status?.currentBranch
                                     ? html`<span class="repo-branch">${status.currentBranch}</span>`
-                                    : nothing}
+                                    : status?.isDetached
+                                      ? html`<span class="repo-branch detached">detached HEAD</span>`
+                                      : nothing}
                                   ${this.renderRepoStatus(status)}
                                   ${this.renderAheadBehind(status)}
                                 </div>

@@ -657,12 +657,12 @@ describe('lv-gitflow-panel', () => {
 
   // ── Error handling ─────────────────────────────────────────────────────
   describe('error handling', () => {
-    it('reports a failed config load instead of the init screen', async () => {
+    it('shows the load error, not the init section, when config load fails', async () => {
       // When get_gitflow_config throws, invokeCommand catches it and returns
       // { success: false, error: { message } } — it never throws, so this is
-      // the path a real backend Err takes. A read that FAILED is not the same
-      // as a repo that is not initialized: showing the init screen here would
-      // invite the user to run `git flow init` to "fix" a read failure.
+      // the path a real backend Err takes. That is a FAILED load, not "not
+      // initialized": the Initialize button would rewrite the repo's gitflow
+      // config with the defaults, so it must not be offered here.
       mockInvoke = async (command: string) => {
         if (command === 'get_gitflow_config') {
           throw new Error('failed to open repository');
@@ -672,11 +672,11 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
-      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
-      const errorEl = el.shadowRoot!.querySelector('.error-banner');
-      expect(errorEl).to.not.be.null;
-      expect(errorEl!.textContent).to.include('failed to open repository');
+      expect(el.shadowRoot!.querySelectorAll('.load-error').length).to.equal(1);
+      expect(el.shadowRoot!.querySelectorAll('.init-section').length).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.load-error-message')?.textContent ?? '').to.contain(
+        'failed to open repository',
+      );
     });
 
     it('retries the config load and renders the sections on success', async () => {
@@ -694,7 +694,7 @@ describe('lv-gitflow-panel', () => {
       };
 
       const el = await renderPanel();
-      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.load-error').length).to.equal(1);
 
       failNext = false;
       const retryBtn = el.shadowRoot!.querySelector('.load-error .btn') as HTMLButtonElement;
@@ -704,7 +704,7 @@ describe('lv-gitflow-panel', () => {
       await new Promise((r) => setTimeout(r, 100));
       await el.updateComplete;
 
-      expect(el.shadowRoot!.querySelector('.load-error')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.load-error').length).to.equal(0);
       expect(el.shadowRoot!.querySelectorAll('.section-header').length).to.equal(3);
       expect(findCommands('get_gitflow_config').length).to.be.greaterThan(1);
     });
@@ -724,14 +724,17 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
-      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
-      const errorEl = el.shadowRoot!.querySelector('.error-banner');
-      expect(errorEl).to.not.be.null;
-      expect(errorEl!.textContent).to.include('Failed to load Git Flow configuration');
+      expect(el.shadowRoot!.querySelectorAll('.load-error').length).to.equal(1);
+      expect(el.shadowRoot!.querySelectorAll('.init-section').length).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.load-error-message')?.textContent ?? '').to.contain(
+        'Failed to load Git Flow configuration',
+      );
     });
 
-    it('keeps the read-failure screen after the error banner is dismissed', async () => {
+    it('renders the read-failure message as section text, not a dismissible banner', async () => {
+      // The failure text belongs to the load-error section itself. If it were
+      // the dismissible error banner instead, dismissing it would leave the
+      // panel with a bare Retry button and no explanation of what went wrong.
       mockInvoke = async (command: string) => {
         if (command === 'get_gitflow_config') {
           throw new Error('failed to open repository');
@@ -741,14 +744,10 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const dismiss = el.shadowRoot!.querySelector('.error-banner-dismiss') as HTMLButtonElement;
-      expect(dismiss).to.not.be.null;
-      dismiss.click();
-      await el.updateComplete;
-
-      expect(el.shadowRoot!.querySelector('.error-banner')).to.be.null;
-      expect(el.shadowRoot!.querySelector('.load-error')).to.not.be.null;
-      expect(el.shadowRoot!.querySelector('.init-section')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.error-banner').length).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.load-error-message')?.textContent ?? '').to.contain(
+        'failed to open repository',
+      );
     });
 
     it('shows error when init_gitflow fails', async () => {
@@ -778,8 +777,8 @@ describe('lv-gitflow-panel', () => {
       expect(errorEl!.textContent).to.include('Init failed: no main branch');
       // An init that failed on a genuinely uninitialized repo must KEEP the
       // Initialize button — it is not a config read failure.
-      expect(el.shadowRoot!.querySelector('.init-section')).to.not.be.null;
-      expect(el.shadowRoot!.querySelector('.load-error')).to.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.init-section').length).to.equal(1);
+      expect(el.shadowRoot!.querySelectorAll('.load-error').length).to.equal(0);
     });
 
     it('shows error when start feature fails', async () => {
@@ -955,6 +954,55 @@ describe('lv-gitflow-panel', () => {
           deleteBranch: true,
           tagMessage: 'Hotfix 1.0.1',
         });
+      } finally {
+        cleanupMockPrompt();
+      }
+    });
+
+    it('shows the tag-collision error in the banner and does not open the conflict dialog when finish release fails', async () => {
+      // The backend refuses a finish whose version tag already exists on an
+      // unrelated commit. That is OPERATION_FAILED, not MERGE_CONFLICT, so it
+      // must land in the inline banner — routing it to the conflict dialog
+      // would offer a resolution flow for a merge that never started.
+      const collision =
+        "Tag 'v1.0.0' already exists and does not contain 'release/1.0.0'. "
+        + 'Delete or rename the tag, or finish with a different version.';
+      setupMockPrompt('Release 1.0.0');
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_gitflow_config':
+            return DEFAULT_CONFIG;
+          case 'get_branches':
+            return releaseBranches;
+          case 'gitflow_finish_release':
+            throw { code: 'OPERATION_FAILED', message: collision };
+          default:
+            return null;
+        }
+      };
+
+      const el = await renderPanel();
+
+      let conflictOpened = false;
+      el.addEventListener('open-conflict-dialog', () => {
+        conflictOpened = true;
+      });
+
+      try {
+        const finishBtns = el.shadowRoot!.querySelectorAll('.item-finish-btn:not(.item-squash-btn)');
+        (finishBtns[0] as HTMLButtonElement).click();
+        await new Promise((r) => setTimeout(r, 150));
+        await el.updateComplete;
+
+        const errorEl = el.shadowRoot!.querySelector('.error-banner');
+        expect(errorEl, 'error banner should be shown').to.not.be.null;
+        expect(errorEl!.textContent).to.include("Tag 'v1.0.0' already exists");
+        expect(conflictOpened, 'conflict dialog must not open').to.be.false;
+
+        // The release is still listed — the finish was refused, not applied.
+        const items = Array.from(el.shadowRoot!.querySelectorAll('.item-name'))
+          .map((n) => n.textContent?.trim());
+        expect(items).to.include('1.0.0');
       } finally {
         cleanupMockPrompt();
       }

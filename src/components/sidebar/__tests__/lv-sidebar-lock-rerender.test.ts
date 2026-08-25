@@ -75,8 +75,8 @@ function defaultMockInvoke(command: string): Promise<unknown> {
     case 'get_tag_sort_mode':
       return Promise.resolve('name');
     case 'get_gitflow_config':
-      // An UNINITIALIZED repo (a read that succeeded), so the gitflow panel
-      // renders the init section. A null here would mean the read FAILED.
+      // A repo where git flow is genuinely not initialized — that, not a
+      // failed load, is what renders the Initialize button this test drives.
       return Promise.resolve({
         initialized: false,
         masterBranch: 'main',

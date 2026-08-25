@@ -86,6 +86,18 @@ export class LvContextDashboard extends LitElement {
         max-width: 200px;
       }
 
+      /* The compact bar names no ref at all, so a detached HEAD had nowhere to
+         show while it lasted. */
+      .detached-head {
+        font-size: var(--font-size-xs);
+        font-family: var(--font-family-mono);
+        white-space: nowrap;
+        padding: 2px 6px;
+        border-radius: var(--radius-xs);
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
       .compact-divider {
         width: 1px;
         height: 16px;
@@ -876,13 +888,26 @@ export class LvContextDashboard extends LitElement {
     if (!this.activeRepository || this.isApplyingProfile) return;
 
     this.isProfileDropdownOpen = false;
+    // Captured before the await: applying is an IPC round-trip, and the
+    // refresh must name the repo the switch ran ON, not whichever tab is
+    // active when it returns.
+    const repoPath = this.activeRepository.repository.path;
     this.isApplyingProfile = true;
 
     try {
-      await unifiedProfileService.applyUnifiedProfile(
-        this.activeRepository.repository.path,
-        profile.id
-      );
+      await unifiedProfileService.applyUnifiedProfile(repoPath, profile.id);
+      showToast(`Applied profile "${profile.name}"`, 'success');
+      // Applying a profile rewrites the repo's local git identity/signing
+      // config. Refresh so listeners re-read it now (the commit panel reloads
+      // the author behind its ${author} commit-template placeholder) instead
+      // of only after the tab is re-switched — the same reason the profile
+      // manager's Apply refreshes. Inside the try, so a failed apply never
+      // announces success or refreshes.
+      this.dispatchEvent(new CustomEvent('repository-refresh', {
+        bubbles: true,
+        composed: true,
+        detail: { repoPath },
+      }));
     } catch (err) {
       // Surface the failure via a visible toast — the repository store's error
       // field has no render sink, so setError alone would be silent (CLAUDE.md
@@ -1111,6 +1136,25 @@ export class LvContextDashboard extends LitElement {
     `;
   }
 
+  /**
+   * The compact bar names no ref, and the repository card that would is behind
+   * a collapsed-by-default panel — so a detached HEAD had nowhere to show.
+   */
+  private renderDetachedHead() {
+    const oid = this.activeRepository?.currentBranch
+      ? null
+      : this.activeRepository?.repository.detachedHeadOid;
+    if (!oid) return nothing;
+    return html`
+      <div class="compact-divider"></div>
+      <span
+        class="detached-head"
+        title="HEAD is detached at ${oid}. New commits won't belong to any branch."
+        >Detached HEAD @ ${oid.slice(0, 7)}</span
+      >
+    `;
+  }
+
   private renderCompactView() {
     return html`
       <div class="dashboard-compact">
@@ -1154,6 +1198,8 @@ export class LvContextDashboard extends LitElement {
                 </button>
               </div>
             `}
+
+        ${this.renderDetachedHead()}
 
         ${(() => {
           const provider = this.detectProvider();

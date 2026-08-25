@@ -7,7 +7,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
-import { showConfirm } from '../../services/dialog.service.ts';
+import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { Stash } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
@@ -417,12 +417,38 @@ export class LvStashList extends LitElement {
     // component.
     if (!this.claimOperation(repoPath)) return;
 
+    // Claimed BEFORE this prompt, like lv-branch-list's rename: showPrompt is
+    // an await, and a claim taken after it does not serialize a double-click.
+    // repoPath is already pinned above — showPrompt is an in-app Lit overlay,
+    // NOT a native modal, so the window stays interactive and the user can
+    // switch repo tabs while it is open.
+    //
+    // Without a message every stash git2 creates falls back to
+    // "WIP on <branch>: <sha> <subject>", which describes the commit the stash
+    // was based on and not the stashed work — three stashes on one branch were
+    // indistinguishable before a destructive Pop/Drop.
+    const message = await showPrompt(
+      'Stash Changes',
+      'Message for this stash (optional):',
+      '',
+      'WIP'
+    );
+    // null is a dismissal; '' is "OK with nothing typed" and must still stash,
+    // keeping git's default "WIP on <branch>" name.
+    if (message === null) {
+      this.releaseOperation(repoPath);
+      return;
+    }
+    const stashMessage = message.trim();
+
     this.isStashing = true;
 
     try {
       const result = await gitService.createStash({
         path: repoPath,
-        message: undefined,
+        // Undefined, not '': the backend only falls back to git's WIP name when
+        // no message is sent (src-tauri/src/commands/stash.rs).
+        message: stashMessage || undefined,
         includeUntracked: true,
       });
 

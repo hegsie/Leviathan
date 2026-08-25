@@ -44,6 +44,38 @@ pub(crate) fn sanitize_url_for_log(url: &str) -> String {
     }
 }
 
+/// Strip userinfo from every URL embedded in free-form text.
+///
+/// `sanitize_url_for_log` takes a string that IS a URL; git's stderr wraps the
+/// URL in prose — `fatal: unable to access
+/// 'https://x-access-token:TOKEN@github.com/o/r.git/': ...` — and that text is
+/// handed straight to the UI on a failed clone. Recent git anonymizes the URL
+/// in its own messages; older git, and messages produced by a remote helper,
+/// do not, and a URL the user typed with credentials in it reaches us intact
+/// either way.
+pub(crate) fn redact_credentials_in_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find("://") {
+        let (head, tail) = rest.split_at(idx + 3);
+        out.push_str(head);
+        // The authority ends at the first delimiter; everything after it is
+        // path or surrounding prose and must survive untouched.
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '\'' | '"'))
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        match authority.rfind('@') {
+            // rfind, not find: a password may itself contain '@'.
+            Some(at) => out.push_str(&authority[at + 1..]),
+            None => out.push_str(authority),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Credential helper configuration
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1096,6 +1128,48 @@ mod tests {
     fn test_sanitize_url_no_credentials() {
         let url = "https://example.com/path";
         assert_eq!(sanitize_url_for_log(url), url);
+    }
+
+    /// git's stderr embeds the URL in prose. The credential must be stripped
+    /// while the surrounding text — which is the whole diagnostic value of the
+    /// message — survives intact.
+    #[test]
+    fn test_redact_credentials_in_text_strips_userinfo_from_embedded_urls() {
+        assert_eq!(
+            redact_credentials_in_text(
+                "fatal: repository 'https://x-access-token:ghp_s3cret@github.com/o/r.git' not found"
+            ),
+            "fatal: repository 'https://github.com/o/r.git' not found"
+        );
+    }
+
+    /// Several URLs in one message must all be redacted, and a password that
+    /// itself contains `@` must not leave its tail behind.
+    #[test]
+    fn test_redact_credentials_in_text_handles_multiple_urls_and_at_in_password() {
+        let redacted = redact_credentials_in_text(
+            "warning: https://u:p@ss@host.example/a failed, retrying https://tok:s3cret@other.example/b",
+        );
+
+        assert!(!redacted.contains("p@ss"), "password leaked: {}", redacted);
+        assert!(!redacted.contains("s3cret"), "token leaked: {}", redacted);
+        assert!(redacted.contains("https://host.example/a"), "{}", redacted);
+        assert!(redacted.contains("https://other.example/b"), "{}", redacted);
+    }
+
+    /// No false positives: text with no credentials must come back byte-for-byte.
+    #[test]
+    fn test_redact_credentials_in_text_leaves_credential_free_text_untouched() {
+        for text in [
+            "error: pathspec 'foo' did not match",
+            "https://github.com/o/r.git",
+            // The `@` is in the path, not the authority.
+            "https://github.com/o/a@b.txt",
+            // SCP form carries no password.
+            "git@github.com:o/r.git",
+        ] {
+            assert_eq!(redact_credentials_in_text(text), text);
+        }
     }
 
     // ========================================================================
