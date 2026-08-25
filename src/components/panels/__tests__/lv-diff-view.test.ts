@@ -1282,6 +1282,244 @@ describe('lv-diff-view', () => {
     });
   });
 
+  // ── Virtualized (very large) diffs ─────────────────────────────────────
+  // Once the flattened diff exceeds the virtualization threshold the unified
+  // view switches to renderVirtualizedUnifiedView(). That path must keep the
+  // same staging affordances, otherwise "Load full diff" on a huge file is a
+  // dead end: the user loaded it precisely to stage a hunk past the cap.
+  describe('virtualized diff (large file)', () => {
+    function makeVirtualizedDiffFile(overrides: Partial<DiffFile> = {}): DiffFile {
+      const padLines: DiffLine[] = [];
+      for (let i = 0; i < 5100; i++) {
+        padLines.push(
+          makeDiffLine({ content: `pad ${i}`, origin: 'context', oldLineNo: 900 + i, newLineNo: 900 + i })
+        );
+      }
+      return makeDiffFile({
+        hunks: [
+          makeDiffHunk({
+            header: '@@ -1,4 +1,5 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 5,
+            lines: [
+              makeDiffLine({ content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+              makeDiffLine({ content: 'old first', origin: 'deletion', oldLineNo: 2, newLineNo: null }),
+              makeDiffLine({ content: 'first hunk change', origin: 'addition', oldLineNo: null, newLineNo: 2 }),
+              makeDiffLine({ content: 'omega', origin: 'context', oldLineNo: 3, newLineNo: 3 }),
+            ],
+          }),
+          makeDiffHunk({
+            header: '@@ -80,4 +81,5 @@',
+            oldStart: 80,
+            oldLines: 4,
+            newStart: 81,
+            newLines: 5,
+            lines: [
+              makeDiffLine({ content: 'beta', origin: 'context', oldLineNo: 80, newLineNo: 81 }),
+              makeDiffLine({ content: 'old second', origin: 'deletion', oldLineNo: 81, newLineNo: null }),
+              makeDiffLine({ content: 'second hunk change', origin: 'addition', oldLineNo: null, newLineNo: 82 }),
+              makeDiffLine({ content: 'zeta', origin: 'context', oldLineNo: 82, newLineNo: 83 }),
+            ],
+          }),
+          makeDiffHunk({
+            header: '@@ -900,5100 +900,5100 @@',
+            oldStart: 900,
+            oldLines: 5100,
+            newStart: 900,
+            newLines: 5100,
+            lines: padLines,
+          }),
+        ],
+        ...overrides,
+      });
+    }
+
+    /** The virtualized scroll container, which only exists on the virtualized path. */
+    function container(el: LvDiffView): HTMLElement {
+      const node = el.shadowRoot!.querySelector('.diff-virtualized-container');
+      expect(node, 'expected the virtualized container to be rendered').to.not.be.null;
+      return node as HTMLElement;
+    }
+
+    async function settle(el: LvDiffView): Promise<void> {
+      const start = Date.now();
+      while (Date.now() - start < 2000) {
+        await new Promise((r) => setTimeout(r, 25));
+        await el.updateComplete;
+        if (!(el as unknown as { loading: boolean }).loading) break;
+      }
+      await el.updateComplete;
+    }
+
+    async function enableLineSelectionMode(el: LvDiffView): Promise<void> {
+      const toggle = Array.from(el.shadowRoot!.querySelectorAll('button.view-btn')).find((b) =>
+        (b.getAttribute('title') ?? '').startsWith('Toggle line selection mode')
+      ) as HTMLElement | undefined;
+      expect(toggle, 'line selection toggle should exist in the toolbar').to.not.be.undefined;
+      toggle!.click();
+      await el.updateComplete;
+    }
+
+    it('renders per-hunk Stage buttons in the virtualized view', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+
+      // Prove we really are on the virtualized path: no .hunk wrappers exist.
+      const c = container(el);
+      expect(el.shadowRoot!.querySelector('.hunk'), 'virtualized path should not render .hunk').to.be.null;
+
+      const stageBtns = c.querySelectorAll('.stage-btn.stage');
+      expect(stageBtns.length, 'each visible hunk header needs a Stage button').to.be.at.least(2);
+      expect(stageBtns[0].getAttribute('title')).to.equal('Stage this hunk');
+
+      // The virtual scroll offsets assume every row is exactly DIFF_LINE_HEIGHT tall.
+      const header = c.querySelector('.virtual-hunk-header') as HTMLElement;
+      expect(header, 'hunk headers should be rendered in the virtualized view').to.not.be.null;
+      expect(Math.round(header.getBoundingClientRect().height)).to.equal(20);
+    });
+
+    it('stages the hunk whose Stage button was clicked in the virtualized view', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+
+      let statusChanged = false;
+      el.addEventListener('status-changed', () => { statusChanged = true; });
+
+      const stageBtns = container(el).querySelectorAll('.stage-btn.stage');
+      expect(stageBtns.length, 'need at least two Stage buttons to pick the second').to.be.at.least(2);
+      clearHistory();
+      (stageBtns[1] as HTMLElement).click();
+      await settle(el);
+
+      const calls = findCommands('stage_hunk');
+      expect(calls.length, 'stage_hunk should have been invoked once').to.equal(1);
+      const patch = (calls[0].args as { patch: string }).patch;
+      expect(patch).to.contain('second hunk change');
+      expect(patch).to.not.contain('first hunk change');
+      expect(statusChanged, 'status-changed should be dispatched').to.be.true;
+    });
+
+    it('shows Unstage buttons in the virtualized view for a staged file', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+
+      const c = container(el);
+      const unstageBtn = c.querySelector('.stage-btn.unstage') as HTMLElement | null;
+      expect(unstageBtn, 'a staged file should offer Unstage in the virtualized view').to.not.be.null;
+      expect(c.querySelector('.stage-btn.stage')).to.be.null;
+
+      clearHistory();
+      unstageBtn!.click();
+      await settle(el);
+
+      expect(findCommands('unstage_hunk').length).to.equal(1);
+    });
+
+    it('reports a failure to stage a hunk from the virtualized view', async () => {
+      const diff = makeVirtualizedDiffFile();
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_file_diff':
+            return diff;
+          case 'stage_hunk':
+            throw { message: 'patch does not apply' };
+          case 'get_diff_tool':
+            return { tool: null };
+          default:
+            return null;
+        }
+      };
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+
+      const stageBtn = container(el).querySelector('.stage-btn.stage') as HTMLElement | null;
+      expect(stageBtn, 'a Stage button is required to exercise the error path').to.not.be.null;
+
+      uiStore.setState({ toasts: [] });
+      stageBtn!.click();
+      await settle(el);
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'a failed hunk stage must surface an error toast').to.equal(1);
+      expect(errors[0].message).to.contain('Failed to stage hunk');
+      expect(errors[0].message).to.contain('patch does not apply');
+    });
+
+    it('selects and stages individual lines in the virtualized view', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+
+      await enableLineSelectionMode(el);
+
+      const c = container(el);
+      expect(c.classList.contains('line-selection-mode'), 'container needs the line-selection-mode class').to.be.true;
+
+      const addition = c.querySelector('.line.code-addition') as HTMLElement | null;
+      expect(addition, 'virtualized view should render addition lines').to.not.be.null;
+      const checkbox = addition!.querySelector('.line-checkbox') as HTMLInputElement | null;
+      expect(checkbox, 'addition lines need a selection checkbox').to.not.be.null;
+      expect(getComputedStyle(checkbox!).display).to.not.equal('none');
+
+      checkbox!.click();
+      await el.updateComplete;
+
+      const bar = el.shadowRoot!.querySelector('.selection-actions');
+      expect(bar, 'the bulk selection bar must be reachable in the virtualized view').to.not.be.null;
+      expect(bar!.querySelector('.selection-info')!.textContent).to.contain('1 line selected');
+
+      clearHistory();
+      (bar!.querySelector('.selection-btn.primary') as HTMLElement).click();
+      await settle(el);
+
+      const calls = findCommands('stage_hunk');
+      expect(calls.length, 'Stage Selected should invoke stage_hunk').to.equal(1);
+      const patch = (calls[0].args as { patch: string }).patch;
+      expect(patch).to.contain('first hunk change');
+      expect(patch).to.not.contain('second hunk change');
+    });
+
+    it('opens the line context menu in the virtualized view', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+
+      const addition = container(el).querySelector('.line.code-addition') as HTMLElement | null;
+      expect(addition).to.not.be.null;
+      addition!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: 10, clientY: 10 })
+      );
+      await el.updateComplete;
+
+      const menu = el.shadowRoot!.querySelector('.context-menu');
+      expect(menu, 'right-clicking a virtualized line should open the context menu').to.not.be.null;
+      expect(menu!.textContent).to.contain('Stage hunk');
+      expect(menu!.textContent).to.contain('Stage line');
+    });
+
+    it('does not offer staging in the virtualized view of a commit diff', async () => {
+      setupDefaultMocks({ diff: makeVirtualizedDiffFile() });
+      const el = await renderDiffView({
+        file: null,
+        commitFile: { commitOid: 'abc123', filePath: 'src/main.ts' },
+      });
+
+      const c = container(el);
+      expect(c.querySelector('.stage-btn'), 'commit diffs are read-only').to.be.null;
+
+      const line = c.querySelector('.line.code-addition') as HTMLElement | null;
+      expect(line).to.not.be.null;
+      line!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, clientX: 10, clientY: 10 })
+      );
+      await el.updateComplete;
+
+      const menu = el.shadowRoot!.querySelector('.context-menu');
+      expect(menu, 'the copy actions should still be available on a commit diff').to.not.be.null;
+      expect(menu!.textContent).to.contain('Copy line');
+      expect(menu!.textContent).to.not.contain('Stage hunk');
+    });
+  });
+
   // ── Context-menu line staging ────────────────────────────────────────────
   // Selection keys are positional `${hunkIndex}-${lineIndex}` pairs. A stage or
   // unstage reloads the diff and renumbers those positions, so a selection
