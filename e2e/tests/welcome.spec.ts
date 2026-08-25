@@ -123,6 +123,30 @@ test.describe('Welcome Screen with Recent Repositories', () => {
       await expect(app.welcomeScreen).toBeVisible();
     }
   });
+
+  test('surfaces an error toast when a recent repository can no longer be opened', async ({ page }) => {
+    // The recent list is restored from the persisted store, not from a command,
+    // so seed it directly to guarantee an entry to click.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: { setState: (s: Record<string, unknown>) => void };
+      };
+      stores.repositoryStore.setState({
+        recentRepositories: [{ path: '/path/to/gone', name: 'gone', lastOpened: Date.now() }],
+      });
+    });
+    await expect(app.recentItems).toHaveCount(1);
+
+    await startCommandCapture(page);
+    await injectCommandError(page, 'open_repository', 'failed to open repository: /path/to/gone');
+
+    await app.recentItems.first().click();
+
+    // A moved or deleted repo must tell the user — repositoryStore.error is never rendered
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toContainText('failed to open repository', { timeout: 5000 });
+    await expect(app.welcomeScreen).toBeVisible();
+  });
 });
 
 test.describe('Clone Dialog', () => {
