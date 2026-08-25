@@ -86,6 +86,18 @@ export class LvContextDashboard extends LitElement {
         max-width: 200px;
       }
 
+      /* The compact bar names no ref at all, so a detached HEAD had nowhere to
+         show while it lasted. */
+      .detached-head {
+        font-size: var(--font-size-xs);
+        font-family: var(--font-family-mono);
+        white-space: nowrap;
+        padding: 2px 6px;
+        border-radius: var(--radius-xs);
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
       .compact-divider {
         width: 1px;
         height: 16px;
@@ -1111,6 +1123,25 @@ export class LvContextDashboard extends LitElement {
     `;
   }
 
+  /**
+   * The compact bar names no ref, and the repository card that would is behind
+   * a collapsed-by-default panel — so a detached HEAD had nowhere to show.
+   */
+  private renderDetachedHead() {
+    const oid = this.activeRepository?.currentBranch
+      ? null
+      : this.activeRepository?.repository.detachedHeadOid;
+    if (!oid) return nothing;
+    return html`
+      <div class="compact-divider"></div>
+      <span
+        class="detached-head"
+        title="HEAD is detached at ${oid}. New commits won't belong to any branch."
+        >Detached HEAD @ ${oid.slice(0, 7)}</span
+      >
+    `;
+  }
+
   private renderCompactView() {
     return html`
       <div class="dashboard-compact">
@@ -1154,6 +1185,8 @@ export class LvContextDashboard extends LitElement {
                 </button>
               </div>
             `}
+
+        ${this.renderDetachedHead()}
 
         ${(() => {
           const provider = this.detectProvider();

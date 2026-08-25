@@ -9,6 +9,8 @@ export interface MockRepository {
   isValid: boolean;
   isBare: boolean;
   headRef: string | null;
+  /** Commit HEAD points at when detached; absent/null while on a branch. */
+  detachedHeadOid?: string | null;
   state: string;
 }
 

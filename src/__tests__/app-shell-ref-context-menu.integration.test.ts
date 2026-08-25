@@ -42,6 +42,7 @@ const mockRepository: Repository = {
   isValid: true,
   isBare: false,
   headRef: 'refs/heads/main',
+  detachedHeadOid: null,
   state: 'clean',
   isShallow: false,
   isPartialClone: false,

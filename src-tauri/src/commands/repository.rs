@@ -46,7 +46,8 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let head_ref = repo.head().ok().map(|h| {
+    let head = repo.head().ok();
+    let head_ref = head.as_ref().map(|h| {
         h.shorthand()
             .ok()
             .map(|s| s.to_string())
@@ -56,6 +57,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
                     .unwrap_or_default()
             })
     });
+    let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
     // Detect shallow and partial clone status
     let is_shallow = repo.is_shallow();
@@ -67,6 +69,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref,
+        detached_head_oid,
         state: RepositoryState::from(repo.state()),
         is_shallow,
         is_partial_clone,
@@ -154,6 +157,20 @@ fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>
         (true, filter)
     } else {
         (false, None)
+    }
+}
+
+/// The commit a detached HEAD points at — a tag or commit checkout, or an
+/// interrupted rebase/bisect. Takes the already-resolved HEAD instead of
+/// re-reading it: an unborn HEAD does not resolve, so asking for it again would
+/// turn opening a freshly initialised repository into an error.
+fn detached_head_oid(
+    repo: &git2::Repository,
+    head: Option<&git2::Reference<'_>>,
+) -> Result<Option<String>> {
+    match head {
+        Some(head) if repo.head_detached()? => Ok(head.target().map(|oid| oid.to_string())),
+        _ => Ok(None),
     }
 }
 
@@ -378,12 +395,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -407,6 +426,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow,
                 is_partial_clone,
@@ -555,12 +575,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -581,6 +603,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow: false, // Full clone via git2 is never shallow
                 is_partial_clone: false,
@@ -714,6 +737,8 @@ pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Reposit
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref: None,
+        // A fresh repository's HEAD is unborn, which is not detached.
+        detached_head_oid: None,
         state: RepositoryState::Clean,
         is_shallow: false,
         is_partial_clone: false,
@@ -803,6 +828,42 @@ mod tests {
         let result = open_repository(repo.path_str()).await.unwrap();
         // Should have a head ref after initial commit
         assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_reports_a_detached_head() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Second", &[("a.txt", "a")]);
+        repo.repo().set_head_detached(target).unwrap();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert_eq!(result.detached_head_oid, Some(target.to_string()));
+        // Why the OID has to be its own field: a detached HEAD's shorthand is
+        // the literal "HEAD", which names no commit the UI could show.
+        assert_eq!(result.head_ref.as_deref(), Some("HEAD"));
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_reports_no_detached_head_on_a_branch() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.detached_head_oid.is_none());
+        assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_unborn_head_is_not_detached() {
+        // An unborn HEAD still resolves as a symbolic ref, so it must not be
+        // reported as detached — an empty repository is not a tag checkout.
+        let repo = TestRepo::new();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.head_ref.is_none());
+        assert!(result.detached_head_oid.is_none());
     }
 
     #[tokio::test]

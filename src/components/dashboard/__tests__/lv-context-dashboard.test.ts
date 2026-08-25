@@ -72,6 +72,7 @@ function makeRepository(overrides: Partial<Repository> = {}): Repository {
     isValid: true,
     isBare: false,
     headRef: 'refs/heads/main',
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
@@ -225,6 +226,31 @@ describe('lv-context-dashboard', () => {
       expect(identity).to.not.be.null;
       expect(identity!.textContent).to.include('John Doe');
       expect(identity!.textContent).to.include('john@work.com');
+    });
+
+    it('warns about a detached HEAD in the collapsed bar', async () => {
+      setupStores({
+        repository: makeRepository({
+          headRef: 'HEAD',
+          detachedHeadOid: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+        }),
+        currentBranch: null,
+      });
+      const el = await renderDashboard();
+
+      const chip = el.shadowRoot!.querySelector('.dashboard-compact .detached-head');
+      expect(chip).to.not.be.null;
+      expect(chip!.textContent).to.include('Detached HEAD @ a1b2c3d');
+      expect(chip!.getAttribute('title')).to.include(
+        'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+      );
+    });
+
+    it('shows no detached warning while on a branch', async () => {
+      setupStores();
+      const el = await renderDashboard();
+
+      expect(el.shadowRoot!.querySelector('.detached-head')).to.be.null;
     });
 
     it('shows profile color dot in compact view', async () => {
