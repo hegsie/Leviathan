@@ -657,10 +657,11 @@ describe('lv-gitflow-panel', () => {
 
   // ── Error handling ─────────────────────────────────────────────────────
   describe('error handling', () => {
-    it('shows init section when config load returns failure', async () => {
+    it('shows the load error, not the init section, when config load fails', async () => {
       // When get_gitflow_config throws, invokeCommand catches it and returns
-      // { success: false }. loadConfig sees !result.success, sets config=null,
-      // so the init section renders.
+      // { success: false }. That is a FAILED load, not "not initialized" — the
+      // Initialize button would rewrite the repo's gitflow config with the
+      // defaults, so it must not be offered here.
       mockInvoke = async (command: string) => {
         if (command === 'get_gitflow_config') {
           throw new Error('Config load failed');
@@ -670,8 +671,10 @@ describe('lv-gitflow-panel', () => {
 
       const el = await renderPanel();
 
-      const initSection = el.shadowRoot!.querySelector('.init-section');
-      expect(initSection).to.not.be.null;
+      expect(el.shadowRoot!.querySelectorAll('.init-section').length).to.equal(0);
+      expect(el.shadowRoot!.querySelector('.load-error-message')?.textContent ?? '').to.contain(
+        'Config load failed',
+      );
     });
 
     it('shows error when init_gitflow fails', async () => {

@@ -1320,8 +1320,16 @@ test.describe('Profile CRUD Operations', () => {
     const saveButton = page.getByRole('button', { name: 'Save Profile' });
     await saveButton.click();
 
-    // Error feedback should appear as a toast notification
-    await expect(page.locator('.toast, .error-banner, [class*="error"]').first()).toBeVisible({ timeout: 5000 });
+    // Error feedback should appear as a toast notification. Filtered to visible
+    // before .first(): `[class*="error"]` matches any element whose class merely
+    // CONTAINS "error" anywhere on the page, and .first() takes them in DOM
+    // order, so a hidden error element in an unrelated panel shadowed the toast.
+    await expect(
+      page
+        .locator('.toast, .error-banner, [class*="error"]')
+        .filter({ visible: true })
+        .first()
+    ).toBeVisible({ timeout: 5000 });
   });
 
   test('color picker should highlight selected color', async ({ page }) => {

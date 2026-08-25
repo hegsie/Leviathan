@@ -4,6 +4,7 @@ import {
   startCommandCaptureWithMocks,
   findCommand,
   injectCommandMock,
+  injectCommandError,
 } from '../fixtures/test-helpers';
 
 /**
@@ -48,7 +49,7 @@ async function injectGitflowPanel(page: import('@playwright/test').Page): Promis
 
   // Wait for the component to finish rendering with Playwright auto-piercing locators
   await page
-    .locator('lv-gitflow-panel#e2e-gitflow .init-section, lv-gitflow-panel#e2e-gitflow .section, lv-gitflow-panel#e2e-gitflow .loading')
+    .locator('lv-gitflow-panel#e2e-gitflow .init-section, lv-gitflow-panel#e2e-gitflow .section, lv-gitflow-panel#e2e-gitflow .load-error, lv-gitflow-panel#e2e-gitflow .loading')
     .first()
     .waitFor({ state: 'visible' });
 }
@@ -658,5 +659,57 @@ test.describe('GitFlow Panel - Loading State', () => {
 
     const commands = await findCommand(page, 'get_gitflow_config');
     expect(commands.length).toBeGreaterThan(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Config Load Failure
+// --------------------------------------------------------------------------
+// A failed get_gitflow_config must not be presented as "not initialized" —
+// the Initialize button rewrites the repo's gitflow config with the defaults.
+test.describe('GitFlow Panel - Config Load Failure', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, { get_branches: [] });
+    await injectCommandError(page, 'get_gitflow_config', 'failed to open repository');
+    await injectGitflowPanel(page);
+  });
+
+  test('shows the load error instead of the initialize prompt', async ({ page }) => {
+    await expect(
+      page.locator('lv-gitflow-panel#e2e-gitflow .load-error-message')
+    ).toContainText('failed to open repository');
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .init-section')).toHaveCount(0);
+  });
+
+  test('Retry re-runs the config load', async ({ page }) => {
+    await injectCommandMock(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'feature/x',
+          shorthand: 'feature/x',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+      ],
+    });
+
+    await page.locator('lv-gitflow-panel#e2e-gitflow .load-error .btn').click();
+
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section').first()).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item-name')).toContainText('x');
   });
 });
