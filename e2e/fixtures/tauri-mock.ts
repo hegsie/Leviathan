@@ -651,7 +651,32 @@ export async function setupTauriMocks(
       // Deep clone mock data into mutable state that mutations can update
       const state = JSON.parse(JSON.stringify(mockData)) as typeof defaultMockData;
 
-      const handler = (command: string, args?: Record<string, unknown>): unknown => {
+      // === Backend event delivery ===
+      // Tauri's `listen()` registers a JS callback through `transformCallback`
+      // and then invokes `plugin:event|listen` with that callback's id. Keep
+      // both so tests can emit backend events the app really listens to.
+      const eventCallbacks = new Map<number, (e: unknown) => void>();
+      const eventListeners = new Map<number, { event: string; cb: (e: unknown) => void }>();
+      let nextCallbackId = 1;
+
+      // `unlisten()` from @tauri-apps/api calls into the event plugin's own
+      // internals before the IPC round trip, so it has to exist for teardown.
+      (window as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: () => {},
+      };
+
+      (window as unknown as Record<string, unknown>).__EMIT_TAURI_EVENT__ = (
+        event: string,
+        payload: unknown
+      ) => {
+        for (const listener of eventListeners.values()) {
+          if (listener.event === event) {
+            listener.cb({ event, id: 0, payload });
+          }
+        }
+      };
+
+      const commandHandler = (command: string, args?: Record<string, unknown>): unknown => {
         switch (command) {
           case 'open_repository':
           case 'get_repository_info':
@@ -1078,12 +1103,31 @@ export async function setupTauriMocks(
         }
       };
 
+      const handler = (command: string, args?: Record<string, unknown>): unknown => {
+        switch (command) {
+          case 'plugin:event|listen': {
+            const cb = eventCallbacks.get(args?.handler as number);
+            const id = nextCallbackId++;
+            if (cb) eventListeners.set(id, { event: args?.event as string, cb });
+            return id;
+          }
+          case 'plugin:event|unlisten':
+            eventListeners.delete(args?.eventId as number);
+            return null;
+        }
+        return commandHandler(command, args);
+      };
+
       // Set up the Tauri internals mock
       (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         invoke: async (command: string, args?: Record<string, unknown>) => {
           return handler(command, args);
         },
-        transformCallback: () => 0,
+        transformCallback: (cb: (e: unknown) => void) => {
+          const id = nextCallbackId++;
+          eventCallbacks.set(id, cb);
+          return id;
+        },
         convertFileSrc: (path: string) => path,
       };
 
