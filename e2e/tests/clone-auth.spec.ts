@@ -102,6 +102,23 @@ test.describe('Clone Dialog - account token', () => {
     expect(args.token).toBeUndefined();
   });
 
+  test('sends no token when the clone URL is plaintext http', async ({ page }) => {
+    // The token travels as the HTTPS password, so it must never be handed to a
+    // remote that would put it on the wire in clear — even one whose host has a
+    // connected account.
+    await dialogs.clone.fillUrl('http://gitlab.com/group/proj.git');
+    await dialogs.clone.fillPath('/home/user/projects');
+
+    await startCommandCapture(page);
+    await dialogs.clone.clone();
+    await waitForCommand(page, 'clone_repository');
+
+    const cloneCmds = await findCommand(page, 'clone_repository');
+    expect(cloneCmds.length).toBeGreaterThanOrEqual(1);
+    const args = cloneCmds[0].args as { token?: string };
+    expect(args.token).toBeUndefined();
+  });
+
   test('surfaces the auth failure in the dialog when the clone is rejected', async ({ page }) => {
     await dialogs.clone.fillUrl('https://gitlab.com/group/private.git');
     await dialogs.clone.fillPath('/home/user/projects');

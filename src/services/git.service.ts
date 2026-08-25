@@ -364,6 +364,66 @@ function cloneUrlHost(url: string): string | null {
 }
 
 /**
+ * Whether a stored token may ride this clone URL.
+ *
+ * The token is sent as the HTTPS password, and `validate_clone_url` also
+ * accepts `http://` and `git://` — plaintext transports that would put the
+ * credential on the wire in clear. SSH URLs (`ssh://` and the scheme-less scp
+ * form) authenticate with a key and never transmit it, so they stay eligible.
+ */
+function cloneUrlIsCredentialSafe(url: string): boolean {
+  const trimmed = url.trim();
+  // scp-like `git@host:owner/repo.git` — always the ssh transport.
+  if (!trimmed.includes("://")) return true;
+  return /^(?:https|ssh):\/\//i.test(trimmed);
+}
+
+/**
+ * The Azure DevOps organization a clone URL names. Every connected ADO account
+ * is scoped to exactly one organization, so this is what picks the right one:
+ *
+ *   https://dev.azure.com/{org}/{project}/_git/{repo}
+ *   https://{org}@dev.azure.com/{org}/...        (userinfo ignored by URL)
+ *   https://ssh.dev.azure.com/v3/{org}/{project}/{repo}
+ *   https://{org}.visualstudio.com/{project}/_git/{repo}
+ */
+function adoUrlOrganization(url: string, host: string): string | undefined {
+  if (host.endsWith(".visualstudio.com")) {
+    return host.slice(0, -".visualstudio.com".length) || undefined;
+  }
+  const trimmed = url.trim();
+  let path: string;
+  if (trimmed.includes("://")) {
+    try {
+      path = new URL(trimmed).pathname;
+    } catch {
+      return undefined;
+    }
+  } else {
+    path = /^[^@/]+@[^:/]+:(.*)$/.exec(trimmed)?.[1] ?? "";
+  }
+  const segments = path.split("/").filter(Boolean);
+  // ssh.dev.azure.com paths carry a `v3` protocol-version prefix.
+  return segments[segments[0] === "v3" ? 1 : 0];
+}
+
+/**
+ * The connected Azure DevOps account for `organization`. Matching on the
+ * organization the URL names — rather than taking the global default account —
+ * keeps one org's token off another org's clone in a multi-account setup.
+ */
+async function findAdoAccountForOrg(organization: string) {
+  const { getAccountsByType } = await import("../stores/unified-profile.store.ts");
+  const wanted = organization.toLowerCase();
+  const matches = getAccountsByType("azure-devops").filter(
+    (account) =>
+      account.config.type === "azure-devops" &&
+      account.config.organization.toLowerCase() === wanted,
+  );
+  return matches.find((account) => account.isDefault) ?? matches[0];
+}
+
+/**
  * The connected GitLab account whose instance serves `host`. GitLab is
  * self-hostable, so the instance URL — not a fixed domain — identifies it, and
  * a repo on `git.acme.dev` must clone with THAT instance's token even when a
@@ -396,7 +456,7 @@ async function findGitLabAccountForHost(host: string) {
  */
 async function getCloneToken(url: string): Promise<string | undefined> {
   const host = cloneUrlHost(url);
-  if (!host) return undefined;
+  if (!host || !cloneUrlIsCredentialSafe(url)) return undefined;
 
   try {
     if (host === "github.com" || host.endsWith(".github.com")) {
@@ -409,16 +469,36 @@ async function getCloneToken(url: string): Promise<string | undefined> {
       host === "ssh.dev.azure.com" ||
       host.endsWith(".visualstudio.com")
     ) {
-      // getAdoToken refreshes an expiring Entra OAuth token, so a long-lived
-      // session still clones with a valid credential.
-      const result = await getAdoToken();
-      return result.success && result.data ? result.data : undefined;
+      const org = adoUrlOrganization(url, host);
+      const adoAccount = org ? await findAdoAccountForOrg(org) : undefined;
+      if (adoAccount) {
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        // Refreshes an expiring Entra OAuth token, so a long-lived session
+        // still clones with a valid credential.
+        const token = await getFreshAccountToken("azure-devops", adoAccount.id, "azure");
+        if (token) return token;
+      }
+      // Legacy single-token storage, for a user who never created an account.
+      // Deliberately not getAdoToken(): that falls back to the default account
+      // whatever its organization, which would hand another org's token over.
+      const { AzureDevOpsCredentials } = await import("./credential.service.ts");
+      const token = await AzureDevOpsCredentials.getToken();
+      return token ?? undefined;
     }
 
     const gitlabAccount = await findGitLabAccountForHost(host);
     if (gitlabAccount) {
-      const { AccountCredentials } = await import("./credential.service.ts");
-      const token = await AccountCredentials.getToken("gitlab", gitlabAccount.id);
+      const { getFreshAccountToken } = await import("./credential.service.ts");
+      // Refresh-aware for the same reason the Azure DevOps branch is: a GitLab
+      // account connected by OAuth holds an access token that expires, and the
+      // stored one may already be dead. A PAT account has no OAuth bundle, so
+      // this returns its stored token unchanged.
+      const token = await getFreshAccountToken(
+        "gitlab",
+        gitlabAccount.id,
+        "gitlab",
+        gitlabAccount.config.type === "gitlab" ? gitlabAccount.config.instanceUrl : undefined,
+      );
       if (token) return token;
     }
     if (host === "gitlab.com" || host.endsWith(".gitlab.com")) {

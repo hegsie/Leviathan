@@ -16,6 +16,9 @@ const keyring = new Map<string, string>();
 const invokedCommands: string[] = [];
 let cloneArgs: Record<string, unknown> | null = null;
 let keyringFails = false;
+/** Set to make `oauth_refresh_token` succeed with this access token. */
+let refreshedAccessToken: string | null = null;
+let refreshArgs: Record<string, unknown> | null = null;
 
 const repositoryStub = {
   path: '/dest/repo',
@@ -34,6 +37,11 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'store_keyring_token') {
     keyring.set(a!.key as string, a!.value as string);
     return null;
+  }
+  if (command === 'oauth_refresh_token') {
+    refreshArgs = { ...(a ?? {}) };
+    if (!refreshedAccessToken) throw new Error('refresh rejected');
+    return { accessToken: refreshedAccessToken, refreshToken: 'r2', expiresIn: 7200 };
   }
   if (command === 'clone_repository') return repositoryStub;
   return null;
@@ -94,6 +102,8 @@ describe('git.service - cloneRepository token lookup', () => {
     invokedCommands.length = 0;
     cloneArgs = null;
     keyringFails = false;
+    refreshedAccessToken = null;
+    refreshArgs = null;
   });
 
   afterEach(() => {
@@ -171,6 +181,83 @@ describe('git.service - cloneRepository token lookup', () => {
     expect(other.token, 'no token for an unknown host').to.be.undefined;
     expect(invokedCommands, 'no keyring read for an unknown host')
       .to.not.include('get_keyring_token');
+  });
+
+  it('does not attach a token to a plaintext clone URL', async () => {
+    unifiedProfileStore.getState().setAccounts([
+      account('gitlab', 'gl-1', 'https://gitlab.com'),
+      account('github', 'gh-1'),
+    ]);
+    seedAccountToken('gitlab', 'gl-1', 'gl-tok');
+    seedAccountToken('github', 'gh-1', 'gh-tok');
+
+    const overHttp = await cloneAndReadArgs('http://gitlab.com/group/proj.git');
+    expect(overHttp.token, 'a token must not ride plaintext http').to.be.undefined;
+
+    invokedCommands.length = 0;
+    const overGitProto = await cloneAndReadArgs('git://github.com/o/r.git');
+    expect(overGitProto.token, 'a token must not ride the git:// protocol').to.be.undefined;
+    expect(invokedCommands, 'no keyring read for a plaintext transport')
+      .to.not.include('get_keyring_token');
+  });
+
+  it("uses the Azure DevOps account matching the URL's organization", async () => {
+    unifiedProfileStore.getState().setAccounts([
+      account('azure-devops', 'ado-default', 'otherorg', true),
+      account('azure-devops', 'ado-target', 'myorg', false),
+    ]);
+    seedAccountToken('azure-devops', 'ado-default', 'other-tok', true);
+    seedAccountToken('azure-devops', 'ado-target', 'target-tok', true);
+
+    const https = await cloneAndReadArgs('https://dev.azure.com/myorg/proj/_git/repo');
+    expect(https.token, "the org's own token, not the default account's").to.equal('target-tok');
+
+    cloneArgs = null;
+    const ssh = await cloneAndReadArgs('git@ssh.dev.azure.com:v3/myorg/proj/repo');
+    expect(ssh.token, 'the v3-prefixed ssh path names the same org').to.equal('target-tok');
+  });
+
+  it('attaches no Azure DevOps token when no account owns the URL organization', async () => {
+    unifiedProfileStore
+      .getState()
+      .setAccounts([account('azure-devops', 'ado-default', 'otherorg', true)]);
+    seedAccountToken('azure-devops', 'ado-default', 'other-tok', true);
+
+    const args = await cloneAndReadArgs('https://dev.azure.com/myorg/proj/_git/repo');
+
+    expect(args.token, "another org's token must not be handed over").to.be.undefined;
+  });
+
+  it('refreshes an expiring GitLab OAuth token before cloning', async () => {
+    unifiedProfileStore
+      .getState()
+      .setAccounts([account('gitlab', 'gl-1', 'https://git.acme.dev')]);
+    keyring.set('gitlab_token_gl-1', 'stale-tok');
+    keyring.set(
+      'gitlab_token_gl-1_oauth',
+      JSON.stringify({ accessToken: 'stale-tok', refreshToken: 'r', expiresAt: Date.now() - 1000 }),
+    );
+    refreshedAccessToken = 'fresh-tok';
+
+    const args = await cloneAndReadArgs('https://git.acme.dev/group/proj.git');
+
+    expect(args.token, 'the refreshed access token, not the expired one').to.equal('fresh-tok');
+    expect(refreshArgs?.provider, 'refreshed against GitLab').to.equal('gitlab');
+    expect(refreshArgs?.instanceUrl, "the account's own instance").to.equal('https://git.acme.dev');
+  });
+
+  it('falls back to the stored GitLab token when the refresh grant fails', async () => {
+    unifiedProfileStore.getState().setAccounts([account('gitlab', 'gl-1', 'https://gitlab.com')]);
+    keyring.set('gitlab_token_gl-1', 'stale-tok');
+    keyring.set(
+      'gitlab_token_gl-1_oauth',
+      JSON.stringify({ accessToken: 'stale-tok', refreshToken: 'r', expiresAt: Date.now() - 1000 }),
+    );
+    refreshedAccessToken = null; // the grant is rejected
+
+    const args = await cloneAndReadArgs('https://gitlab.com/group/proj.git');
+
+    expect(args.token, 'still something to try rather than nothing').to.equal('stale-tok');
   });
 
   it('does not overwrite a token the caller supplied', async () => {
