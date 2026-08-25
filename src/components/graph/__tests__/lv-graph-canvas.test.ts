@@ -1976,15 +1976,19 @@ describe('lv-graph-canvas', () => {
       throw new Error(`timed out waiting for ${what}`);
     }
 
-    /** Backend mock that serves real pages of a `total`-commit history */
-    function setupPaginatedMocks(total: number, pageSize: number): void {
+    /**
+     * Backend mock that serves real pages of a `total`-commit history.
+     * `available` lets the pages run out EARLIER than the total the backend
+     * reports, i.e. the total the graph paginates against is stale.
+     */
+    function setupPaginatedMocks(total: number, pageSize: number, available = total): void {
       mockInvoke = async (command: string, args?: unknown) => {
         switch (command) {
           case 'get_commit_history': {
             const a = args as { skip?: number; limit?: number } | undefined;
             const skip = a?.skip ?? 0;
             const limit = a?.limit ?? pageSize;
-            return makeMoreCommits(Math.max(0, Math.min(limit, total - skip)), skip);
+            return makeMoreCommits(Math.max(0, Math.min(limit, available - skip)), skip);
           }
           case 'get_commit_total':
             return total;
@@ -2082,7 +2086,7 @@ describe('lv-graph-canvas', () => {
       expect(catchUpPageCalls()).to.equal(0);
     });
 
-    it('makes a single catch-up attempt when the next page fails after a refresh', async () => {
+    it('recovers the viewport and reports it when the next page fails after a refresh', async () => {
       setupPaginatedMocks(500, 100);
       const el = await renderSizedCanvas(100);
       const internals = internalsOf(el);
@@ -2100,6 +2104,11 @@ describe('lv-graph-canvas', () => {
         return previousMock(command, args);
       };
 
+      const notices: Array<{ message: string; type?: string }> = [];
+      el.addEventListener('graph-notice', (e) => {
+        notices.push((e as CustomEvent<{ message: string; type?: string }>).detail);
+      });
+
       clearHistory();
       el.refresh();
       await waitUntil(() => catchUpPageCalls() > 0, 'the catch-up attempt');
@@ -2113,6 +2122,35 @@ describe('lv-graph-canvas', () => {
       // ...and must not paint the reload error banner
       expect(internals.loadError).to.be.null;
       expect(el.shadowRoot!.querySelector('.info-panel')).to.be.null;
+      // The viewport must not be left blank on the failure path either
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+      // ...and the failure must not be silent
+      expect(notices.map((n) => n.type)).to.include('error');
+      expect(notices.some((n) => n.message.includes('network blip'))).to.be.true;
+    });
+
+    it('shrinks the scroller onto the loaded rows when the reported total was stale', async () => {
+      // The backend reports 500 commits but only serves 200 — a hard reset
+      // shortened the history under a total the graph had already cached
+      setupPaginatedMocks(500, 100, 200);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      // Catch up towards a row the stale total says exists but the history
+      // does not, so the chain runs off the end into an empty page
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.hasMoreCommits === false, 'the empty page');
+      await el.updateComplete;
+
+      expect(internals.sortedNodesByRow.length).to.equal(200);
+      // The scroller must no longer span the stale 500-row history...
+      const maxScrollY = Math.max(
+        0,
+        internals.virtualScroll.getContentSize().height - internals.getViewport().height
+      );
+      expect(internals.scrollState.getScroll().scrollTop).to.be.at.most(maxScrollY);
+      // ...and the viewport must be back on rows that actually paint
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
     });
 
     it('does not paginate on a refresh while the graph is at the top', async () => {

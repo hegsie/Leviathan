@@ -1307,6 +1307,34 @@ export class LvGraphCanvas extends LitElement {
     return scrollTop + viewportHeight > loadedBottom;
   }
 
+  /**
+   * True when the WHOLE viewport sits past the loaded rows, so getVisibleRange
+   * returns an empty window and the canvas paints nothing at all.
+   */
+  private isViewportEntirelyBeyondLoaded(): boolean {
+    const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    return scrollTop >= loadedBottom;
+  }
+
+  /**
+   * Pull the scroll back onto the rows that are actually loaded. The content
+   * height can still span the FULL history (updateVirtualTotalRows pads the
+   * scroller out to commitTotal while hasMoreCommits), so the browser never
+   * clamps for us and a viewport parked past the last loaded row would paint
+   * nothing.
+   */
+  private clampScrollOntoLoadedRows(): void {
+    if (!this.scrollState || !this.virtualScroll) return;
+    const { scrollTop, scrollLeft } = this.scrollState.getScroll();
+    const loadedHeight = this.PADDING * 2 + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    // getContentSize() caps very long histories, so never scroll past it either
+    const height = Math.min(loadedHeight, this.virtualScroll.getContentSize().height);
+    const maxScrollY = Math.max(0, height - this.getViewport().height);
+    this.scrollState.setScroll(Math.min(scrollTop, maxScrollY), scrollLeft);
+    this.syncScrollbarPosition();
+  }
+
   private async loadMoreCommits(): Promise<void> {
     if (this.isLoadingMore || !this.hasMoreCommits || !this.repositoryPath) return;
     this.isLoadingMore = true;
@@ -1331,11 +1359,32 @@ export class LvGraphCanvas extends LitElement {
         // but stop the catch-up chain to avoid a hot retry loop
         failed = true;
         log.warn('loadMoreCommits: fetch failed:', result.error?.message);
+        // The chain stops here, so a viewport parked past the loaded rows
+        // would sit on a blank canvas with nothing on screen to explain it
+        if (this.isViewportEntirelyBeyondLoaded()) {
+          this.clampScrollOntoLoadedRows();
+        }
+        // A console warning is not feedback — the component has no toast of
+        // its own, so app-shell surfaces graph-notice for it
+        this.dispatchEvent(
+          new CustomEvent('graph-notice', {
+            detail: {
+              message: `Could not load more commits: ${result.error?.message ?? 'unknown error'}`,
+              type: 'error',
+            },
+            bubbles: true,
+            composed: true,
+          })
+        );
         return;
       }
       if (!result.data?.length) {
-        // Genuinely no more commits
+        // Genuinely no more commits: shrink the scroller back onto the loaded
+        // rows (a stale commitTotal had it spanning a longer history) and pull
+        // a viewport that was parked out there back onto real rows
         this.hasMoreCommits = false;
+        this.updateVirtualTotalRows();
+        this.clampScrollOntoLoadedRows();
         return;
       }
 
@@ -1401,11 +1450,9 @@ export class LvGraphCanvas extends LitElement {
    */
   private recoverViewportAfterReload(): void {
     if (!this.scrollState || !this.virtualScroll) return;
-    const { scrollTop, scrollLeft } = this.scrollState.getScroll();
-    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
     // Only when the WHOLE viewport is past the loaded rows: a viewport that
     // still shows rows recovers on the next scroll, which runs checkLoadMore
-    if (scrollTop < loadedBottom) return;
+    if (!this.isViewportEntirelyBeyondLoaded()) return;
 
     // Only paginate while unfiltered — with a branch filter or an active
     // search the scrollbar does not span the full history
@@ -1417,11 +1464,7 @@ export class LvGraphCanvas extends LitElement {
       return;
     }
 
-    const size = this.virtualScroll.getContentSize();
-    const viewport = this.getViewport();
-    const maxScrollY = Math.max(0, size.height - viewport.height);
-    this.scrollState.setScroll(Math.min(scrollTop, maxScrollY), scrollLeft);
-    this.syncScrollbarPosition();
+    this.clampScrollOntoLoadedRows();
   }
 
   /**
