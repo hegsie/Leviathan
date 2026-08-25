@@ -28,6 +28,7 @@ import type { LvDiffView } from '../lv-diff-view.ts';
 // Import the actual component — registers <lv-diff-view> custom element
 import '../lv-diff-view.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -169,12 +170,30 @@ async function renderDiffView(props: {
   return el;
 }
 
+function findWordWrapButton(el: LvDiffView): HTMLElement | null {
+  const viewBtns = el.shadowRoot!.querySelectorAll('.view-btn');
+  return (
+    (Array.from(viewBtns).find((btn) => btn.getAttribute('title') === 'Toggle word wrap') as
+      | HTMLElement
+      | undefined) ?? null
+  );
+}
+
+function clickWordWrapButton(el: LvDiffView): void {
+  const btn = findWordWrapButton(el);
+  expect(btn, 'the word wrap toolbar button exists').to.not.be.null;
+  btn!.click();
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-diff-view', () => {
   beforeEach(() => {
     clearHistory();
     setupDefaultMocks();
     confirmAnswer = 'Ok';
+    // Word wrap is a shared setting now — start every test from a known off.
+    settingsStore.getState().setWordWrap(false);
+    localStorage.removeItem('leviathan-diff-word-wrap');
   });
 
   // ── Rendering ──────────────────────────────────────────────────────────
@@ -813,6 +832,61 @@ describe('lv-diff-view', () => {
       diffContent = el.shadowRoot!.querySelector('.diff-content');
       expect(diffContent).to.not.be.null;
       expect(diffContent!.classList.contains('word-wrap')).to.be.true;
+    });
+
+    it('toolbar button writes the shared Word Wrap setting', async () => {
+      const el = await renderDiffView();
+
+      clickWordWrapButton(el);
+      await el.updateComplete;
+
+      expect(settingsStore.getState().wordWrap, 'the app setting is the source of truth').to.be
+        .true;
+      const diffContent = el.shadowRoot!.querySelector('.diff-content');
+      expect(diffContent!.classList.contains('word-wrap')).to.be.true;
+    });
+
+    it('renders wrapped when the setting is already on', async () => {
+      settingsStore.getState().setWordWrap(true);
+
+      const el = await renderDiffView();
+
+      const diffContent = el.shadowRoot!.querySelector('.diff-content');
+      expect(diffContent!.classList.contains('word-wrap')).to.be.true;
+      const wordWrapBtn = findWordWrapButton(el);
+      expect(wordWrapBtn!.classList.contains('active'), 'the toolbar button reflects it').to.be
+        .true;
+    });
+
+    it('follows the Settings dialog changing the setting while the diff is open', async () => {
+      const el = await renderDiffView();
+      let diffContent = el.shadowRoot!.querySelector('.diff-content');
+      expect(diffContent!.classList.contains('word-wrap')).to.be.false;
+
+      settingsStore.getState().setWordWrap(true);
+      await el.updateComplete;
+
+      diffContent = el.shadowRoot!.querySelector('.diff-content');
+      expect(diffContent!.classList.contains('word-wrap')).to.be.true;
+    });
+
+    it('no longer writes its own word-wrap storage key', async () => {
+      const el = await renderDiffView();
+
+      clickWordWrapButton(el);
+      await el.updateComplete;
+
+      expect(localStorage.getItem('leviathan-diff-word-wrap')).to.be.null;
+    });
+
+    it('stops following the setting once removed', async () => {
+      const el = await renderDiffView();
+
+      el.remove();
+      settingsStore.getState().setWordWrap(true);
+
+      expect((el as unknown as { wordWrap: boolean }).wordWrap, 'the subscription is torn down').to
+        .be.false;
     });
   });
 

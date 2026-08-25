@@ -879,3 +879,67 @@ test.describe('Diff - UI Outcome Verification', () => {
     await expect(onionSkinBtn).not.toHaveClass(/active/);
   });
 });
+
+test.describe('Word Wrap setting', () => {
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  // The diff view has its own `.diff-content` inside the app-shell wrapper of the
+  // same name, so scope the assertion to the component.
+  const DIFF_CONTENT = 'lv-diff-view .diff-content';
+  const WORD_WRAP_TOGGLE =
+    'lv-settings-dialog .setting-row:has(.setting-name:text-is("Word Wrap")) .toggle-switch';
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('Settings > Word Wrap wraps the open diff', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(DIFF_CONTENT)).not.toHaveClass(/word-wrap/);
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator('lv-settings-dialog')).toBeVisible();
+    await page.locator(`${WORD_WRAP_TOGGLE} .toggle-slider`).click();
+    await page.locator('lv-settings-dialog button:has-text("Done")').click();
+
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+  });
+
+  test('the toolbar button is the same preference as the setting', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).not.toBeChecked();
+    await page.locator('lv-settings-dialog button:has-text("Done")').click();
+
+    await page.locator('lv-diff-view [title="Toggle word wrap"]').click();
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).toBeChecked();
+  });
+
+  test('wrapping survives closing and reopening the diff', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await page.locator('lv-diff-view [title="Toggle word wrap"]').click();
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+
+    await graph.closeDiff();
+    await expect(graph.diffOverlay).not.toBeVisible();
+
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+  });
+});
