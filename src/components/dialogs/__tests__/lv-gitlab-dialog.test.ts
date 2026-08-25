@@ -294,6 +294,96 @@ describe('lv-gitlab-dialog', () => {
       );
     });
 
+    // Regression: the dialog outlives the repository, so a detect_gitlab_repo
+    // issued for the repository whose tab has since closed can resolve
+    // afterwards. Its result must be dropped, or the repo header -- and the
+    // repo-backed loaders behind it -- come back for a repository that is gone.
+    it('ignores a repository detection that resolves after the repository closed', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Hold the detection open so it can be made to land late.
+      const baseInvoke = mockInvoke;
+      const pendingDetects: Array<() => void> = [];
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_gitlab_repo') {
+          await new Promise<void>((resolve) => pendingDetects.push(resolve));
+        }
+        return baseInvoke(command, args);
+      };
+
+      el.repositoryPath = '/mock/repo';
+      await waitForLoad(el);
+      expect(pendingDetects.length, 'detection in flight').to.equal(1);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header while the detection is still in flight'
+      ).to.equal(0);
+
+      // Last repository tab closed while the detection was still in flight.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      pendingDetects.forEach((resolve) => resolve());
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header restored by a detection for the closed repository'
+      ).to.equal(0);
+    });
+
+    // Regression: a create-* draft is scoped to the repository it was composed
+    // against, but the create handlers guard only on the detected repo. Leaving
+    // the draft on screen when the dialog is repointed would submit it into the
+    // new repository.
+    it('drops the merge request draft when the repository changes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const listTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Merge Requests'
+      ) as HTMLButtonElement;
+      listTab.click();
+      await waitForLoad(el);
+
+      const newButton = Array.from(el.shadowRoot!.querySelectorAll('button.btn')).find(
+        (b) => b.textContent?.trim() === '+ New MR'
+      ) as HTMLButtonElement;
+      expect(newButton === undefined, 'missing + New MR button').to.be.false;
+      newButton.click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector(
+        'input[placeholder="Merge request title"]'
+      ) as HTMLInputElement | null;
+      expect(titleInput === null, 'missing draft title input').to.be.false;
+      titleInput!.value = 'Draft for the first repository';
+      titleInput!.dispatchEvent(new Event('input'));
+      await waitForLoad(el);
+
+      // The user switches to a different repository with the draft on screen.
+      el.repositoryPath = '/mock/other-repo';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('input[placeholder="Merge request title"]').length,
+        'submittable draft form after the repository changed'
+      ).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).createMrTitle, 'retained draft title').to.equal('');
+    });
+
     it('shows account selector when accounts exist', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);
 
