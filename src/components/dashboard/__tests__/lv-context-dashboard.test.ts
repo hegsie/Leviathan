@@ -670,6 +670,131 @@ describe('lv-context-dashboard', () => {
     });
   });
 
+  // ── Backend parity for account/profile resolution ──────────────────────────
+  describe('repository account resolution (backend parity)', () => {
+    // getRelevantAccount()/getProfileAssignmentSource() must predict what the
+    // Rust `get_repository_preferred_account` / `url_matches_pattern` resolve,
+    // otherwise the dashboard advertises one account while PR and pipeline
+    // calls use another.
+
+    it('falls back to the global default account, not the first account of the type', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'First GitHub' }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+
+    it('uses the global default when no profile is active', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'First GitHub' }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: null,
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+
+    it('matches an account whose trailing /* pattern spans nested path segments', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'Global GitHub', isDefault: true }),
+          makeAccount({
+            id: 'account-2',
+            name: 'Work-org GitHub',
+            urlPatterns: ['github.com/work-org/*'],
+          }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Work-org GitHub');
+    });
+
+    it('labels the profile as matched by URL pattern for a nested remote', async () => {
+      setupStores({
+        profile: makeProfile({ urlPatterns: ['github.com/work-org/*'], isDefault: false }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const profileCard = el.shadowRoot!.querySelector('lv-profile-card');
+      expect(profileCard, 'profile card rendered').to.not.be.null;
+      const source = profileCard!.shadowRoot!.querySelector('.assignment-source');
+      expect(source!.textContent).to.include('Matched by URL pattern');
+    });
+
+    it('shows the connect card when no account of the detected provider exists', async () => {
+      setupStores({
+        accounts: [makeAccount({ id: 'gl-1', integrationType: 'gitlab', isDefault: true })],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/user/repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('lv-integration-card')).to.be.null;
+      const cardTitle = el.shadowRoot!.querySelector('.configure-card-title');
+      expect(cardTitle!.textContent).to.include('GitHub not connected');
+    });
+
+    it('does not let a non-matching pattern account hijack resolution', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({
+            id: 'account-1',
+            name: 'Other-host GitHub',
+            urlPatterns: ['gitlab.com/work-org/*'],
+          }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+  });
+
   // ── Profile-switch refresh + confirmation ──────────────────────────────────
   // Applying a profile rewrites the repo's local git identity/signing config,
   // so the switch must refresh listeners (the commit panel re-reads the author
