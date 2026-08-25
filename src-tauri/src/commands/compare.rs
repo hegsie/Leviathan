@@ -461,6 +461,48 @@ mod tests {
         assert_eq!(comparison.behind, 0);
     }
 
+    /// Two refs with no merge base must FAIL rather than report a bogus
+    /// zero/zero: the comparison dialog renders this message verbatim, so a
+    /// silent success here would show "0 ahead, 0 behind" for two histories
+    /// that share nothing at all.
+    #[tokio::test]
+    async fn test_compare_branches_unrelated_histories() {
+        let repo = TestRepo::with_initial_commit();
+        let main_branch = repo.current_branch();
+
+        // A parentless commit in the same repository — an orphan branch.
+        let git = repo.repo();
+        let tree_oid = git.index().unwrap().write_tree().unwrap();
+        let tree = git.find_tree(tree_oid).unwrap();
+        let sig = git.signature().unwrap();
+        let orphan = git
+            .commit(
+                Some("refs/heads/orphan"),
+                &sig,
+                &sig,
+                "Orphan root",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        assert_ne!(orphan, repo.head_oid());
+
+        let result = compare_branches(
+            repo.path_str(),
+            main_branch,
+            "orphan".to_string(),
+            false,
+            false,
+        )
+        .await;
+
+        let err = result.expect_err("unrelated histories have no merge base");
+        assert!(
+            err.to_string().contains("No common ancestor"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_compare_branches_invalid_ref() {
         let repo = TestRepo::with_initial_commit();
