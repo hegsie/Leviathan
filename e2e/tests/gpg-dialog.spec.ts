@@ -28,6 +28,18 @@ const ED25519 = {
   publicKey: 'ssh-ed25519 AAAA me@example.com',
 };
 
+// get_ssh_keys lists a private key with a known name even when its .pub file
+// is missing, so publicPath names a file that does not exist.
+const ORPHAN = {
+  name: 'id_ecdsa',
+  path: '/home/u/.ssh/id_ecdsa',
+  publicPath: '/home/u/.ssh/id_ecdsa.pub',
+  keyType: 'unknown',
+  fingerprint: null,
+  comment: null,
+  publicKey: null,
+};
+
 const SSH_CONFIG = {
   gpgAvailable: true,
   gpgVersion: 'gpg (GnuPG) 2.2.27',
@@ -86,6 +98,31 @@ test.describe('GPG Dialog - SSH signing', () => {
     await expect(
       page.locator('lv-gpg-dialog .dialog-footer.wizard .btn-secondary')
     ).toHaveText('Refresh');
+  });
+
+  test('a key with no public key file is not offered as a signing choice', async ({ page }) => {
+    // Selecting it would write a nonexistent .pub path into user.signingkey and
+    // report success, while git then fails every signed commit.
+    await startCommandCaptureWithMocks(page, {
+      get_gpg_config: SSH_CONFIG,
+      get_gpg_keys: [],
+      get_ssh_keys: [ED25519, ORPHAN],
+      set_signing_key: null,
+    });
+    await openGpgDialog(page);
+
+    const item = page.locator('lv-gpg-dialog .key-item');
+    await expect(item).toHaveCount(1);
+    await expect(item).toContainText('me@example.com');
+    await expect(page.locator('lv-gpg-dialog .unusable-keys')).toContainText(
+      'id_ecdsa cannot sign'
+    );
+
+    await item.click();
+
+    const calls = await findCommand(page, 'set_signing_key');
+    expect(calls).toHaveLength(1);
+    expect((calls[0].args as { keyId: string }).keyId).toBe('/home/u/.ssh/id_ed25519.pub');
   });
 
   test('a failing SSH key listing surfaces an error', async ({ page }) => {

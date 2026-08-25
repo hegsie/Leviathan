@@ -1278,34 +1278,56 @@ export class LvGpgDialog extends LitElement {
    * The ~/.ssh key picker, shared by the setup wizard and the normal view.
    * Selecting writes the PUBLIC key path into user.signingkey, which is what
    * git (and the backend's usability check) accepts for SSH signing.
+   *
+   * get_ssh_keys also lists a private key whose .pub file is missing (a known
+   * key name is enough), and its publicPath then points at a file that does
+   * not exist. Offering such a key would write that path into user.signingkey
+   * and report success, while ssh_key_is_usable() rejects it and git fails
+   * every signed commit with "failed to read ssh signing key" — so only keys
+   * with readable public-key data are selectable.
    */
   private renderSshKeyList() {
-    if (this.sshKeys.length === 0) {
-      return html`
-        <div class="empty-text">
-          No SSH keys found in ~/.ssh. Generate one, then refresh:
-        </div>
-        ${this.renderCommandBlock('ssh-keygen -t ed25519 -C "your@email.com"')}
-      `;
-    }
+    const usable = this.sshKeys.filter((key) => key.publicKey);
+    const unusable = this.sshKeys.filter((key) => !key.publicKey);
     return html`
-      <div class="key-list">
-        ${this.sshKeys.map(
-          (key) => html`
-            <div
-              class="key-item ${this.isSshKeySelected(key) ? 'selected' : ''}"
-              @click=${() => this.handleSelectKey(key.publicPath)}
-            >
-              <div class="key-radio"></div>
-              <div class="key-info">
-                <div class="key-user">${key.comment || key.name}</div>
-                <div class="key-details">${key.keyType} / ${key.fingerprint || key.publicPath}</div>
-              </div>
-              <span class="key-badge">${key.name}</span>
+      ${usable.length === 0
+        ? html`
+            <div class="empty-text">
+              No usable SSH keys found in ~/.ssh. Generate one, then refresh:
             </div>
+            ${this.renderCommandBlock('ssh-keygen -t ed25519 -C "your@email.com"')}
           `
-        )}
-      </div>
+        : html`
+            <div class="key-list">
+              ${usable.map(
+                (key) => html`
+                  <div
+                    class="key-item ${this.isSshKeySelected(key) ? 'selected' : ''}"
+                    @click=${() => this.handleSelectKey(key.publicPath)}
+                  >
+                    <div class="key-radio"></div>
+                    <div class="key-info">
+                      <div class="key-user">${key.comment || key.name}</div>
+                      <div class="key-details">${key.keyType} / ${key.fingerprint || key.publicPath}</div>
+                    </div>
+                    <span class="key-badge">${key.name}</span>
+                  </div>
+                `
+              )}
+            </div>
+          `}
+      ${unusable.length === 0
+        ? nothing
+        : html`
+            <div class="empty-text unusable-keys">
+              ${unusable.map((key) => key.name).join(', ')} cannot sign: no
+              public key file in ~/.ssh. Recreate it from the private key, then
+              refresh:
+            </div>
+            ${this.renderCommandBlock(
+              `ssh-keygen -y -f ${unusable[0].path} > ${unusable[0].publicPath}`
+            )}
+          `}
     `;
   }
 

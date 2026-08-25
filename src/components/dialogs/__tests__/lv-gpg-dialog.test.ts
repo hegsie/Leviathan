@@ -257,6 +257,18 @@ describe('lv-gpg-dialog SSH signing key picker', () => {
     keyType: 'ssh-rsa',
     fingerprint: 'SHA256:def',
     comment: null,
+    publicKey: 'ssh-rsa AAAA',
+  };
+  // get_ssh_keys lists a private key with a known name even when its .pub file
+  // is missing: publicPath then names a file that does not exist, so nothing
+  // can sign with it.
+  const ORPHAN: SshKey = {
+    name: 'id_ecdsa',
+    path: '/home/u/.ssh/id_ecdsa',
+    publicPath: '/home/u/.ssh/id_ecdsa.pub',
+    keyType: 'unknown',
+    fingerprint: null,
+    comment: null,
     publicKey: null,
   };
 
@@ -378,6 +390,48 @@ describe('lv-gpg-dialog SSH signing key picker', () => {
       '.dialog-footer.wizard .btn-primary',
     ) as HTMLButtonElement;
     expect(complete.disabled, 'nothing to complete until a key is picked').to.equal(true);
+  });
+
+  it('does not offer a key whose public key file is missing', async () => {
+    // Writing that nonexistent .pub path into user.signingkey reports success
+    // while ssh_key_is_usable() rejects it and every signed commit then fails
+    // with "failed to read ssh signing key".
+    configByRepo.set(REPO, makeConfig({
+      gpgFormat: 'ssh',
+      gpgAvailable: true,
+      gpgVersion: 'gpg (GnuPG) 2.2.27',
+      signingKey: null,
+    }));
+    sshKeys = [ED25519, ORPHAN];
+
+    const el = await open();
+
+    const items = el.shadowRoot!.querySelectorAll('.key-item');
+    expect(items, 'only the key that can actually sign is offered').to.have.length(1);
+    expect(items[0].textContent).to.contain('me@example.com');
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text, 'the skipped key is explained, not silently dropped')
+      .to.contain('id_ecdsa cannot sign');
+    expect(text, 'and the way to recover it is offered')
+      .to.contain('ssh-keygen -y -f /home/u/.ssh/id_ecdsa > /home/u/.ssh/id_ecdsa.pub');
+  });
+
+  it('an SSH signer whose only key has no public key file gets ssh-keygen guidance', async () => {
+    configByRepo.set(REPO, makeConfig({ gpgFormat: 'ssh', signingKey: null }));
+    sshKeys = [ORPHAN];
+
+    const el = await open();
+
+    expect(
+      el.shadowRoot!.querySelectorAll('.key-item'),
+      'nothing selectable when no key can sign',
+    ).to.have.length(0);
+    expect(el.shadowRoot!.textContent ?? '').to.contain('No usable SSH keys found');
+    const complete = el.shadowRoot!.querySelector(
+      '.dialog-footer.wizard .btn-primary',
+    ) as HTMLButtonElement;
+    expect(complete.disabled, 'nothing to complete until a usable key exists').to.equal(true);
+    expect(invoked.some((c) => c.command === 'set_signing_key')).to.equal(false);
   });
 
   it('a failing get_ssh_keys is reported, not silently empty', async () => {
