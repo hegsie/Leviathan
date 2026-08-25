@@ -407,6 +407,43 @@ test.describe('Push Operation', () => {
     await expect(pushBadge).toBeVisible();
     await expect(pushBadge).toHaveText('3');
   });
+
+  test('push refused while the repository is busy says so and keeps the badge', async ({ page }) => {
+    app = new AppPage(page);
+    await setupOpenRepository(page, withAheadBehind(3, 0));
+
+    const pushBadge = page.locator('.badge.push');
+    await expect(pushBadge).toBeVisible();
+    await expect(pushBadge).toHaveText('3');
+
+    // Exactly what the backend returns when an earlier push TIMED OUT and its
+    // blocking task is still running: the frontend's own push lock was
+    // released on that early return, so the retry reaches IPC and only the
+    // backend registry can refuse it.
+    await injectCommandError(
+      page,
+      'push',
+      'A push is already running for this repository. Wait for it to finish and try again — an operation that timed out can still be finishing in the background.'
+    );
+
+    const pushButton = page.getByRole('button', { name: /Push/i });
+    await pushButton.click();
+
+    const toast = page.locator('.toast');
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toHaveClass(/error/);
+    await expect(toast).toContainText(/already running for this repository/i);
+    // NOT rewritten by the timeout rule into "increase the timeout in
+    // Settings", which sends the user to a setting that cannot help here.
+    await expect(toast).not.toContainText(/increase the timeout/i);
+    await expect(toast.getByRole('button', { name: 'Open Settings' })).toHaveCount(0);
+
+    // Nothing was pushed, so the ahead badge must survive, and the button must
+    // stay usable for the retry the message asks for.
+    await expect(pushBadge).toBeVisible();
+    await expect(pushBadge).toHaveText('3');
+    await expect(pushButton).toBeEnabled();
+  });
 });
 
 // ============================================================================
