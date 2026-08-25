@@ -116,9 +116,8 @@ describe('lv-file-history', () => {
   describe('restore this version', () => {
     const RESTORE_LABEL = /restore this version/i;
 
-    async function renderWithCommits(): Promise<LvFileHistory> {
-      mockInvoke = async (command: string) =>
-        command === 'get_file_history' ? [mockCommit] : null;
+    async function renderWithCommits(commits: Commit[] = [mockCommit]): Promise<LvFileHistory> {
+      mockInvoke = async (command: string) => (command === 'get_file_history' ? commits : null);
       const el = await renderHistory();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).loadHistory();
@@ -181,6 +180,32 @@ describe('lv-file-history', () => {
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'error' && /not found in commit/.test(t.message))).to.be
         .true;
+    });
+
+    it('restores a pre-rename commit under the path the file had then', async () => {
+      // The panel loads with follow=true, so rows from before a rename hold the
+      // file under its OLD name — the current name is not in those trees at
+      // all, and restoring it could only fail.
+      const renamed: Commit = { ...mockCommit, path: 'src/old-name.ts' };
+      const el = await renderWithCommits([renamed]);
+
+      const items = await openMenu(el);
+      items.find((i) => RESTORE_LABEL.test(i.textContent ?? ''))!.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      const calls = restoreCalls();
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].args).to.deep.equal({
+        path: REPO_PATH,
+        filePath: 'src/old-name.ts',
+        commit: renamed.oid,
+      });
+      expect(
+        uiStore
+          .getState()
+          .toasts.some((t) => t.type === 'success' && t.message.includes('src/old-name.ts'))
+      ).to.be.true;
     });
 
     it('does nothing when the confirm is declined', async () => {

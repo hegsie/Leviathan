@@ -1644,7 +1644,14 @@ pub async fn get_file_history(
         }
 
         if file_modified {
-            commits.push(Commit::from_git2(&commit));
+            // current_path is still the name the file had IN THIS COMMIT — the
+            // rename is only followed backwards below. Report it, because a
+            // caller that acts on a pre-rename row (restoring the file to that
+            // version) must use the historical name: the file's CURRENT name is
+            // not in that commit's tree at all.
+            let mut entry = Commit::from_git2(&commit);
+            entry.path = Some(current_path.clone());
+            commits.push(entry);
 
             // Follow the rename backwards
             if let Some(old_path) = renamed_from {
@@ -1762,6 +1769,55 @@ mod tests {
         );
         assert!(summaries.iter().any(|s| s == "Rename it"));
         assert!(summaries.iter().any(|s| s == "Edit after rename"));
+    }
+
+    /// Every row must carry the path the file had AT that commit.
+    ///
+    /// Without it a caller acting on a pre-rename row — restoring the file to
+    /// that version — passes the file's CURRENT name, which is not in that
+    /// commit's tree at all, so the action can only fail.
+    #[tokio::test]
+    async fn test_get_file_history_reports_the_path_at_each_commit() {
+        let repo = TestRepo::with_initial_commit();
+
+        commit_file_at(&repo, "Add original", "old-name.txt", "line one\n", 1_000);
+        commit_rename_at(&repo, "old-name.txt", "new-name.txt", "Rename it", 2_000);
+        commit_file_at(
+            &repo,
+            "Edit after rename",
+            "new-name.txt",
+            "line one\nline two\n",
+            3_000,
+        );
+
+        let history = get_file_history(
+            repo.path_str(),
+            "new-name.txt".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let path_of = |summary: &str| {
+            history
+                .iter()
+                .find(|c| c.summary == summary)
+                .unwrap_or_else(|| panic!("{} missing from history", summary))
+                .path
+                .clone()
+        };
+
+        assert_eq!(
+            path_of("Edit after rename"),
+            Some("new-name.txt".to_string())
+        );
+        assert_eq!(path_of("Rename it"), Some("new-name.txt".to_string()));
+        assert_eq!(
+            path_of("Add original"),
+            Some("old-name.txt".to_string()),
+            "a commit from before the rename holds the file under its OLD name"
+        );
     }
 
     /// With following OFF, the history stops at the rename — as asked.

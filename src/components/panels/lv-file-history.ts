@@ -405,12 +405,22 @@ export class LvFileHistory extends LitElement {
    * the row says which one that is. The backend's "File '<path>' not found in
    * commit <oid>" comes back through the helper as an error toast, which is
    * the honest outcome.
+   *
+   * `commit.path` — not `this.filePath` — is the path to restore: we load with
+   * follow=true, so every commit from before a rename holds the file under its
+   * OLD name and its tree does not contain the current one. Falls back to
+   * this.filePath for a backend that did not report a path.
    */
   private async handleContextRestoreFile(): Promise<void> {
     const commit = this.contextMenu.commit;
     if (!commit || !this.repositoryPath || !this.filePath) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    await restoreFileFromCommit(this.repositoryPath, this.filePath, commit.oid, commit.shortId);
+    await restoreFileFromCommit(
+      this.repositoryPath,
+      commit.path ?? this.filePath,
+      commit.oid,
+      commit.shortId
+    );
   }
 
   private async handleContextCopyHash(): Promise<void> {

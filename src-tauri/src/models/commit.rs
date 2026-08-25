@@ -15,6 +15,13 @@ pub struct Commit {
     pub committer: Signature,
     pub parent_ids: Vec<String>,
     pub timestamp: i64,
+    /// The path the subject file had AT this commit, set only by the
+    /// path-scoped walks (get_file_history). Following a rename means the
+    /// commits before it hold the file under its OLD name, so a caller acting
+    /// on one — restoring it, diffing it — has to use this rather than the
+    /// file's current name. `None` on every non-path-scoped commit list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Git signature (author/committer)
@@ -67,6 +74,7 @@ impl Commit {
                 .when()
                 .seconds()
                 .max(commit.committer().when().seconds()),
+            path: None,
         }
     }
 }
