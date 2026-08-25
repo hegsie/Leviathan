@@ -1108,7 +1108,8 @@ describe('app-shell destructive guards', () => {
       // the lock held, the ONLY enabled items may be the read-only ones. A new
       // mutating button that forgets the binding fails here without anyone
       // having to remember to add it to a list.
-      const READ_ONLY = ['create tag', 'create branch'];
+      // Describe only reads: it runs `git describe` and shows the answer.
+      const READ_ONLY = ['create tag', 'create branch', 'describe this commit'];
       const el = shellOnRepo();
       document.body.appendChild(el);
       try {

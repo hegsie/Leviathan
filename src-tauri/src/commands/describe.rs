@@ -79,6 +79,21 @@ fn parse_describe_output(output: &str) -> DescribeResult {
     }
 }
 
+/// Whether a failed `git describe` failed only because nothing names the commit.
+///
+/// git words this case three ways depending on which refs exist and which
+/// flags are in play:
+///   "fatal: No names found, cannot describe anything."
+///   "fatal: No annotated tags can describe '<oid>'."
+///   "fatal: No tags can describe '<oid>'."
+/// Every other failure (bad revision, unreadable repository) is a real fault.
+/// The command below runs under LC_ALL=C so these stay in English on a
+/// localized machine.
+fn is_no_names_found(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("no names found") || lower.contains("can describe")
+}
+
 /// Describe a commit using tags
 ///
 /// Returns the most recent tag reachable from a commit, with additional
@@ -106,6 +121,10 @@ pub async fn describe(
     // Build the git describe command
     let mut cmd = Command::new("git");
     cmd.current_dir(&path);
+    // Pinned to the C locale so the "nothing tags this commit" failure below
+    // is recognizable by its wording on a machine with git's translations
+    // installed — that case is an empty state in the UI, not an error.
+    cmd.env("LC_ALL", "C");
     cmd.arg("describe");
 
     // Add flags based on options
@@ -153,9 +172,18 @@ pub async fn describe(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        // A commit with no tag above it is the normal state of every commit in
+        // a repository nobody has tagged yet, so it is reported separately
+        // from the failures that mean the request itself was wrong.
+        if is_no_names_found(stderr) {
+            return Err(LeviathanError::NoTagsReachable(
+                commitish.unwrap_or_else(|| "HEAD".to_string()),
+            ));
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "git describe failed: {}",
-            stderr.trim()
+            stderr
         )));
     }
 
@@ -243,8 +271,81 @@ mod tests {
         )
         .await;
 
-        // Should fail because there are no tags
-        assert!(result.is_err());
+        // Nothing tags this commit. That is reported as its own error so the
+        // UI can show an empty state rather than a failure.
+        assert!(matches!(
+            result,
+            Err(LeviathanError::NoTagsReachable(ref target)) if target == "HEAD"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_describe_no_tags_names_the_commit_it_was_asked_about() {
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid().to_string();
+
+        let result = describe(
+            repo.path_str(),
+            Some(oid.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(LeviathanError::NoTagsReachable(ref target)) if *target == oid
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_describe_bad_revision_is_not_an_empty_result() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_tag("v1.0.0");
+
+        // A revision that does not resolve is a real fault, not "nothing tags
+        // this commit" — the two must not collapse into the same report.
+        let result = describe(
+            repo.path_str(),
+            Some("no-such-revision".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LeviathanError::OperationFailed(_))));
+    }
+
+    #[test]
+    fn test_is_no_names_found_wordings() {
+        assert!(is_no_names_found(
+            "fatal: No names found, cannot describe anything."
+        ));
+        assert!(is_no_names_found(
+            "fatal: No annotated tags can describe '0123456789abcdef'."
+        ));
+        assert!(is_no_names_found(
+            "fatal: No tags can describe '0123456789abcdef'."
+        ));
+        // Real faults must not be mistaken for the empty case.
+        assert!(!is_no_names_found(
+            "fatal: Not a valid object name no-such-revision"
+        ));
+        assert!(!is_no_names_found(
+            "fatal: not a git repository (or any of the parent directories): .git"
+        ));
     }
 
     #[tokio::test]
@@ -277,7 +378,9 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_lightweight_tag("v0.1.0");
 
-        // Without --tags flag, lightweight tags are not found
+        // Without --tags flag, lightweight tags are not found. git's wording
+        // there ("No annotated tags can describe ...") is still the empty
+        // case, and the UI offers --tags as the way out of it.
         let result = describe(
             repo.path_str(),
             None,
@@ -291,7 +394,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(LeviathanError::NoTagsReachable(_))));
 
         // With --tags flag, lightweight tags are found
         let result = describe(

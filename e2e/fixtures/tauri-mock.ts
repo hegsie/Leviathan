@@ -419,6 +419,21 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'push_tag':
         return null;
 
+      // `git describe` names a commit after the nearest tag below it. The
+      // default answer is built from the seeded tag list so the dialog has
+      // something real to render; specs that need the untagged repository
+      // case override this command with a NO_TAGS_REACHABLE failure.
+      case 'describe': {
+        const describeTag = mocks.tags[0]?.name ?? 'v1.0.0';
+        return {
+          description: `${describeTag}-2-gabc123d`,
+          tag: describeTag,
+          commitsAhead: 2,
+          commitHash: 'abc123d',
+          isDirty: false,
+        };
+      }
+
       // Rewrite commands (cherry-pick, revert, reset, merge, rebase)
       case 'cherry_pick':
       case 'revert':
@@ -909,6 +924,21 @@ export async function setupTauriMocks(
           }
           case 'push_tag':
             return null;
+
+          // `git describe` names a commit after the nearest tag below it. The
+          // default answer is built from the seeded tag list so the dialog has
+          // something real to render; specs that need the untagged repository
+          // case override this command with a NO_TAGS_REACHABLE failure.
+          case 'describe': {
+            const describeTag = state.tags[0]?.name ?? 'v1.0.0';
+            return {
+              description: `${describeTag}-2-gabc123d`,
+              tag: describeTag,
+              commitsAhead: 2,
+              commitHash: 'abc123d',
+              isDirty: false,
+            };
+          }
 
           // === Stash mutations ===
           case 'create_stash': {
