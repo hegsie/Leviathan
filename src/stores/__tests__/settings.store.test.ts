@@ -43,8 +43,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().diffContextLines).to.equal(3);
     });
 
-    it('should have word wrap enabled by default', () => {
-      expect(settingsStore.getState().wordWrap).to.be.true;
+    it('should have word wrap disabled by default', () => {
+      // The diff view's own copy — the only word wrap that ever did anything —
+      // defaulted to off, so this default must match it.
+      expect(settingsStore.getState().wordWrap).to.be.false;
     });
 
     it('should not show whitespace by default', () => {
@@ -376,6 +378,10 @@ describe('settings.store', () => {
 
       expect(migrated.autoStashOnCheckout).to.equal(true);
       expect(migrated.theme, 'other settings survive').to.equal('dark');
+      expect(
+        (migrated as unknown as { wordWrap: boolean }).wordWrap,
+        'the never-read value is dropped'
+      ).to.equal(false);
     });
 
     it('leaves a v2 state alone', () => {
@@ -391,6 +397,76 @@ describe('settings.store', () => {
       };
 
       expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
+    });
+
+    it('a v2 wordWrap is dropped — nothing read it', () => {
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ wordWrap: true, autoStashOnCheckout: false }, 2) as {
+        wordWrap: boolean;
+        autoStashOnCheckout: boolean;
+      };
+
+      expect(migrated.wordWrap, 'a persisted wordWrap was never a user choice').to.equal(false);
+      expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
+    });
+
+    it('leaves a v3 wordWrap alone', () => {
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ wordWrap: true }, 3) as { wordWrap: boolean };
+
+      expect(migrated.wordWrap, 'a v3 value is a real user choice').to.equal(true);
+    });
+  });
+
+  describe('legacy diff word-wrap key', () => {
+    const LEGACY_KEY = 'leviathan-diff-word-wrap';
+
+    const rehydrate = (): void => {
+      (settingsStore as unknown as { persist: { rehydrate: () => void } }).persist.rehydrate();
+    };
+
+    afterEach(() => {
+      localStorage.removeItem(LEGACY_KEY);
+    });
+
+    it('adopts the diff view word-wrap preference and removes the old key', () => {
+      localStorage.setItem(LEGACY_KEY, 'true');
+
+      rehydrate();
+
+      expect(settingsStore.getState().wordWrap, 'the only real choice is carried over').to.be.true;
+      expect(localStorage.getItem(LEGACY_KEY), 'the old key is adopted once, then dropped').to.be
+        .null;
+    });
+
+    it('treats any non-"true" stored value as off and still drops the key', () => {
+      localStorage.setItem(LEGACY_KEY, 'yes');
+
+      rehydrate();
+
+      expect(settingsStore.getState().wordWrap).to.be.false;
+      expect(localStorage.getItem(LEGACY_KEY)).to.be.null;
+    });
+
+    it('leaves the setting alone when there is no old key to adopt', () => {
+      localStorage.removeItem(LEGACY_KEY);
+      settingsStore.getState().setWordWrap(true);
+
+      rehydrate();
+
+      expect(settingsStore.getState().wordWrap, 'a real setting is not clobbered').to.be.true;
     });
   });
 });

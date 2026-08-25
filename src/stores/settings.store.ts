@@ -99,7 +99,9 @@ const defaultSettings = {
   graphRowHeight: 40,
   graphColorScheme: 'default' as GraphColorScheme,
   diffContextLines: 3,
-  wordWrap: true,
+  // Defaults OFF: until it was wired up nothing read this, and the diff view's
+  // own copy — the only word wrap anyone has ever seen — defaulted to off.
+  wordWrap: false,
   showWhitespace: false,
   autoFetchInterval: 0,
   fetchOnFocus: false,
@@ -117,6 +119,26 @@ const defaultSettings = {
   minimizeToTray: false,
   showNativeNotifications: true,
 };
+
+const LEGACY_DIFF_WORD_WRAP_KEY = 'leviathan-diff-word-wrap';
+
+/**
+ * The diff view used to keep word wrap in its own localStorage key, and its
+ * toolbar button was the only control that did anything — `wordWrap` here was
+ * read by nothing. That key holds the user's only real choice on the matter,
+ * so adopt it once, then drop it.
+ */
+function adoptLegacyDiffWordWrap(state: SettingsState): void {
+  let legacy: string | null;
+  try {
+    legacy = localStorage.getItem(LEGACY_DIFF_WORD_WRAP_KEY);
+    if (legacy === null) return;
+    localStorage.removeItem(LEGACY_DIFF_WORD_WRAP_KEY);
+  } catch {
+    return; // Storage unavailable — nothing to carry over.
+  }
+  state.setWordWrap(legacy === 'true');
+}
 
 export const settingsStore = createStore<SettingsState>()(
   persist(
@@ -195,7 +217,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 2,
+      version: 3,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -203,11 +225,16 @@ export const settingsStore = createStore<SettingsState>()(
       // `autoStashOnCheckout: false` over the new default and still got a
       // refused checkout. That `false` was never a user choice: the setting was
       // not read by anything until it was wired up, so every one of those users
-      // has only ever experienced auto-stashing.
+      // has only ever experienced auto-stashing. `wordWrap` has exactly the same
+      // story: it was persisted but never read, so a persisted value is not a
+      // user choice either and is dropped in favour of the diff view's own key.
       migrate: (persisted: unknown, fromVersion: number) => {
-        const state = (persisted ?? {}) as Partial<SettingsState>;
+        const state = { ...((persisted ?? {}) as Partial<SettingsState>) };
         if (fromVersion < 2) {
-          return { ...state, autoStashOnCheckout: true } as SettingsState;
+          state.autoStashOnCheckout = true;
+        }
+        if (fromVersion < 3) {
+          state.wordWrap = false;
         }
         return state as SettingsState;
       },
@@ -217,6 +244,7 @@ export const settingsStore = createStore<SettingsState>()(
           applyFontSize(state.fontSize);
           applyDensity(state.density);
           applyGraphColorScheme(state.graphColorScheme);
+          adoptLegacyDiffWordWrap(state);
         }
       },
     }
