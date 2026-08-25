@@ -1932,7 +1932,7 @@ export class LvGitHubDialog extends LitElement {
               `}
             `}
           </div>
-        ` : html`
+        ` : this.authMethod === 'pat' ? html`
           <!-- PAT Form -->
           <div class="form-group">
             <label>Personal Access Token</label>
@@ -1975,7 +1975,7 @@ export class LvGitHubDialog extends LitElement {
               Connect to GitHub
             </button>
           </div>
-        `}
+        ` : nothing}
 
         ${this.authMethod === 'app' ? html`
           <!-- GitHub App Form -->

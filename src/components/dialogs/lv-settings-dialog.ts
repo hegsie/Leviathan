@@ -796,7 +796,7 @@ export class LvSettingsDialog extends LitElement {
       };
     });
 
-    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
+    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean; loadError?: string }>('model-download-complete', (event) => {
       // Remove from progress tracking and refresh the model list
       const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
       this.downloadProgress = rest;
@@ -806,6 +806,10 @@ export class LvSettingsDialog extends LitElement {
       if (event.payload.loaded) {
         this.loadAiProviders();
         window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+      } else if (event.payload.loaded === false) {
+        // The download succeeded but the engine refused the model - the user
+        // still has no AI, so say so instead of silently refreshing the list.
+        this.aiError = `Loading failed for ${event.payload.modelId}: ${event.payload.loadError ?? 'unknown error'}`;
       }
     });
 

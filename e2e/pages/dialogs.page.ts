@@ -339,6 +339,10 @@ export class GitHubDialogPage extends BaseDialog {
   readonly authMethodToggle: Locator;
   readonly oauthButton: Locator;
   readonly patButton: Locator;
+  readonly appButton: Locator;
+  readonly appIdInput: Locator;
+  readonly appPrivateKeyInput: Locator;
+  readonly connectViaAppButton: Locator;
   readonly oauthSignInButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
@@ -373,6 +377,10 @@ export class GitHubDialogPage extends BaseDialog {
     this.authMethodToggle = page.locator('lv-github-dialog .auth-method-toggle');
     this.oauthButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Sign in with GitHub")');
     this.patButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.appButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("GitHub App")');
+    this.appIdInput = page.locator('lv-github-dialog input[placeholder="123456"]');
+    this.appPrivateKeyInput = page.locator('lv-github-dialog textarea');
+    this.connectViaAppButton = page.locator('lv-github-dialog button:has-text("Connect via GitHub App")');
     this.oauthSignInButton = page.locator('lv-github-dialog .btn-oauth');
     this.oauthSpinner = page.locator('lv-github-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-github-dialog .oauth-status');
@@ -424,6 +432,10 @@ export class GitHubDialogPage extends BaseDialog {
     await this.patButton.click();
   }
 
+  async selectAppMethod(): Promise<void> {
+    await this.appButton.click();
+  }
+
   async isOAuthConfigured(): Promise<boolean> {
     // OAuth is configured if the toggle is visible and the OAuth button is enabled
     const toggleVisible = await this.authMethodToggle.isVisible();
@@ -451,6 +463,9 @@ export class GitLabDialogPage extends BaseDialog {
   readonly issuesTab: Locator;
   readonly pipelinesTab: Locator;
 
+  // Create-issue tab
+  readonly labelChips: Locator;
+
   // Connection tab
   readonly instanceUrlInput: Locator;
   readonly tokenInput: Locator;
@@ -475,6 +490,9 @@ export class GitLabDialogPage extends BaseDialog {
     this.mergeRequestsTab = page.locator('lv-gitlab-dialog .tab:has-text("Merge Requests")');
     this.issuesTab = page.locator('lv-gitlab-dialog .tab:has-text("Issues")');
     this.pipelinesTab = page.locator('lv-gitlab-dialog .tab:has-text("Pipelines")');
+
+    // Create-issue label picker
+    this.labelChips = page.locator('lv-gitlab-dialog .label-chip');
 
     // Connection
     this.instanceUrlInput = page.locator('lv-gitlab-dialog input[type="text"]').first();

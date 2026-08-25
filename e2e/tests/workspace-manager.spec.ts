@@ -109,3 +109,66 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
     await expect(page.locator('lv-toast-container .toast.error, lv-toast-container .toast-error')).toBeVisible({ timeout: 5000 });
   });
 });
+
+
+test.describe('Workspace Manager - repo status chips', () => {
+  test('renders the tracked branch with its ahead/behind counts and labels a detached repo', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_workspaces: [
+        {
+          id: 'ws-1',
+          name: 'Alpha Workspace',
+          description: '',
+          color: '#4fc3f7',
+          repositories: [
+            { path: '/repos/alpha', name: 'alpha' },
+            { path: '/repos/beta', name: 'beta' },
+          ],
+          createdAt: '2024-01-01T00:00:00Z',
+          lastOpened: null,
+        },
+      ],
+      search_workspace: [],
+      validate_workspace_repositories: [
+        {
+          path: '/repos/alpha',
+          name: 'alpha',
+          exists: true,
+          isValidRepo: true,
+          changedFilesCount: 0,
+          currentBranch: 'main',
+          isDetached: false,
+          ahead: 2,
+          behind: 1,
+        },
+        {
+          path: '/repos/beta',
+          name: 'beta',
+          exists: true,
+          isValidRepo: true,
+          changedFilesCount: 0,
+          currentBranch: null,
+          isDetached: true,
+          ahead: 0,
+          behind: 0,
+        },
+      ],
+    });
+
+    // The dialog auto-selects the first workspace on open.
+    await openWorkspaceManager(page);
+
+    const dialog = page.locator('lv-workspace-manager-dialog');
+
+    // The tracked branch keeps its name and its counts...
+    await expect(dialog.locator('.repo-branch').first()).toHaveText('main');
+    await expect(dialog.locator('.repo-ahead-behind').first()).toHaveText('↑2 ↓1');
+
+    // ...and the detached repo says so instead of showing a branch named HEAD,
+    // with no ahead/behind, which is what git reports for it.
+    await expect(dialog.locator('.repo-branch.detached')).toHaveText('detached HEAD');
+    await expect(dialog.locator('.repo-ahead-behind')).toHaveCount(1);
+  });
+});
