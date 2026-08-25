@@ -317,6 +317,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_notes_refs_includes_custom_ref() {
+        // The panel's ref selector is fed by this: a repo that keeps notes in
+        // refs/notes/review must offer that ref, not just the default one.
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        set_note(
+            repo.path_str(),
+            oid.to_string(),
+            "Review note".to_string(),
+            Some("refs/notes/review".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let refs = get_notes_refs(repo.path_str()).await.unwrap();
+        assert!(refs.contains(&"refs/notes/review".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_notes_scoped_to_ref() {
+        // Switching refs in the panel must list that ref's notes only.
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        set_note(
+            repo.path_str(),
+            oid.to_string(),
+            "Default ref".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        set_note(
+            repo.path_str(),
+            oid.to_string(),
+            "Review ref".to_string(),
+            Some("refs/notes/review".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let default_notes = get_notes(repo.path_str(), None).await.unwrap();
+        assert_eq!(default_notes.len(), 1);
+        assert_eq!(default_notes[0].message, "Default ref");
+
+        let review_notes = get_notes(repo.path_str(), Some("refs/notes/review".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(review_notes.len(), 1);
+        assert_eq!(review_notes[0].message, "Review ref");
+    }
+
+    #[tokio::test]
     async fn test_set_note_invalid_commit() {
         let repo = TestRepo::with_initial_commit();
         let result = set_note(
