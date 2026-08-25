@@ -510,6 +510,11 @@ export class LvReflogDialog extends LitElement {
 
     this.loading = true;
     this.entries = [];
+    // This read supersedes any "Show more" still in flight, and that page's
+    // own cleanup is generation-scoped so it will not run. Without clearing
+    // the flag here a reopened session renders its footer button as a
+    // disabled "Loading..." for a request nobody is waiting on any more.
+    this.loadingMore = false;
 
     try {
       const result = await gitService.getReflog(repoPath, requestedLimit);
@@ -576,7 +581,8 @@ export class LvReflogDialog extends LitElement {
         'error',
       );
     } finally {
-      this.loadingMore = false;
+      // A superseded page must not clear the flag the live read raised.
+      if (gen === this.fetchGeneration) this.loadingMore = false;
     }
   }
 

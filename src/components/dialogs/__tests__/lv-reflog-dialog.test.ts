@@ -564,19 +564,23 @@ describe('lv-reflog-dialog', () => {
     describe('superseded reads', () => {
       /** get_reflog reads that are held open until the test releases them. */
       function deferredReflog(total: number): {
-        pending: Array<{ limit: number; release: () => void }>;
+        pending: Array<{ limit: number; release: () => void; fail: () => void }>;
         defer: () => void;
       } {
         const all = pageEntries(total);
-        const pending: Array<{ limit: number; release: () => void }> = [];
+        const pending: Array<{ limit: number; release: () => void; fail: () => void }> = [];
         let deferring = false;
         mockInvoke = async (command, args) => {
           if (command === 'get_reflog') {
             const limit = (args as { limit?: number }).limit ?? total;
             const page = all.slice(0, limit);
             if (!deferring) return page;
-            return new Promise((resolve) => {
-              pending.push({ limit, release: () => resolve(page) });
+            return new Promise((resolve, reject) => {
+              pending.push({
+                limit,
+                release: () => resolve(page),
+                fail: () => reject(new Error('reflog read failed')),
+              });
             });
           }
           if (command === 'plugin:dialog|message') return 'Ok';
@@ -667,6 +671,90 @@ describe('lv-reflog-dialog', () => {
         await el.updateComplete;
 
         expect(showMore(el)!.disabled, 'a read racing the reset is not a live option').to.be.true;
+      });
+
+      // `loadingMore` is per-request state, so a session that never sees its
+      // page land must not hand the flag to the next one: the reopened dialog
+      // came up with its only paging control stuck on a disabled "Loading..."
+      // for a request nobody was waiting on — on the app's recovery surface.
+      it('offers a usable Show more in a session reopened over an abandoned page', async () => {
+        const { pending, defer } = deferredReflog(120);
+        const el = await openDialog();
+
+        defer();
+        showMore(el)!.click();
+        await flush();
+        expect(pending.map((p) => p.limit), 'the 100-entry page is in flight').to.deep.equal([100]);
+
+        // The host closes this dialog by clearing `open` ("Show in graph"),
+        // then the user reopens it — the abandoned page is still out there.
+        el.open = false;
+        await el.updateComplete;
+        el.open = true;
+        await el.updateComplete;
+        await flush();
+        pending[1].release();
+        await settle(el);
+
+        expect(el.shadowRoot!.querySelectorAll('.entry').length).to.equal(50);
+        expect(showMore(el)!.disabled, 'the new session can page').to.be.false;
+        expect(showMore(el)!.textContent?.trim()).to.equal('Show more');
+      });
+
+      it('keeps Show more busy when an abandoned page settles under a live one', async () => {
+        const { pending, defer } = deferredReflog(120);
+        const el = await openDialog();
+
+        defer();
+        showMore(el)!.click();
+        await flush();
+
+        el.open = false;
+        await el.updateComplete;
+        el.open = true;
+        await el.updateComplete;
+        await flush();
+        pending[1].release();
+        await settle(el);
+
+        // A page the user asked for in the NEW session.
+        showMore(el)!.click();
+        await flush();
+        expect(pending.map((p) => p.limit)).to.deep.equal([100, 50, 100]);
+
+        pending[0].release(); // the abandoned page finally settles
+        await settle(el);
+
+        expect(showMore(el)!.disabled, 'the live page is still loading').to.be.true;
+        expect(showMore(el)!.textContent?.trim()).to.equal('Loading...');
+      });
+
+      // The failure half of the same abandonment. invokeCommand turns every
+      // rejection into `{ success: false }`, so a failed page reports through
+      // the SAME branch that publishes a good one — behind the `open` check —
+      // and a session the host has already closed stays quiet.
+      it('does not report a failed page for a session the host already closed', async () => {
+        const { pending, defer } = deferredReflog(120);
+        const el = await openDialog();
+
+        defer();
+        showMore(el)!.click();
+        await flush();
+        expect(pending.map((p) => p.limit)).to.deep.equal([100]);
+
+        // "Show in graph" clears `open` without calling close(), so the fetch
+        // generation is untouched and only `open` marks the session as gone.
+        el.open = false;
+        await el.updateComplete;
+        uiStore.setState({ toasts: [] });
+
+        pending[0].fail();
+        await settle(el);
+
+        expect(
+          uiStore.getState().toasts.some((t) => /load more/i.test(t.message)),
+          'a page nobody is watching must not raise a toast'
+        ).to.be.false;
       });
     });
   });
