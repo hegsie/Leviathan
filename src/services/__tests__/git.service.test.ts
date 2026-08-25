@@ -475,6 +475,13 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     }));
   }
 
+  /** Simulates an account whose keyring entry is gone (revoked, or a fresh machine). */
+  function clearToken(integrationType: string, accountId: string) {
+    const key = `${integrationType}_token_${accountId}`;
+    keyring.delete(key);
+    keyring.delete(`${key}_oauth`);
+  }
+
   interface MockOptions {
     detectGitHub?: unknown;
     detectAdo?: unknown;
@@ -672,5 +679,92 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     await gitFetch({ path: '/repo', silent: true });
 
     expect(fetchToken, 'single-account setups are unaffected').to.equal('personal-tok');
+  });
+
+  it("sends no token when the repo's resolved GitHub account has no keyring entry", async () => {
+    const { work } = setupGitHubAccounts();
+    clearToken('github', 'gh-work');
+    // A legacy single-token credential is present too — it is just as wrong an
+    // identity for this repo as the global default account.
+    keyring.set('github_token', 'legacy-tok');
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'must not authenticate as the personal account').to.be.undefined;
+  });
+
+  it("sends no token when the repo's resolved Azure DevOps account has no keyring entry", async () => {
+    const personal: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'personalorg'),
+      id: 'ado-personal',
+      isDefault: true,
+    };
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'workorg'),
+      id: 'ado-work',
+      isDefault: false,
+    };
+    unifiedProfileStore.getState().setAccounts([personal, work]);
+    keyring.clear();
+    seedToken('azure-devops', 'ado-personal', 'personal-tok');
+    keyring.set('azure_devops_token', 'legacy-tok');
+    installMock({
+      detectAdo: { organization: 'workorg', project: 'p', repository: 'repo', remoteName: 'origin' },
+      remoteUrl: 'https://dev.azure.com/workorg/p/_git/repo',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'must not authenticate as the personal org').to.be.undefined;
+    expect(credWrites, 'and must not clobber the keyring credential either').to.have.length(0);
+  });
+
+  it("sends no token when the repo's resolved GitLab account has no keyring entry", async () => {
+    const personal: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab'),
+      id: 'gl-personal',
+      isDefault: true,
+    };
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab'),
+      id: 'gl-work',
+      isDefault: false,
+    };
+    unifiedProfileStore.getState().setAccounts([personal, work]);
+    keyring.clear();
+    seedToken('gitlab', 'gl-personal', 'gl-personal-tok');
+    keyring.set('gitlab_token', 'legacy-tok');
+    installMock({
+      detectGitLab: { projectId: '1', projectPath: 'acme/app', remoteName: 'origin' },
+      remoteUrl: 'https://gitlab.com/acme/app.git',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'must not authenticate as the personal account').to.be.undefined;
+  });
+
+  it('still uses the legacy single token when the global default has none', async () => {
+    setupGitHubAccounts();
+    clearToken('github', 'gh-personal');
+    keyring.set('github_token', 'legacy-tok');
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: null,
+      preferredAccount: null, // nothing repo-specific → the legacy path still applies
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'legacy setups keep working').to.equal('legacy-tok');
   });
 });

@@ -1202,12 +1202,17 @@ export async function syncAdoGitCredentials(org: string, token: string): Promise
  * the repo's assigned profile default, then the global default — so delegate to
  * it and keep the global default purely as the fallback for when it cannot
  * answer (no accounts configured, or the command failed).
+ *
+ * `repoSpecific` reports which tier answered: `true` when the resolver matched
+ * this repository to an account, `false` when we fell back to the global
+ * default. Callers need the distinction because a repo-specific match rules out
+ * authenticating with any other account's credentials.
  */
 async function resolveRepoAccount(
   repoPath: string,
   integrationType: IntegrationType,
   remoteName: string | undefined,
-): Promise<IntegrationAccount | undefined> {
+): Promise<{ account: IntegrationAccount | undefined; repoSpecific: boolean }> {
   const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
   try {
     // Dynamic import: unified-profile.service.ts statically imports this module,
@@ -1228,13 +1233,13 @@ async function resolveRepoAccount(
       integrationType,
       repoUrl,
     );
-    if (account) return account;
+    if (account) return { account, repoSpecific: true };
   } catch (err) {
     // Must be caught here: letting it reach getRepoToken's outer catch would
     // skip the remaining providers and every legacy fallback below.
     console.error("Failed to resolve the repository's preferred account:", err);
   }
-  return selectDefaultGlobalAccount(integrationType);
+  return { account: selectDefaultGlobalAccount(integrationType), repoSpecific: false };
 }
 
 /**
@@ -1258,10 +1263,18 @@ async function getRepoToken(
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
-      const account = await resolveRepoAccount(repoPath, "github", ghRepoResult.data.remoteName);
+      const { account, repoSpecific } = await resolveRepoAccount(
+        repoPath,
+        "github",
+        ghRepoResult.data.remoteName,
+      );
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
         if (token) return token;
+        // This repo resolves to THIS account, but its keyring entry is gone. Every
+        // fallback below re-resolves the global default, so continuing would push
+        // as a different identity. Fail instead and let the user reconnect it.
+        if (repoSpecific) return undefined;
       }
       // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
@@ -1277,7 +1290,7 @@ async function getRepoToken(
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
-      const account = await resolveRepoAccount(
+      const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         "azure-devops",
         adoRepoResult.data.remoteName,
@@ -1300,6 +1313,9 @@ async function getRepoToken(
           }
           return token;
         }
+        // See the GitHub branch: a repo-specific account with no usable token
+        // must not silently borrow the global default's.
+        if (repoSpecific) return undefined;
       }
       // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
@@ -1315,7 +1331,7 @@ async function getRepoToken(
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
-      const account = await resolveRepoAccount(
+      const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         "gitlab",
         gitlabRepoResult.data.remoteName,
@@ -1323,6 +1339,9 @@ async function getRepoToken(
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
         if (token) return token;
+        // See the GitHub branch: a repo-specific account with no usable token
+        // must not silently borrow the global default's.
+        if (repoSpecific) return undefined;
       }
       // Legacy fallback for GitLab
       const tokenResult = await getGitLabToken();
