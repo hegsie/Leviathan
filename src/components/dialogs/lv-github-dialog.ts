@@ -1605,13 +1605,36 @@ export class LvGitHubDialog extends LitElement {
       const unifiedProfile = await import('../../services/unified-profile.service.ts');
       const { createEmptyIntegrationAccount } = await import('../../types/unified-profile.types.ts');
       const existingAppAccount = this.accounts.find((a) => a.id === accountId);
+      // The backend keeps a single GitHub App configuration (one keyring
+      // entry), so connecting a different App repoints the credential that
+      // every other App account resolves through — those accounts have no
+      // token of their own and fall back to that same config. Supersede them
+      // instead of leaving entries in the selector that silently authenticate
+      // as the App just connected.
+      const supersededAppAccounts = this.accounts.filter(
+        (a) => a.id !== accountId && a.id.startsWith('github-app-'),
+      );
       const appAccount: IntegrationAccount = {
         ...(existingAppAccount ?? createEmptyIntegrationAccount('github')),
         id: accountId,
         name: existingAppAccount?.name || `GitHub App ${this.appId}`,
-        isDefault: existingAppAccount ? existingAppAccount.isDefault : this.accounts.length === 0,
+        isDefault: existingAppAccount
+          ? existingAppAccount.isDefault
+          : supersededAppAccounts.some((a) => a.isDefault) || this.accounts.length === 0,
       };
       await unifiedProfile.saveGlobalAccount(appAccount);
+      for (const superseded of supersededAppAccounts) {
+        try {
+          await unifiedProfileService.deleteGlobalAccount(superseded.id);
+        } catch (supersededErr) {
+          showToast(
+            supersededErr instanceof Error
+              ? `Connected, but the previous GitHub App account could not be removed: ${supersededErr.message}`
+              : 'Connected, but the previous GitHub App account could not be removed',
+            'warning',
+          );
+        }
+      }
       // Keep the selector in sync so the new account is listed and a later
       // store emit cannot reset the selection (the subscription clears
       // selectedAccountId when it is not in this.accounts). Mirrors the

@@ -1216,6 +1216,108 @@ describe('lv-github-dialog', () => {
       expect(pat!.isDefault).to.be.true;
       expect(dialog.selectedAccountId).to.equal('gh-acc-1');
     });
+
+    const deletedAccountIds = (): string[] =>
+      invokeHistory
+        .filter((h) => h.command === 'delete_global_account')
+        .map((h) => (h.args as { accountId: string }).accountId);
+
+    it('connecting a second GitHub App removes the App account it supersedes', async () => {
+      // The backend stores ONE GitHub App configuration, so the previous App
+      // account has no credential of its own left to resolve through.
+      const oldApp = createTestAccount({
+        id: 'github-app-99999',
+        name: 'Old App',
+        integrationType: 'github',
+        isDefault: false,
+      });
+      seedAccounts([mockAccount, oldApp]);
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      expect(savedAccounts().map((a) => a.id)).to.deep.equal(['github-app-12345']);
+      expect(deletedAccountIds(), 'the superseded App account is removed').to.deep.equal([
+        'github-app-99999',
+      ]);
+
+      const remaining = unifiedProfileStore.getState().accounts.map((a) => a.id);
+      expect(remaining).to.not.include('github-app-99999');
+      expect(remaining, 'the PAT account is untouched').to.include('gh-acc-1');
+      expect(
+        (dialog.accounts as IntegrationAccount[]).map((a) => a.id),
+        'the selector no longer offers the superseded App',
+      ).to.not.include('github-app-99999');
+      expect(dialog.selectedAccountId).to.equal('github-app-12345');
+    });
+
+    it('the replacement App account inherits the superseded App account Default flag', async () => {
+      const oldApp = createTestAccount({
+        id: 'github-app-99999',
+        name: 'Old App',
+        integrationType: 'github',
+        isDefault: true,
+      });
+      seedAccounts([oldApp]);
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      const saved = savedAccounts();
+      expect(saved).to.have.lengthOf(1);
+      expect(saved[0].isDefault, 'the github type is not left without a default').to.be.true;
+      expect(selectDefaultGlobalAccount('github')?.id).to.equal('github-app-12345');
+    });
+
+    it('warns but still connects when the superseded App account cannot be removed', async () => {
+      const oldApp = createTestAccount({
+        id: 'github-app-99999',
+        name: 'Old App',
+        integrationType: 'github',
+        isDefault: false,
+      });
+      seedAccounts([mockAccount, oldApp]);
+      appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'delete_global_account') throw new Error('keyring is locked');
+        return previous(command, args);
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      fillAppForm(dialog);
+      await dialog.handleConnectGitHubApp();
+
+      expect(dialog.connectionStatus?.connected, 'the App is still connected').to.be.true;
+      expect(dialog.error, 'a cleanup failure is not a connect failure').to.be.null;
+      const warning = uiStore
+        .getState()
+        .toasts.find((t) => t.type === 'warning' && t.message.includes('keyring is locked'));
+      expect(warning, 'the failed cleanup is surfaced to the user').to.exist;
+    });
   });
 
   describe('load-failure feedback', () => {

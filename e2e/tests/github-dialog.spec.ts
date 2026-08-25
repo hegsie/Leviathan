@@ -402,3 +402,160 @@ test.describe('GitHub Dialog - GitHub App', () => {
     expect(saves).toHaveLength(0);
   });
 });
+
+/**
+ * Superseding a GitHub App connection.
+ *
+ * The backend keeps a single GitHub App configuration, so connecting a second
+ * App repoints the credential the first App's account resolved through. That
+ * account must not stay in the selector pretending to be a separate identity.
+ */
+test.describe('GitHub Dialog - GitHub App replacement', () => {
+  const defaultProfile = {
+    id: 'profile-1',
+    name: 'Default',
+    gitName: 'Test User',
+    gitEmail: 'test@example.com',
+    signingKey: null,
+    urlPatterns: [],
+    isDefault: true,
+    color: '#4f46e5',
+    defaultAccounts: { github: 'gh-acc-1' },
+  };
+
+  const existingGitHubAccount = {
+    id: 'gh-acc-1',
+    name: 'GitHub (testuser)',
+    integrationType: 'github',
+    config: { type: 'github' },
+    color: '#4f46e5',
+    cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+    urlPatterns: [],
+    isDefault: true,
+  };
+
+  const oldAppAccount = {
+    id: 'github-app-999999',
+    name: 'Old App',
+    integrationType: 'github',
+    config: { type: 'github' },
+    color: null,
+    cachedUser: null,
+    urlPatterns: [],
+    isDefault: false,
+  };
+
+  const PEM = '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----';
+
+  test('connecting a different GitHub App drops the account it supersedes', async ({ page }) => {
+    const app = new AppPage(page);
+    const dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [defaultProfile],
+        accounts: [existingGitHubAccount, oldAppAccount],
+        repositoryAssignments: {},
+      },
+      get_integration_accounts: [existingGitHubAccount, oldAppAccount],
+      get_profiles: [defaultProfile],
+      get_active_profile: defaultProfile,
+    });
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    const selector = page.locator('lv-github-dialog lv-account-selector');
+    await expect(selector).toContainText('GitHub (testuser)');
+
+    await startCommandCaptureWithMocks(page, {
+      configure_github_app: { connected: true, user: null, scopes: ['app-installation'] },
+      save_global_account: {
+        id: 'github-app-123456',
+        name: 'GitHub App 123456',
+        integrationType: 'github',
+        config: { type: 'github' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+      delete_global_account: null,
+    });
+
+    await dialogs.github.selectAppMethod();
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await dialogs.github.connectViaApp('123456', PEM, '7890');
+
+    await waitForCommand(page, 'delete_global_account');
+
+    const deletes = await findCommand(page, 'delete_global_account');
+    expect(deletes.map((c) => (c.args as { accountId: string }).accountId)).toEqual([
+      'github-app-999999',
+    ]);
+
+    await expect(page.locator('lv-toast-container .toast.success').first()).toBeVisible({
+      timeout: 5000,
+    });
+
+    // The stale App is gone from the selector; the PAT account and the newly
+    // connected App are both listed.
+    await selector.locator('.selector-btn').click();
+    const dropdown = selector.locator('.dropdown');
+    await expect(dropdown).toBeVisible();
+    await expect(dropdown).toContainText('GitHub App 123456');
+    await expect(dropdown).toContainText('GitHub (testuser)');
+    await expect(dropdown).not.toContainText('Old App');
+  });
+
+  test('warns but stays connected when the superseded App account cannot be removed', async ({
+    page,
+  }) => {
+    const app = new AppPage(page);
+    const dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [defaultProfile],
+        accounts: [existingGitHubAccount, oldAppAccount],
+        repositoryAssignments: {},
+      },
+      get_integration_accounts: [existingGitHubAccount, oldAppAccount],
+      get_profiles: [defaultProfile],
+      get_active_profile: defaultProfile,
+    });
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    await startCommandCaptureWithMocks(page, {
+      configure_github_app: { connected: true, user: null, scopes: ['app-installation'] },
+      save_global_account: {
+        id: 'github-app-123456',
+        name: 'GitHub App 123456',
+        integrationType: 'github',
+        config: { type: 'github' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+    });
+    await injectCommandError(page, 'delete_global_account', 'keyring is locked');
+
+    await dialogs.github.selectAppMethod();
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await dialogs.github.connectViaApp('123456', PEM, '7890');
+
+    await expect(page.locator('lv-toast-container .toast.warning').first()).toBeVisible({
+      timeout: 5000,
+    });
+    // The connection itself still succeeded.
+    await expect(page.locator('lv-toast-container .toast.success').first()).toBeVisible({
+      timeout: 5000,
+    });
+    await expect(page.locator('lv-github-dialog .error-message')).toHaveCount(0);
+  });
+});
