@@ -461,6 +461,9 @@ export class GitLabDialogPage extends BaseDialog {
   readonly issuesTab: Locator;
   readonly pipelinesTab: Locator;
 
+  // Create-issue tab
+  readonly labelChips: Locator;
+
   // Connection tab
   readonly instanceUrlInput: Locator;
   readonly tokenInput: Locator;
@@ -485,6 +488,9 @@ export class GitLabDialogPage extends BaseDialog {
     this.mergeRequestsTab = page.locator('lv-gitlab-dialog .tab:has-text("Merge Requests")');
     this.issuesTab = page.locator('lv-gitlab-dialog .tab:has-text("Issues")');
     this.pipelinesTab = page.locator('lv-gitlab-dialog .tab:has-text("Pipelines")');
+
+    // Create-issue label picker
+    this.labelChips = page.locator('lv-gitlab-dialog .label-chip');
 
     // Connection
     this.instanceUrlInput = page.locator('lv-gitlab-dialog input[type="text"]').first();
