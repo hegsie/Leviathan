@@ -1,6 +1,7 @@
 import { expect } from '@open-wc/testing';
 import type { Shortcut } from '../keyboard.service.ts';
 import { keyboardService } from '../keyboard.service.ts';
+import { pushOverlay, removeOverlay, resetOverlayStack } from '../../utils/overlay-stack.ts';
 
 // Clear localStorage before tests
 const STORAGE_KEY = 'leviathan-keyboard-settings';
@@ -570,6 +571,114 @@ describe('shortcut customization has a single source of truth', () => {
       keyboardService.setVimMode(previousVimMode);
       keyboardService.unregister('test-reset-all-a');
       keyboardService.unregister('test-reset-all-b');
+    }
+  });
+});
+
+describe('modal overlays own the keyboard', () => {
+  // Every shortcut lives on `document`, so a plain `s` behind an open dialog
+  // staged the whole working tree and `u` unstaged it — with the file-status
+  // panel hidden behind the overlay, so nothing visibly happened.
+  afterEach(() => {
+    resetOverlayStack();
+    keyboardService.setEnabled(true);
+  });
+
+  it('does not run a plain-key shortcut while a dialog covers the app, and restores it on close', () => {
+    let fired = 0;
+    keyboardService.register('test-overlay-plain', {
+      key: 'y',
+      description: 'destructive probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    const dialog = {};
+    try {
+      pushOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'no shortcut may run behind an overlay').to.equal(0);
+
+      removeOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'and it works again once the dialog closes').to.equal(1);
+    } finally {
+      keyboardService.unregister('test-overlay-plain');
+    }
+  });
+
+  it('keeps blocking while a dialog remains under the one that closed', () => {
+    let fired = 0;
+    keyboardService.register('test-overlay-nested', {
+      key: 'y',
+      description: 'destructive probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    const dialog = {};
+    const palette = {};
+    try {
+      pushOverlay(dialog);
+      pushOverlay(palette);
+      removeOverlay(palette);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+
+      expect(fired, 'the dialog underneath still covers the app').to.equal(0);
+    } finally {
+      keyboardService.unregister('test-overlay-nested');
+    }
+  });
+
+  it('does not drive vim navigation behind a dialog', () => {
+    let down = 0;
+    keyboardService.setVimMode(true);
+    keyboardService.setVimActions({
+      navigateDown: () => {
+        down++;
+      },
+    });
+
+    const dialog = {};
+    try {
+      pushOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+      expect(down, 'j must not move the graph behind a modal').to.equal(0);
+
+      removeOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+      expect(down, 'and it moves again once the dialog closes').to.equal(1);
+    } finally {
+      keyboardService.setVimMode(false);
+      keyboardService.setVimActions({});
+    }
+  });
+
+  it('still runs Ctrl/Cmd combos while a dialog covers the app', () => {
+    // The guard must not kill Cmd+P, Cmd+, or Ctrl+Enter from inside a dialog:
+    // those are deliberate and unambiguous.
+    let fired = 0;
+    keyboardService.register('test-overlay-mod', {
+      key: 'r',
+      ctrl: true,
+      description: 'mod probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    try {
+      pushOverlay({});
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true }));
+      expect(fired, 'modifier combos stay live behind an overlay').to.equal(1);
+    } finally {
+      keyboardService.unregister('test-overlay-mod');
     }
   });
 });

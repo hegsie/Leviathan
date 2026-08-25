@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository } from '../fixtures/tauri-mock';
-import { startCommandCapture, findCommand, injectCommandError, injectCommandMock, waitForCommand } from '../fixtures/test-helpers';
+import { setupOpenRepository, setupTauriMocks, initializeRepositoryStore, defaultMockData } from '../fixtures/tauri-mock';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandMock, waitForCommand } from '../fixtures/test-helpers';
 
 /**
  * E2E tests for Search Bar
@@ -589,5 +589,88 @@ test.describe('Search Bar - UI Outcome Verification', () => {
 
     // The graph canvas should still be visible (not crashed) even with zero results
     await expect(graphCanvas).toBeVisible();
+  });
+});
+
+
+test.describe('Semantic Search Fallback', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  /**
+   * Apply a semantic-mode filter to the graph canvas.
+   *
+   * NOTE: this deliberately sets the same `.searchFilter` property app-shell's
+   * template binds, instead of typing into the search bar. lv-search-bar's
+   * `search-change` event is `composed`, so app-shell's listener on
+   * <lv-toolbar> receives BOTH the toolbar's re-dispatched `{ filter }` event
+   * and the search bar's own raw-filter event; the raw one arrives last and
+   * leaves app-shell's searchFilter `undefined`. That plumbing defect is out
+   * of scope here — driving the canvas property directly still exercises the
+   * real component and the real graph-notice -> toast wiring.
+   */
+  async function applySemanticFilter(page: import('@playwright/test').Page, query: string): Promise<void> {
+    await page.evaluate((q) => {
+      const shell = document.querySelector('lv-app-shell');
+      const canvas = shell?.shadowRoot?.querySelector('lv-graph-canvas') as unknown as {
+        searchFilter: Record<string, string> | null;
+      } | null;
+      if (!canvas) throw new Error('lv-graph-canvas not found');
+      canvas.searchFilter = {
+        query: q,
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'semantic',
+      };
+    }, query);
+  }
+
+  test('semantic search failure shows keyword results and an unavailable toast', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+    await startCommandCaptureWithMocks(page, {
+      semantic_search: { __error__: 'Embedding model not downloaded' },
+      search_commits: [defaultMockData.commits[0]],
+    });
+
+    await applySemanticFilter(page, 'authentication rework');
+
+    // The failure must be announced, not silently read as "no matches"
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Semantic search is unavailable',
+      })
+    ).toBeVisible();
+
+    // ...and the promised keyword fallback must actually have run
+    const searches = await findCommand(page, 'search_commits');
+    expect(searches.length).toBeGreaterThan(0);
+    expect((searches[0].args as { query?: string }).query).toBe('authentication rework');
+  });
+
+  test('successful semantic search neither falls back nor toasts', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+    await startCommandCaptureWithMocks(page, {
+      semantic_search: [
+        { oid: defaultMockData.commits[0].oid, distance: 0.1, summary: 'Initial commit' },
+      ],
+      search_commits: [],
+    });
+
+    await applySemanticFilter(page, 'authentication rework');
+    await waitForCommand(page, 'semantic_search');
+    // The load finishes with the commit refetch; wait for it so a late
+    // keyword fallback would still be captured before the assertions.
+    await waitForCommand(page, 'get_commit_total');
+
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Semantic search is unavailable',
+      })
+    ).toHaveCount(0);
+    expect(await findCommand(page, 'search_commits')).toHaveLength(0);
   });
 });
