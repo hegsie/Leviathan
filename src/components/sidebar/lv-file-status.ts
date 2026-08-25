@@ -684,11 +684,25 @@ export class LvFileStatus extends LitElement {
     return count;
   }
 
-  /** How many rows a section actually renders (collapsed folders hide theirs) */
-  private visibleFileCount(files: StatusEntry[]): number {
+  /**
+   * How many rows a section actually renders (collapsed folders hide theirs).
+   * `prebuiltTree` lets a caller that has already built this section's tree
+   * hand it over, so one render pass does not build the same tree twice.
+   */
+  private visibleFileCount(
+    files: StatusEntry[],
+    prebuiltTree?: Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >,
+  ): number {
     if (this.viewMode !== "tree") return files.length;
     const visible: StatusEntry[] = [];
-    this.collectVisibleTreeFiles(files, visible);
+    this.collectVisibleFromNode(
+      prebuiltTree ?? this.buildFileTree(files),
+      "",
+      visible,
+    );
     return visible.length;
   }
 
@@ -2221,9 +2235,13 @@ export class LvFileStatus extends LitElement {
     files: StatusEntry[],
     staged: boolean,
     indexOffset: number,
+    prebuiltTree?: Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >,
   ) {
     if (this.viewMode === "tree") {
-      const tree = this.buildFileTree(files);
+      const tree = prebuiltTree ?? this.buildFileTree(files);
       let currentIndex = indexOffset;
 
       return html`
@@ -2416,6 +2434,13 @@ export class LvFileStatus extends LitElement {
       `;
     }
 
+    // The staged tree is needed twice below — once to render the staged rows,
+    // once to count them for the unstaged section's index offset. Build it once.
+    const stagedTree =
+      this.viewMode === "tree"
+        ? this.buildFileTree(this.stagedFiles)
+        : undefined;
+
     return html`
       <!-- Toolbar -->
       <div class="toolbar">
@@ -2497,7 +2522,7 @@ export class LvFileStatus extends LitElement {
         </div>
         ${this.stagedExpanded ? this.renderSelectionActions(true) : nothing}
         ${this.stagedFiles.length > 0 && this.stagedExpanded
-          ? this.renderFileList(this.stagedFiles, true, 0)
+          ? this.renderFileList(this.stagedFiles, true, 0, stagedTree)
           : nothing}
       </div>
 
@@ -2556,7 +2581,9 @@ export class LvFileStatus extends LitElement {
           ? this.renderFileList(
               this.unstagedFiles,
               false,
-              this.stagedExpanded ? this.visibleFileCount(this.stagedFiles) : 0,
+              this.stagedExpanded
+                ? this.visibleFileCount(this.stagedFiles, stagedTree)
+                : 0,
             )
           : nothing}
       </div>

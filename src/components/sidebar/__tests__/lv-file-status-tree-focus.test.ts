@@ -80,6 +80,29 @@ function indices(el: LvFileStatus): (string | null)[] {
   return rows(el).map((r) => r.getAttribute('data-index'));
 }
 
+/**
+ * Wrap the panel's tree builder with a counter. Returns a getter for the number
+ * of buildFileTree calls made since wrapping.
+ */
+function countTreeBuilds(el: LvFileStatus): () => number {
+  const host = el as unknown as {
+    buildFileTree: (files: StatusEntry[]) => unknown;
+  };
+  const original = host.buildFileTree.bind(el);
+  let calls = 0;
+  host.buildFileTree = (files: StatusEntry[]) => {
+    calls += 1;
+    return original(files);
+  };
+  return () => calls;
+}
+
+/** Force one render pass without changing any state. */
+async function rerender(el: LvFileStatus): Promise<void> {
+  el.requestUpdate();
+  await el.updateComplete;
+}
+
 describe('lv-file-status tree view row indices', () => {
   it('a collapsed folder does not inflate the row indices', async () => {
     const el = await renderWith([
@@ -184,5 +207,54 @@ describe('lv-file-status tree view row indices', () => {
       'flat view keeps the same row order',
     ).to.deep.equal(['lib/x.ts', 'src/a.ts', 'docs/readme.md']);
     expect(indices(el), 'flat view numbers 0..n-1').to.deep.equal(['0', '1', '2']);
+  });
+});
+
+describe('lv-file-status tree view render cost', () => {
+  it('builds each section tree once per render', async () => {
+    const el = await renderWith([
+      entry('lib/x.ts', true),
+      entry('lib/y.ts', true),
+      entry('src/a.ts'),
+    ]);
+    await clickViewToggle(el);
+
+    const builds = countTreeBuilds(el);
+    await rerender(el);
+
+    expect(
+      builds(),
+      'one buildFileTree per section — counting the staged rows reuses the tree the staged rows were rendered from',
+    ).to.equal(2);
+  });
+
+  it('builds each section tree once per render with a folder collapsed', async () => {
+    const el = await renderWith([
+      entry('lib/x.ts', true),
+      entry('lib/y.ts', true),
+      entry('top.txt'),
+    ]);
+    await clickViewToggle(el);
+    await collapseFolder(el, 'lib');
+
+    const builds = countTreeBuilds(el);
+    await rerender(el);
+
+    expect(builds(), 'still one buildFileTree per section').to.equal(2);
+    expect(
+      rows(el).map((r) => r.getAttribute('data-index')),
+      'and the reused tree still yields the visible-row offset',
+    ).to.deep.equal(['0']);
+  });
+
+  // No-regression guard: flat view never built a tree and still must not — it
+  // passes with and without the render-cost fix.
+  it('builds no tree at all in flat view', async () => {
+    const el = await renderWith([entry('lib/x.ts', true), entry('src/a.ts')]);
+
+    const builds = countTreeBuilds(el);
+    await rerender(el);
+
+    expect(builds(), 'flat view renders straight from the file arrays').to.equal(0);
   });
 });
