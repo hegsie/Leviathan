@@ -54,6 +54,20 @@ export class LvGitflowPanel extends LitElement {
         color: var(--color-text-muted);
       }
 
+      .load-error {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-md);
+        text-align: center;
+      }
+
+      .load-error-message {
+        font-size: var(--font-size-sm);
+        color: var(--color-error);
+      }
+
       .section {
         margin-bottom: var(--spacing-sm);
       }
@@ -281,6 +295,20 @@ export class LvGitflowPanel extends LitElement {
   @state() private config: GitFlowConfig | null = null;
   @state() private loading = true;
   @state() private error: string | null = null;
+  /**
+   * A config load that FAILED, as opposed to one that reported "not
+   * initialized". The two must render differently: only the second may offer
+   * the Initialize button, which rewrites the repo's gitflow config with the
+   * defaults and would silently discard custom branch names and prefixes.
+   */
+  @state() private configLoadFailed = false;
+  /**
+   * The repo path `config` and the active item lists were loaded from. A
+   * failed load keeps the last good data for the SAME repo, but never carries
+   * another repo's items across — their Finish buttons run against
+   * `repositoryPath`, so that would finish the wrong branch.
+   */
+  private configPath: string | null = null;
   @state() private activeFeatures: ActiveItem[] = [];
   @state() private activeReleases: ActiveItem[] = [];
   @state() private activeHotfixes: ActiveItem[] = [];
@@ -376,24 +404,55 @@ export class LvGitflowPanel extends LitElement {
 
     this.loading = true;
     this.error = null;
+    this.configLoadFailed = false;
 
     try {
       const result = await gitService.getGitFlowConfig(loadedPath);
       if (!isLatest()) return;
       if (result.success && result.data) {
         this.config = result.data;
+        this.configPath = loadedPath;
         if (this.config.initialized) {
           await this.loadActiveItems(loadedPath, isLatest);
         }
       } else {
-        this.config = null;
+        // invokeCommand turns every backend failure into success === false, so
+        // this — not the catch — is the normal failure path. Nulling the config
+        // here rendered the "Git Flow is not initialized" prompt, inviting the
+        // user to re-initialize an already-initialized repo and overwrite its
+        // custom branch names and prefixes with the defaults.
+        this.markConfigLoadFailed(
+          loadedPath,
+          result.error?.message || 'Failed to load Git Flow configuration',
+        );
       }
     } catch (err) {
       console.error('Failed to load git flow config:', err);
-      if (isLatest()) this.error = 'Failed to load Git Flow configuration';
+      if (isLatest()) {
+        this.markConfigLoadFailed(loadedPath, 'Failed to load Git Flow configuration');
+      }
     } finally {
       if (isLatest()) this.loading = false;
     }
+  }
+
+  /**
+   * Record a failed config load: surface `message` and keep whatever this
+   * repo's last successful load produced, so a transient failure (repo lock,
+   * filesystem error) does not present an initialized repo as uninitialized.
+   * A config loaded from a DIFFERENT path is dropped instead of kept — the
+   * Finish buttons bound to its items run against `repositoryPath`.
+   */
+  private markConfigLoadFailed(loadedPath: string, message: string): void {
+    if (this.configPath !== loadedPath) {
+      this.config = null;
+      this.configPath = null;
+      this.activeFeatures = [];
+      this.activeReleases = [];
+      this.activeHotfixes = [];
+    }
+    this.configLoadFailed = true;
+    this.error = message;
   }
 
   private async loadActiveItems(
@@ -1054,6 +1113,23 @@ export class LvGitflowPanel extends LitElement {
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading Git Flow...</div>`;
+    }
+
+    // A load that FAILED is not the same as "not initialized": the Initialize
+    // button would rewrite this repo's gitflow config with the defaults. The
+    // message is the section's own text rather than a dismissible banner, so
+    // dismissing it cannot leave a blank panel.
+    if (this.configLoadFailed && !this.config?.initialized) {
+      return html`
+        <div class="load-error">
+          <div class="load-error-message">
+            ${this.error ?? 'Failed to load Git Flow configuration'}
+          </div>
+          <button class="btn btn-secondary" @click=${() => void this.loadConfig()}>
+            Retry
+          </button>
+        </div>
+      `;
     }
 
     if (!this.config || !this.config.initialized) {

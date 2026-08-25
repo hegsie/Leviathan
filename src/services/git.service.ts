@@ -227,6 +227,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
   Commit,
+  FileHistoryEntry,
   Branch,
   BranchTrackingInfo,
   Remote,
@@ -1897,15 +1898,16 @@ export async function getImageVersions(
 }
 
 /**
- * Get all commits that modified a specific file
+ * Get all commits that modified a specific file, each paired with the path the
+ * file had in that commit (which differs from `filePath` before a rename).
  */
 export async function getFileHistory(
   repoPath: string,
   filePath: string,
   limit?: number,
   followRenames?: boolean,
-): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>("get_file_history", {
+): Promise<CommandResult<FileHistoryEntry[]>> {
+  return invokeCommand<FileHistoryEntry[]>("get_file_history", {
     path: repoPath,
     filePath,
     limit,
