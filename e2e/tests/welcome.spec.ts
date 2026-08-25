@@ -602,3 +602,88 @@ test.describe('Welcome - Extended Tests', () => {
     await expect(app.welcomeScreen).not.toBeVisible({ timeout: 10000 });
   });
 });
+
+test.describe('Welcome Screen - recent repository rows', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    app = new AppPage(page);
+    await app.goto();
+
+    await page.waitForFunction(
+      () => typeof (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined',
+      { timeout: 10000 }
+    );
+
+    // Seed recents through the store: most recent first ⇒ rows are repo1, repo2.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: {
+          getState: () => {
+            clearRecentRepositories: () => void;
+            addRecentRepository: (path: string, name: string) => void;
+          };
+        };
+      };
+      const state = stores.repositoryStore.getState();
+      state.clearRecentRepositories();
+      state.addRecentRepository('/path/to/repo2', 'repo2');
+      state.addRecentRepository('/path/to/repo1', 'repo1');
+    });
+
+    await expect(app.recentItems).toHaveCount(2);
+  });
+
+  test('reveals the per-row remove control on hover', async () => {
+    const remove = app.recentItems.first().locator('.recent-remove');
+    await expect(remove).toHaveCount(1);
+
+    await expect
+      .poll(() => remove.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe('0');
+
+    await app.recentItems.first().hover();
+
+    await expect
+      .poll(() => remove.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe('1');
+  });
+
+  test('has no stray remove buttons sitting between rows', async () => {
+    await expect(app.welcomeScreen.locator('.recent-list > button.recent-remove')).toHaveCount(0);
+  });
+
+  test('removes only the clicked entry and does not open it', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().hover();
+    await app.recentItems.first().locator('.recent-remove').click();
+
+    await expect(app.recentItems).toHaveCount(1);
+    await expect(app.recentItems.first()).toContainText('repo2');
+    expect(await findCommand(page, 'open_repository')).toHaveLength(0);
+  });
+
+  test('opens a recent repository with the keyboard', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().press('Enter');
+
+    await waitForCommand(page, 'open_repository');
+    const openCmds = await findCommand(page, 'open_repository');
+    expect(openCmds.length).toBeGreaterThan(0);
+    expect((openCmds[0].args as { path: string }).path).toBe('/path/to/repo1');
+  });
+
+  test('Enter on the remove button removes the entry without opening it', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().hover();
+    await app.recentItems.first().locator('.recent-remove').press('Enter');
+
+    await expect(app.recentItems).toHaveCount(1);
+    await expect(app.recentItems.first()).toContainText('repo2');
+    expect(await findCommand(page, 'open_repository')).toHaveLength(0);
+  });
+});

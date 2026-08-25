@@ -217,7 +217,8 @@ export class LvWelcome extends LitElement {
         transition: opacity var(--transition-fast);
       }
 
-      .recent-item:hover .recent-remove {
+      .recent-item:hover .recent-remove,
+      .recent-remove:focus-visible {
         opacity: 1;
       }
 
@@ -407,7 +408,29 @@ export class LvWelcome extends LitElement {
     this.openRepoByPath(path);
   }
 
+  private handleRecentKeydown(e: KeyboardEvent, path: string): void {
+    // The nested remove button's keydown bubbles up to the row, so activating
+    // on it unconditionally would open the repository the user just removed.
+    // Only the row itself activates.
+    if (e.target !== e.currentTarget) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.handleRecentClick(path);
+  }
+
   private handleRecentRemove(e: Event, path: string): void {
+    e.stopPropagation();
+    repositoryStore.getState().removeRecentRepository(path);
+  }
+
+  private handleRecentRemoveKeydown(e: KeyboardEvent, path: string): void {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // The global keyboard service claims Enter/Space and cancels them before
+    // the browser turns them into a click, so the button needs to activate
+    // itself. preventDefault also suppresses any native activation, keeping
+    // the removal to exactly one call.
+    e.preventDefault();
     e.stopPropagation();
     repositoryStore.getState().removeRecentRepository(path);
   }
@@ -574,9 +597,13 @@ export class LvWelcome extends LitElement {
                 <div class="recent-list">
                   ${this.recentRepositories.map(
                     (repo) => html`
-                      <button
+                      <div
                         class="recent-item"
+                        role="button"
+                        tabindex="0"
+                        aria-label="Open ${repo.name}"
                         @click=${() => this.handleRecentClick(repo.path)}
+                        @keydown=${(e: KeyboardEvent) => this.handleRecentKeydown(e, repo.path)}
                       >
                         <svg class="recent-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
@@ -587,14 +614,17 @@ export class LvWelcome extends LitElement {
                         </div>
                         <button
                           class="recent-remove"
+                          title="Remove from recent repositories"
+                          aria-label="Remove ${repo.name} from recent repositories"
                           @click=${(e: Event) => this.handleRecentRemove(e, repo.path)}
+                          @keydown=${(e: KeyboardEvent) => this.handleRecentRemoveKeydown(e, repo.path)}
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <line x1="18" y1="6" x2="6" y2="18"></line>
                             <line x1="6" y1="6" x2="18" y2="18"></line>
                           </svg>
                         </button>
-                      </button>
+                      </div>
                     `
                   )}
                 </div>
