@@ -159,6 +159,15 @@ export interface UnifiedProfilesConfigV2 {
 }
 
 /**
+ * Result of saving a profile: the stored profile, plus the repositories assigned
+ * to it whose local git config could not be rewritten with the edited identity.
+ */
+export interface SaveProfileResult {
+  profile: UnifiedProfile;
+  failedRepositories: string[];
+}
+
+/**
  * Current git identity for a repository
  */
 export interface CurrentGitIdentity {

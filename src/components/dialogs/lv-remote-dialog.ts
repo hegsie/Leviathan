@@ -563,17 +563,26 @@ export class LvRemoteDialog extends LitElement {
         return;
       }
 
-      // Update push URL if different
-      if (this.formPushUrl.trim() && this.formPushUrl.trim() !== this.formUrl.trim()) {
+      // An empty push URL — or one equal to the fetch URL — means "push where
+      // you fetch". Send the empty URL through so the backend unsets it;
+      // skipping the write would silently leave the old push destination in
+      // place. Nothing to do when the remote never had a push URL.
+      const pushUrl = this.formPushUrl.trim();
+      const wantsPushUrl = pushUrl !== '' && pushUrl !== this.formUrl.trim();
+      const hadPushUrl = (this.editingRemote.pushUrl ?? '') !== '';
+
+      if (wantsPushUrl || hadPushUrl) {
         result = await gitService.setRemoteUrl(
           this.pinnedRepoPath,
           this.editingRemote.name,
-          this.formPushUrl.trim(),
+          wantsPushUrl ? pushUrl : '',
           true
         );
 
         if (!result.success) {
-          this.error = result.error?.message ?? 'Failed to update push URL';
+          this.error =
+            result.error?.message ??
+            (wantsPushUrl ? 'Failed to update push URL' : 'Failed to clear push URL');
           return;
         }
       }

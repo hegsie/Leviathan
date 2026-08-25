@@ -38,6 +38,20 @@ export function isTopOverlay(owner: object): boolean {
   return stack.length === 0 || stack[stack.length - 1] === owner;
 }
 
+/**
+ * True while any overlay is registered — something is covering the app.
+ *
+ * Global single-key shortcuts consult this. They live on `document` and fired
+ * no matter what was on screen, so a plain `s` behind an open dialog staged
+ * the whole working tree and `u` unstaged it, with the file-status panel
+ * hidden behind the overlay so nothing visibly changed. Unlike `isTopOverlay`,
+ * an empty stack means "nothing is open" — there is no unregistered-overlay
+ * case to be lenient about. See keyboard.service.
+ */
+export function isOverlayOpen(): boolean {
+  return stack.length > 0;
+}
+
 /** Test seam: drop all registrations. */
 export function resetOverlayStack(): void {
   stack.length = 0;

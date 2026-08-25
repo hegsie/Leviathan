@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { setupOpenRepository, setupTauriMocks } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
-import { injectCommandError } from '../fixtures/test-helpers';
+import { injectCommandError, injectCommandMock } from '../fixtures/test-helpers';
 
 test.describe('Settings Dialog', () => {
   let app: AppPage;
@@ -532,5 +532,44 @@ test.describe('Dialogs - Error Scenarios', () => {
 
     // Dialog should still be visible (no crash)
     await expect(dialogs.settings.dialog).toBeVisible();
+  });
+});
+
+test.describe('Command Palette - open file in editor', () => {
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('selecting a file whose editor fails shows an error toast', async ({ page }) => {
+    await injectCommandMock(page, { list_tracked_files: ['src/main.rs'] });
+    await injectCommandError(page, 'open_in_configured_editor', 'Invalid path: src/main.rs');
+
+    await dialogs.commandPalette.open();
+    // File entries only join the results once the query is at least 2 chars.
+    await dialogs.commandPalette.search('main.rs');
+    await dialogs.commandPalette.selectResultByText('src/main.rs');
+
+    // executeSelected closes the palette, so the toast is unobstructed.
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+    await expect(
+      page.locator('lv-toast-container .toast.error .toast-message').first()
+    ).toContainText('src/main.rs');
+  });
+
+  test('selecting a file that opens successfully shows no error toast', async ({ page }) => {
+    await injectCommandMock(page, {
+      list_tracked_files: ['src/main.rs'],
+      open_in_configured_editor: { success: true, message: 'Opened in code' },
+    });
+
+    await dialogs.commandPalette.open();
+    await dialogs.commandPalette.search('main.rs');
+    await dialogs.commandPalette.selectResultByText('src/main.rs');
+
+    await expect(dialogs.commandPalette.palette).not.toBeVisible();
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
   });
 });
