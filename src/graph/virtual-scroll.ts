@@ -35,9 +35,12 @@ export interface VisibleRange {
   startRow: number;
   /** Last visible row (inclusive) */
   endRow: number;
-  /** First visible lane (inclusive) */
+  /**
+   * First visible lane (inclusive). A lane number, NOT a drawn column — the
+   * graph is mirrored, so lane 0 is drawn at the far right.
+   */
   startLane: number;
-  /** Last visible lane (inclusive) */
+  /** Last visible lane (inclusive). A lane number, not a drawn column. */
   endLane: number;
 }
 
@@ -227,15 +230,18 @@ export class VirtualScrollManager {
       Math.ceil((viewport.scrollTop + viewport.height - padding) / rowHeight) + overscanRows
     );
 
-    // Calculate visible lanes
-    const startLane = Math.max(
-      0,
-      Math.floor((viewport.scrollLeft - padding) / laneWidth) - 2
-    );
-    const endLane = Math.min(
-      this.layout.maxLane,
-      Math.ceil((viewport.scrollLeft + viewport.width - padding) / laneWidth) + 2
-    );
+    // Visible drawn columns, measured from the left edge of the graph, +/-2
+    // columns of overscan
+    const startColumn = Math.floor((viewport.scrollLeft - padding) / laneWidth) - 2;
+    const endColumn =
+      Math.ceil((viewport.scrollLeft + viewport.width - padding) / laneWidth) + 2;
+
+    // The graph is mirrored — lane L is DRAWN at column (maxLane - L), lane 0
+    // on the right (see renderEdges/renderNodes in canvas-renderer) — so the
+    // visible columns are converted back to lanes before anything is culled
+    const { maxLane } = this.layout;
+    const startLane = Math.max(0, maxLane - endColumn);
+    const endLane = Math.min(maxLane, maxLane - startColumn);
 
     return { startRow, endRow, startLane, endLane };
   }
@@ -262,7 +268,14 @@ export class VirtualScrollManager {
   }
 
   /**
-   * Get nodes in visible range
+   * Get nodes in visible range.
+   *
+   * Rows are deliberately NOT culled by lane. A node carries its whole row —
+   * avatar, refs, message, stats and time are drawn per-node in fixed columns
+   * to the right of the graph, regardless of the node's lane — so dropping a
+   * node whose dot is scrolled out of view would blank the commit row (and
+   * drop it from the screen-reader mirror). There is exactly one node per row,
+   * so the lane test saved nothing anyway.
    */
   private getVisibleNodes(range: VisibleRange): LayoutNode[] {
     const nodes: LayoutNode[] = [];
@@ -271,9 +284,7 @@ export class VirtualScrollManager {
       const rowNodes = this.nodesByRow.get(row);
       if (rowNodes) {
         for (const node of rowNodes) {
-          if (node.lane >= range.startLane && node.lane <= range.endLane) {
-            nodes.push(node);
-          }
+          nodes.push(node);
         }
       }
     }
