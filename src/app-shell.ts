@@ -4657,12 +4657,31 @@ export class AppShell extends LitElement {
   }
 
   private async createStashOnRepo(repoPath: string): Promise<void> {
+    // Prompted here too, not only in the stash panel: the shortcut, the palette
+    // and the panel button run the same operation and report the same "Stash
+    // created", so a keyboard-started stash must be nameable as well —
+    // otherwise it is an indistinguishable "WIP on <branch>". null is a
+    // dismissal; '' keeps git's default name. The lock is claimed by
+    // runRefExclusive before this runs and released in its finally, so the
+    // cancel path needs no extra bookkeeping.
+    const message = await showPrompt(
+      'Stash Changes',
+      'Message for this stash (optional):',
+      '',
+      'WIP'
+    );
+    if (message === null) return;
+    const stashMessage = message.trim();
+
     // includeUntracked matches the stash-list button (lv-stash-list.ts): both
     // surfaces report an identical "Stash created", so they must stash the same
     // set — otherwise the shortcut silently leaves untracked files behind and
     // the divergence only surfaces during a later checkout or clean.
     const result = await gitService.createStash({
       path: repoPath,
+      // Undefined, not '': the backend only falls back to git's WIP name when
+      // no message is sent (src-tauri/src/commands/stash.rs).
+      message: stashMessage || undefined,
       includeUntracked: true,
     });
     if (result.success) {
