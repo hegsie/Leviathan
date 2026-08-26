@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
@@ -296,5 +297,226 @@ test.describe('GitHub Dialog - Extended Scenarios', () => {
     // Verify the error message is shown in the dialog
     const errorText = page.locator('lv-github-dialog .error-message');
     await expect(errorText).toBeVisible({ timeout: 5000 });
+  });
+});
+
+/**
+ * Pagination: the list tabs used to stop dead at the first page — the backend
+ * never sent a `page` param and no tab offered a way to ask for more, so a
+ * repository with more than one page of pull requests silently showed 30 and
+ * hid the rest.
+ */
+test.describe('GitHub Dialog - Pagination', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  const connectedMocks = {
+    check_github_connection: {
+      connected: true,
+      user: { login: 'octocat', name: 'The Octocat', avatarUrl: '' },
+      scopes: ['repo'],
+    },
+    detect_github_repo: { owner: 'octocat', repo: 'hello-world', remoteName: 'origin' },
+    list_issues: { issues: [], nextPage: null },
+    list_releases: [],
+    get_workflow_runs: [],
+    get_repo_labels: [],
+  };
+
+  /**
+   * `injectCommandMock` only serves static values, so answer `list_pull_requests`
+   * from the requested page here: page 1 is a full page (#1–#30), page 2 the
+   * short tail (#31–#40) — or a failure, for the error path.
+   */
+  async function injectPagedPullRequests(page: Page, failSecondPage = false): Promise<void> {
+    await page.evaluate((shouldFail: boolean) => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+
+      const makePr = (n: number) => ({
+        number: n,
+        title: `Paged PR ${n}`,
+        state: 'open',
+        user: { login: 'octocat', id: 1, avatarUrl: '', name: null, email: null },
+        createdAt: '2025-01-15T10:00:00Z',
+        updatedAt: '2025-01-15T10:00:00Z',
+        mergedAt: null,
+        headRef: `feature/${n}`,
+        headSha: 'abc1234',
+        baseRef: 'main',
+        draft: false,
+        mergeable: true,
+        htmlUrl: `https://github.com/octocat/hello-world/pull/${n}`,
+        additions: 1,
+        deletions: 1,
+        changedFiles: 1,
+      });
+
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command !== 'list_pull_requests') return originalInvoke(command, args);
+
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) captured.push({ command, args });
+
+        const requested = Number((args as { page?: number })?.page ?? 1);
+        if (requested >= 2) {
+          if (shouldFail) throw new Error('Rate limit exceeded');
+          return Array.from({ length: 10 }, (_, i) => makePr(31 + i));
+        }
+        return Array.from({ length: 30 }, (_, i) => makePr(1 + i));
+      };
+    }, failSecondPage);
+  }
+
+  async function injectConcurrentListLoads(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      let releaseSecondPrPage = (): void => {};
+      const secondPrPage = new Promise<void>((resolve) => {
+        releaseSecondPrPage = resolve;
+      });
+      (
+        window as unknown as { __RELEASE_SECOND_PR_PAGE__?: () => void }
+      ).__RELEASE_SECOND_PR_PAGE__ = releaseSecondPrPage;
+
+      const makePr = (n: number) => ({
+        number: n,
+        title: `Paged PR ${n}`,
+        state: 'open',
+        user: { login: 'octocat', id: 1, avatarUrl: '', name: null, email: null },
+        createdAt: '2025-01-15T10:00:00Z',
+        updatedAt: '2025-01-15T10:00:00Z',
+        mergedAt: null,
+        headRef: `feature/${n}`,
+        headSha: 'abc1234',
+        baseRef: 'main',
+        draft: false,
+        mergeable: true,
+        htmlUrl: `https://github.com/octocat/hello-world/pull/${n}`,
+        additions: 1,
+        deletions: 1,
+        changedFiles: 1,
+      });
+      const makeRun = (n: number) => ({
+        id: n,
+        name: 'CI',
+        headBranch: 'main',
+        headSha: 'abc1234',
+        status: 'completed',
+        conclusion: 'success',
+        workflowId: 10,
+        htmlUrl: `https://github.com/octocat/hello-world/actions/runs/${n}`,
+        createdAt: '2025-01-15T10:00:00Z',
+        updatedAt: '2025-01-15T10:05:00Z',
+        runNumber: n,
+        event: 'push',
+      });
+
+      internals.invoke = async (command: string, args?: unknown) => {
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+
+        if (command === 'list_pull_requests') {
+          if (captured) captured.push({ command, args });
+          const requested = Number((args as { page?: number })?.page ?? 1);
+          if (requested === 2) await secondPrPage;
+          return Array.from(
+            { length: requested === 1 ? 30 : 10 },
+            (_, i) => makePr(requested === 1 ? i + 1 : i + 31)
+          );
+        }
+        if (command === 'get_workflow_runs') {
+          if (captured) captured.push({ command, args });
+          return Array.from({ length: 20 }, (_, i) => makeRun(i + 1));
+        }
+        return originalInvoke(command, args);
+      };
+    });
+  }
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('loads the next page of pull requests when Load more is clicked', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, connectedMocks);
+    await injectPagedPullRequests(page);
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+    await dialogs.github.switchToPullRequestsTab();
+
+    const prItems = page.locator('lv-github-dialog .pr-item');
+    await expect(prItems).toHaveCount(30);
+
+    const loadMore = page.locator('lv-github-dialog .load-more button');
+    await expect(loadMore).toBeVisible();
+    await loadMore.click();
+
+    // The second page is appended, not swapped in, and the button disappears
+    // once the short page proves the list has ended.
+    await expect(prItems).toHaveCount(40);
+    await expect(page.locator('lv-github-dialog .pr-item:has-text("Paged PR 40")')).toBeVisible();
+    await expect(loadMore).toHaveCount(0);
+
+    const calls = await findCommand(page, 'list_pull_requests');
+    const pages = calls.map((c) => (c.args as { page?: number })?.page);
+    expect(pages).toContain(2);
+  });
+
+  test('keeps the loaded pull requests and surfaces an error when the next page fails', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, connectedMocks);
+    await injectPagedPullRequests(page, true);
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+    await dialogs.github.switchToPullRequestsTab();
+
+    const prItems = page.locator('lv-github-dialog .pr-item');
+    await expect(prItems).toHaveCount(30);
+
+    const loadMore = page.locator('lv-github-dialog .load-more button');
+    await loadMore.click();
+
+    await expect(page.locator('lv-github-dialog .error-message')).toBeVisible();
+    await expect(page.locator('lv-github-dialog .error-message')).toContainText('Rate limit exceeded');
+    // Nothing already loaded is thrown away, and the button stays for a retry.
+    await expect(prItems).toHaveCount(30);
+    await expect(loadMore).toBeVisible();
+  });
+
+  test('keeps each tab pagination control independent', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, connectedMocks);
+    await injectConcurrentListLoads(page);
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+    await dialogs.github.switchToPullRequestsTab();
+
+    const loadMore = page.locator('lv-github-dialog .load-more button');
+    await expect(loadMore).toHaveText('Load more');
+    await loadMore.click();
+    await expect(loadMore).toHaveText('Loading...');
+
+    await dialogs.github.switchToActionsTab();
+    await expect(page.locator('lv-github-dialog .workflow-item')).toHaveCount(20);
+    await expect(loadMore).toHaveText('Load more');
+    await expect(loadMore).toBeEnabled();
+
+    await page.evaluate(() => {
+      (
+        window as unknown as { __RELEASE_SECOND_PR_PAGE__?: () => void }
+      ).__RELEASE_SECOND_PR_PAGE__?.();
+    });
   });
 });
