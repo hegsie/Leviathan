@@ -83,6 +83,7 @@ function setupStore(): void {
     isValid: true,
     isBare: false,
     headRef: null,
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
