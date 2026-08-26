@@ -127,6 +127,15 @@ interface SplitLine {
   right: DiffLine | null;
   isWhitespaceOnly?: boolean;
   inlineSegments?: InlineDiffSegment[];
+  /**
+   * The hunk this row came from and each side's index into `hunk.lines`.
+   * Split rows are addressed by the same (hunkIndex, lineIndex) keys as the
+   * unified view, so both views select and stage through one code path.
+   */
+  hunk: DiffHunk;
+  hunkIndex: number;
+  leftIndex: number | null;
+  rightIndex: number | null;
 }
 
 interface DiffContextMenuState {
@@ -321,7 +330,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       }
 
       .hunk-separator-split {
-        height: 4px;
+        position: relative;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 0 var(--spacing-sm);
         border-top: 1px solid var(--color-border);
         min-width: max-content;
       }
@@ -699,22 +713,30 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
       /* Line selection mode */
       .line-selection-mode .line.code-addition,
-      .line-selection-mode .line.code-deletion {
+      .line-selection-mode .line.code-deletion,
+      .line-selection-mode .split-line.code-addition,
+      .line-selection-mode .split-line.code-deletion,
+      .line-selection-mode .split-line.code-ws-change {
         cursor: pointer;
       }
 
       .line-selection-mode .line.code-addition:hover,
-      .line-selection-mode .line.code-deletion:hover {
+      .line-selection-mode .line.code-deletion:hover,
+      .line-selection-mode .split-line.code-addition:hover,
+      .line-selection-mode .split-line.code-deletion:hover,
+      .line-selection-mode .split-line.code-ws-change:hover {
         filter: brightness(1.15);
       }
 
-      .line.selected {
+      .line.selected,
+      .split-line.selected {
         outline: 2px solid var(--color-primary);
         outline-offset: -2px;
         position: relative;
       }
 
-      .line.selected::before {
+      .line.selected::before,
+      .split-line.selected::before {
         content: '';
         position: absolute;
         left: 0;
@@ -1506,6 +1528,25 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   /**
+   * Toggle a whole split row's selection. A whitespace-only row is one change
+   * shown on both sides, so its two underlying lines toggle together — the same
+   * rule renderWhitespaceOnlyLine applies in the unified view.
+   */
+  private toggleSplitRowSelection(keys: LineKey[]): void {
+    if (keys.length === 0) return;
+    const newSelected = new Set(this.selectedLines);
+    const isSelected = keys.some((k) => newSelected.has(k));
+    for (const key of keys) {
+      if (isSelected) {
+        newSelected.delete(key);
+      } else {
+        newSelected.add(key);
+      }
+    }
+    this.selectedLines = newSelected;
+  }
+
+  /**
    * Check if a line is selected
    */
   private isLineSelected(hunkIndex: number, lineIndex: number): boolean {
@@ -2109,7 +2150,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     const offsetY = range.startLine * DIFF_LINE_HEIGHT;
 
     return html`
-      ${this.renderSelectionActions()}
       <div class="diff-virtualized-container ${this.lineSelectionMode ? 'line-selection-mode' : ''}"
            @scroll=${this.handleDiffScroll}>
         ${this.flatLines.length > 10000 ? html`
@@ -2331,8 +2371,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
   /**
    * Stage/unstage (and, in line-selection mode, Select All) actions for one hunk.
-   * Shared by the hunk view and the virtualized view so that a large diff keeps
-   * the same staging affordances instead of becoming a read-only dead end.
+   * Shared by the unified, split and virtualized hunk separators so that every
+   * view offers the same staging affordances instead of becoming a read-only
+   * dead end.
    */
   private renderHunkActions(hunk: DiffHunk, hunkIndex: number) {
     // Only working-directory diffs can be staged (not commit diffs).
@@ -2422,15 +2463,19 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private convertToSplitLines(hunks: DiffHunk[]): SplitLine[] {
     const splitLines: SplitLine[] = [];
 
-    for (const hunk of hunks) {
+    hunks.forEach((hunk, hunkIndex) => {
       // Add hunk separator as a special line
       splitLines.push({
         left: { content: hunk.header, origin: 'hunk-header', oldLineNo: null, newLineNo: null },
         right: { content: hunk.header, origin: 'hunk-header', oldLineNo: null, newLineNo: null },
+        hunk,
+        hunkIndex,
+        leftIndex: null,
+        rightIndex: null,
       });
 
-      const deletions: DiffLine[] = [];
-      const additions: DiffLine[] = [];
+      const deletions: Array<{ line: DiffLine; index: number }> = [];
+      const additions: Array<{ line: DiffLine; index: number }> = [];
 
       const flushPending = () => {
         // Check for whitespace-only pairs while flushing
@@ -2438,46 +2483,81 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           const del = deletions.shift() ?? null;
           const add = additions.shift() ?? null;
 
-          if (del && add && isWhitespaceOnlyChange(del.content, add.content)) {
-            const segments = computeInlineWhitespaceDiff(del.content, add.content);
+          if (del && add && isWhitespaceOnlyChange(del.line.content, add.line.content)) {
+            const segments = computeInlineWhitespaceDiff(del.line.content, add.line.content);
             splitLines.push({
-              left: del,
-              right: add,
+              left: del.line,
+              right: add.line,
               isWhitespaceOnly: true,
               inlineSegments: segments,
+              hunk,
+              hunkIndex,
+              leftIndex: del.index,
+              rightIndex: add.index,
             });
           } else {
-            splitLines.push({ left: del, right: add });
+            splitLines.push({
+              left: del?.line ?? null,
+              right: add?.line ?? null,
+              hunk,
+              hunkIndex,
+              leftIndex: del?.index ?? null,
+              rightIndex: add?.index ?? null,
+            });
           }
         }
       };
 
-      for (const line of hunk.lines) {
+      hunk.lines.forEach((line, lineIndex) => {
         if (line.origin === 'deletion') {
-          deletions.push(line);
+          deletions.push({ line, index: lineIndex });
         } else if (line.origin === 'addition') {
-          additions.push(line);
+          additions.push({ line, index: lineIndex });
         } else {
           // Context line - flush any pending deletions/additions first
           flushPending();
           // Add context line to both sides
-          splitLines.push({ left: line, right: line });
+          splitLines.push({
+            left: line,
+            right: line,
+            hunk,
+            hunkIndex,
+            leftIndex: lineIndex,
+            rightIndex: lineIndex,
+          });
         }
-      }
+      });
 
       // Flush remaining deletions/additions
       flushPending();
-    }
+    });
 
     return splitLines;
   }
 
-  private renderSplitLineCell(
-    line: DiffLine | null,
-    side: 'left' | 'right',
-    wsOnly?: boolean,
-    segments?: InlineDiffSegment[],
-  ) {
+  /**
+   * Hunk separator row in split view. Both panes render it so the two sides
+   * stay row-aligned, but the stage actions are rendered on the Modified side
+   * only rather than being duplicated.
+   */
+  private renderSplitHunkSeparator(sl: SplitLine, side: 'left' | 'right') {
+    // Only show stage/unstage button for working directory diffs (not commit diffs)
+    const showStageButton = this.file !== null && !this.commitFile;
+
+    return html`
+      <div class="hunk-separator-split">
+        <div class="hunk-separator-line"></div>
+        ${side === 'right' && showStageButton
+          ? html`<div class="hunk-actions">${this.renderHunkActions(sl.hunk, sl.hunkIndex)}</div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderSplitLineCell(sl: SplitLine, side: 'left' | 'right') {
+    const line = side === 'left' ? sl.left : sl.right;
+    const lineIndex = side === 'left' ? sl.leftIndex : sl.rightIndex;
+
     if (!line) {
       return html`
         <div class="split-line empty">
@@ -2488,18 +2568,57 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
 
     if (line.origin === 'hunk-header') {
-      return html`<div class="hunk-separator-split"></div>`;
+      return this.renderSplitHunkSeparator(sl, side);
     }
 
     const lineNo = side === 'left' ? line.oldLineNo : line.newLineNo;
 
-    if (wsOnly && segments) {
+    // A whitespace-only row is one change shown on both sides, so it selects
+    // both of its underlying lines; every other row selects its own line.
+    const isSelectable = line.origin === 'addition' || line.origin === 'deletion';
+    const keys: LineKey[] =
+      sl.isWhitespaceOnly && sl.leftIndex !== null && sl.rightIndex !== null
+        ? [this.getLineKey(sl.hunkIndex, sl.leftIndex), this.getLineKey(sl.hunkIndex, sl.rightIndex)]
+        : isSelectable && lineIndex !== null
+          ? [this.getLineKey(sl.hunkIndex, lineIndex)]
+          : [];
+    const isSelected = keys.some((k) => this.selectedLines.has(k));
+
+    const handleClick = (e: MouseEvent) => {
+      if (this.lineSelectionMode && keys.length > 0) {
+        e.preventDefault();
+        this.toggleSplitRowSelection(keys);
+      }
+    };
+
+    const handleCheckboxChange = (e: Event) => {
+      e.stopPropagation();
+      this.toggleSplitRowSelection(keys);
+    };
+
+    const checkbox = this.lineSelectionMode && keys.length > 0 ? html`
+      <input
+        type="checkbox"
+        class="line-checkbox"
+        style="display: inline-block"
+        .checked=${isSelected}
+        @change=${handleCheckboxChange}
+        @click=${(e: Event) => e.stopPropagation()}
+      />
+    ` : nothing;
+
+    if (sl.isWhitespaceOnly && sl.inlineSegments) {
       // Whitespace-only: show inline diff with yellow background
-      const filteredSegments = segments.filter(s =>
+      const filteredSegments = sl.inlineSegments.filter(s =>
         side === 'left' ? s.type !== 'added' : s.type !== 'removed'
       );
       return html`
-        <div class="split-line code-ws-change">
+        <div
+          class="split-line code-ws-change ${isSelected ? 'selected' : ''}"
+          @contextmenu=${(e: MouseEvent) => this.handleLineContextMenu(e, line, sl.hunk)}
+          @click=${handleClick}
+        >
+          ${checkbox}
           <span class="split-line-no">${lineNo ?? ''}</span>
           <span class="split-line-content">${this.renderInlineWhitespaceContent(filteredSegments)}</span>
         </div>
@@ -2511,7 +2630,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     else if (line.origin === 'addition') lineClass = 'code-addition';
 
     return html`
-      <div class="split-line ${lineClass}">
+      <div
+        class="split-line ${lineClass} ${isSelected ? 'selected' : ''}"
+        @contextmenu=${(e: MouseEvent) => this.handleLineContextMenu(e, line, sl.hunk)}
+        @click=${handleClick}
+      >
+        ${checkbox}
         <span class="split-line-no">${lineNo ?? ''}</span>
         <span class="split-line-content">${this.renderHighlightedContent(line.content)}</span>
       </div>
@@ -2524,22 +2648,23 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     const splitLines = this.convertToSplitLines(this.diff.hunks);
 
     return html`
-      <div class="split-container ${this.wordWrap ? 'word-wrap' : ''}">
+      <div class="split-container ${this.wordWrap ? 'word-wrap' : ''} ${this.lineSelectionMode ? 'line-selection-mode' : ''}">
         <div class="split-pane">
           <div class="split-pane-header">Original</div>
-          ${splitLines.map((sl) => this.renderSplitLineCell(sl.left, 'left', sl.isWhitespaceOnly, sl.inlineSegments))}
+          ${splitLines.map((sl) => this.renderSplitLineCell(sl, 'left'))}
         </div>
         <div class="split-pane">
           <div class="split-pane-header">Modified</div>
-          ${splitLines.map((sl) => this.renderSplitLineCell(sl.right, 'right', sl.isWhitespaceOnly, sl.inlineSegments))}
+          ${splitLines.map((sl) => this.renderSplitLineCell(sl, 'right'))}
         </div>
       </div>
     `;
   }
 
   /**
-   * Bulk stage/unstage bar for the current line selection. Shared by the hunk
-   * view and the virtualized view.
+   * Bulk stage/unstage bar for the current line selection. Rendered once in
+   * `render()`, above the view switch, so a selection stays actionable in the
+   * unified, split and virtualized views alike.
    */
   private renderSelectionActions() {
     if (!this.lineSelectionMode || this.selectedLines.size === 0) return nothing;
@@ -2580,7 +2705,6 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
 
     return html`
-      ${this.renderSelectionActions()}
       <div class="diff-content ${this.wordWrap ? 'word-wrap' : ''} ${this.lineSelectionMode ? 'line-selection-mode' : ''}">
         ${this.diff.hunks.length === 0
           ? html`<div class="empty">No changes in this file</div>`
@@ -2870,6 +2994,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           <button class="btn-link" @click=${this.handleLoadFullDiff}>Load full diff</button>
         </div>
       ` : nothing}
+      ${this.renderSelectionActions()}
       ${this.viewMode === 'split' ? this.renderSplitView() : this.renderUnifiedView()}
       ${this.renderContextMenu()}
     `;
