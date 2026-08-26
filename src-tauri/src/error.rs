@@ -108,6 +108,16 @@ pub enum LeviathanError {
 
     #[error("Operation cancelled")]
     OperationCancelled,
+
+    /// A fetch/pull/push is already running against this repository.
+    ///
+    /// Distinct from OperationFailed so the UI can present it as "wait and
+    /// retry" rather than as a git failure: nothing went wrong, the work
+    /// simply has not finished yet. It is reachable specifically AFTER a
+    /// network timeout, when the abandoned blocking task is still live —
+    /// see services/remote_ops.rs.
+    #[error("{0}")]
+    RemoteOperationInFlight(String),
 }
 
 /// Serializable error response for IPC
@@ -151,6 +161,7 @@ impl From<LeviathanError> for ErrorResponse {
             // like any other. The distinction is internal to await_remote_task.
             LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
             LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+            LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
         };
 
         ErrorResponse {
@@ -197,6 +208,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
                 LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
                 LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+                LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
             }
             .to_string(),
             message: self.to_string(),
