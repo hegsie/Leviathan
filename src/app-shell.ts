@@ -125,6 +125,7 @@ import {
 import { searchIndexService } from './services/search-index.service.ts';
 import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
+import * as localAiService from './services/local-ai.service.ts';
 import { emit, type UnlistenFn } from '@tauri-apps/api/event';
 
 /**
@@ -562,9 +563,6 @@ export class AppShell extends LitElement {
   @state() private showBlame = false;
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
-
-  // Remote status (for auto-fetch ahead/behind indicators)
-  @state() private remoteStatus: { ahead: number; behind: number } | null = null;
 
   // Progress operations
   @state() private progressOperations: ProgressOperation[] = [];
@@ -1591,16 +1589,6 @@ export class AppShell extends LitElement {
         // Clear search filter
         this.searchFilter = null;
 
-        // The footer ahead/behind badge belongs to the previous repo —
-        // repopulate from the new repo's last-known counts (autofetch keeps
-        // these fresh) instead of showing repo A's counts under repo B
-        this.remoteStatus = newActiveRepo?.currentBranch?.aheadBehind
-          ? {
-              ahead: newActiveRepo.currentBranch.aheadBehind.ahead,
-              behind: newActiveRepo.currentBranch.aheadBehind.behind,
-            }
-          : null;
-
         // Load profile for new repository and check integration
         if (newActiveRepo) {
           gitService.loadProfileForRepository(newActiveRepo.repository.path);
@@ -1686,7 +1674,10 @@ export class AppShell extends LitElement {
       // route, because alt-tabbing back into the app is not a gesture that
       // should raise a native "Allow fetch?" modal.
       // Pinned: the user can switch tabs during the fetch; the result belongs
-      // to the repo it was started for.
+      // to the repo it was started for, so the write below is keyed by that
+      // path rather than gated on whichever tab is active when it lands —
+      // which is also why the focus fetch now refreshes that repo's TAB badge,
+      // which it previously left stale.
       const repoPath = this.activeRepository.repository.path;
       // Alt-tabbing repeatedly used to start a fetch per focus event; on a hung
       // remote they stacked with nothing to cancel them.
@@ -1696,12 +1687,8 @@ export class AppShell extends LitElement {
         try {
         await gitService.fetchInBackground(repoPath);
         const result = await gitService.getRemoteStatus(repoPath);
-        if (
-          result.success &&
-          result.data &&
-          repoPath === this.activeRepository?.repository.path
-        ) {
-          this.remoteStatus = { ahead: result.data.ahead, behind: result.data.behind };
+        if (result.success && result.data) {
+          this.applyAheadBehind(repoPath, result.data.ahead, result.data.behind);
         }
         } finally {
           this.focusFetchInFlight.delete(repoPath);
@@ -1715,6 +1702,9 @@ export class AppShell extends LitElement {
 
     // Set up update notification listeners
     this.setupUpdateListeners();
+
+    // Surface background model-download failures even when Settings is closed
+    this.setupModelDownloadListeners();
 
     // Initialize OAuth deep link listener
     initOAuthListener().catch((e) => {
@@ -1866,6 +1856,15 @@ export class AppShell extends LitElement {
       showToast(`Update failed: ${error.message}`, 'error', 8000);
     });
     this.updateUnlisteners.push(unlistenError);
+  }
+
+  /**
+   * Model downloads run in a backend task and outlive the Settings dialog that
+   * started them, so the shell - not the dialog - owns the failure listener.
+   * Without it a download that fails after Settings is closed is silent.
+   */
+  private async setupModelDownloadListeners(): Promise<void> {
+    this.updateUnlisteners.push(await localAiService.listenForModelDownloadFailures());
   }
 
   /**
@@ -4440,10 +4439,27 @@ export class AppShell extends LitElement {
     );
   }
 
-  // Auto-fetch runs for every open repo. Every successful result updates
-  // that repo's ahead/behind in the store (so tab badges stay fresh even for
-  // background tabs), but only the ACTIVE repo's result may drive the
-  // toolbar badge.
+  /**
+   * Mirror freshly computed ahead/behind counts into a repo's store entry.
+   *
+   * Both remote badges — the tab bar's and the status bar's — render this one
+   * field, so a writer that updates only one of them puts them out of step.
+   * Path-keyed: a result belongs to the repo it was computed for, never to
+   * whichever tab happens to be active when it lands.
+   */
+  private applyAheadBehind(repoPath: string, ahead: number, behind: number): void {
+    const store = repositoryStore.getState();
+    const repo = store.openRepositories.find((r) => r.repository.path === repoPath);
+    if (!repo?.currentBranch) return;
+    store.updateRepoData(repoPath, {
+      currentBranch: { ...repo.currentBranch, aheadBehind: { ahead, behind } },
+    });
+  }
+
+  // Auto-fetch runs for every open repo. Every successful result updates that
+  // repo's ahead/behind in the store, which is the single field BOTH badges
+  // (tab bar and status bar) render — so a background repo's result freshens
+  // its own tab badge and can never paint under the active tab.
   private handleAutoFetchCompleted = (event: {
     repoPath: string;
     success: boolean;
@@ -4458,20 +4474,7 @@ export class AppShell extends LitElement {
     // Recovered — let the next failure speak again.
     this.autoFetchFailureReported.delete(event.repoPath);
 
-    const store = repositoryStore.getState();
-    const repo = store.openRepositories.find((r) => r.repository.path === event.repoPath);
-    if (repo?.currentBranch) {
-      store.updateRepoData(event.repoPath, {
-        currentBranch: {
-          ...repo.currentBranch,
-          aheadBehind: { ahead: event.ahead, behind: event.behind },
-        },
-      });
-    }
-
-    if (event.repoPath === this.activeRepository?.repository.path) {
-      this.remoteStatus = { ahead: event.ahead, behind: event.behind };
-    }
+    this.applyAheadBehind(event.repoPath, event.ahead, event.behind);
   };
 
   // With several repos auto-fetching, an unattributed toast is noise — name
@@ -4671,12 +4674,31 @@ export class AppShell extends LitElement {
   }
 
   private async createStashOnRepo(repoPath: string): Promise<void> {
+    // Prompted here too, not only in the stash panel: the shortcut, the palette
+    // and the panel button run the same operation and report the same "Stash
+    // created", so a keyboard-started stash must be nameable as well —
+    // otherwise it is an indistinguishable "WIP on <branch>". null is a
+    // dismissal; '' keeps git's default name. The lock is claimed by
+    // runRefExclusive before this runs and released in its finally, so the
+    // cancel path needs no extra bookkeeping.
+    const message = await showPrompt(
+      'Stash Changes',
+      'Message for this stash (optional):',
+      '',
+      'WIP'
+    );
+    if (message === null) return;
+    const stashMessage = message.trim();
+
     // includeUntracked matches the stash-list button (lv-stash-list.ts): both
     // surfaces report an identical "Stash created", so they must stash the same
     // set — otherwise the shortcut silently leaves untracked files behind and
     // the divergence only surfaces during a later checkout or clean.
     const result = await gitService.createStash({
       path: repoPath,
+      // Undefined, not '': the backend only falls back to git's WIP name when
+      // no message is sent (src-tauri/src/commands/stash.rs).
+      message: stashMessage || undefined,
       includeUntracked: true,
     });
     if (result.success) {
@@ -4848,10 +4870,19 @@ export class AppShell extends LitElement {
 
   private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
     if (!this.activeRepository) return;
-    try {
-      await gitService.openInConfiguredEditor(this.activeRepository.repository.path, e.detail.path);
-    } catch {
-      showToast('Failed to open file in editor', 'error');
+    // gitService.openInConfiguredEditor returns a CommandResult (invokeCommand
+    // never throws), so we must inspect result.success — the catch-only path
+    // could never fire, so a file deleted since the palette listed it, or an
+    // editor that fails to launch, closed the palette and did nothing at all.
+    const result = await gitService.openInConfiguredEditor(
+      this.activeRepository.repository.path,
+      e.detail.path,
+    );
+    if (!result.success || !result.data?.success) {
+      const message =
+        result.data?.message || result.error?.message || 'Failed to open file in editor';
+      log.error('Failed to open file in editor:', message);
+      showToast(message, 'error');
     }
   }
 
@@ -4934,6 +4965,43 @@ export class AppShell extends LitElement {
   private handleVimModeChange(e: CustomEvent<{ enabled: boolean }>): void {
     this.vimMode = e.detail.enabled;
     keyboardService.setVimMode(e.detail.enabled);
+  }
+
+  /**
+   * The status bar's ahead/behind badge.
+   *
+   * Read from the ACTIVE repo's `currentBranch.aheadBehind` — the SAME field
+   * the tab badge renders — not from a private `remoteStatus` field. That
+   * field was written only by the tab switch, the fetch-on-focus handler and
+   * auto-fetch: nothing in push/pull/fetch touched it, and handleRefresh
+   * refreshes the repository, the graph and the indexes but not that. So a
+   * push of three commits left the status bar reading up-3 until the next
+   * auto-fetch tick, tab switch or refocus — forever with auto-fetch off —
+   * which reads as "the push didn't land" and invites a second push, while
+   * the tab badge an inch away already showed nothing. One source of truth is
+   * the only way the two can never disagree.
+   */
+  private renderRemoteBadges() {
+    const ab = this.activeRepository?.currentBranch?.aheadBehind;
+    if (!ab) return nothing;
+    return html`
+      ${ab.ahead > 0
+        ? html`<span
+            class="status-ahead"
+            title="${ab.ahead} commit${ab.ahead !== 1 ? 's' : ''} to push"
+            style="margin-left: 12px; color: var(--color-success, #4caf50);"
+            >&uarr;${ab.ahead}</span
+          >`
+        : nothing}
+      ${ab.behind > 0
+        ? html`<span
+            class="status-behind"
+            title="${ab.behind} commit${ab.behind !== 1 ? 's' : ''} to pull"
+            style="margin-left: ${ab.ahead > 0 ? '4' : '12'}px; color: var(--color-warning, #ff9800);"
+            >&darr;${ab.behind}</span
+          >`
+        : nothing}
+    `;
   }
 
   render() {
@@ -5171,12 +5239,7 @@ export class AppShell extends LitElement {
 
             <footer class="status-bar">
               <span>${this.activeRepository.repository.path}</span>
-              ${this.remoteStatus && this.remoteStatus.ahead > 0
-                ? html`<span style="margin-left: 12px; color: var(--color-success, #4caf50);">&uarr;${this.remoteStatus.ahead}</span>`
-                : ''}
-              ${this.remoteStatus && this.remoteStatus.behind > 0
-                ? html`<span style="margin-left: ${this.remoteStatus.ahead > 0 ? '4' : '12'}px; color: var(--color-warning, #ff9800);">&darr;${this.remoteStatus.behind}</span>`
-                : ''}
+              ${this.renderRemoteBadges()}
             </footer>
           `
         : html`<lv-welcome

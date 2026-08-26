@@ -227,6 +227,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
   Commit,
+  FileHistoryEntry,
   Branch,
   BranchTrackingInfo,
   Remote,
@@ -318,9 +319,6 @@ import type {
   GetDiffWithOptionsCommand,
   GetAvatarUrlCommand,
   GetAvatarUrlsCommand,
-  KeyboardShortcutConfig,
-  GetKeyboardShortcutsCommand,
-  SetKeyboardShortcutCommand,
   CheckoutFileFromCommitCommand,
   CheckoutFileFromBranchCommand,
   GetFileAtCommitCommand,
@@ -1897,15 +1895,16 @@ export async function getImageVersions(
 }
 
 /**
- * Get all commits that modified a specific file
+ * Get all commits that modified a specific file, each paired with the path the
+ * file had in that commit (which differs from `filePath` before a rename).
  */
 export async function getFileHistory(
   repoPath: string,
   filePath: string,
   limit?: number,
   followRenames?: boolean,
-): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>("get_file_history", {
+): Promise<CommandResult<FileHistoryEntry[]>> {
+  return invokeCommand<FileHistoryEntry[]>("get_file_history", {
     path: repoPath,
     filePath,
     limit,
@@ -6976,61 +6975,6 @@ export async function pruneRemoteTrackingBranches(
     path: repoPath,
     remote,
   });
-}
-
-/**
- * Keyboard Shortcuts operations
- */
-
-/**
- * Get all keyboard shortcuts (defaults merged with user customizations)
- *
- * @param args Optional path for repo-specific shortcuts (reserved for future use)
- * @returns List of keyboard shortcuts with customization status
- */
-export async function getKeyboardShortcuts(
-  args?: GetKeyboardShortcutsCommand,
-): Promise<CommandResult<KeyboardShortcutConfig[]>> {
-  return invokeCommand<KeyboardShortcutConfig[]>("get_keyboard_shortcuts", {
-    path: args?.path ?? null,
-  });
-}
-
-/**
- * Set a keyboard shortcut for a specific action
- *
- * @param args Action name and new shortcut key combination
- * @returns Updated list of all keyboard shortcuts
- */
-export async function setKeyboardShortcut(
-  args: SetKeyboardShortcutCommand,
-): Promise<CommandResult<KeyboardShortcutConfig[]>> {
-  return invokeCommand<KeyboardShortcutConfig[]>("set_keyboard_shortcut", {
-    action: args.action,
-    shortcut: args.shortcut,
-  });
-}
-
-/**
- * Reset all keyboard shortcuts to their default values
- *
- * @returns List of keyboard shortcuts after reset (all defaults)
- */
-export async function resetKeyboardShortcuts(): Promise<
-  CommandResult<KeyboardShortcutConfig[]>
-> {
-  return invokeCommand<KeyboardShortcutConfig[]>("reset_keyboard_shortcuts");
-}
-
-/**
- * Get default keyboard shortcuts (without any user customizations)
- *
- * @returns List of default keyboard shortcuts
- */
-export async function getDefaultShortcuts(): Promise<
-  CommandResult<KeyboardShortcutConfig[]>
-> {
-  return invokeCommand<KeyboardShortcutConfig[]>("get_default_shortcuts");
 }
 
 /**

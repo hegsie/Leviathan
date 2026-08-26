@@ -70,6 +70,38 @@ describe('error-suggestion.service', () => {
       expect(result!.action).to.be.undefined;
     });
 
+    // A repository that already has a remote operation in flight. The backend
+    // refuses with LeviathanError::RemoteOperationInFlight; its message is
+    // already user-facing and explains that a timed-out operation can still be
+    // running, so the suggestion service must pass it through UNCHANGED rather
+    // than let a later rule rewrite it.
+    const inFlightMessage =
+      'A push is already running for this repository. Wait for it to finish and try again — an operation that timed out can still be finishing in the background.';
+
+    it('should keep the in-flight refusal verbatim instead of calling it a timeout', () => {
+      const result = getErrorSuggestion(inFlightMessage, { operation: 'push' });
+      expect(result).to.not.be.null;
+      expect(result!.message).to.equal(inFlightMessage);
+      // The timeout rule would otherwise claim it (the message says "timed
+      // out") and offer Open Settings, which fixes nothing here.
+      expect(result!.action).to.be.undefined;
+    });
+
+    it('should recognise the in-flight refusal by its error code', () => {
+      const result = getErrorSuggestion('REMOTE_OPERATION_IN_FLIGHT: a pull is already running');
+      expect(result).to.not.be.null;
+      expect(result!.message).to.include('already running');
+      expect(result!.action).to.be.undefined;
+    });
+
+    it('should not mistake the in-flight refusal for a stuck lock file', () => {
+      const result = getErrorSuggestion(
+        'A fetch is already running for this repository. Wait for it to finish and try again.'
+      );
+      expect(result).to.not.be.null;
+      expect(result!.message).to.not.include('lock file');
+    });
+
     it('should return suggestion for operation timeout', () => {
       const result = getErrorSuggestion('The operation timed out after 300 seconds');
       expect(result).to.not.be.null;
