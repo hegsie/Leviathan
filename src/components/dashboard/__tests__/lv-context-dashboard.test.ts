@@ -904,6 +904,54 @@ describe('lv-context-dashboard', () => {
     });
   });
 
+  // ── Assignment-source badge sync after a profile switch ───────────────────
+  describe('profile switch assignment badge', () => {
+    it("shows 'Manually assigned' on the profile card after switching profile from the dropdown", async () => {
+      const personal = makeProfile({ id: 'profile-2', name: 'Personal' });
+      setupStores({
+        profiles: [defaultProfile, personal],
+        repositoryAssignments: {},
+      });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      // Before the switch: no assignment, no URL pattern, not the default
+      // profile — the card renders the fallback badge.
+      const card = el.shadowRoot!.querySelector('lv-profile-card') as HTMLElement & {
+        updateComplete: Promise<unknown>;
+      };
+      await card.updateComplete;
+      expect(card.shadowRoot!.querySelectorAll('.assignment-source.fallback')).to.have.lengthOf(1);
+
+      // Switch profile via the real dropdown.
+      const selectorBtn = el.shadowRoot!.querySelector(
+        '.profile-selector-btn'
+      ) as HTMLButtonElement;
+      selectorBtn.click();
+      await el.updateComplete;
+      const items = Array.from(
+        el.shadowRoot!.querySelectorAll('.dropdown-item')
+      ) as HTMLButtonElement[];
+      const personalItem = items.find((i) => i.textContent?.includes('Personal'));
+      expect(personalItem, 'the Personal entry is in the dropdown').to.not.be.undefined;
+      personalItem!.click();
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      await card.updateComplete;
+
+      // applyUnifiedProfile mirrors the backend's repo→profile assignment into
+      // the store, so the badge flips to 'Manually assigned' right away.
+      expect(card.shadowRoot!.querySelectorAll('.assignment-source.fallback')).to.have.lengthOf(0);
+      const badge = card.shadowRoot!.querySelector('.assignment-source');
+      expect(badge, 'assignment-source badge is rendered').to.not.be.null;
+      expect(badge!.textContent!.trim()).to.equal('Manually assigned');
+    });
+  });
+
   // ── Default-account precedence (Wave 1, item 6) ────────────────────────────
   describe('default account precedence badge', () => {
     it('marks the active account as Global default when it is account.isDefault but not a profile preference', async () => {

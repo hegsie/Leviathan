@@ -439,6 +439,14 @@ export async function applyUnifiedProfile(path: string, profileId: string): Prom
     throw new Error(result.error?.message || 'Failed to apply profile');
   }
 
+  // The Rust command also persists the repo→profile assignment
+  // (config.assign_profile). Mirror it here — must run AFTER the success check
+  // so a rejected apply never records an assignment the backend did not save —
+  // otherwise the dashboard's "Manually assigned" badge and the profile
+  // manager's assigned-repository list stay stale until the next full
+  // loadUnifiedProfiles().
+  unifiedProfileStore.getState().setRepositoryAssignment(path, profileId);
+
   // Update active profile in store
   const profile = unifiedProfileStore.getState().profiles.find((p) => p.id === profileId);
   if (profile) {
