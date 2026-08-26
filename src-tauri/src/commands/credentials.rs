@@ -353,7 +353,62 @@ pub async fn unset_credential_helper(
 
     // Surface git's failure: the dialog reloads the list right after this
     // returns, so a swallowed error is indistinguishable from a dead button.
-    run_git_config_unset(repo_path, &[scope, "--unset", &key])
+    run_git_config_unset(repo_path, &[scope, "--unset", &key])?;
+
+    // `--unset` only ever edits the canonical file for the scope. A helper that
+    // git attributes to this scope but that actually lives in an `include`d
+    // file survives, and git reports the very same "key not set" exit as a
+    // genuine no-op — so the removal has to be confirmed, not assumed.
+    let scope_name = if global { "global" } else { "local" };
+    if let Some(origin) = key_origin_in_scope(repo_path, scope_name, &key) {
+        return Err(LeviathanError::OperationFailed(format!(
+            "\"{}\" is still set by {}, a file included from the {} git config. \
+             Edit that file to remove it.",
+            key, origin, scope_name
+        )));
+    }
+
+    Ok(())
+}
+
+/// The config file a `credential.*` key still resolves to within `scope`, if any.
+///
+/// `git config --show-scope` reports the scope of the file that *pulled in* an
+/// `include`/`includeIf` file, not the file the value was written in, so a
+/// helper defined in an included file is listed as `local` (or `global`) while
+/// `--unset` cannot reach it. Reading the key back after a removal is what
+/// tells "already gone" apart from "unreachable from here".
+///
+/// `--show-scope --show-origin --null` emits `scope\0origin\0key\nvalue\0`
+/// records; the key is compared exactly, so the loose `--get-regexp` prefix
+/// cannot match a neighbouring `credential.*` setting.
+fn key_origin_in_scope(repo_path: Option<&Path>, scope: &str, key: &str) -> Option<String> {
+    let raw = run_git_config_raw(
+        repo_path,
+        &[
+            "--show-scope",
+            "--show-origin",
+            "--null",
+            "--get-regexp",
+            "^credential\\.",
+        ],
+    )
+    .ok()?;
+
+    let mut fields = raw.split('\0');
+    while let Some(entry_scope) = fields.next() {
+        if entry_scope.is_empty() {
+            continue;
+        }
+        let Some(origin) = fields.next() else { break };
+        let Some(record) = fields.next() else { break };
+        let entry_key = record.split_once('\n').map_or(record, |(k, _)| k);
+        if entry_scope == scope && entry_key == key {
+            // Origins read "file:<path>"; show just the path to the user.
+            return Some(origin.strip_prefix("file:").unwrap_or(origin).to_string());
+        }
+    }
+    None
 }
 
 /// Get available credential helpers on this system
@@ -1073,6 +1128,102 @@ mod tests {
                 .iter()
                 .any(|h| h.url_pattern.as_deref() == Some("https://leviathan-remove.example")),
             "the URL-scoped helper should be gone from the listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_in_included_file_is_refused() {
+        let repo = TestRepo::with_initial_commit();
+
+        // A helper written in a file that the repository config merely
+        // `include`s. git attributes it to the "local" scope, but `--local
+        // --unset` only edits .git/config, so it cannot reach this value.
+        let included = repo.path.join("included.config");
+        std::fs::write(
+            &included,
+            "[credential \"https://included.example\"]\n\thelper = cache\n",
+        )
+        .unwrap();
+        run_git_config(
+            Some(&repo.path),
+            &["--local", "include.path", "../included.config"],
+        )
+        .unwrap();
+
+        let listed = get_credential_helpers(repo.path_str()).await.unwrap();
+        let helper = listed
+            .iter()
+            .find(|h| h.url_pattern.as_deref() == Some("https://included.example"))
+            .expect("an included helper is still part of the merged config");
+        assert_eq!(
+            helper.config_scope, "local",
+            "git reports the including file's scope, which is what makes this silent"
+        );
+
+        let err = unset_credential_helper(
+            Some(repo.path_str()),
+            Some(false),
+            Some("https://included.example".to_string()),
+        )
+        .await
+        .expect_err("a removal that cannot reach the value must not report success");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("included.config"),
+            "the error must name the file to edit, got: {}",
+            message
+        );
+
+        // The real point: the helper is still active, so claiming success would
+        // send the user round the same dialog forever.
+        let after = get_credential_helpers(repo.path_str()).await.unwrap();
+        assert!(
+            after
+                .iter()
+                .any(|h| h.url_pattern.as_deref() == Some("https://included.example")),
+            "the helper is still configured after the failed removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unset_credential_helper_ignores_other_scopes() {
+        let repo = TestRepo::with_initial_commit();
+
+        // A URL helper genuinely in .git/config, plus an unrelated included
+        // credential key. The removal must succeed: the leftover check has to
+        // match the key exactly and only within the scope it aimed at.
+        let included = repo.path.join("other.config");
+        std::fs::write(&included, "[credential]\n\tuseHttpPath = true\n").unwrap();
+        run_git_config(
+            Some(&repo.path),
+            &["--local", "include.path", "../other.config"],
+        )
+        .unwrap();
+
+        set_credential_helper(
+            Some(repo.path_str()),
+            "cache".to_string(),
+            Some(false),
+            Some("https://plain.example".to_string()),
+        )
+        .await
+        .unwrap();
+
+        unset_credential_helper(
+            Some(repo.path_str()),
+            Some(false),
+            Some("https://plain.example".to_string()),
+        )
+        .await
+        .expect("a reachable helper must still be removable");
+
+        let after = get_credential_helpers(repo.path_str()).await.unwrap();
+        assert!(
+            !after
+                .iter()
+                .any(|h| h.url_pattern.as_deref() == Some("https://plain.example")),
+            "the helper should be gone"
         );
     }
 
