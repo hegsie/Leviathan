@@ -52,6 +52,7 @@ function makeRepoStatus(overrides: Partial<WorkspaceRepoStatus> = {}): Workspace
     isValidRepo: true,
     changedFilesCount: 0,
     currentBranch: 'main',
+    isDetached: false,
     ahead: 0,
     behind: 0,
     ...overrides,
@@ -693,6 +694,52 @@ describe('lv-workspace-manager-dialog', () => {
 
       const validateCalls = findCommands('validate_workspace_repositories');
       expect(validateCalls.length).to.be.greaterThan(0);
+    });
+
+    it('shows the branch name for an attached repo and "detached HEAD" for a detached one', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({ path: '/repos/alpha', name: 'alpha', currentBranch: 'main' }),
+          makeRepoStatus({
+            path: '/repos/beta',
+            name: 'beta',
+            currentBranch: null,
+            isDetached: true,
+          }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      const branches = el.shadowRoot!.querySelectorAll('.repo-branch');
+      expect(branches.length).to.equal(2);
+      expect(branches[0].textContent?.trim()).to.equal('main');
+      expect(branches[0].classList.contains('detached')).to.be.false;
+
+      const detached = el.shadowRoot!.querySelector('.repo-branch.detached');
+      expect(detached).to.not.be.null;
+      expect(detached!.textContent?.trim()).to.equal('detached HEAD');
+    });
+
+    it('shows no branch chip when a repo has no branch and is not detached', async () => {
+      setupDefaultMocks({
+        statuses: [
+          makeRepoStatus({
+            path: '/repos/alpha',
+            name: 'alpha',
+            exists: false,
+            isValidRepo: false,
+            currentBranch: null,
+            isDetached: false,
+          }),
+        ],
+      });
+
+      const el = await renderDialog();
+      await tick(el, 100);
+
+      expect(el.shadowRoot!.querySelectorAll('.repo-branch').length).to.equal(0);
     });
 
     it('renders repo status badges from validation result', async () => {
