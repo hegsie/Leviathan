@@ -167,6 +167,28 @@ test.describe('GitHub Dialog - Connection Flow', () => {
     // The error is caught and displayed, so just verify the dialog remains open
     await expect(dialogs.github.dialog).toBeVisible();
   });
+
+  test('should replace the token form when the GitHub App method is selected', async () => {
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+
+    // GitHub App and Personal Access Token are alternative flows: selecting one
+    // must replace the other's form, never stack both connect buttons.
+    await dialogs.github.selectAppMethod();
+
+    await expect(dialogs.github.appIdInput).toBeVisible();
+    await expect(dialogs.github.connectViaAppButton).toBeVisible();
+    await expect(dialogs.github.tokenInput).toHaveCount(0);
+    await expect(dialogs.github.connectButton).toHaveCount(0);
+
+    // ...and the swap is symmetric.
+    await dialogs.github.selectPATMethod();
+
+    await expect(dialogs.github.tokenInput).toBeVisible();
+    await expect(dialogs.github.connectButton).toBeVisible();
+    await expect(dialogs.github.appIdInput).toHaveCount(0);
+    await expect(dialogs.github.connectViaAppButton).toHaveCount(0);
+  });
 });
 
 test.describe('GitHub Dialog - Close', () => {
@@ -350,6 +372,76 @@ test.describe('GitHub Dialog - Pagination', () => {
     }, failSecondPage);
   }
 
+  async function injectConcurrentListLoads(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      let releaseSecondPrPage = (): void => {};
+      const secondPrPage = new Promise<void>((resolve) => {
+        releaseSecondPrPage = resolve;
+      });
+      (
+        window as unknown as { __RELEASE_SECOND_PR_PAGE__?: () => void }
+      ).__RELEASE_SECOND_PR_PAGE__ = releaseSecondPrPage;
+
+      const makePr = (n: number) => ({
+        number: n,
+        title: `Paged PR ${n}`,
+        state: 'open',
+        user: { login: 'octocat', id: 1, avatarUrl: '', name: null, email: null },
+        createdAt: '2025-01-15T10:00:00Z',
+        updatedAt: '2025-01-15T10:00:00Z',
+        mergedAt: null,
+        headRef: `feature/${n}`,
+        headSha: 'abc1234',
+        baseRef: 'main',
+        draft: false,
+        mergeable: true,
+        htmlUrl: `https://github.com/octocat/hello-world/pull/${n}`,
+        additions: 1,
+        deletions: 1,
+        changedFiles: 1,
+      });
+      const makeRun = (n: number) => ({
+        id: n,
+        name: 'CI',
+        headBranch: 'main',
+        headSha: 'abc1234',
+        status: 'completed',
+        conclusion: 'success',
+        workflowId: 10,
+        htmlUrl: `https://github.com/octocat/hello-world/actions/runs/${n}`,
+        createdAt: '2025-01-15T10:00:00Z',
+        updatedAt: '2025-01-15T10:05:00Z',
+        runNumber: n,
+        event: 'push',
+      });
+
+      internals.invoke = async (command: string, args?: unknown) => {
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+
+        if (command === 'list_pull_requests') {
+          if (captured) captured.push({ command, args });
+          const requested = Number((args as { page?: number })?.page ?? 1);
+          if (requested === 2) await secondPrPage;
+          return Array.from(
+            { length: requested === 1 ? 30 : 10 },
+            (_, i) => makePr(requested === 1 ? i + 1 : i + 31)
+          );
+        }
+        if (command === 'get_workflow_runs') {
+          if (captured) captured.push({ command, args });
+          return Array.from({ length: 20 }, (_, i) => makeRun(i + 1));
+        }
+        return originalInvoke(command, args);
+      };
+    });
+  }
+
   test.beforeEach(async ({ page }) => {
     app = new AppPage(page);
     dialogs = new DialogsPage(page);
@@ -401,5 +493,30 @@ test.describe('GitHub Dialog - Pagination', () => {
     // Nothing already loaded is thrown away, and the button stays for a retry.
     await expect(prItems).toHaveCount(30);
     await expect(loadMore).toBeVisible();
+  });
+
+  test('keeps each tab pagination control independent', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, connectedMocks);
+    await injectConcurrentListLoads(page);
+
+    await app.executeCommand('GitHub');
+    await expect(dialogs.github.dialog).toBeVisible();
+    await dialogs.github.switchToPullRequestsTab();
+
+    const loadMore = page.locator('lv-github-dialog .load-more button');
+    await expect(loadMore).toHaveText('Load more');
+    await loadMore.click();
+    await expect(loadMore).toHaveText('Loading...');
+
+    await dialogs.github.switchToActionsTab();
+    await expect(page.locator('lv-github-dialog .workflow-item')).toHaveCount(20);
+    await expect(loadMore).toHaveText('Load more');
+    await expect(loadMore).toBeEnabled();
+
+    await page.evaluate(() => {
+      (
+        window as unknown as { __RELEASE_SECOND_PR_PAGE__?: () => void }
+      ).__RELEASE_SECOND_PR_PAGE__?.();
+    });
   });
 });

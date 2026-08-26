@@ -35,13 +35,13 @@ describe('git.service - Gitattributes management', () => {
       const mockEntries: GitAttribute[] = [
         {
           pattern: '*',
-          attributes: [{ name: 'text', value: { type: 'value', value: 'auto' } }],
+          attributes: [{ name: 'text', value: { value: 'auto' } }],
           lineNumber: 1,
           rawLine: '* text=auto',
         },
         {
           pattern: '*.png',
-          attributes: [{ name: 'binary', value: { type: 'set' } }],
+          attributes: [{ name: 'binary', value: 'set' }],
           lineNumber: 2,
           rawLine: '*.png binary',
         },
@@ -75,7 +75,7 @@ describe('git.service - Gitattributes management', () => {
       const mockResult: GitAttribute[] = [
         {
           pattern: '*.txt',
-          attributes: [{ name: 'text', value: { type: 'set' } }],
+          attributes: [{ name: 'text', value: 'set' }],
           lineNumber: 1,
           rawLine: '*.txt text',
         },
@@ -95,13 +95,13 @@ describe('git.service - Gitattributes management', () => {
       const mockResult: GitAttribute[] = [
         {
           pattern: '*.txt',
-          attributes: [{ name: 'text', value: { type: 'set' } }],
+          attributes: [{ name: 'text', value: 'set' }],
           lineNumber: 1,
           rawLine: '*.txt text',
         },
         {
           pattern: '*.png',
-          attributes: [{ name: 'binary', value: { type: 'set' } }],
+          attributes: [{ name: 'binary', value: 'set' }],
           lineNumber: 2,
           rawLine: '*.png binary',
         },
@@ -140,8 +140,8 @@ describe('git.service - Gitattributes management', () => {
         {
           pattern: '*.md',
           attributes: [
-            { name: 'text', value: { type: 'set' } },
-            { name: 'diff', value: { type: 'value', value: 'markdown' } },
+            { name: 'text', value: 'set' },
+            { name: 'diff', value: { value: 'markdown' } },
           ],
           lineNumber: 1,
           rawLine: '*.md text diff=markdown',

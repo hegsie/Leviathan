@@ -93,8 +93,31 @@ pub enum LeviathanError {
     #[error("Operation timed out: {0}")]
     OperationTimeout(String),
 
+    /// Timed out AFTER the operation had already changed the repository — a
+    /// pull whose fetch succeeded (remote-tracking refs and FETCH_HEAD are
+    /// written) and only then hit its deadline guard.
+    ///
+    /// Reported to the frontend exactly like `OperationTimeout` (same code,
+    /// same message). It exists only so `await_remote_task` can tell it from a
+    /// transfer the deadline aborted before anything was written: the aborted
+    /// transfer is the outcome the caller was already told about and is
+    /// suppressed, while this one changed the repository and must still reach
+    /// the late reporter so the UI refreshes.
+    #[error("Operation timed out: {0}")]
+    OperationTimeoutAfterChange(String),
+
     #[error("Operation cancelled")]
     OperationCancelled,
+
+    /// A fetch/pull/push is already running against this repository.
+    ///
+    /// Distinct from OperationFailed so the UI can present it as "wait and
+    /// retry" rather than as a git failure: nothing went wrong, the work
+    /// simply has not finished yet. It is reachable specifically AFTER a
+    /// network timeout, when the abandoned blocking task is still live —
+    /// see services/remote_ops.rs.
+    #[error("{0}")]
+    RemoteOperationInFlight(String),
 }
 
 /// Serializable error response for IPC
@@ -134,7 +157,11 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::Custom(_) => "CUSTOM_ERROR",
             LeviathanError::OAuth(_) => "OAUTH_ERROR",
             LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
+            // Deliberately the SAME code: to the frontend this is a timeout
+            // like any other. The distinction is internal to await_remote_task.
+            LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
             LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+            LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
         };
 
         ErrorResponse {
@@ -179,7 +206,9 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::Custom(_) => "CUSTOM_ERROR",
                 LeviathanError::OAuth(_) => "OAUTH_ERROR",
                 LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
+                LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
                 LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+                LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
             }
             .to_string(),
             message: self.to_string(),

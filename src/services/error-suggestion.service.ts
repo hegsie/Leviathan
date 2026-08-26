@@ -17,6 +17,11 @@ export interface ErrorContext {
   /** Repo the failing operation ran against. Pinned into any suggested
    *  action, because a toast outlives a repository switch. */
   repoPath?: string;
+  /** Remote the failing operation was aimed at, when the caller chose one.
+   *  Pinned into the suggested action for the same reason `repoPath` is: a
+   *  retry that re-resolves the destination can land on a different remote
+   *  than the attempt the user is recovering from. */
+  remote?: string;
 }
 
 /**
@@ -30,6 +35,22 @@ export function getErrorSuggestion(
   if (!errorMessage) return null;
 
   const msg = errorMessage.toLowerCase();
+
+  // The backend refused because this repository already has a fetch, pull or
+  // push in flight (LeviathanError::RemoteOperationInFlight).
+  //
+  // Kept VERBATIM, and checked FIRST. The backend's wording already names
+  // which operation holds the repository and says to retry — and it mentions
+  // that an operation which timed out can still be finishing, which is the
+  // part the user cannot deduce, because the app's own push/ref locks were
+  // released the moment the timeout fired and everything looks idle. Two
+  // rules below would otherwise claim it and replace that with something
+  // wrong: the timeout rule ("increase the timeout in Settings") and the
+  // repository-lock rule ("remove the lock file").
+  if (msg.includes('already running for this repository') ||
+      msg.includes('remote_operation_in_flight')) {
+    return { message: errorMessage };
+  }
 
   // A push the remote refused. libgit2 emits TWO different messages here
   // (push.c:345 and :356) that share no substring, and they mean opposite
@@ -51,16 +72,23 @@ export function getErrorSuggestion(
     // refspec-generic pre-check, and neither pulling nor "newer changes"
     // describes it.
     if (context?.operation === 'push-tag') {
-      // "Delete the remote tag first" named something Leviathan cannot do —
-      // there is no remote-tag deletion anywhere in the app. push_tag already
-      // implements the force refspec, so offer that instead of advice the user
-      // cannot follow.
+      // "Delete the remote tag first" is a two-step detour (the tag's Delete
+      // flow can now do it), and push_tag already implements the force
+      // refspec — so offer the one-click recovery instead.
       return {
         message: 'The remote already has this tag at a different commit.',
         action: {
           label: 'Force Push Tag',
+          // The remote travels with the tag: the rejected push was aimed at a
+          // remote the user picked, and a force retry that re-resolved the
+          // destination would move the tag on a DIFFERENT remote and report
+          // success.
           callback: () => window.dispatchEvent(new CustomEvent('force-push-tag', {
-            detail: { tagName: context?.branchName, repoPath: context?.repoPath },
+            detail: {
+              tagName: context?.branchName,
+              repoPath: context?.repoPath,
+              remote: context?.remote,
+            },
           })),
         },
       };

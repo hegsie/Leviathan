@@ -27,8 +27,30 @@ import type { LvStashList } from '../lv-stash-list.ts';
 
 // Import the actual component
 import '../lv-stash-list.ts';
+// Side-effect import so showPrompt finds the singleton already in the DOM.
+import '../../dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../../dialogs/lv-prompt-dialog.ts';
 import { tryAcquireRefOp, resetRefOpLocks } from '../../../utils/ref-lock.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+
+/**
+ * handleCreateStash now asks for an optional stash message, so these tests
+ * install a stub that answers it immediately. '' is "OK with nothing typed",
+ * which keeps git's default naming and the exact behaviour asserted below.
+ */
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  const dialog = document.querySelector('lv-prompt-dialog');
+  if (dialog) dialog.remove();
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -74,6 +96,11 @@ describe('lv-stash-list operationInProgress guards', () => {
   beforeEach(() => {
     resetRefOpLocks();
     invokeCalls.length = 0;
+    setupMockPrompt('');
+  });
+
+  afterEach(() => {
+    cleanupMockPrompt();
   });
 
   it('should have operationInProgress initially false', async () => {

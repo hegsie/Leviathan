@@ -169,6 +169,8 @@ export class LvChangelogDialog extends LitElement {
   @state() private error = '';
   @state() private tags: Tag[] = [];
   @state() private aiAvailable = false;
+  /** Why AI is unavailable — names the selected provider when it is the one at fault. */
+  @state() private aiUnavailableReason = '';
 
   @query('lv-modal') private modal!: HTMLElement & { open: boolean };
 
@@ -202,7 +204,19 @@ export class LvChangelogDialog extends LitElement {
     this.pinnedRepoPath = this.repositoryPath;
     (this.modal as HTMLElement & { open: boolean }).open = true;
     await this.loadTags();
+    await this.refreshAiAvailability();
+  }
+
+  /**
+   * A selected provider is never substituted, so "unavailable" usually means
+   * that one provider is unreachable — not that nothing is configured. Ask for
+   * the reason so the warning can say which provider needs attention.
+   */
+  private async refreshAiAvailability(): Promise<void> {
     this.aiAvailable = await aiService.isAiAvailable();
+    this.aiUnavailableReason = this.aiAvailable
+      ? ''
+      : ((await aiService.getAiUnavailableReason())?.reason ?? '');
   }
 
   /** True while the AI call is in flight, for the host's tab-close sweep. */
@@ -329,7 +343,8 @@ export class LvChangelogDialog extends LitElement {
 
           ${!this.aiAvailable ? html`
             <div class="ai-warning">
-              No AI provider available. Configure one in Settings &gt; AI Providers.
+              ${this.aiUnavailableReason ||
+                'No AI provider available. Configure one in Settings > AI Providers.'}
             </div>
           ` : nothing}
 

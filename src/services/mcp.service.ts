@@ -22,6 +22,8 @@ export interface McpStatus {
   running: boolean;
   port: number;
   url: string | null;
+  /** Why the server is not running, when the last start attempt failed */
+  lastError: string | null;
 }
 
 /**

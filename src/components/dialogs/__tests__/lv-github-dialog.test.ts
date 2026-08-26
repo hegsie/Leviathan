@@ -424,6 +424,135 @@ describe('lv-github-dialog', () => {
       }
     });
 
+    // Regression: these provider dialogs are repo-independent (they stay open
+    // when the last repository tab closes), at which point repositoryPath goes
+    // to ''. The detected repo must be cleared, or the dialog keeps showing --
+    // and acting on -- the repository whose tab was just closed.
+    it('clears the detected repo when repositoryPath becomes empty', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header with a repository open'
+      ).to.equal(1);
+
+      // Last repository tab closed: the host rebinds repositoryPath to ''.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'stale repo header after the last repository tab closed'
+      ).to.equal(0);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const repoTab = Array.from(tabs).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      repoTab.click();
+      await waitForLoad(el);
+
+      const emptyText = el.shadowRoot!.querySelector('.empty-state')?.textContent?.trim() ?? '';
+      expect(emptyText, 'repo-backed tab after the last repository tab closed').to.contain(
+        'No GitHub repository detected'
+      );
+    });
+
+    // Regression: the dialog outlives the repository, so a detect_github_repo
+    // issued for the repository whose tab has since closed can resolve
+    // afterwards. Its result must be dropped, or the repo header -- and the
+    // repo-backed loaders behind it -- come back for a repository that is gone.
+    it('ignores a repository detection that resolves after the repository closed', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Hold the detection open so it can be made to land late.
+      const baseInvoke = mockInvoke;
+      const pendingDetects: Array<() => void> = [];
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_github_repo') {
+          await new Promise<void>((resolve) => pendingDetects.push(resolve));
+        }
+        return baseInvoke(command, args);
+      };
+
+      el.repositoryPath = '/mock/repo';
+      await waitForLoad(el);
+      expect(pendingDetects.length, 'detection in flight').to.equal(1);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header while the detection is still in flight'
+      ).to.equal(0);
+
+      // Last repository tab closed while the detection was still in flight.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      pendingDetects.forEach((resolve) => resolve());
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header restored by a detection for the closed repository'
+      ).to.equal(0);
+    });
+
+    // Regression: a create-* draft is scoped to the repository it was composed
+    // against, but the create handlers guard only on the detected repo. Leaving
+    // the draft on screen when the dialog is repointed would submit it into the
+    // new repository.
+    it('drops the pull request draft when the repository changes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const listTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      listTab.click();
+      await waitForLoad(el);
+
+      const newButton = Array.from(el.shadowRoot!.querySelectorAll('button.btn')).find(
+        (b) => b.textContent?.trim() === '+ New PR'
+      ) as HTMLButtonElement;
+      expect(newButton === undefined, 'missing + New PR button').to.be.false;
+      newButton.click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector(
+        'input[placeholder="Pull request title"]'
+      ) as HTMLInputElement | null;
+      expect(titleInput === null, 'missing draft title input').to.be.false;
+      titleInput!.value = 'Draft for the first repository';
+      titleInput!.dispatchEvent(new Event('input'));
+      await waitForLoad(el);
+
+      // The user switches to a different repository with the draft on screen.
+      el.repositoryPath = '/mock/other-repo';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('input[placeholder="Pull request title"]').length,
+        'submittable draft form after the repository changed'
+      ).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).createPrTitle, 'retained draft title').to.equal('');
+    });
+
     it('shows account selector when accounts exist', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);
 
@@ -1304,6 +1433,74 @@ describe('lv-github-dialog', () => {
       expect(loadMoreButton(el)).to.be.null;
       const calls = callsTo('get_workflow_runs');
       expect(calls[calls.length - 1].page).to.equal(2);
+    });
+
+    it('keeps other tabs loadable while a pull request page is in flight', async () => {
+      prPages = { 1: makePullRequests(30, 100), 2: makePullRequests(5, 70) };
+      runPages = { 1: makeWorkflowRuns(20, 1) };
+      let releaseSecondPage = (): void => {};
+      prPageGates[2] = new Promise<void>((resolve) => {
+        releaseSecondPage = resolve;
+      });
+
+      const el = await openOnTab('Pull Requests');
+      loadMoreButton(el)!.click();
+      await el.updateComplete;
+
+      const actionsTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Actions'
+      ) as HTMLButtonElement;
+      actionsTab.click();
+      await waitForLoad(el);
+
+      const actionsLoadMore = loadMoreButton(el);
+      expect(actionsLoadMore).to.not.be.null;
+      expect(actionsLoadMore!.disabled, 'a PR request must not disable the Actions cursor').to.be.false;
+      expect(actionsLoadMore!.textContent?.trim()).to.equal('Load more');
+
+      releaseSecondPage();
+      await waitForLoad(el);
+    });
+
+    it('keeps loading visible when a superseded request finishes first', async () => {
+      const el = await openOnTab('Pull Requests');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      let releaseOpen = (): void => {};
+      let releaseClosed = (): void => {};
+      const openGate = new Promise<void>((resolve) => {
+        releaseOpen = resolve;
+      });
+      const closedGate = new Promise<void>((resolve) => {
+        releaseClosed = resolve;
+      });
+
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_pull_requests') {
+          const state = (args as { state?: string } | undefined)?.state;
+          await (state === 'closed' ? closedGate : openGate);
+          return makePullRequests(30, state === 'closed' ? 200 : 100);
+        }
+        return null;
+      };
+
+      dialog.prFilter = 'open';
+      const superseded = dialog.loadPullRequests('tok');
+      await Promise.resolve();
+      dialog.prFilter = 'closed';
+      const current = dialog.loadPullRequests('tok');
+      await Promise.resolve();
+
+      releaseOpen();
+      await superseded;
+      expect(
+        dialog.isLoading,
+        'the stale request must not clear the newer request loading state'
+      ).to.be.true;
+
+      releaseClosed();
+      await current;
+      expect(dialog.isLoading).to.be.false;
     });
 
     it('does not append a superseded page after the pull request filter changed', async () => {

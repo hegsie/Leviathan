@@ -88,9 +88,13 @@ pub async fn init_gitflow(
     version_tag_prefix: Option<String>,
 ) -> Result<GitFlowConfig> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let mut config = repo.config()?;
+    // The local level specifically. set_str already landed here, but the
+    // rollback below also has to READ what .git/config holds: repo.config()
+    // resolves through the user's global and system files too, so a snapshot
+    // taken from it would "restore" an inherited value by writing it into the
+    // repository, inventing a local key that was never there.
+    let mut config = repo.config()?.open_level(git2::ConfigLevel::Local)?;
 
-    let master = master_branch.unwrap_or_else(|| "main".to_string());
     let develop = develop_branch.unwrap_or_else(|| "develop".to_string());
     let feature = feature_prefix.unwrap_or_else(|| "feature/".to_string());
     let release = release_prefix.unwrap_or_else(|| "release/".to_string());
@@ -98,32 +102,103 @@ pub async fn init_gitflow(
     let support = support_prefix.unwrap_or_else(|| "support/".to_string());
     let version_tag = version_tag_prefix.unwrap_or_else(|| "v".to_string());
 
-    // Set git flow config values
-    config.set_str("gitflow.branch.master", &master)?;
-    config.set_str("gitflow.branch.develop", &develop)?;
-    config.set_str("gitflow.prefix.feature", &feature)?;
-    config.set_str("gitflow.prefix.release", &release)?;
-    config.set_str("gitflow.prefix.hotfix", &hotfix)?;
-    config.set_str("gitflow.prefix.support", &support)?;
-    config.set_str("gitflow.prefix.versiontag", &version_tag)?;
-
-    // Ensure develop branch exists
-    let develop_exists = repo.find_branch(&develop, git2::BranchType::Local).is_ok();
-
-    if !develop_exists {
-        // Create develop from master/main
-        let master_branch = repo
-            .find_branch(&master, git2::BranchType::Local)
-            .or_else(|_| repo.find_branch("master", git2::BranchType::Local))
-            .or_else(|_| repo.find_branch("main", git2::BranchType::Local))
-            .map_err(|_| {
+    // gitflow.branch.master must name a branch that EXISTS. Every hotfix start
+    // and every release/hotfix finish resolves it and fails with
+    // BranchNotFound when it does not, and get_gitflow_config keys
+    // `initialized` off this very entry — so once a wrong name is written the
+    // panel never offers the init section again and there is no way back
+    // inside the app. Writing the "main" default on a repository whose default
+    // branch is "master" did exactly that: develop was cut from master through
+    // the fallback below, but the name the fallback resolved was thrown away.
+    let master = match master_branch {
+        // An explicitly requested branch is honoured or refused — never
+        // silently swapped for a different one.
+        Some(requested) => {
+            if repo
+                .find_branch(&requested, git2::BranchType::Local)
+                .is_err()
+            {
+                return Err(LeviathanError::BranchNotFound(requested));
+            }
+            requested
+        }
+        None => ["main", "master"]
+            .into_iter()
+            .find(|name| repo.find_branch(name, git2::BranchType::Local).is_ok())
+            .map(str::to_string)
+            .ok_or_else(|| {
                 LeviathanError::OperationFailed(
-                    "Cannot find master/main branch to create develop from".to_string(),
+                    "Cannot find a main or master branch to base Git Flow on".to_string(),
                 )
-            })?;
+            })?,
+    };
 
-        let commit = master_branch.get().peel_to_commit()?;
+    // Ensure develop branch exists. Whether THIS call created it matters: if
+    // the config below cannot be persisted the branch has to go back, or a
+    // retry would silently reuse a develop cut from a base the user may no
+    // longer have selected. A develop that was already there is left alone.
+    let mut created_develop = false;
+    if repo.find_branch(&develop, git2::BranchType::Local).is_err() {
+        // Create develop from the resolved master
+        let base = repo
+            .find_branch(&master, git2::BranchType::Local)
+            .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
+        let commit = base.get().peel_to_commit()?;
         repo.branch(&develop, &commit, false)?;
+        created_develop = true;
+    }
+
+    // Written last, once every branch this config names is known to exist. A
+    // half-written gitflow config still reads as initialized, so an init that
+    // errored after this point used to leave the repository permanently stuck
+    // with a config pointing at branches that were never created.
+    //
+    // Each set_str is its own write to .git/config, so the sequence is not
+    // atomic: any of them can fail on its own (a lock held by another process,
+    // a disk that just filled, a key a hand-edit left as a multivar). Persist
+    // them as a unit instead — snapshot what the local config holds now, and
+    // on the first failure put every key back the way this call found it and
+    // drop a develop this call created, so a failed init leaves the repository
+    // as it was rather than half-configured.
+    //
+    // gitflow.branch.master is the key get_gitflow_config keys `initialized`
+    // off, so it goes LAST — writing the marker before the six values it
+    // vouches for would let a failure part-way through leave the repository
+    // flagged initialized while develop and the prefixes silently fall back to
+    // defaults at read time, and the panel would never offer the init section
+    // again.
+    let entries = [
+        ("gitflow.branch.develop", develop.as_str()),
+        ("gitflow.prefix.feature", feature.as_str()),
+        ("gitflow.prefix.release", release.as_str()),
+        ("gitflow.prefix.hotfix", hotfix.as_str()),
+        ("gitflow.prefix.support", support.as_str()),
+        ("gitflow.prefix.versiontag", version_tag.as_str()),
+        ("gitflow.branch.master", master.as_str()),
+    ];
+    let snapshot: Vec<(&str, Option<String>)> = entries
+        .iter()
+        .map(|(key, _)| (*key, config.get_string(key).ok()))
+        .collect();
+
+    if let Err(err) = entries
+        .iter()
+        .try_for_each(|(key, value)| config.set_str(key, value))
+    {
+        // Best effort, and deliberately so: the write error is what the user
+        // needs to see, and a rollback step that also fails must not mask it.
+        for (key, previous) in snapshot {
+            let _ = match previous {
+                Some(value) => config.set_str(key, &value),
+                None => config.remove(key),
+            };
+        }
+        if created_develop {
+            if let Ok(mut branch) = repo.find_branch(&develop, git2::BranchType::Local) {
+                let _ = branch.delete();
+            }
+        }
+        return Err(err.into());
     }
 
     Ok(GitFlowConfig {
@@ -566,6 +641,35 @@ async fn finish_release_like(
         .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
     let release_commit = release_branch.get().peel_to_commit()?;
 
+    // A version tag left behind by an EARLIER pass of this same finish is
+    // expected — the develop side conflicted, the user resolved it and re-ran —
+    // and the tag block below adopts it. Any OTHER pre-existing tag belongs to
+    // someone else: a teammate's tag, an old cycle reusing the number, or the
+    // release/hotfix collision both flows produce because they share
+    // gitflow.prefix.versiontag. Adopting one of those merges, deletes the
+    // branch and reports success while the release ships untagged and the
+    // version resolves to unrelated code. A tag from our own pass always
+    // CONTAINS the release tip (it sits on the master merge commit, or on a
+    // master tip that already merged it); anything else is refused here, before
+    // any mutation, so the repository is left exactly as it was.
+    if let Ok(tag_ref) = repo.find_reference(&format!("refs/tags/{}", tag_name)) {
+        let from_this_finish = match tag_ref.peel_to_commit() {
+            Ok(tagged) => {
+                tagged.id() == release_commit.id()
+                    || repo.graph_descendant_of(tagged.id(), release_commit.id())?
+            }
+            // A tag that does not resolve to a commit is certainly not ours.
+            Err(_) => false,
+        };
+        if !from_this_finish {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Tag '{}' already exists and does not contain '{}'. \
+                 Delete or rename the tag, or finish with a different version.",
+                tag_name, branch_name
+            )));
+        }
+    }
+
     // Merge into master
     let master_branch = repo
         .find_branch(&master, git2::BranchType::Local)
@@ -613,7 +717,8 @@ async fn finish_release_like(
         Some(merge_oid)
     };
 
-    // Create the tag on master. Skip when it already exists (re-run after the
+    // Create the tag on master. Skip when it already exists — validated above
+    // as this finish's own tag from an earlier pass (re-run after the
     // develop-side conflict was resolved and tagged on the first pass) so we
     // don't fail with "tag already exists". When it is MISSING we must still
     // tag: on a re-run after a MASTER-side conflict was resolved via the dialog,
@@ -781,6 +886,23 @@ pub async fn gitflow_finish_hotfix(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// A repository whose default branch is "master" — still the case for any
+    /// repo created before git 2.28, and the setup init_gitflow got wrong.
+    fn repo_on_master() -> TestRepo {
+        let test_repo = TestRepo::with_initial_commit();
+        {
+            let repo = test_repo.repo();
+            let mut main = repo
+                .find_branch("main", git2::BranchType::Local)
+                .expect("with_initial_commit leaves HEAD on main");
+            // libgit2 moves HEAD along with the branch; with_initial_commit
+            // relies on the same rename in the other direction.
+            main.rename("master", false).expect("rename main -> master");
+        }
+        assert_eq!(test_repo.current_branch(), "master");
+        test_repo
+    }
 
     #[tokio::test]
     async fn test_get_gitflow_config_not_initialized() {
@@ -1077,9 +1199,226 @@ mod tests {
         assert!(develop.is_ok());
     }
 
+    /// The name recorded in gitflow.branch.master has to be the branch develop
+    /// was actually cut from. Recording the "main" default on a master-default
+    /// repository left every later hotfix and finish looking for a branch that
+    /// was never there.
+    #[tokio::test]
+    async fn test_init_gitflow_records_the_master_branch_that_exists() {
+        let repo = repo_on_master();
+
+        let config = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect("init must succeed on a repo whose default branch is master");
+
+        assert_eq!(config.master_branch, "master");
+        assert_eq!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.master")
+                .unwrap(),
+            "master",
+            "the persisted name must be the branch that exists"
+        );
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_ok(),
+            "develop must still be created"
+        );
+    }
+
+    /// The user-visible consequence: the panel's Initialize button passes no
+    /// config at all, so a master-default repo used to end up with a hotfix
+    /// button that could only ever fail.
+    #[tokio::test]
+    async fn test_gitflow_hotfix_works_after_init_on_a_master_repo() {
+        let repo = repo_on_master();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let branch = gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .expect("hotfix start must work on a repo initialized by the panel");
+
+        assert_eq!(branch.name, "hotfix/1.0.1");
+        assert!(branch.is_head);
+    }
+
+    /// A gitflow config reads as initialized the moment gitflow.branch.master
+    /// exists, so writing the keys before the branch lookup turned a failed
+    /// init into a repository permanently stuck on a broken config.
+    #[tokio::test]
+    async fn test_init_gitflow_failure_leaves_the_repo_uninitialized() {
+        // No commit, so there is no branch to base anything on.
+        let repo = TestRepo::new();
+
+        let err = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect_err("init must fail with no branch to base on");
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(
+            !config.initialized,
+            "a failed init must not leave the repo looking initialized"
+        );
+        assert!(
+            err.to_string().contains("main or master"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    /// The seven config writes are seven separate writes to .git/config, so
+    /// one of them can fail on its own. gitflow.branch.master is the key
+    /// `initialized` is read off, so it has to be the last one written — if it
+    /// goes first, a failure part-way through leaves the repo flagged
+    /// initialized while develop and the prefixes fall back to defaults, and
+    /// the panel never offers the init section again.
+    ///
+    /// A duplicated key is the cheapest real way to make exactly one write
+    /// fail: libgit2 refuses set_str on a multivar.
+    #[tokio::test]
+    async fn test_init_gitflow_partial_config_write_leaves_the_repo_uninitialized() {
+        let repo = TestRepo::with_initial_commit();
+
+        // A hand-edited (or merge-mangled) config with gitflow.prefix.feature
+        // listed twice. Every other gitflow write still succeeds.
+        let config_path = repo.path.join(".git").join("config");
+        let mut existing = std::fs::read_to_string(&config_path).unwrap();
+        existing.push_str("[gitflow \"prefix\"]\n\tfeature = a/\n\tfeature = b/\n");
+        std::fs::write(&config_path, existing).unwrap();
+
+        let err = init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect_err("init must fail when a gitflow config key cannot be written");
+        assert!(
+            err.to_string().contains("multivar"),
+            "expected the multivar write to be what failed, got: {}",
+            err
+        );
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(
+            !config.initialized,
+            "an init that failed part-way through the config writes must not \
+             leave the repo looking initialized — the panel would never offer \
+             the init section again"
+        );
+        assert!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.master")
+                .is_err(),
+            "the initialized marker must not be persisted by a failed init"
+        );
+        // The keys written before the failure are rolled back, not left
+        // lying around: gitflow.branch.develop is written first and succeeds.
+        assert!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.develop")
+                .is_err(),
+            "a key this attempt wrote must be removed again when a later write fails"
+        );
+        // And the branch this attempt cut goes back too. Left behind, a retry
+        // would reuse it instead of cutting develop from the selected base.
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_err(),
+            "a failed init must not leave the develop branch it created behind"
+        );
+    }
+
+    /// Re-initializing an already-configured repository must not shred the
+    /// configuration it already had. The rollback restores each key to the
+    /// value this call found rather than deleting it, and leaves a develop it
+    /// did not create alone.
+    #[tokio::test]
+    async fn test_init_gitflow_failed_reinit_restores_the_previous_config() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect("first init must succeed");
+
+        // Duplicate gitflow.prefix.release so that exactly one write of the
+        // re-init fails — the two keys written before it succeed first.
+        let config_path = repo.path.join(".git").join("config");
+        let mut existing = std::fs::read_to_string(&config_path).unwrap();
+        existing.push_str("[gitflow \"prefix\"]\n\trelease = duplicate/\n");
+        std::fs::write(&config_path, existing).unwrap();
+
+        init_gitflow(
+            repo.path_str(),
+            None,
+            None,
+            Some("feat/".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("re-init must fail when a gitflow config key cannot be written");
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(config.initialized, "the repo stays initialized as it was");
+        assert_eq!(
+            config.feature_prefix, "feature/",
+            "a key the failed attempt overwrote must be restored to its previous value"
+        );
+        assert_eq!(config.master_branch, "main");
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_ok(),
+            "a develop this attempt did not create must be left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_gitflow_refuses_a_master_branch_that_does_not_exist() {
+        let repo = TestRepo::with_initial_commit();
+
+        let err = init_gitflow(
+            repo.path_str(),
+            Some("nope".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("init must refuse a master branch that does not exist");
+        assert!(
+            err.to_string().contains("Branch not found: nope"),
+            "unexpected error: {}",
+            err
+        );
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(!config.initialized);
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_err(),
+            "a refused init must not create develop"
+        );
+    }
+
     #[tokio::test]
     async fn test_init_gitflow_custom_branches() {
         let repo = TestRepo::with_initial_commit();
+        // The custom master must exist — init_gitflow refuses to record a
+        // branch that does not.
+        repo.create_branch("production");
         let result = init_gitflow(
             repo.path_str(),
             Some("production".to_string()),
@@ -1837,6 +2176,252 @@ mod tests {
         // Branch was deleted.
         assert!(git_repo
             .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_refuses_a_version_tag_on_an_unrelated_commit() {
+        // A tag with the release's version already exists on an UNRELATED
+        // commit (a teammate's tag, or an old cycle reusing the number).
+        // Finishing must refuse before touching anything — silently adopting
+        // it would merge, delete the branch and report success while the
+        // version tag still resolves to the old code.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Unrelated work on master, tagged with the version we are about to
+        // release.
+        repo.checkout_branch(&master);
+        repo.create_commit("Unrelated work", &[("other.txt", "x")]);
+        let stale = repo.head_oid();
+        repo.create_tag("v2.0.0");
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("release.txt", "r")]);
+
+        let master_before = count_reachable_commits(&repo, &master);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+
+        match &result {
+            Err(LeviathanError::OperationFailed(msg)) => {
+                assert!(
+                    msg.contains("v2.0.0") && msg.contains("release/2.0.0"),
+                    "error must name the colliding tag and branch: {}",
+                    msg
+                );
+            }
+            other => panic!("expected the finish to be refused, got {:?}", other),
+        }
+
+        let git_repo = repo.repo();
+        // Nothing was mutated: branch alive, master untouched, HEAD unmoved,
+        // and the tag still points where it did.
+        assert!(
+            git_repo
+                .find_branch("release/2.0.0", git2::BranchType::Local)
+                .is_ok(),
+            "release branch must survive a refused finish"
+        );
+        assert_eq!(
+            count_reachable_commits(&repo, &master),
+            master_before,
+            "master must not gain a merge commit"
+        );
+        assert_eq!(repo.current_branch(), "release/2.0.0", "HEAD must not move");
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v2.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            stale,
+            "the pre-existing tag must be left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finish_hotfix_refuses_when_the_release_of_the_same_version_owns_the_tag() {
+        // release/1.0.1 and hotfix/1.0.1 both resolve to the tag v1.0.1
+        // because the two flows share gitflow.prefix.versiontag. Once the
+        // release has claimed it, the hotfix finish must refuse rather than
+        // ship the hotfix untagged.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        repo.checkout_branch("develop");
+        gitflow_start_release(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("rel.txt", "r")]);
+        gitflow_finish_release(repo.path_str(), "1.0.1".to_string(), None, Some(true))
+            .await
+            .unwrap();
+
+        let tag_before = repo
+            .repo()
+            .find_reference("refs/tags/v1.0.1")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        let master_before = count_reachable_commits(&repo, &master);
+
+        gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        let hotfix_commit = repo.create_commit("Hotfix change", &[("fix.txt", "f")]);
+
+        let result =
+            gitflow_finish_hotfix(repo.path_str(), "1.0.1".to_string(), None, Some(true)).await;
+
+        match &result {
+            Err(LeviathanError::OperationFailed(msg)) => {
+                assert!(
+                    msg.contains("v1.0.1") && msg.contains("hotfix/1.0.1"),
+                    "error must name the colliding tag and branch: {}",
+                    msg
+                );
+            }
+            other => panic!("expected the hotfix finish to be refused, got {:?}", other),
+        }
+
+        let git_repo = repo.repo();
+        assert!(
+            git_repo
+                .find_branch("hotfix/1.0.1", git2::BranchType::Local)
+                .is_ok(),
+            "hotfix branch must survive a refused finish"
+        );
+        assert_eq!(
+            count_reachable_commits(&repo, &master),
+            master_before,
+            "master must not gain a merge commit"
+        );
+
+        let tag_now = git_repo
+            .find_reference("refs/tags/v1.0.1")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        assert_eq!(tag_now, tag_before, "the release's tag must be left alone");
+        assert!(
+            !git_repo
+                .graph_descendant_of(tag_now, hotfix_commit)
+                .unwrap(),
+            "the hotfix must not end up shipped under a tag that does not contain it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_adopts_its_own_tag_from_a_prior_pass() {
+        // Same shape as test_finish_release_idempotent_after_develop_conflict:
+        // the first pass tags master and then conflicts on develop. The tag
+        // left behind IS this finish's own, so the re-run must still adopt it
+        // rather than be refused by the collision guard.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop base", &[("shared.txt", "develop base")]);
+        gitflow_start_release(repo.path_str(), "3.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop divergent", &[("shared.txt", "develop divergent")]);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        let tag_before = repo
+            .repo()
+            .find_reference("refs/tags/v3.0.0")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v3.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            tag_before,
+            "the finish's own tag must be adopted unchanged"
+        );
+        assert!(git_repo
+            .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_accepts_a_lightweight_tag_on_the_release_tip() {
+        // The tag sits exactly ON the release tip (and is lightweight, so it
+        // peels straight to a commit). That contains the release, so the
+        // finish must proceed — the guard is about unrelated tags, not about
+        // every pre-existing tag.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "6.0.0".to_string())
+            .await
+            .unwrap();
+        let release_tip = repo.create_commit("Release change", &[("release.txt", "r")]);
+        repo.create_lightweight_tag("v6.0.0");
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "6.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "finish was refused: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v6.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            release_tip,
+            "the existing tag must be left where it was"
+        );
+        assert!(git_repo
+            .find_branch("release/6.0.0", git2::BranchType::Local)
             .is_err());
     }
 }

@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::models::Commit;
+use crate::models::{Commit, FileHistoryEntry};
 
 /// Cached full revwalk (OIDs only) per repository for the all-branches graph
 /// walk. Paging a raw revwalk with `skip` is O(skip) per request and re-walks
@@ -1511,14 +1511,20 @@ pub async fn search_commits(
     Ok(results)
 }
 
-/// Get all commits that modified a specific file
+/// Get all commits that modified a specific file, each paired with the path
+/// the file had in that commit.
+///
+/// The path is per-entry, not per-request: following a rename backwards means
+/// older entries refer to the file under its old name, and a caller that
+/// diffed or blamed them under the file's current name would get
+/// "File not found in commit" for a commit this very list says touched it.
 #[command]
 pub async fn get_file_history(
     path: String,
     file_path: String,
     limit: Option<usize>,
     follow_renames: Option<bool>,
-) -> Result<Vec<Commit>> {
+) -> Result<Vec<FileHistoryEntry>> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let mut revwalk = repo.revwalk()?;
@@ -1541,11 +1547,11 @@ pub async fn get_file_history(
 
     let limit_count = limit.unwrap_or(500);
     let should_follow = follow_renames.unwrap_or(true);
-    let mut commits = Vec::new();
+    let mut entries: Vec<FileHistoryEntry> = Vec::new();
     let mut current_path = file_path.clone();
 
     for oid_result in revwalk {
-        if commits.len() >= limit_count {
+        if entries.len() >= limit_count {
             break;
         }
 
@@ -1644,7 +1650,14 @@ pub async fn get_file_history(
         }
 
         if file_modified {
-            commits.push(Commit::from_git2(&commit));
+            // Recorded BEFORE the rename is followed: at the renaming commit
+            // the file already exists in that commit's tree under the NEW
+            // name, so the new name is the right path there. Only commits
+            // older than the rename get the old name.
+            entries.push(FileHistoryEntry {
+                commit: Commit::from_git2(&commit),
+                path_at_commit: current_path.clone(),
+            });
 
             // Follow the rename backwards
             if let Some(old_path) = renamed_from {
@@ -1653,7 +1666,7 @@ pub async fn get_file_history(
         }
     }
 
-    Ok(commits)
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -1748,7 +1761,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let summaries: Vec<String> = following.iter().map(|c| c.summary.clone()).collect();
+        let summaries: Vec<String> = following.iter().map(|e| e.commit.summary.clone()).collect();
 
         assert!(
             summaries.iter().any(|s| s == "Add original"),
@@ -1782,13 +1795,156 @@ mod tests {
         )
         .await
         .unwrap();
-        let summaries: Vec<String> = not_following.iter().map(|c| c.summary.clone()).collect();
+        let summaries: Vec<String> = not_following
+            .iter()
+            .map(|e| e.commit.summary.clone())
+            .collect();
 
         assert!(
             !summaries.iter().any(|s| s == "Add original"),
             "not following must not reach past the rename, got {:?}",
             summaries
         );
+    }
+
+    /// Every entry must carry the path the file had in ITS commit.
+    ///
+    /// Following a rename makes pre-rename commits reachable, but a bare
+    /// `Commit` says nothing about where the file lived then, so the UI had
+    /// only the file's current path to offer for diff/blame — a name that did
+    /// not exist yet at those commits.
+    #[tokio::test]
+    async fn test_file_history_entries_carry_the_path_at_each_commit() {
+        let repo = TestRepo::with_initial_commit();
+
+        // Topology-inconsistent timestamps, as in the rename tests above.
+        commit_file_at(&repo, "Add original", "old-name.txt", "line one\n", 1_000);
+        commit_file_at(
+            &repo,
+            "Edit original",
+            "old-name.txt",
+            "line one\nline two\n",
+            3_000,
+        );
+        commit_rename_at(&repo, "old-name.txt", "new-name.txt", "Rename it", 2_000);
+        commit_file_at(
+            &repo,
+            "Edit after rename",
+            "new-name.txt",
+            "line one\nline two\nline three\n",
+            4_000,
+        );
+
+        let entries = get_file_history(
+            repo.path_str(),
+            "new-name.txt".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let path_for = |summary: &str| -> String {
+            entries
+                .iter()
+                .find(|e| e.commit.summary == summary)
+                .unwrap_or_else(|| panic!("missing entry {:?}", summary))
+                .path_at_commit
+                .clone()
+        };
+
+        assert_eq!(
+            path_for("Add original"),
+            "old-name.txt",
+            "a commit older than the rename must report the OLD path"
+        );
+        assert_eq!(
+            path_for("Edit original"),
+            "old-name.txt",
+            "edits under the old name must report the OLD path"
+        );
+        assert_eq!(
+            path_for("Rename it"),
+            "new-name.txt",
+            "at the renaming commit the file already exists under the new name"
+        );
+        assert_eq!(path_for("Edit after rename"), "new-name.txt");
+    }
+
+    /// The point of the per-entry path: it is actually diffable.
+    ///
+    /// The second half of this test is what every UI click on a pre-rename row
+    /// used to do — pass the file's current name — and it still fails, which is
+    /// exactly why the entry has to carry its own path.
+    #[tokio::test]
+    async fn test_file_history_path_at_commit_is_diffable() {
+        let repo = TestRepo::with_initial_commit();
+
+        commit_file_at(&repo, "Add original", "old-name.txt", "line one\n", 1_000);
+        commit_rename_at(&repo, "old-name.txt", "new-name.txt", "Rename it", 2_000);
+
+        let entries = get_file_history(
+            repo.path_str(),
+            "new-name.txt".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let entry = entries
+            .iter()
+            .find(|e| e.commit.summary == "Add original")
+            .expect("pre-rename commit must be listed");
+
+        let ok = crate::commands::diff::get_commit_file_diff(
+            repo.path_str(),
+            entry.commit.oid.clone(),
+            entry.path_at_commit.clone(),
+            None,
+        )
+        .await
+        .expect("the path the entry reports must be diffable at that commit");
+        assert_eq!(ok.path, "old-name.txt");
+
+        let err = crate::commands::diff::get_commit_file_diff(
+            repo.path_str(),
+            entry.commit.oid.clone(),
+            "new-name.txt".to_string(),
+            None,
+        )
+        .await
+        .expect_err("the file's CURRENT name does not exist at that commit");
+        assert!(
+            err.to_string().contains("File not found in commit"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    /// Edge case: nothing was renamed, so every entry keeps the requested path.
+    #[tokio::test]
+    async fn test_file_history_entries_use_the_requested_path_when_nothing_was_renamed() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Modify README", &[("README.md", "# Updated")]);
+        repo.create_commit("Modify again", &[("README.md", "# Updated again")]);
+
+        let entries = get_file_history(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(100),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(entries.len(), 3);
+        for entry in &entries {
+            assert_eq!(
+                entry.path_at_commit, "README.md",
+                "no rename happened, so every entry keeps the requested path"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2487,8 +2643,8 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        let commits = result.unwrap();
-        assert_eq!(commits.len(), 3); // Initial + 2 modifications
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 3); // Initial + 2 modifications
     }
 
     #[tokio::test]
@@ -2506,8 +2662,8 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        let commits = result.unwrap();
-        assert_eq!(commits.len(), 2);
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 2);
     }
 
     #[tokio::test]
@@ -2523,8 +2679,8 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        let commits = result.unwrap();
-        assert!(commits.is_empty());
+        let entries = result.unwrap();
+        assert!(entries.is_empty());
     }
 
     #[tokio::test]

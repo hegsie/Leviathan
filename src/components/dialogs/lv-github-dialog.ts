@@ -793,7 +793,10 @@ export class LvGitHubDialog extends LitElement {
   @state() private hasMoreReleases = false;
   @state() private runsPage = 1;
   @state() private hasMoreRuns = false;
-  @state() private isLoadingMore = false;
+  @state() private isLoadingMorePrs = false;
+  @state() private isLoadingMoreRuns = false;
+  @state() private isLoadingMoreIssues = false;
+  @state() private isLoadingMoreReleases = false;
   // Request generations, one per paged list. A restart (a filter change, a
   // reload after a create) supersedes an in-flight page load: the superseded
   // result must neither append to the list that replaced it nor overwrite its
@@ -934,8 +937,45 @@ export class LvGitHubDialog extends LitElement {
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
-    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
-      await this.detectRepo();
+    if (changedProperties.has('repositoryPath')) {
+      // The dialog is repo-independent (it stays open across the last tab close),
+      // so an empty path must clear the previously detected repo. Otherwise the
+      // repo-backed tabs keep rendering and acting on the closed repository.
+      // The create-* drafts belong to the repository they were typed against,
+      // so they go too -- otherwise a draft left on screen is submitted into
+      // whichever repository the dialog is repointed at.
+      this.resetRepoScopedDrafts();
+      if (!this.repositoryPath) {
+        this.detectedRepo = null;
+      } else if (this.open) {
+        await this.detectRepo();
+      }
+    }
+  }
+
+  /**
+   * Drop every create-* draft and leave any create-* tab. Called when
+   * repositoryPath changes, because those drafts are scoped to the repository
+   * they were composed against while the create handlers guard only on
+   * detectedRepo, which is re-derived from whatever repository is now current.
+   */
+  private resetRepoScopedDrafts(): void {
+    this.createPrTitle = '';
+    this.createPrBody = '';
+    this.createPrHead = '';
+    this.createPrBase = '';
+    this.createPrDraft = false;
+    this.createIssueTitle = '';
+    this.createIssueBody = '';
+    this.createIssueLabels = [];
+    this.createReleaseTag = '';
+    this.createReleaseName = '';
+    this.createReleaseBody = '';
+    this.createReleasePrerelease = false;
+    this.createReleaseDraft = false;
+    this.createReleaseGenerateNotes = true;
+    if (this.activeTab.startsWith('create-')) {
+      this.activeTab = 'connection';
     }
   }
 
@@ -1101,7 +1141,14 @@ export class LvGitHubDialog extends LitElement {
   private async detectRepo(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    const result = await gitService.detectGitHubRepo(this.repositoryPath);
+    // The dialog outlives the repository -- it stays open when the last tab
+    // closes -- so a detect issued for one path can resolve after the path has
+    // changed. Dropping the stale result stops the closed (or previously
+    // selected) repository from being re-detected and re-loaded over the
+    // current one.
+    const requestedPath = this.repositoryPath;
+    const result = await gitService.detectGitHubRepo(requestedPath);
+    if (this.repositoryPath !== requestedPath) return;
     if (result.success && result.data) {
       this.detectedRepo = result.data;
       // SAFETY: IPC calls are batched with Promise.all to avoid N+1 sequential calls.
@@ -1134,8 +1181,9 @@ export class LvGitHubDialog extends LitElement {
     // Appending must not swap the rendered list for the "Loading…" placeholder,
     // so it uses its own flag.
     if (append) {
-      this.isLoadingMore = true;
+      this.isLoadingMorePrs = true;
     } else {
+      this.isLoadingMorePrs = false;
       this.isLoading = true;
     }
     this.error = null;
@@ -1165,10 +1213,12 @@ export class LvGitHubDialog extends LitElement {
       if (requestId !== this.prRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load pull requests';
     } finally {
-      if (append) {
-        this.isLoadingMore = false;
-      } else {
-        this.isLoading = false;
+      if (requestId === this.prRequestId) {
+        if (append) {
+          this.isLoadingMorePrs = false;
+        } else {
+          this.isLoading = false;
+        }
       }
     }
   }
@@ -1179,7 +1229,7 @@ export class LvGitHubDialog extends LitElement {
 
     const requestedPage = append ? this.runsPage + 1 : 1;
     const requestId = ++this.runsRequestId;
-    if (append) this.isLoadingMore = true;
+    this.isLoadingMoreRuns = append;
     // Same as loadPullRequests: a load that succeeds must not leave the
     // previous attempt's banner standing.
     this.error = null;
@@ -1210,7 +1260,7 @@ export class LvGitHubDialog extends LitElement {
       if (requestId !== this.runsRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load workflow runs';
     } finally {
-      if (append) this.isLoadingMore = false;
+      if (append && requestId === this.runsRequestId) this.isLoadingMoreRuns = false;
     }
   }
 
@@ -1224,7 +1274,7 @@ export class LvGitHubDialog extends LitElement {
 
     const requestedPage = append ? (this.issuesNextPage ?? 1) : 1;
     const requestId = ++this.issuesRequestId;
-    if (append) this.isLoadingMore = true;
+    this.isLoadingMoreIssues = append;
     this.error = null;
 
     try {
@@ -1250,7 +1300,7 @@ export class LvGitHubDialog extends LitElement {
       if (requestId !== this.issuesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load issues';
     } finally {
-      if (append) this.isLoadingMore = false;
+      if (append && requestId === this.issuesRequestId) this.isLoadingMoreIssues = false;
     }
   }
 
@@ -1282,7 +1332,7 @@ export class LvGitHubDialog extends LitElement {
 
     const requestedPage = append ? this.releasesPage + 1 : 1;
     const requestId = ++this.releasesRequestId;
-    if (append) this.isLoadingMore = true;
+    this.isLoadingMoreReleases = append;
     this.error = null;
 
     try {
@@ -1307,7 +1357,7 @@ export class LvGitHubDialog extends LitElement {
       if (requestId !== this.releasesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load releases';
     } finally {
-      if (append) this.isLoadingMore = false;
+      if (append && requestId === this.releasesRequestId) this.isLoadingMoreReleases = false;
     }
   }
 
@@ -2034,7 +2084,7 @@ export class LvGitHubDialog extends LitElement {
               `}
             `}
           </div>
-        ` : html`
+        ` : this.authMethod === 'pat' ? html`
           <!-- PAT Form -->
           <div class="form-group">
             <label>Personal Access Token</label>
@@ -2077,7 +2127,7 @@ export class LvGitHubDialog extends LitElement {
               Connect to GitHub
             </button>
           </div>
-        `}
+        ` : nothing}
 
         ${this.authMethod === 'app' ? html`
           <!-- GitHub App Form -->
@@ -2168,11 +2218,11 @@ export class LvGitHubDialog extends LitElement {
    * next page and appends it. Rendered only when a further page exists, so its
    * absence is itself the "that's the whole list" signal.
    */
-  private renderLoadMore(onClick: () => void) {
+  private renderLoadMore(onClick: () => void, isLoading: boolean) {
     return html`
       <div class="load-more">
-        <button class="btn" ?disabled=${this.isLoadingMore} @click=${onClick}>
-          ${this.isLoadingMore ? 'Loading...' : 'Load more'}
+        <button class="btn" ?disabled=${isLoading} @click=${onClick}>
+          ${isLoading ? 'Loading...' : 'Load more'}
         </button>
       </div>
     `;
@@ -2251,7 +2301,9 @@ export class LvGitHubDialog extends LitElement {
         `)}
       </div>
 
-      ${this.hasMorePrs ? this.renderLoadMore(() => this.loadPullRequests(undefined, true)) : ''}
+      ${this.hasMorePrs
+        ? this.renderLoadMore(() => this.loadPullRequests(undefined, true), this.isLoadingMorePrs)
+        : ''}
     `;
   }
 
@@ -2314,7 +2366,9 @@ export class LvGitHubDialog extends LitElement {
         `)}
       </div>
 
-      ${this.hasMoreRuns ? this.renderLoadMore(() => this.loadWorkflowRuns(undefined, true)) : ''}
+      ${this.hasMoreRuns
+        ? this.renderLoadMore(() => this.loadWorkflowRuns(undefined, true), this.isLoadingMoreRuns)
+        : ''}
     `;
   }
 
@@ -2409,7 +2463,7 @@ export class LvGitHubDialog extends LitElement {
       </div>
 
       ${this.issuesNextPage !== null
-        ? this.renderLoadMore(() => this.loadIssues(undefined, true))
+        ? this.renderLoadMore(() => this.loadIssues(undefined, true), this.isLoadingMoreIssues)
         : ''}
     `;
   }
@@ -2544,7 +2598,9 @@ export class LvGitHubDialog extends LitElement {
         `)}
       </div>
 
-      ${this.hasMoreReleases ? this.renderLoadMore(() => this.loadReleases(undefined, true)) : ''}
+      ${this.hasMoreReleases
+        ? this.renderLoadMore(() => this.loadReleases(undefined, true), this.isLoadingMoreReleases)
+        : ''}
     `;
   }
 
