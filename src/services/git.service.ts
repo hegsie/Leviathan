@@ -5282,11 +5282,23 @@ export async function addToGitignore(
   return invokeCommand<void>("add_to_gitignore", { path: repoPath, patterns });
 }
 
+/**
+ * Remove the rule on `lineNumber` (1-based, as reported by `getGitignore`).
+ *
+ * The line is required, not the pattern alone: a .gitignore can repeat a line,
+ * and the backend used to drop every line with matching text — removing one
+ * displayed row took its twins with it.
+ */
 export async function removeFromGitignore(
   repoPath: string,
   pattern: string,
+  lineNumber: number,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>("remove_from_gitignore", { path: repoPath, pattern });
+  return invokeCommand<void>("remove_from_gitignore", {
+    path: repoPath,
+    pattern,
+    lineNumber,
+  });
 }
 
 export async function isIgnored(

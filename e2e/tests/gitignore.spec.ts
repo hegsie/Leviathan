@@ -190,6 +190,40 @@ test.describe('Ignore rules dialog', () => {
       .toEqual(['/target/', 'Cargo.lock']);
   });
 
+  test('removes only the rule row the user clicked', async ({ page }) => {
+    // The same line can legitimately appear twice — repeated section comments,
+    // or a pattern restated around a negation. Removing by text alone took the
+    // twin with it, so the write carries the line the clicked row came from.
+    const DUPLICATES = [
+      { pattern: '# generated', lineNumber: 1, isComment: true, isNegation: false, isEmpty: false },
+      { pattern: 'dist/', lineNumber: 2, isComment: false, isNegation: false, isEmpty: false },
+      { pattern: '# generated', lineNumber: 3, isComment: true, isNegation: false, isEmpty: false },
+      { pattern: 'coverage/', lineNumber: 4, isComment: false, isNegation: false, isEmpty: false },
+    ];
+    await injectCommandMock(page, { get_gitignore: DUPLICATES });
+    await openIgnoreDialog(page);
+    const dialog = page.locator('lv-gitignore-dialog');
+
+    const rows = dialog.locator('.rule-item:not(.blank)');
+    await expect(rows).toHaveCount(4);
+
+    // What the file looks like once line 3 — and only line 3 — is gone.
+    await injectCommandMock(page, {
+      get_gitignore: [DUPLICATES[0], DUPLICATES[1], { ...DUPLICATES[3], lineNumber: 3 }],
+    });
+
+    await rows.nth(2).locator('button').click();
+
+    await waitForCommand(page, 'remove_from_gitignore');
+    const [command] = await findCommand(page, 'remove_from_gitignore');
+    expect((command.args as { pattern: string }).pattern).toBe('# generated');
+    expect((command.args as { lineNumber: number }).lineNumber).toBe(3);
+
+    await expect(rows).toHaveCount(3);
+    await expect(dialog.locator('.rule-text', { hasText: '# generated' })).toHaveCount(1);
+    await expect(page.locator('lv-toast-container .toast.success').first()).toBeVisible();
+  });
+
   test('explains why a path is ignored', async ({ page }) => {
     await openIgnoreDialog(page);
     const dialog = page.locator('lv-gitignore-dialog');

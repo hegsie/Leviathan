@@ -470,9 +470,12 @@ export class LvGitignoreDialog extends LitElement {
     this.saving = true;
     this.error = null;
     try {
+      // Line identity, not just the text: the same line can appear twice in a
+      // .gitignore, and only the row the user clicked was asked for.
       const result = await gitService.removeFromGitignore(
         this.pinnedRepoPath,
         entry.pattern,
+        entry.lineNumber,
       );
       if (result.success) {
         await this.reloadGitignore();

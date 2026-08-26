@@ -150,14 +150,46 @@ describe('lv-gitignore-dialog', () => {
   it('offers no Remove control on a blank line', async () => {
     const el = await openDialog();
 
-    // remove_from_gitignore filters by trimmed equality, so removing a blank
-    // entry would strip EVERY blank line from the file.
+    // A blank line is a spacer, not a rule — there is nothing to remove, so the
+    // row carries no control that would suggest otherwise.
     const blank = el.shadowRoot!.querySelector('.rule-item.blank')!;
     expect(blank.querySelector('button')).to.be.null;
 
     const rows = Array.from(el.shadowRoot!.querySelectorAll('.rule-item:not(.blank)'));
     expect(rows.length).to.equal(2);
     expect(rows.every((r) => r.querySelector('button') !== null)).to.be.true;
+  });
+
+  it('removes only the occurrence the user clicked', async () => {
+    gitignoreEntries = [
+      entry({ pattern: '# generated', lineNumber: 1, isComment: true }),
+      entry({ pattern: 'dist/', lineNumber: 2 }),
+      entry({ pattern: '# generated', lineNumber: 3, isComment: true }),
+      entry({ pattern: 'coverage/', lineNumber: 4 }),
+    ];
+    const el = await openDialog();
+    const changes = trackChanges(el);
+
+    const removeButtons = el.shadowRoot!.querySelectorAll<HTMLElement>(
+      '.rule-item:not(.blank) button',
+    );
+    expect(removeButtons.length).to.equal(4);
+
+    invokeCalls.length = 0;
+    // The SECOND "# generated" — text alone cannot tell the two rows apart, so
+    // the write has to carry the line the row came from.
+    removeButtons[2].click();
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+
+    expect(calls('remove_from_gitignore')[0].args).to.deep.equal({
+      path: REPO,
+      pattern: '# generated',
+      lineNumber: 3,
+    });
+    expect(calls('get_gitignore').length, 'rules are re-read after the write').to.equal(1);
+    expect(uiStore.getState().toasts.some((t) => t.type === 'success')).to.be.true;
+    expect(changes).to.deep.equal([REPO]);
   });
 
   it('adds a rule, reloads and announces the change', async () => {
