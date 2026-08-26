@@ -25,7 +25,7 @@ import {
  * to access internal elements.
  */
 
-const MOCK_COMMITS = [
+const MOCK_COMMIT_OBJECTS = [
   {
     oid: 'abc123def456789',
     shortId: 'abc123d',
@@ -59,6 +59,18 @@ const MOCK_COMMITS = [
     parentIds: [],
     timestamp: Math.floor(Date.now() / 1000) - 604800,
   },
+];
+
+/**
+ * File history entries as the backend returns them: each commit paired with the
+ * path the file had in THAT commit. The oldest entry predates a rename, so it
+ * carries the old path — diffing or blaming it under 'src/main.ts' would fail
+ * with "File not found in commit".
+ */
+const MOCK_ENTRIES = [
+  { commit: MOCK_COMMIT_OBJECTS[0], pathAtCommit: 'src/main.ts' },
+  { commit: MOCK_COMMIT_OBJECTS[1], pathAtCommit: 'src/main.ts' },
+  { commit: MOCK_COMMIT_OBJECTS[2], pathAtCommit: 'src/old-main.ts' },
 ];
 
 /**
@@ -99,7 +111,7 @@ test.describe('File History - Commit List', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
     await showFileHistory(page);
   });
@@ -171,7 +183,7 @@ test.describe('File History - Selection', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
     await showFileHistory(page);
   });
@@ -204,7 +216,7 @@ test.describe('File History - Close', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
     await showFileHistory(page);
   });
@@ -224,7 +236,7 @@ test.describe('File History - View Diff', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
     await showFileHistory(page);
   });
@@ -254,13 +266,91 @@ test.describe('File History - View Diff', () => {
 });
 
 // --------------------------------------------------------------------------
+// Renamed Files — the path a row acts on must be the path AT THAT COMMIT
+// --------------------------------------------------------------------------
+test.describe('File History - Renamed Files', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_ENTRIES,
+      get_commit_file_diff: {
+        path: 'src/old-main.ts',
+        oldPath: null,
+        status: 'added',
+        hunks: [],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 0,
+        deletions: 0,
+      },
+      get_file_blame: {
+        path: 'src/old-main.ts',
+        lines: [],
+        totalLines: 0,
+      },
+    });
+    await showFileHistory(page);
+  });
+
+  test('View on a pre-rename entry diffs the old path, not the current one', async ({ page }) => {
+    await page.locator('lv-file-history .view-diff-btn').nth(2).click();
+
+    // The diff pane header shows the historical path the diff was taken for.
+    await expect(page.locator('.diff-path')).toHaveText('src/old-main.ts');
+
+    await waitForCommand(page, 'get_commit_file_diff');
+    const commands = await findCommand(page, 'get_commit_file_diff');
+    expect(commands.length).toBeGreaterThan(0);
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/old-main.ts');
+    expect(args.commitOid).toBe('ghi345jkl678901');
+  });
+
+  test('View on a post-rename entry still diffs the current path', async ({ page }) => {
+    await page.locator('lv-file-history .view-diff-btn').first().click();
+
+    await expect(page.locator('.diff-path')).toHaveText('src/main.ts');
+    await waitForCommand(page, 'get_commit_file_diff');
+    const commands = await findCommand(page, 'get_commit_file_diff');
+    expect(commands.length).toBeGreaterThan(0);
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/main.ts');
+  });
+
+  test('View blame at this commit on a pre-rename entry blames the old path', async ({ page }) => {
+    await page.locator('lv-file-history .commit-item').nth(2).click({ button: 'right' });
+    await expect(page.locator('lv-file-history .context-menu')).toBeVisible();
+    await page
+      .locator('lv-file-history .context-menu-item')
+      .filter({ hasText: 'View blame' })
+      .click();
+
+    await expect(page.locator('lv-blame-view')).toBeAttached();
+
+    await waitForCommand(page, 'get_file_blame');
+    const commands = await findCommand(page, 'get_file_blame');
+    expect(commands.length).toBeGreaterThan(0);
+    const args = commands[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/old-main.ts');
+  });
+
+  test('the historical path is shown on pre-rename entries only', async ({ page }) => {
+    const items = page.locator('lv-file-history .commit-item');
+    await expect(items.nth(2).locator('.commit-path')).toHaveText('src/old-main.ts');
+    await expect(items.nth(0).locator('.commit-path')).toHaveCount(0);
+    await expect(items.nth(1).locator('.commit-path')).toHaveCount(0);
+  });
+});
+
+// --------------------------------------------------------------------------
 // Context Menu
 // --------------------------------------------------------------------------
 test.describe('File History - Context Menu', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
     await showFileHistory(page);
   });
@@ -336,7 +426,7 @@ test.describe('File History - Loading State', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
   });
 
@@ -357,7 +447,7 @@ test.describe('File History - Error Scenarios', () => {
   test('get_file_history failure should show error state or toast', async ({ page }) => {
     // Set up command capture with a valid initial response so the component can mount
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
     });
 
     // Inject an error so the next call to get_file_history will fail

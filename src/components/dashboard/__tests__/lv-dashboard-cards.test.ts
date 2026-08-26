@@ -74,6 +74,7 @@ function makeRepository(overrides: Partial<Repository> = {}): Repository {
     isValid: true,
     isBare: false,
     headRef: 'refs/heads/main',
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
@@ -382,6 +383,97 @@ describe('lv-repository-card', () => {
       const branchName = el.shadowRoot!.querySelector('.branch-name');
       expect(branchName).to.not.be.null;
       expect(branchName!.textContent).to.include('feature/awesome');
+    });
+
+    it('shows a detached HEAD chip when no branch is checked out', async () => {
+      const repo = makeRepository({
+        headRef: 'HEAD',
+        detachedHeadOid: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+      });
+      const el = await fixture<LvRepositoryCard>(
+        html`<lv-repository-card
+          .repository=${repo}
+          .currentBranch=${null}
+          .remotes=${[makeRemote()]}
+        ></lv-repository-card>`
+      );
+      await el.updateComplete;
+
+      const chip = el.shadowRoot!.querySelector('.branch-name.detached');
+      expect(chip).to.not.be.null;
+      expect(chip!.textContent).to.include('Detached HEAD');
+      expect(chip!.textContent).to.include('a1b2c3d');
+    });
+
+    it('names the full commit in the detached chip tooltip', async () => {
+      const repo = makeRepository({
+        headRef: 'HEAD',
+        detachedHeadOid: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+      });
+      const el = await fixture<LvRepositoryCard>(
+        html`<lv-repository-card
+          .repository=${repo}
+          .currentBranch=${null}
+        ></lv-repository-card>`
+      );
+      await el.updateComplete;
+
+      const chip = el.shadowRoot!.querySelector('.branch-name.detached');
+      expect(chip).to.not.be.null;
+      const title = chip!.getAttribute('title') ?? '';
+      expect(title).to.include('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+      expect(title).to.include("won't belong to any branch");
+    });
+
+    it('shows the detached chip when the repo has no remotes', async () => {
+      const repo = makeRepository({
+        headRef: 'HEAD',
+        detachedHeadOid: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+      });
+      const el = await fixture<LvRepositoryCard>(
+        html`<lv-repository-card
+          .repository=${repo}
+          .currentBranch=${null}
+          .remotes=${[]}
+        ></lv-repository-card>`
+      );
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.branch-info')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.branch-name.detached')).to.not.be.null;
+    });
+
+    it('shows the branch name, not a detached chip, on a normal checkout', async () => {
+      const repo = makeRepository({ detachedHeadOid: null });
+      const el = await fixture<LvRepositoryCard>(
+        html`<lv-repository-card
+          .repository=${repo}
+          .currentBranch=${makeBranch({ name: 'feature/awesome' })}
+        ></lv-repository-card>`
+      );
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.branch-name.detached')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.branch-name')!.textContent).to.include(
+        'feature/awesome'
+      );
+    });
+
+    it('shows no detached chip on an unborn HEAD', async () => {
+      // A freshly initialised repo has no branch and no detached commit: a null
+      // currentBranch alone must not be read as detachment.
+      const repo = makeRepository({ headRef: null, detachedHeadOid: null });
+      const el = await fixture<LvRepositoryCard>(
+        html`<lv-repository-card
+          .repository=${repo}
+          .currentBranch=${null}
+          .remotes=${[]}
+        ></lv-repository-card>`
+      );
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.branch-name.detached')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.branch-name')).to.be.null;
     });
 
     it('renders provider icon for GitHub repo', async () => {

@@ -566,6 +566,35 @@ async fn finish_release_like(
         .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?;
     let release_commit = release_branch.get().peel_to_commit()?;
 
+    // A version tag left behind by an EARLIER pass of this same finish is
+    // expected — the develop side conflicted, the user resolved it and re-ran —
+    // and the tag block below adopts it. Any OTHER pre-existing tag belongs to
+    // someone else: a teammate's tag, an old cycle reusing the number, or the
+    // release/hotfix collision both flows produce because they share
+    // gitflow.prefix.versiontag. Adopting one of those merges, deletes the
+    // branch and reports success while the release ships untagged and the
+    // version resolves to unrelated code. A tag from our own pass always
+    // CONTAINS the release tip (it sits on the master merge commit, or on a
+    // master tip that already merged it); anything else is refused here, before
+    // any mutation, so the repository is left exactly as it was.
+    if let Ok(tag_ref) = repo.find_reference(&format!("refs/tags/{}", tag_name)) {
+        let from_this_finish = match tag_ref.peel_to_commit() {
+            Ok(tagged) => {
+                tagged.id() == release_commit.id()
+                    || repo.graph_descendant_of(tagged.id(), release_commit.id())?
+            }
+            // A tag that does not resolve to a commit is certainly not ours.
+            Err(_) => false,
+        };
+        if !from_this_finish {
+            return Err(LeviathanError::OperationFailed(format!(
+                "Tag '{}' already exists and does not contain '{}'. \
+                 Delete or rename the tag, or finish with a different version.",
+                tag_name, branch_name
+            )));
+        }
+    }
+
     // Merge into master
     let master_branch = repo
         .find_branch(&master, git2::BranchType::Local)
@@ -613,7 +642,8 @@ async fn finish_release_like(
         Some(merge_oid)
     };
 
-    // Create the tag on master. Skip when it already exists (re-run after the
+    // Create the tag on master. Skip when it already exists — validated above
+    // as this finish's own tag from an earlier pass (re-run after the
     // develop-side conflict was resolved and tagged on the first pass) so we
     // don't fail with "tag already exists". When it is MISSING we must still
     // tag: on a re-run after a MASTER-side conflict was resolved via the dialog,
@@ -1837,6 +1867,252 @@ mod tests {
         // Branch was deleted.
         assert!(git_repo
             .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_refuses_a_version_tag_on_an_unrelated_commit() {
+        // A tag with the release's version already exists on an UNRELATED
+        // commit (a teammate's tag, or an old cycle reusing the number).
+        // Finishing must refuse before touching anything — silently adopting
+        // it would merge, delete the branch and report success while the
+        // version tag still resolves to the old code.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // Unrelated work on master, tagged with the version we are about to
+        // release.
+        repo.checkout_branch(&master);
+        repo.create_commit("Unrelated work", &[("other.txt", "x")]);
+        let stale = repo.head_oid();
+        repo.create_tag("v2.0.0");
+
+        gitflow_start_release(repo.path_str(), "2.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("release.txt", "r")]);
+
+        let master_before = count_reachable_commits(&repo, &master);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "2.0.0".to_string(), None, Some(true)).await;
+
+        match &result {
+            Err(LeviathanError::OperationFailed(msg)) => {
+                assert!(
+                    msg.contains("v2.0.0") && msg.contains("release/2.0.0"),
+                    "error must name the colliding tag and branch: {}",
+                    msg
+                );
+            }
+            other => panic!("expected the finish to be refused, got {:?}", other),
+        }
+
+        let git_repo = repo.repo();
+        // Nothing was mutated: branch alive, master untouched, HEAD unmoved,
+        // and the tag still points where it did.
+        assert!(
+            git_repo
+                .find_branch("release/2.0.0", git2::BranchType::Local)
+                .is_ok(),
+            "release branch must survive a refused finish"
+        );
+        assert_eq!(
+            count_reachable_commits(&repo, &master),
+            master_before,
+            "master must not gain a merge commit"
+        );
+        assert_eq!(repo.current_branch(), "release/2.0.0", "HEAD must not move");
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v2.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            stale,
+            "the pre-existing tag must be left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finish_hotfix_refuses_when_the_release_of_the_same_version_owns_the_tag() {
+        // release/1.0.1 and hotfix/1.0.1 both resolve to the tag v1.0.1
+        // because the two flows share gitflow.prefix.versiontag. Once the
+        // release has claimed it, the hotfix finish must refuse rather than
+        // ship the hotfix untagged.
+        let repo = TestRepo::with_initial_commit();
+        let master = repo.current_branch();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        repo.checkout_branch("develop");
+        gitflow_start_release(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("rel.txt", "r")]);
+        gitflow_finish_release(repo.path_str(), "1.0.1".to_string(), None, Some(true))
+            .await
+            .unwrap();
+
+        let tag_before = repo
+            .repo()
+            .find_reference("refs/tags/v1.0.1")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        let master_before = count_reachable_commits(&repo, &master);
+
+        gitflow_start_hotfix(repo.path_str(), "1.0.1".to_string())
+            .await
+            .unwrap();
+        let hotfix_commit = repo.create_commit("Hotfix change", &[("fix.txt", "f")]);
+
+        let result =
+            gitflow_finish_hotfix(repo.path_str(), "1.0.1".to_string(), None, Some(true)).await;
+
+        match &result {
+            Err(LeviathanError::OperationFailed(msg)) => {
+                assert!(
+                    msg.contains("v1.0.1") && msg.contains("hotfix/1.0.1"),
+                    "error must name the colliding tag and branch: {}",
+                    msg
+                );
+            }
+            other => panic!("expected the hotfix finish to be refused, got {:?}", other),
+        }
+
+        let git_repo = repo.repo();
+        assert!(
+            git_repo
+                .find_branch("hotfix/1.0.1", git2::BranchType::Local)
+                .is_ok(),
+            "hotfix branch must survive a refused finish"
+        );
+        assert_eq!(
+            count_reachable_commits(&repo, &master),
+            master_before,
+            "master must not gain a merge commit"
+        );
+
+        let tag_now = git_repo
+            .find_reference("refs/tags/v1.0.1")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+        assert_eq!(tag_now, tag_before, "the release's tag must be left alone");
+        assert!(
+            !git_repo
+                .graph_descendant_of(tag_now, hotfix_commit)
+                .unwrap(),
+            "the hotfix must not end up shipped under a tag that does not contain it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_adopts_its_own_tag_from_a_prior_pass() {
+        // Same shape as test_finish_release_idempotent_after_develop_conflict:
+        // the first pass tags master and then conflicts on develop. The tag
+        // left behind IS this finish's own, so the re-run must still adopt it
+        // rather than be refused by the collision guard.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop base", &[("shared.txt", "develop base")]);
+        gitflow_start_release(repo.path_str(), "3.0.0".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Release change", &[("shared.txt", "release content")]);
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop divergent", &[("shared.txt", "develop divergent")]);
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(matches!(result, Err(LeviathanError::MergeConflict)));
+
+        let tag_before = repo
+            .repo()
+            .find_reference("refs/tags/v3.0.0")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        crate::commands::merge::resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        crate::commands::merge::commit_merge(repo.path_str(), None, None)
+            .await
+            .unwrap();
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "3.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "re-run finish failed: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v3.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            tag_before,
+            "the finish's own tag must be adopted unchanged"
+        );
+        assert!(git_repo
+            .find_branch("release/3.0.0", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_release_accepts_a_lightweight_tag_on_the_release_tip() {
+        // The tag sits exactly ON the release tip (and is lightweight, so it
+        // peels straight to a commit). That contains the release, so the
+        // finish must proceed — the guard is about unrelated tags, not about
+        // every pre-existing tag.
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_release(repo.path_str(), "6.0.0".to_string())
+            .await
+            .unwrap();
+        let release_tip = repo.create_commit("Release change", &[("release.txt", "r")]);
+        repo.create_lightweight_tag("v6.0.0");
+
+        let result =
+            gitflow_finish_release(repo.path_str(), "6.0.0".to_string(), None, Some(true)).await;
+        assert!(result.is_ok(), "finish was refused: {:?}", result.err());
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo
+                .find_reference("refs/tags/v6.0.0")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            release_tip,
+            "the existing tag must be left where it was"
+        );
+        assert!(git_repo
+            .find_branch("release/6.0.0", git2::BranchType::Local)
             .is_err());
     }
 }
