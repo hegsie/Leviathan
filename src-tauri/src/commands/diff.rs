@@ -2278,8 +2278,9 @@ mod tests {
         assert_eq!(stats[0].files_changed, 1);
     }
 
-    /// Clicking a file the commit's file list badges "renamed" must show the
-    /// rename diff (only the edited lines), not the whole file as added.
+    /// Clicking a file that the commit's file list badges as "renamed" must
+    /// show the rename diff (only the edited lines), not the whole file as
+    /// added.
     #[tokio::test]
     async fn test_get_commit_file_diff_renamed_with_edit() {
         let repo = TestRepo::with_initial_commit();
