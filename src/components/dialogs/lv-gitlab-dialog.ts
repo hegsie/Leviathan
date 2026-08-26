@@ -885,13 +885,24 @@ export class LvGitLabDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * OAuth access token first (GitLab OAuth access tokens last ~2h, so without
+   * this a signed-in account reads as disconnected on the next open). Personal
+   * access tokens have no OAuth bundle and are returned unchanged.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
-    if (this.selectedAccountId) {
-      return credentialService.getAccountToken('gitlab', this.selectedAccountId);
-    }
-    return null;
+    if (!this.selectedAccountId) return null;
+    // Refresh against the instance the account was created on — a detected repo
+    // on a DIFFERENT instance must not redirect the refresh grant.
+    const account = getAccountById(this.selectedAccountId);
+    const instanceUrl =
+      account?.config.type === 'gitlab' ? account.config.instanceUrl : this.instanceUrlInput;
+    return credentialService.getFreshAccountToken(
+      'gitlab',
+      this.selectedAccountId,
+      'gitlab',
+      instanceUrl || undefined
+    );
   }
 
   /**

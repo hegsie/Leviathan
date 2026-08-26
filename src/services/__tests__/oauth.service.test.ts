@@ -265,6 +265,39 @@ describe('oauth.service - refreshToken', () => {
     expect(tokens.accessToken).to.equal('a3');
     expect(tokens.refreshToken).to.equal('r3');
   });
+
+  /** Capture the args of the next `oauth_refresh_token` invoke. */
+  function captureRefreshArgs(): { args?: Record<string, unknown> } {
+    const captured: { args?: Record<string, unknown> } = {};
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_refresh_token') {
+        captured.args = args as Record<string, unknown>;
+        return Promise.resolve({ accessToken: 'a4', refreshToken: 'r4', expiresIn: 3600 });
+      }
+      return Promise.resolve(null);
+    };
+    return captured;
+  }
+
+  // Bitbucket's refresh_token grant is authenticated with the client secret,
+  // exactly like its code exchange — without it the grant 401s and the caller
+  // silently falls back to the expired access token.
+  it('sends the client secret for Bitbucket', async () => {
+    const captured = captureRefreshArgs();
+    const { refreshToken } = await import('../oauth.service.ts');
+    await refreshToken('bitbucket', 'r1');
+
+    expect(captured.args?.clientSecret).to.be.a('string');
+    expect((captured.args?.clientSecret as string).length).to.be.greaterThan(0);
+  });
+
+  it('sends no client secret for a PKCE-only provider', async () => {
+    const captured = captureRefreshArgs();
+    const { refreshToken } = await import('../oauth.service.ts');
+    await refreshToken('gitlab', 'r1');
+
+    expect(captured.args?.clientSecret, 'GitLab is a public PKCE client').to.equal(undefined);
+  });
 });
 
 describe('oauth.service - loopback cancel/restart guard', () => {

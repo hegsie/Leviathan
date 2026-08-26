@@ -143,6 +143,8 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+/** Raw result of `oauth_refresh_token`; null → the refresh fails. */
+let refreshResponse: unknown = null;
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -193,6 +195,7 @@ function setupMockInvoke(): void {
 
     // OAuth
     if (command === 'get_oauth_client_id') return null;
+    if (command === 'oauth_refresh_token') return refreshResponse;
 
     return null;
   };
@@ -203,6 +206,7 @@ describe('lv-bitbucket-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    refreshResponse = null;
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
   });
@@ -1237,6 +1241,99 @@ describe('lv-bitbucket-dialog', () => {
 
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success' && /Connected Bitbucket/.test(t.message))).to.be.true;
+    });
+  });
+  // Regression: Bitbucket OAuth access tokens expire in ~2h. The dialog read the
+  // raw stored access token once at open and reused that cached value for every
+  // API call, so a signed-in account read as disconnected on the next open and a
+  // long-open dialog kept using a token that had since expired.
+  describe('OAuth token refresh (regression)', () => {
+    function seedExpiringOAuthToken(): void {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'stale-access');
+      keyringStore.set(
+        'bitbucket_token_bb-acc-1_oauth',
+        JSON.stringify({
+          accessToken: 'stale-access',
+          refreshToken: 'r1',
+          expiresAt: Date.now() + 60_000,
+        })
+      );
+    }
+
+    function findInvoke(command: string): { command: string; args: unknown } | undefined {
+      return invokeHistory.find((h) => h.command === command);
+    }
+
+    it('refreshes an expiring OAuth access token on open', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const check = findInvoke('check_bitbucket_connection_with_token');
+      expect(check, 'connection was checked with a token').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('fresh-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['bb-acc-1']?.status
+      ).to.equal('connected');
+    });
+
+    it('re-reads the token for each API call instead of reusing the cached one', async () => {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'tok-1');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Another caller (e.g. a background refresh, or a push) rotated the stored
+      // credential while the dialog stayed open.
+      keyringStore.set('bitbucket_token_bb-acc-1', 'tok-2');
+      invokeHistory.length = 0;
+
+      await (el as unknown as { loadPullRequests: () => Promise<void> }).loadPullRequests();
+      await el.updateComplete;
+
+      const list = findInvoke('list_bitbucket_pull_requests');
+      expect(list, 'pull requests were requested').to.not.be.undefined;
+      expect((list!.args as { token: string }).token).to.equal('tok-2');
+    });
+
+    it('verifies the newly entered app password, not the stored credential', async () => {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'bbapp:olduser:old-secret');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const priv = el as unknown as {
+        usernameInput: string;
+        appPasswordInput: string;
+        selectedAccountId: string | null;
+        handleSaveCredentials: () => Promise<void>;
+      };
+      priv.selectedAccountId = 'bb-acc-1';
+      priv.usernameInput = 'newuser';
+      priv.appPasswordInput = 'new-secret';
+      invokeHistory.length = 0;
+
+      await priv.handleSaveCredentials();
+      await el.updateComplete;
+
+      const check = findInvoke('check_bitbucket_connection_with_token');
+      expect(check, 'the entered credential was verified').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('bbapp:newuser:new-secret');
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('bbapp:newuser:new-secret');
     });
   });
 });

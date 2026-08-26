@@ -437,11 +437,16 @@ export async function refreshToken(
   instanceUrl?: string
 ): Promise<OAuthTokenResponse> {
   const clientId = getClientId(provider);
+  // Bitbucket (like GitHub) authenticates the refresh grant with the client
+  // secret, same as the code exchange; PKCE public clients (GitLab, Entra) have
+  // none and send only the client id.
+  const clientSecret = getClientSecret(provider);
 
   const result = await invokeCommand<OAuthTokenResponse>('oauth_refresh_token', {
     provider,
     refreshToken: refreshTokenValue,
     clientId,
+    clientSecret,
     instanceUrl,
   });
   if (!result.success || !result.data) {

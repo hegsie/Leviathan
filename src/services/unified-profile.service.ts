@@ -667,16 +667,30 @@ export async function refreshAccountCachedUser(
   const store = unifiedProfileStore.getState();
 
   try {
-    // Get the token for this account. For Azure DevOps OAuth accounts, refresh an
-    // expiring Entra access token first — otherwise the ~1h expiry would make this
-    // path (periodic validation, "Refresh account", profile manager) mark the
-    // account disconnected even though a valid refresh token exists.
+    // Get the token for this account. For OAuth accounts, refresh an expiring
+    // access token first — otherwise the short expiry (~1h Entra, ~2h GitLab /
+    // Bitbucket) makes this path (periodic validation, "Refresh account", the
+    // profile manager) mark the account disconnected even though a valid
+    // refresh token exists.
     let token: string | null;
-    if (account.integrationType === 'azure-devops') {
-      const { getFreshAccountToken } = await import('./credential.service.ts');
-      token = await getFreshAccountToken('azure-devops', account.id, 'azure');
-    } else {
-      token = await AccountCredentials.getToken(account.integrationType, account.id);
+    const { getFreshAccountToken } = await import('./credential.service.ts');
+    switch (account.integrationType) {
+      case 'azure-devops':
+        token = await getFreshAccountToken('azure-devops', account.id, 'azure');
+        break;
+      case 'gitlab':
+        token = await getFreshAccountToken(
+          'gitlab',
+          account.id,
+          'gitlab',
+          account.config.type === 'gitlab' ? account.config.instanceUrl : undefined
+        );
+        break;
+      case 'bitbucket':
+        token = await getFreshAccountToken('bitbucket', account.id, 'bitbucket');
+        break;
+      default:
+        token = await AccountCredentials.getToken(account.integrationType, account.id);
     }
     if (!token) {
       log.debug(` No token for account ${account.id}, skipping refresh`);

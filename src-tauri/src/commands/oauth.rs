@@ -467,12 +467,32 @@ pub async fn oauth_exchange_code(
     Ok(tokens)
 }
 
+/// Build the form body for a `refresh_token` grant. Bitbucket (and GitHub)
+/// authenticate the refresh with the client secret, exactly as they do the code
+/// exchange; public PKCE clients (GitLab, Entra) send only the client id.
+fn refresh_token_params<'a>(
+    refresh_token: &'a str,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+) -> Vec<(&'static str, &'a str)> {
+    let mut params = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    if let Some(secret) = client_secret {
+        params.push(("client_secret", secret));
+    }
+    params
+}
+
 /// Refresh an OAuth token
 #[tauri::command]
 pub async fn oauth_refresh_token(
     provider: String,
     refresh_token: String,
     client_id: String,
+    client_secret: Option<String>,
     instance_url: Option<String>,
 ) -> Result<OAuthTokenResponse> {
     let provider_enum: OAuthProvider = provider
@@ -500,11 +520,7 @@ pub async fn oauth_refresh_token(
     };
 
     // Build request body
-    let params = vec![
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &refresh_token),
-        ("client_id", &client_id),
-    ];
+    let params = refresh_token_params(&refresh_token, &client_id, client_secret.as_deref());
 
     // Make token request
     let client = reqwest::Client::new();
@@ -616,6 +632,27 @@ pub async fn oauth_wait_for_github_callback(port: u16) -> Result<CallbackRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==========================================================================
+    // refresh_token_params Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_refresh_token_params_includes_client_secret() {
+        let params = refresh_token_params("r1", "cid", Some("sek"));
+        assert!(params.contains(&("grant_type", "refresh_token")));
+        assert!(params.contains(&("refresh_token", "r1")));
+        assert!(params.contains(&("client_id", "cid")));
+        // Bitbucket rejects a refresh grant without the client secret.
+        assert!(params.contains(&("client_secret", "sek")));
+    }
+
+    #[test]
+    fn test_refresh_token_params_omits_client_secret_when_none() {
+        let params = refresh_token_params("r1", "cid", None);
+        assert_eq!(params.len(), 3);
+        assert!(!params.iter().any(|(k, _)| *k == "client_secret"));
+    }
 
     // ==========================================================================
     // StartOAuthResponse Tests

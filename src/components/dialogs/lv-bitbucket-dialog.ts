@@ -824,9 +824,11 @@ export class LvBitbucketDialog extends LitElement {
     }
   }
 
-  private async checkConnection(): Promise<void> {
-    // Get token for selected account (or use stored OAuth token)
-    const token = this.oauthToken || await this.getSelectedAccountToken();
+  private async checkConnection(providedToken?: string | null): Promise<void> {
+    // Verify the caller's token when it supplied one (e.g. a just-entered app
+    // password that isn't persisted yet); otherwise re-read the selected
+    // account's credential, refreshing an expiring OAuth token first.
+    const token = providedToken ?? await this.getActiveToken();
 
     if (token) {
       // Use OAuth token to check connection
@@ -914,13 +916,36 @@ export class LvBitbucketDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * OAuth access token first (Bitbucket OAuth access tokens last ~2h, so
+   * without this a signed-in account reads as disconnected on the next open).
+   * App-password credentials (`bbapp:` prefixed) have no OAuth bundle and are
+   * returned unchanged.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (this.selectedAccountId) {
-      return credentialService.getAccountToken('bitbucket', this.selectedAccountId);
+      return credentialService.getFreshAccountToken(
+        'bitbucket',
+        this.selectedAccountId,
+        'bitbucket'
+      );
     }
     return null;
+  }
+
+  /**
+   * Token for an API call: the selected account's credential, re-read (and
+   * refreshed when near expiry) on every call so a long-open dialog never keeps
+   * using a token that expired while it was open. Falls back to the token this
+   * session's sign-in captured when no account-backed credential exists yet.
+   */
+  private async getActiveToken(): Promise<string | null> {
+    const token = await this.getSelectedAccountToken();
+    if (token) {
+      this.oauthToken = token;
+      return token;
+    }
+    return this.oauthToken;
   }
 
   /**
@@ -1011,11 +1036,12 @@ export class LvBitbucketDialog extends LitElement {
     this.error = null;
 
     try {
+      const token = await this.getActiveToken();
       const result = await gitService.listBitbucketPullRequests(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         this.prFilter,
-        this.oauthToken
+        token
       );
 
       if (result.success && result.data) {
@@ -1034,11 +1060,12 @@ export class LvBitbucketDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getActiveToken();
       const result = await gitService.listBitbucketIssues(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         undefined,
-        this.oauthToken
+        token
       );
 
       if (result.success && result.data) {
@@ -1057,10 +1084,11 @@ export class LvBitbucketDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     try {
+      const token = await this.getActiveToken();
       const result = await gitService.listBitbucketPipelines(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
-        this.oauthToken
+        token
       );
 
       if (result.success && result.data) {
@@ -1100,7 +1128,9 @@ export class LvBitbucketDialog extends LitElement {
       );
       this.oauthToken = appPasswordCredential;
 
-      await this.checkConnection();
+      // Verify the JUST-ENTERED credential — it is only persisted below, after
+      // the check succeeds, so a re-read would still see the old stored one.
+      await this.checkConnection(appPasswordCredential);
 
       if (this.connectionStatus?.connected) {
         const user = this.connectionStatus.user;
@@ -1416,11 +1446,12 @@ export class LvBitbucketDialog extends LitElement {
         closeSourceBranch: this.createPrCloseSource,
       };
 
+      const token = await this.getActiveToken();
       const result = await gitService.createBitbucketPullRequest(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         input,
-        this.oauthToken
+        token
       );
 
       if (result.success && result.data) {
@@ -1454,11 +1485,12 @@ export class LvBitbucketDialog extends LitElement {
         content: this.createIssueContent || undefined,
       };
 
+      const token = await this.getActiveToken();
       const result = await gitService.createBitbucketIssue(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         input,
-        this.oauthToken
+        token
       );
 
       if (result.success && result.data) {

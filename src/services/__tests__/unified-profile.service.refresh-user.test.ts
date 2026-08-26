@@ -92,6 +92,23 @@ const bitbucketConnectionResponse = {
   },
 };
 
+/** Raw result of `oauth_refresh_token`; null → the refresh fails. */
+let refreshResponse: unknown = null;
+
+/** Seed an OAuth bundle whose access token is inside the 5-minute expiry window. */
+function setExpiringOAuthToken(
+  integrationType: string,
+  accountId: string,
+  accessToken: string
+): void {
+  const key = `${integrationType}_token_${accountId}`;
+  tokenStore.set(key, accessToken);
+  tokenStore.set(
+    `${key}_oauth`,
+    JSON.stringify({ accessToken, refreshToken: 'r1', expiresAt: Date.now() + 60_000 })
+  );
+}
+
 function setupDefaultMockInvoke(): void {
   mockInvoke = async (command: string, args?: unknown) => {
     const params = args as Record<string, unknown> | undefined;
@@ -127,6 +144,10 @@ function setupDefaultMockInvoke(): void {
       return bitbucketConnectionResponse;
     }
 
+    if (command === 'oauth_refresh_token') {
+      return refreshResponse;
+    }
+
     // Update cached user and config reload
     if (command === 'update_global_account_cached_user') {
       return null;
@@ -149,6 +170,7 @@ describe('unified-profile.service - refreshAccountCachedUser', () => {
     unifiedProfileStore.getState().reset();
     invokeHistory.length = 0;
     tokenStore.clear();
+    refreshResponse = null;
     setupDefaultMockInvoke();
   });
 
@@ -204,6 +226,56 @@ describe('unified-profile.service - refreshAccountCachedUser', () => {
     expect(result!.username).to.equal('adouser');
     expect(result!.displayName).to.equal('ADO User');
     expect(result!.email).to.equal('adouser@org.com');
+  });
+
+  // Regression: this background validator is what marks an account disconnected
+  // app-wide. It only refreshed Azure DevOps tokens, so GitLab/Bitbucket OAuth
+  // accounts were reported disconnected on startup once their ~2h access token
+  // lapsed, despite a valid stored refresh token.
+  it('refreshes an expiring GitLab OAuth token before validating the account', async () => {
+    const account = createTestAccount({
+      id: 'gl-oauth-1',
+      name: 'OAuth GitLab',
+      integrationType: 'gitlab',
+      config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+    });
+    unifiedProfileStore.getState().setAccounts([account]);
+    setExpiringOAuthToken('gitlab', 'gl-oauth-1', 'stale-access');
+    refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+
+    const result = await refreshAccountCachedUser(account);
+
+    const check = invokeHistory.find((h) => h.command === 'check_gitlab_connection');
+    expect(check, 'the account was validated').to.not.be.undefined;
+    expect((check!.args as { token: string }).token).to.equal('fresh-access');
+    expect(result).to.not.be.null;
+    expect(
+      unifiedProfileStore.getState().accountConnectionStatus['gl-oauth-1']?.status
+    ).to.equal('connected');
+  });
+
+  it('refreshes an expiring Bitbucket OAuth token before validating the account', async () => {
+    const account = createTestAccount({
+      id: 'bb-oauth-1',
+      name: 'OAuth Bitbucket',
+      integrationType: 'bitbucket',
+      config: { type: 'bitbucket', workspace: 'myworkspace' },
+    });
+    unifiedProfileStore.getState().setAccounts([account]);
+    setExpiringOAuthToken('bitbucket', 'bb-oauth-1', 'stale-access');
+    refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+
+    const result = await refreshAccountCachedUser(account);
+
+    const check = invokeHistory.find(
+      (h) => h.command === 'check_bitbucket_connection_with_token'
+    );
+    expect(check, 'the account was validated').to.not.be.undefined;
+    expect((check!.args as { token: string }).token).to.equal('fresh-access');
+    expect(result).to.not.be.null;
+    expect(
+      unifiedProfileStore.getState().accountConnectionStatus['bb-oauth-1']?.status
+    ).to.equal('connected');
   });
 
   it('returns CachedUser with mapped fields for a Bitbucket account', async () => {
@@ -355,6 +427,7 @@ describe('unified-profile.service - validateAllAccountTokens', () => {
     unifiedProfileStore.getState().reset();
     invokeHistory.length = 0;
     tokenStore.clear();
+    refreshResponse = null;
     setupDefaultMockInvoke();
   });
 
