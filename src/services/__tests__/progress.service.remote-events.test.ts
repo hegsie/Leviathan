@@ -1,11 +1,12 @@
 /**
  * Progress Service — backend event routing
  *
- * `remote-operation-completed` carries an operation NAME and no repository, so
- * a listener that removed "the first row whose type matches" removed whichever
- * repo's row happened to be first: fetch repo B, Ctrl+Tab, fetch repo A (a
- * different `fetch:<repo>` key, so both run at once), and A finishing tore
- * down B's progress indicator while B was still fetching.
+ * `remote-operation-completed` carries no progress-operation ID — rows are
+ * keyed `fetch:<repo>` — so a listener that removed "the first row whose type
+ * matches" removed whichever repo's row happened to be first: fetch repo B,
+ * Ctrl+Tab, fetch repo A (a different `fetch:<repo>` key, so both run at
+ * once), and A finishing tore down B's progress indicator while B was still
+ * fetching. Every row is started and removed by its own caller in app-shell.
  */
 
 import { expect } from '@open-wc/testing';

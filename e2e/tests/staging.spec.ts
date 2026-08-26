@@ -474,7 +474,9 @@ test.describe('Staging to Commit Flow', () => {
     await expect(rightPanel.commitMessage).toHaveValue('');
   });
 
-  test('successful commit should dispatch repository-refresh event', async ({ page }) => {
+  test('successful commit should dispatch repository-refresh pinned to the committing repository', async ({
+    page,
+  }) => {
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(
       page,
@@ -487,20 +489,37 @@ test.describe('Staging to Commit Flow', () => {
       create_commit: { oid: 'abc123', shortId: 'abc123d', summary: 'test' },
     });
 
-    // Listen for repository-refresh event (what the commit panel dispatches)
-    // Do NOT await evaluate immediately -- it returns a promise that resolves when the inner promise does
-    const eventPromise = page.evaluate(() => {
-      return new Promise<boolean>((resolve) => {
-        window.addEventListener('repository-refresh', () => resolve(true), { once: true });
-        setTimeout(() => resolve(false), 5000);
+    // Collect every repository-refresh the commit flow emits (the commit panel's
+    // own and the right panel's re-broadcast), skipping app-shell's tagged
+    // self-broadcast. Each must name the repo the commit ran in — an untagged
+    // refresh falls back to whichever tab is active.
+    await page.evaluate(() => {
+      const w = window as unknown as { __refreshDetails?: Array<{ repoPath?: string }> };
+      w.__refreshDetails = [];
+      window.addEventListener('repository-refresh', (e) => {
+        const detail = (e as CustomEvent).detail as
+          | { repoPath?: string; source?: string }
+          | undefined;
+        if (detail?.source === 'app-shell') return;
+        w.__refreshDetails?.push({ repoPath: detail?.repoPath });
       });
     });
 
     await rightPanel.commitMessage.fill('feat: trigger refresh');
     await rightPanel.commitButton.click();
 
-    const result = await eventPromise;
-    expect(result).toBe(true);
+    await page.waitForFunction(() => {
+      const w = window as unknown as { __refreshDetails?: unknown[] };
+      return (w.__refreshDetails?.length ?? 0) > 0;
+    });
+
+    const details = await page.evaluate(
+      () => (window as unknown as { __refreshDetails: Array<{ repoPath?: string }> }).__refreshDetails
+    );
+    expect(details.length).toBeGreaterThan(0);
+    for (const detail of details) {
+      expect(detail.repoPath).toBe('/tmp/test-repo');
+    }
   });
 
   test('successful commit should dispatch commit-created event with commit data', async ({ page }) => {

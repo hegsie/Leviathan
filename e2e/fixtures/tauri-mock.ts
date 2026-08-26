@@ -441,6 +441,9 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return null;
       }
       case 'push_tag':
+      // Deleting a tag offers to delete the remote copy too — the local
+      // delete leaves it behind and the tag fetch refspec restores it.
+      case 'delete_remote_tag':
         return null;
 
       // Rewrite commands (cherry-pick, revert, reset, merge, rebase)
@@ -547,6 +550,10 @@ function createMockHandler(mocks: typeof defaultMockData) {
       // AI availability
       case 'is_ai_available':
         return false;
+      // Null = "AI is usable"; a test wanting the unavailable-provider UI
+      // overrides this with { reason, providerSelected }.
+      case 'ai_unavailable_reason':
+        return null;
 
       // AI provider commands
       case 'get_ai_providers':
@@ -957,6 +964,8 @@ export async function setupTauriMocks(
             return null;
           }
           case 'push_tag':
+          // See the other builder's switch — tag delete offers the remote too.
+          case 'delete_remote_tag':
             return null;
 
           // === Stash mutations ===
@@ -1033,6 +1042,8 @@ export async function setupTauriMocks(
           // === AI commands ===
           case 'is_ai_available':
             return false;
+          case 'ai_unavailable_reason':
+            return null;
           case 'generate_commit_message':
             return { summary: 'Auto-generated commit', body: null };
           case 'get_ai_providers':

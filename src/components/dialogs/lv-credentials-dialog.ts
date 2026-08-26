@@ -256,12 +256,17 @@ export class LvCredentialsDialog extends LitElement {
         transition: all var(--transition-fast);
       }
 
-      .btn-icon:hover {
+      .btn-icon:hover:not(:disabled) {
         background: var(--color-bg-hover);
         color: var(--color-text-primary);
       }
 
-      .btn-icon.danger:hover {
+      .btn-icon:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-icon.danger:hover:not(:disabled) {
         background: var(--color-error-bg);
         color: var(--color-error);
       }
@@ -511,7 +516,25 @@ export class LvCredentialsDialog extends LitElement {
     }
   }
 
+  /**
+   * Where a helper's removal has to be aimed. A URL-scoped helper can be
+   * written in any config file, so `configScope` — the file git reported —
+   * decides, not the "url" badge. Null means a file this dialog cannot edit
+   * (system/worktree), where `--local`/`--global` would silently miss.
+   */
+  private removalTarget(helper: CredentialHelper): { path: string | null; global: boolean } | null {
+    if (helper.configScope === 'global') return { path: null, global: true };
+    if (helper.configScope === 'local') return { path: this.pinnedRepoPath, global: false };
+    return null;
+  }
+
   private async handleRemoveHelper(helper: CredentialHelper): Promise<void> {
+    const target = this.removalTarget(helper);
+    if (!target) {
+      this.error = `"${helper.name}" is configured in the ${helper.configScope} git config, which this dialog cannot change.`;
+      return;
+    }
+
     const confirmed = await showConfirm('Remove Helper', `Remove credential helper "${helper.name}"?`, 'warning');
     if (!confirmed) return;
 
@@ -519,8 +542,8 @@ export class LvCredentialsDialog extends LitElement {
 
     try {
       const result = await gitService.unsetCredentialHelper(
-        helper.scope === 'local' ? this.pinnedRepoPath : null,
-        helper.scope === 'global',
+        target.path,
+        target.global,
         helper.urlPattern ?? undefined
       );
 
@@ -605,6 +628,9 @@ export class LvCredentialsDialog extends LitElement {
                       <span class="helper-name">
                         ${helper.name}
                         <span class="scope-badge">${helper.scope}</span>
+                        ${helper.scope === 'url'
+                          ? html`<span class="scope-badge">${helper.configScope}</span>`
+                          : ''}
                         ${helper.urlPattern
                           ? html`<span class="scope-badge">${helper.urlPattern}</span>`
                           : ''}
@@ -613,7 +639,10 @@ export class LvCredentialsDialog extends LitElement {
                     </div>
                     <button
                       class="btn-icon danger"
-                      title="Remove helper"
+                      ?disabled=${this.removalTarget(helper) === null}
+                      title=${this.removalTarget(helper) === null
+                        ? `Configured in the ${helper.configScope} git config — remove it there`
+                        : 'Remove helper'}
                       @click=${() => this.handleRemoveHelper(helper)}
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -106,6 +106,42 @@ export class LvAnalyticsPanel extends LitElement {
         border-bottom: 1px solid var(--color-border);
       }
 
+      .section-header-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+
+      .refresh-btn {
+        width: 20px;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+        flex-shrink: 0;
+      }
+
+      .refresh-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .refresh-btn svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .refresh-error {
+        padding: 6px 10px;
+        border: 1px solid var(--color-danger);
+        border-radius: var(--radius-sm);
+        color: var(--color-danger);
+        font-size: var(--font-size-xs);
+      }
+
       .section-body {
         padding: 12px;
       }
@@ -321,30 +357,104 @@ export class LvAnalyticsPanel extends LitElement {
 
   @property({ type: String }) repositoryPath: string | null = null;
 
+  /**
+   * Whether this panel's tab is currently showing. `lv-right-panel` keeps the
+   * component mounted inside a `display: none` tab, so a `repository-refresh`
+   * that arrives while another tab is up must not pay for a full statistics
+   * walk — it is remembered and settled when the tab comes back.
+   */
+  @property({ type: Boolean }) active = true;
+
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private stats: RepoStatistics | null = null;
 
+  private static readonly REFRESH_DEBOUNCE_MS = 300;
+
   private lastLoadedPath: string | null = null;
+  private needsReload = false;
+  private refreshTimeout: ReturnType<typeof setTimeout> | null = null;
+  private loadSeq = 0;
 
   connectedCallback(): void {
     super.connectedCallback();
+    // `repository-refresh` is the broadcast every mutating operation fires
+    // (commit, reset, merge, rebase, revert, stash apply). Without it the
+    // statistics froze at whatever they were when the repository was opened:
+    // this panel is never unmounted, only hidden, so switching tabs never
+    // reloaded it either.
+    window.addEventListener('repository-refresh', this.handleRepositoryRefresh);
     if (this.repositoryPath) {
       this.loadStats();
     }
   }
 
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('repository-refresh', this.handleRepositoryRefresh);
+    this.clearPendingReload();
+  }
+
   updated(changed: Map<string, unknown>): void {
     if (changed.has('repositoryPath') && this.repositoryPath && this.repositoryPath !== this.lastLoadedPath) {
       this.loadStats();
+      return;
+    }
+    if (changed.has('active') && this.active && this.needsReload) {
+      this.scheduleReload();
     }
   }
 
+  private handleRepositoryRefresh = (): void => {
+    if (!this.repositoryPath) return;
+    this.needsReload = true;
+    if (this.active) {
+      this.scheduleReload();
+    }
+  };
+
+  /**
+   * Coalesce a burst of refreshes into a single statistics walk — one user
+   * operation can broadcast more than once (this panel's own commit plus
+   * app-shell's handleRefresh).
+   */
+  private scheduleReload(): void {
+    this.clearPendingReload();
+    this.refreshTimeout = setTimeout(() => {
+      this.refreshTimeout = null;
+      // The tab can be hidden inside the debounce window. Bail out and leave
+      // `needsReload` set, so `updated()` re-schedules the walk when Analytics
+      // comes back rather than paying for it behind a hidden tab.
+      if (!this.active) return;
+      void this.loadStats();
+    }, LvAnalyticsPanel.REFRESH_DEBOUNCE_MS);
+  }
+
+  private clearPendingReload(): void {
+    if (this.refreshTimeout) {
+      clearTimeout(this.refreshTimeout);
+      this.refreshTimeout = null;
+    }
+  }
+
+  private handleRefreshClick = (): void => {
+    // An explicit click beats any debounce window it may land inside.
+    this.clearPendingReload();
+    void this.loadStats();
+  };
+
   async loadStats(): Promise<void> {
     if (!this.repositoryPath) return;
+    // Another repository's numbers must not sit on screen while the new ones
+    // load; a refresh of the SAME repository keeps its charts up.
+    if (this.repositoryPath !== this.lastLoadedPath) {
+      this.stats = null;
+    }
     this.loading = true;
     this.error = null;
+    this.needsReload = false;
     this.lastLoadedPath = this.repositoryPath;
+    const seq = ++this.loadSeq;
 
     try {
       const result = await gitService.getRepoStatistics(this.repositoryPath, {
@@ -352,15 +462,19 @@ export class LvAnalyticsPanel extends LitElement {
         includeContributors: true,
         includeFileTypes: true,
       });
+      if (seq !== this.loadSeq) return; // superseded by a newer load
       if (result.success && result.data) {
         this.stats = result.data;
       } else {
         this.error = result.error?.message ?? 'Failed to load statistics';
       }
     } catch (err) {
+      if (seq !== this.loadSeq) return;
       this.error = (err as Error).message;
     } finally {
-      this.loading = false;
+      if (seq === this.loadSeq) {
+        this.loading = false;
+      }
     }
   }
 
@@ -369,25 +483,28 @@ export class LvAnalyticsPanel extends LitElement {
       return html`<div class="empty-state">No repository open</div>`;
     }
 
-    if (this.loading) {
-      return html`<div class="loading">Loading statistics...</div>`;
-    }
-
-    if (this.error) {
-      return html`
-        <div class="error">
-          <span>${this.error}</span>
-          <button class="retry-btn" @click=${this.loadStats}>Retry</button>
-        </div>
-      `;
-    }
-
     if (!this.stats) {
+      if (this.loading) {
+        return html`<div class="loading">Loading statistics...</div>`;
+      }
+
+      if (this.error) {
+        return html`
+          <div class="error">
+            <span>${this.error}</span>
+            <button class="retry-btn" @click=${this.loadStats}>Retry</button>
+          </div>
+        `;
+      }
+
       return html`<div class="empty-state">No statistics available</div>`;
     }
 
     return html`
       <div class="content">
+        ${this.error
+          ? html`<div class="refresh-error" role="alert">Refresh failed: ${this.error}</div>`
+          : nothing}
         ${this.renderOverview(this.stats)}
         ${this.stats.activityByMonth ? this.renderTimeline(this.stats.activityByMonth) : nothing}
         ${this.stats.activityByWeekday || this.stats.activityByHour
@@ -408,7 +525,22 @@ export class LvAnalyticsPanel extends LitElement {
 
     return html`
       <div class="section">
-        <div class="section-header">Overview</div>
+        <div class="section-header section-header-row">
+          <span>Overview</span>
+          <button
+            class="refresh-btn"
+            title="Refresh statistics"
+            aria-label="Refresh statistics"
+            ?disabled=${this.loading}
+            aria-busy=${this.loading ? 'true' : 'false'}
+            @click=${this.handleRefreshClick}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
+            </svg>
+          </button>
+        </div>
         <div class="section-body">
           <div class="overview-grid">
             ${this.renderCard(this.formatCompactNumber(s.totalCommits), 'Commits')}

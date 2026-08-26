@@ -406,6 +406,51 @@ describe('error-suggestion.service', () => {
       expect(detail!.repoPath).to.equal('/repo/a');
     });
 
+    it('Force Push Tag carries the remote the rejected push was aimed at', () => {
+      // The rejected push went to the remote the user picked in the menu. A
+      // force retry that left the destination to the backend resolver would
+      // move the tag on a DIFFERENT remote — `origin` in a fork checkout — and
+      // report success.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+        remote: 'upstream',
+      });
+      let detail: { remote?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ remote?: string }>).detail;
+      };
+      window.addEventListener('force-push-tag', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push-tag', handler);
+      }
+      expect(detail!.remote).to.equal('upstream');
+    });
+
+    it('Force Push Tag leaves the remote unset when the push named none', () => {
+      // The graph ref menu pushes without choosing a remote; the retry must
+      // stay on the backend resolver rather than inventing a destination.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+      });
+      let detail: { remote?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ remote?: string }>).detail;
+      };
+      window.addEventListener('force-push-tag', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push-tag', handler);
+      }
+      expect(detail!.remote).to.equal(undefined);
+    });
+
     it('being behind the remote still offers Pull Now', () => {
       // The git CLI's hyphenated spelling means the opposite of libgit2's.
       const result = getErrorSuggestion('Updates were rejected: non-fast-forward', {

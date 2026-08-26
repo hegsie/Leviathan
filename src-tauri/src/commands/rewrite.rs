@@ -119,17 +119,36 @@ fn restore_after_abort(repo: &git2::Repository) -> Result<()> {
     Ok(())
 }
 
+/// What a single sequencer pick did.
+///
+/// git's sequencer distinguishes three outcomes and each needs different
+/// bookkeeping from the caller. Signalling "empty" through `Err` (as this used
+/// to) meant the caller's `?` returned before it could record the commits still
+/// queued behind the stop, so the rest of a range was silently dropped.
+enum PickOutcome {
+    /// The pick was applied and committed. Boxed so the stop variants — which
+    /// are the common ones a caller matches on — do not each carry a Commit's
+    /// worth of padding.
+    Applied(Box<Commit>),
+    /// The pick conflicted; CHERRY_PICK_HEAD is left in place for the caller.
+    Conflicted,
+    /// The pick's changes are already present in HEAD, so git stops and creates
+    /// no commit. CHERRY_PICK_HEAD is left in place so it can be skipped.
+    Empty,
+}
+
 /// Apply a single non-merge commit as a cherry-pick onto the current HEAD and
 /// create the resulting commit, matching canonical git semantics:
 /// - refuses root commits and merge commits (a merge needs an explicit mainline);
 /// - stops (creates no commit) when the result would be empty;
 /// - runs the post-commit hook git's sequencer runs.
 ///
-/// Returns `Ok(Some(commit))` on success, `Ok(None)` when the pick conflicts
-/// (the repository is left in cherry-pick state with CHERRY_PICK_HEAD written so
-/// the caller can persist sequencer state), and `Err` on any hard failure
-/// (including an empty pick, which git treats as a stop condition).
-fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<Option<Commit>> {
+/// Returns `PickOutcome::Applied` on success, `PickOutcome::Conflicted` when the
+/// pick conflicts and `PickOutcome::Empty` when it is already applied — the last
+/// two both leave the repository in cherry-pick state with CHERRY_PICK_HEAD
+/// written so the caller can persist sequencer state. `Err` is reserved for hard
+/// failures.
+fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<PickOutcome> {
     if commit.parent_count() == 0 {
         return Err(LeviathanError::OperationFailed(format!(
             "Cannot cherry-pick root commit {}",
@@ -154,15 +173,13 @@ fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<Opt
 
     let mut index = repo.index()?;
     if index.has_conflicts() {
-        return Ok(None);
+        return Ok(PickOutcome::Conflicted);
     }
 
     let head = repo.head()?.peel_to_commit()?;
     let tree_oid = index.write_tree()?;
     if tree_oid == head.tree_id() {
-        return Err(LeviathanError::OperationFailed(
-            EMPTY_CHERRY_PICK_MSG.to_string(),
-        ));
+        return Ok(PickOutcome::Empty);
     }
     let tree = repo.find_tree(tree_oid)?;
     let signature = repo.signature()?;
@@ -189,7 +206,9 @@ fn cherry_pick_one(repo: &git2::Repository, commit: &git2::Commit) -> Result<Opt
     crate::commands::hooks::run_hook_noblock(repo, "post-commit", &[]);
 
     let new_commit = repo.find_commit(new_oid)?;
-    Ok(Some(Commit::from_git2(&new_commit)))
+    Ok(PickOutcome::Applied(Box::new(Commit::from_git2(
+        &new_commit,
+    ))))
 }
 
 /// Persist multi-commit cherry-pick sequencer state on a conflict: the commits
@@ -268,6 +287,87 @@ fn resolve_sequence<'repo>(
     }
 
     Ok(commits)
+}
+
+/// Apply the commits still queued in CHERRY_PICK_SEQUENCE — git's sequencer
+/// resuming a range after a stop. Returns the last commit it created, or None
+/// when nothing was queued.
+///
+/// On a fresh stop (conflict or empty pick) it rewrites the sequence file with
+/// the commits AFTER the one that stopped, so the next continue/skip resumes
+/// from the right place instead of re-attempting the commit that just stopped.
+/// CHERRY_PICK_SEQUENCE_HEAD is deliberately left alone: an abort must still
+/// rewind to the commit the whole range started from.
+fn resume_sequence(repo: &git2::Repository) -> Result<Option<Commit>> {
+    let seq_path = repo.path().join(CHERRY_PICK_SEQUENCE);
+    let contents = match std::fs::read_to_string(&seq_path) {
+        Ok(contents) => contents,
+        // No sequence file: this was a single pick, not a range. Nothing queued,
+        // nothing to resume.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            clear_sequencer_state(repo);
+            return Ok(None);
+        }
+        // The file IS there but unreadable (permissions, corruption, a
+        // half-written line). It still names commits the user asked for, so
+        // treating it as "nothing queued" would report the cherry-pick as
+        // finished and drop the rest of the range without a word. Surface it
+        // instead, and drop the sidecar only when no cherry-pick is left in
+        // progress — the same rule the resolve failure below follows, so a
+        // stale CHERRY_PICK_SEQUENCE_HEAD can never rewind a later, unrelated
+        // abort past commits it never touched.
+        Err(e) => {
+            clear_sequencer_state_if_not_in_progress(repo);
+            return Err(LeviathanError::OperationFailed(format!(
+                "Could not read the queued cherry-pick sequence: {}",
+                e
+            )));
+        }
+    };
+
+    let remaining: Vec<String> = contents
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    // Check the remainder before resuming it, for the same reason the initial
+    // range is checked: stopping partway leaves picks applied that no abort path
+    // accounts for.
+    let commits = match resolve_sequence(repo, &remaining) {
+        Ok(commits) => commits,
+        Err(e) => {
+            clear_sequencer_state_if_not_in_progress(repo);
+            return Err(e);
+        }
+    };
+
+    let mut last = None;
+    for (i, commit) in commits.iter().enumerate() {
+        // The commits still pending AFTER this one. Written on every stop so a
+        // second continue/skip never re-attempts the commit that just stopped.
+        let still: Vec<String> = remaining.iter().skip(i + 1).cloned().collect();
+        match cherry_pick_one(repo, commit) {
+            Ok(PickOutcome::Applied(c)) => last = Some(*c),
+            Ok(PickOutcome::Conflicted) => {
+                std::fs::write(&seq_path, still.join("\n"))?;
+                return Err(LeviathanError::CherryPickConflict);
+            }
+            Ok(PickOutcome::Empty) => {
+                std::fs::write(&seq_path, still.join("\n"))?;
+                return Err(LeviathanError::OperationFailed(
+                    EMPTY_CHERRY_PICK_MSG.to_string(),
+                ));
+            }
+            Err(e) => {
+                clear_sequencer_state_if_not_in_progress(repo);
+                return Err(e);
+            }
+        }
+    }
+
+    clear_sequencer_state(repo);
+    Ok(last)
 }
 
 /// Cherry-pick a commit onto the current branch
@@ -481,45 +581,47 @@ pub async fn continue_cherry_pick(path: String) -> Result<Commit> {
 
     // If this cherry-pick was part of a multi-commit sequence, apply the
     // remaining commits now (the real sequencer resumes automatically).
-    let seq_path = repo.path().join(CHERRY_PICK_SEQUENCE);
-    if let Ok(contents) = std::fs::read_to_string(&seq_path) {
-        let remaining: Vec<String> = contents
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-
-        // Check the remainder before resuming it, for the same reason the
-        // initial range is checked: stopping partway leaves picks applied that
-        // no abort path accounts for.
-        let commits = match resolve_sequence(&repo, &remaining) {
-            Ok(commits) => commits,
-            Err(e) => {
-                clear_sequencer_state_if_not_in_progress(&repo);
-                return Err(e);
-            }
-        };
-
-        for (i, commit) in commits.iter().enumerate() {
-            match cherry_pick_one(&repo, commit) {
-                Ok(Some(c)) => last = c,
-                Ok(None) => {
-                    // Conflict again: persist the not-yet-applied remainder so
-                    // the next continue resumes from here.
-                    let still: Vec<String> = remaining.iter().skip(i + 1).cloned().collect();
-                    std::fs::write(&seq_path, still.join("\n"))?;
-                    return Err(LeviathanError::CherryPickConflict);
-                }
-                Err(e) => {
-                    clear_sequencer_state_if_not_in_progress(&repo);
-                    return Err(e);
-                }
-            }
-        }
+    if let Some(resumed) = resume_sequence(&repo)? {
+        last = resumed;
     }
 
-    clear_sequencer_state(&repo);
     Ok(last)
+}
+
+/// Skip the stopped cherry-pick and resume the rest of the sequence
+/// (`git cherry-pick --skip`).
+///
+/// The stopped pick is dropped — reset --merge semantics, so unrelated
+/// uncommitted work survives — and any commits still queued in
+/// CHERRY_PICK_SEQUENCE are applied. Unlike abort, picks already applied earlier
+/// in the range STAY, so this is the only exit from an already-applied
+/// (empty) pick that does not throw the whole range away. Returns the last
+/// commit the resumed sequence created, or None when nothing was left to apply.
+#[command]
+pub async fn skip_cherry_pick(path: String) -> Result<Option<Commit>> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // git refuses to skip when no cherry-pick is in progress and leaves the
+    // working tree untouched. Resolve via repo.path() (worktree-safe).
+    let cherry_pick_head_path = repo.path().join("CHERRY_PICK_HEAD");
+    if !cherry_pick_head_path.exists() {
+        return Err(LeviathanError::OperationFailed(
+            "There is no cherry-pick in progress to skip.".to_string(),
+        ));
+    }
+
+    // Drop the stopped pick's changes (its conflict stages, or nothing at all
+    // when it stopped because it was already applied). Deliberately does NOT
+    // read CHERRY_PICK_SEQUENCE_HEAD — skip keeps earlier picks; only abort
+    // rewinds them.
+    restore_after_abort(&repo)?;
+    let _ = std::fs::remove_file(&cherry_pick_head_path);
+    repo.cleanup_state()?;
+
+    // The sequencer sidecars are NOT cleared first: if the resumed range stops
+    // again, a later abort still has to rewind to the original pre-sequence
+    // HEAD. resume_sequence clears them when the range actually finishes.
+    resume_sequence(&repo)
 }
 
 /// Abort a cherry-pick in progress
@@ -749,6 +851,33 @@ pub async fn continue_revert(path: String) -> Result<Commit> {
     Ok(Commit::from_git2(&new_commit))
 }
 
+/// Skip the stopped revert (`git revert --skip`): drop its changes and end the
+/// operation.
+///
+/// Reverts here are always single-commit, so there is no queued remainder to
+/// resume — but the empty-revert message promises a skip, and skipping (unlike
+/// aborting) is not framed as rolling anything back.
+#[command]
+pub async fn skip_revert(path: String) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+
+    // git refuses to skip when no revert is in progress and leaves the working
+    // tree untouched. Resolve via repo.path() (worktree-safe).
+    let revert_head_path = repo.path().join("REVERT_HEAD");
+    if !revert_head_path.exists() {
+        return Err(LeviathanError::OperationFailed(
+            "There is no revert in progress to skip.".to_string(),
+        ));
+    }
+
+    // Drop the stopped revert's changes, preserving unrelated uncommitted work.
+    restore_after_abort(&repo)?;
+    let _ = std::fs::remove_file(&revert_head_path);
+    repo.cleanup_state()?;
+
+    Ok(())
+}
+
 /// Abort a revert in progress
 #[command]
 pub async fn abort_revert(path: String) -> Result<()> {
@@ -811,15 +940,27 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
     let mut results = Vec::new();
 
     for (i, commit) in commits.iter().enumerate() {
+        // The commits still pending AFTER this one, persisted on any stop so
+        // continue/skip resume from the right place.
+        let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
         match cherry_pick_one(&repo, commit) {
-            Ok(Some(new_commit)) => results.push(new_commit),
-            Ok(None) => {
+            Ok(PickOutcome::Applied(new_commit)) => results.push(*new_commit),
+            Ok(PickOutcome::Conflicted) => {
                 // Conflict: persist the not-yet-applied commits and the
                 // pre-sequence HEAD so continue/abort behave like git's
                 // sequencer.
-                let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
                 write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
                 return Err(LeviathanError::CherryPickConflict);
+            }
+            Ok(PickOutcome::Empty) => {
+                // git's sequencer stops on an already-applied pick but keeps the
+                // REST of the range queued so `--skip` can resume it. Without
+                // this the remainder was dropped on the floor and Abort — which
+                // rewinds every applied pick — was the only way out.
+                write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
+                return Err(LeviathanError::OperationFailed(
+                    EMPTY_CHERRY_PICK_MSG.to_string(),
+                ));
             }
             Err(e) => {
                 clear_sequencer_state_if_not_in_progress(&repo);
@@ -1637,12 +1778,20 @@ pub async fn cherry_pick_from_branch(
     let mut results = Vec::new();
 
     for (i, commit) in commits.iter().enumerate() {
+        let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
         match cherry_pick_one(&repo, commit) {
-            Ok(Some(new_commit)) => results.push(new_commit),
-            Ok(None) => {
-                let remaining: Vec<String> = commit_oids.iter().skip(i + 1).cloned().collect();
+            Ok(PickOutcome::Applied(new_commit)) => results.push(*new_commit),
+            Ok(PickOutcome::Conflicted) => {
                 write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
                 return Err(LeviathanError::CherryPickConflict);
+            }
+            Ok(PickOutcome::Empty) => {
+                // Keep the rest of the range queued so Skip can resume it — see
+                // cherry_pick_range's Empty arm.
+                write_sequencer_state(&repo, pre_sequence_head, &remaining)?;
+                return Err(LeviathanError::OperationFailed(
+                    EMPTY_CHERRY_PICK_MSG.to_string(),
+                ));
             }
             Err(e) => {
                 clear_sequencer_state_if_not_in_progress(&repo);
@@ -3697,6 +3846,339 @@ mod tests {
         let git_dir = test_repo.repo().path().to_path_buf();
         assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
         assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    // ---- Empty/conflicted picks are skippable, and a stop keeps the remainder ----
+
+    /// main with [A, D, E] on feature and D already applied to main, so a range
+    /// of [A, D, E] stops on D with an "empty" error. Returns (pre_seq, a, d, e).
+    async fn setup_empty_mid_range(
+        test_repo: &TestRepo,
+    ) -> (git2::Oid, git2::Oid, git2::Oid, git2::Oid) {
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let a = test_repo.create_commit("A adds a.txt", &[("a.txt", "a")]);
+        let d = test_repo.create_commit("D adds d.txt", &[("d.txt", "d")]);
+        let e = test_repo.create_commit("E adds e.txt", &[("e.txt", "e")]);
+
+        // Pre-apply D onto main so the mid-range pick of D becomes empty.
+        test_repo.checkout_branch("main");
+        cherry_pick(test_repo.path_str(), d.to_string(), None, None)
+            .await
+            .unwrap();
+        (test_repo.head_oid(), a, d, e)
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_empty_mid_pick_queues_remaining() {
+        // An already-applied mid-range pick stops the sequence. git keeps the
+        // REST of the range queued so `--skip` can resume it; signalling the
+        // empty stop through Err used to return before the sequencer state was
+        // written, silently dropping every commit after it.
+        let test_repo = TestRepo::with_initial_commit();
+        let (_pre_seq, a, d, e) = setup_empty_mid_range(&test_repo).await;
+
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), d.to_string(), e.to_string()],
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("empty"),
+            "the mid-range stop must report the pick as empty"
+        );
+
+        let seq_path = test_repo.repo().path().join(CHERRY_PICK_SEQUENCE);
+        assert!(
+            seq_path.exists(),
+            "the commits after the empty pick must stay queued"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&seq_path).unwrap().trim(),
+            e.to_string(),
+            "only E is still pending — D itself must not be re-queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_resumes_after_empty_stop() {
+        let test_repo = TestRepo::with_initial_commit();
+        let (pre_seq, a, d, e) = setup_empty_mid_range(&test_repo).await;
+
+        let _ = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), d.to_string(), e.to_string()],
+        )
+        .await;
+
+        // Skip drops the already-applied D and resumes with E, keeping A.
+        let last = skip_cherry_pick(test_repo.path_str())
+            .await
+            .expect("skip must succeed")
+            .expect("the resumed sequence applied E");
+        assert_eq!(last.summary, "E adds e.txt");
+
+        assert!(test_repo.path.join("a.txt").exists(), "A stays applied");
+        assert!(test_repo.path.join("e.txt").exists(), "E was resumed");
+        assert_ne!(
+            test_repo.head_oid(),
+            pre_seq,
+            "skip must not rewind already-applied picks"
+        );
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_drops_conflicted_pick_and_resumes() {
+        let test_repo = TestRepo::with_initial_commit();
+        let (m, a, b, c) = setup_range(&test_repo);
+
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), c.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // Skip abandons the conflicted B and applies the pending C.
+        let last = skip_cherry_pick(test_repo.path_str())
+            .await
+            .expect("skip must succeed")
+            .expect("the resumed sequence applied C");
+        assert_eq!(last.summary, "C adds c.txt");
+
+        assert!(test_repo.path.join("a.txt").exists(), "A stays applied");
+        assert!(test_repo.path.join("c.txt").exists(), "C was resumed");
+        let shared = std::fs::read_to_string(test_repo.path.join("shared.txt")).unwrap();
+        assert_eq!(shared, "main", "the skipped pick's changes are dropped");
+        assert!(!shared.contains("<<<<<<<"), "no conflict markers survive");
+        assert!(!test_repo.repo().index().unwrap().has_conflicts());
+        assert_ne!(test_repo.head_oid(), m, "skip is not an abort — A survives");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_single_pick_returns_none() {
+        // A lone cherry-pick that stopped as empty has no queued remainder, so
+        // the skip simply ends the operation.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Base", &[("f.txt", "x")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Change to y", &[("f.txt", "y")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Same change to y", &[("f.txt", "y")]);
+        let head_before = test_repo.head_oid();
+
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(result.is_err());
+
+        let last = skip_cherry_pick(test_repo.path_str()).await.unwrap();
+        assert!(last.is_none(), "nothing was left to apply");
+        assert_eq!(test_repo.head_oid(), head_before, "no commit is created");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert!(!test_repo.repo().path().join("CHERRY_PICK_HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_with_nothing_in_progress_errors() {
+        let test_repo = TestRepo::with_initial_commit();
+        let head_before = test_repo.head_oid();
+        test_repo.create_file("dirty.txt", "uncommitted");
+
+        let err = skip_cherry_pick(test_repo.path_str())
+            .await
+            .expect_err("skipping with no cherry-pick in progress must fail");
+        assert!(
+            err.to_string()
+                .contains("no cherry-pick in progress to skip"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Refusing must leave the repository entirely untouched.
+        assert_eq!(test_repo.head_oid(), head_before);
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("dirty.txt")).unwrap(),
+            "uncommitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_reports_an_unreadable_sequence_file() {
+        // An unreadable CHERRY_PICK_SEQUENCE is not the same as an absent one:
+        // it still names commits the user queued. Reporting success and
+        // dropping them would end the range silently, with no error and no
+        // in-progress state left to tell the user anything went wrong.
+        let test_repo = TestRepo::with_initial_commit();
+        let (_m, a, b, c) = setup_range(&test_repo);
+
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), c.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // C is still queued; corrupt the file so read_to_string fails with
+        // something other than NotFound (invalid UTF-8 -> InvalidData).
+        let seq_path = test_repo.repo().path().join(CHERRY_PICK_SEQUENCE);
+        assert_eq!(
+            std::fs::read_to_string(&seq_path).unwrap().trim(),
+            c.to_string()
+        );
+        std::fs::write(&seq_path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let err = skip_cherry_pick(test_repo.path_str())
+            .await
+            .expect_err("an unreadable sequence must not report success");
+        assert!(
+            err.to_string()
+                .contains("Could not read the queued cherry-pick sequence"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The queued C was never applied, and nothing pretended it was.
+        assert!(!test_repo.path.join("c.txt").exists());
+
+        // No cherry-pick is left in progress, so the sidecars must be gone —
+        // a stale CHERRY_PICK_SEQUENCE_HEAD would let a later, unrelated
+        // abort rewind past commits it never touched.
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_preserves_unrelated_dirty_file() {
+        // Skip restores only the paths the stopped pick touched (reset --merge
+        // semantics). A blanket force checkout here would destroy unrelated
+        // uncommitted work.
+        let test_repo = TestRepo::with_initial_commit();
+        let (_m, a, b, c) = setup_range(&test_repo);
+
+        let _ = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), c.to_string()],
+        )
+        .await;
+
+        // README.md is tracked and unrelated to any pick in the range.
+        std::fs::write(test_repo.path.join("README.md"), "local edit").unwrap();
+
+        skip_cherry_pick(test_repo.path_str()).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("README.md")).unwrap(),
+            "local edit",
+            "skip must not discard unrelated uncommitted work"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_continue_cherry_pick_empty_mid_sequence_queues_remaining() {
+        // Resuming a range can itself hit an already-applied pick. The stop must
+        // strip that commit from the sequence file, otherwise the next
+        // continue/skip re-attempts it and loops forever.
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Base", &[("shared.txt", "base")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let a = test_repo.create_commit("A adds a.txt", &[("a.txt", "a")]);
+        let b = test_repo.create_commit("B edits shared", &[("shared.txt", "feature")]);
+        let d = test_repo.create_commit("D adds d.txt", &[("d.txt", "d")]);
+        let e = test_repo.create_commit("E adds e.txt", &[("e.txt", "e")]);
+
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main edits shared", &[("shared.txt", "main")]);
+        // Pre-apply D so the resumed sequence stops on it as empty.
+        cherry_pick(test_repo.path_str(), d.to_string(), None, None)
+            .await
+            .unwrap();
+
+        // Range [A, B, D, E]: A applies, B conflicts.
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), d.to_string(), e.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // Resolve B and stage it.
+        std::fs::write(test_repo.path.join("shared.txt"), "resolved").unwrap();
+        let repo = test_repo.repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("shared.txt")).unwrap();
+        index.write().unwrap();
+
+        let err = continue_cherry_pick(test_repo.path_str())
+            .await
+            .expect_err("the resumed sequence stops on the already-applied D");
+        assert!(
+            err.to_string().to_lowercase().contains("empty"),
+            "unexpected error: {}",
+            err
+        );
+
+        let seq_path = test_repo.repo().path().join(CHERRY_PICK_SEQUENCE);
+        assert!(seq_path.exists(), "E must stay queued behind the stop");
+        assert_eq!(
+            std::fs::read_to_string(&seq_path).unwrap().trim(),
+            e.to_string(),
+            "D must be dropped from the sequence so a skip does not re-hit it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_revert_after_empty_revert() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Setup", &[("f.txt", "x")]);
+        let add_oid = test_repo.create_commit("A: x->y", &[("f.txt", "y")]);
+        test_repo.create_commit("B: y->x", &[("f.txt", "x")]);
+        let head_before = test_repo.head_oid();
+
+        let result = revert(test_repo.path_str(), add_oid.to_string(), None).await;
+        assert!(result.is_err(), "the revert is empty and must stop");
+
+        skip_revert(test_repo.path_str())
+            .await
+            .expect("skip must end the stopped revert");
+        assert_eq!(test_repo.head_oid(), head_before, "no commit is created");
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert!(!test_repo.repo().path().join("REVERT_HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn test_skip_revert_with_nothing_in_progress_errors() {
+        let test_repo = TestRepo::with_initial_commit();
+        let head_before = test_repo.head_oid();
+
+        let err = skip_revert(test_repo.path_str())
+            .await
+            .expect_err("skipping with no revert in progress must fail");
+        assert!(
+            err.to_string().contains("no revert in progress to skip"),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(test_repo.head_oid(), head_before);
     }
 
     // ---- Finding 45: state files resolved via repo.path() for linked worktrees ----

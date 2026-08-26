@@ -4,7 +4,7 @@
 
 use crate::error::{LeviathanError, Result};
 use crate::services::ai::{
-    AiProviderInfo, AiProviderType, AiState, AnalysisFinding, CommitSplitSuggestion,
+    AiProviderInfo, AiProviderType, AiState, AiUnavailable, AnalysisFinding, CommitSplitSuggestion,
     ConflictExplanation, ConflictResolutionSuggestion, FindingCategory, GeneratedChangelog,
     GeneratedCommitMessage, GeneratedPrDescription, ReflogMatch, RiskLevel, Severity,
     StagedAnalysis, CHANGELOG_PROMPT, COMMIT_SPLIT_PROMPT, CONFLICT_EXPLAIN_PROMPT,
@@ -116,6 +116,23 @@ pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     let result = service.has_available_provider().await;
     tracing::debug!("is_ai_available check: {}", result);
     Ok(result)
+}
+
+/// Why an AI request would fail right now, or `None` when AI is usable.
+///
+/// `is_ai_available` only answers yes/no; when the answer is no the UI needs to
+/// say which provider is unavailable, because a provider chosen in Settings is
+/// never substituted with another one.
+#[command]
+pub async fn ai_unavailable_reason(state: State<'_, AiState>) -> Result<Option<AiUnavailable>> {
+    let service = state.read().await;
+    Ok(service
+        .unavailable_reason()
+        .await
+        .map(|reason| AiUnavailable {
+            reason,
+            provider_selected: service.get_config().active_provider.is_some(),
+        }))
 }
 
 /// Suggest a conflict resolution using AI

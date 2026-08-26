@@ -29,11 +29,13 @@ import '../lv-reflog-dialog.ts';
 import '../lv-remote-dialog.ts';
 import '../lv-config-dialog.ts';
 import '../lv-hooks-dialog.ts';
+import '../lv-gitignore-dialog.ts';
 import '../lv-create-tag-dialog.ts';
 import '../lv-create-branch-dialog.ts';
 import '../lv-credentials-dialog.ts';
 import '../lv-repository-health-dialog.ts';
 import '../lv-changelog-dialog.ts';
+import '../lv-export-import-dialog.ts';
 
 /**
  * tag → [private in-flight field, value that means "running"].
@@ -56,11 +58,13 @@ const IN_FLIGHT_FIELDS: Array<[string, string, unknown]> = [
   ['lv-remote-dialog', 'fetchingRemote', 'origin'],
   ['lv-config-dialog', 'saving', true],
   ['lv-hooks-dialog', 'saving', true],
+  ['lv-gitignore-dialog', 'saving', true],
   ['lv-create-tag-dialog', 'isCreating', true],
   ['lv-create-branch-dialog', 'isCreating', true],
   ['lv-credentials-dialog', 'testing', true],
   ['lv-repository-health-dialog', 'runningAction', 'gc'],
   ['lv-changelog-dialog', 'isGenerating', true],
+  ['lv-export-import-dialog', 'operationRunning', true],
 ];
 
 type Probe = HTMLElement & { operationInFlight?: boolean };
