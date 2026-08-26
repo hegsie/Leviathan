@@ -492,30 +492,60 @@ export class LvConfigDialog extends LitElement {
 
   private async handleSaveSetting(key: string, value: string): Promise<void> {
     this.error = null;
+    // An emptied value means "stop configuring this key", not "configure it to
+    // the empty string". git accepts `key =` on write but rejects it on every
+    // later read of an enumerated key — `git push` on a repo with an empty
+    // push.default dies with `fatal: bad config variable 'push.default'` — so
+    // writing it here would break the repository from inside the dialog whose
+    // job is to configure it. Clearing has to go through --unset.
+    const clearing = value === '';
 
     try {
-      const result = await gitService.setConfigValue(
-        this.pinnedRepoPath,
-        key,
-        value,
-        false // local
-      );
+      const result = clearing
+        ? await gitService.unsetConfigValue(this.pinnedRepoPath, key, false /* local */)
+        : await gitService.setConfigValue(this.pinnedRepoPath, key, value, false /* local */);
 
       if (result.success) {
-        showToast('Setting saved', 'success');
-        // Update the in-memory value so re-renders don't snap the input back
-        // to the stale value.
-        // The write always lands in this repository's config, so the scope
-        // badge has to follow it — a row that was "not set" a moment ago must
-        // not keep saying so next to the value the user just chose.
-        this.settings = this.settings.map((s) =>
-          s.key === key ? { ...s, value, scope: 'local' } : s
-        );
+        showToast(clearing ? 'Setting cleared' : 'Setting saved', 'success');
+        if (clearing) {
+          // Dropping the repository-scoped key can uncover a value from a
+          // broader scope, and the tab only ever writes the local one, so the
+          // effective value and scope have to come back from git rather than
+          // be guessed as "unset" here.
+          await this.reloadSettings();
+        } else {
+          // Update the in-memory value so re-renders don't snap the input back
+          // to the stale value.
+          // The write always lands in this repository's config, so the scope
+          // badge has to follow it — a row that was "not set" a moment ago must
+          // not keep saying so next to the value the user just chose.
+          this.settings = this.settings.map((s) =>
+            s.key === key ? { ...s, value, scope: 'local' } : s
+          );
+        }
       } else {
-        this.error = result.error?.message || 'Failed to save setting';
+        this.error =
+          result.error?.message || (clearing ? 'Failed to clear setting' : 'Failed to save setting');
       }
     } catch (e) {
-      this.error = e instanceof Error ? e.message : 'Failed to save setting';
+      this.error =
+        e instanceof Error
+          ? e.message
+          : clearing
+            ? 'Failed to clear setting'
+            : 'Failed to save setting';
+    }
+  }
+
+  /**
+   * Re-read the common settings after a change whose effective result cannot be
+   * derived locally. Only the settings list is refreshed — a full `loadData()`
+   * would flip the dialog back to its loading state and blank the other tabs.
+   */
+  private async reloadSettings(): Promise<void> {
+    const settingsResult = await gitService.getCommonSettings(this.pinnedRepoPath);
+    if (settingsResult.success && settingsResult.data) {
+      this.settings = settingsResult.data;
     }
   }
 
@@ -712,7 +742,8 @@ export class LvConfigDialog extends LitElement {
         <div class="hint">
           Changes are saved automatically when you modify a value.
           A setting that is not configured yet shows as "Not set" — pick or type a
-          value to set it for this repository.
+          value to set it for this repository, or choose "Not set" again to clear
+          it from this repository.
         </div>
       </div>
     `;

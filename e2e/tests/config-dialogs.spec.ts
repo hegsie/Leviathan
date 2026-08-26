@@ -4,6 +4,7 @@ import {
   startCommandCaptureWithMocks,
   findCommand,
   injectCommandError,
+  injectCommandMock,
   openViaCommandPalette,
   autoConfirmDialogs,
 } from '../fixtures/test-helpers';
@@ -114,6 +115,7 @@ test.describe('Config Dialog - Settings Tab', () => {
       ],
       get_aliases: [],
       set_config_value: null,
+      unset_config_value: null,
     });
 
     await openConfigDialog(page);
@@ -203,6 +205,69 @@ test.describe('Config Dialog - Settings Tab', () => {
 
     // Verify UI: the control should reflect the updated value
     await expect(select).toHaveValue('true');
+  });
+
+  test('should clear a configured setting instead of writing an empty value', async ({
+    page,
+  }) => {
+    // After the unset the backend no longer reports core.autocrlf as configured.
+    await injectCommandMock(page, {
+      get_common_settings: [
+        { key: 'core.autocrlf', value: '', scope: 'unset' },
+        { key: 'push.default', value: 'current', scope: 'global' },
+        { key: 'pull.rebase', value: '', scope: 'unset' },
+        { key: 'core.editor', value: '', scope: 'unset' },
+      ],
+    });
+
+    const autocrlf = page.locator('lv-config-dialog .setting-item').nth(0);
+    await autocrlf.locator('.setting-value select').selectOption({ value: '' });
+
+    const unsets = await findCommand(page, 'unset_config_value');
+    expect(unsets.length).toBeGreaterThan(0);
+    expect(unsets[unsets.length - 1].args).toMatchObject({
+      key: 'core.autocrlf',
+      global: false,
+    });
+
+    // Writing `core.autocrlf = ` instead would be accepted by git and then make
+    // every later git command in the repository fail on a malformed value.
+    const writes = await findCommand(page, 'set_config_value');
+    expect(writes.length).toBe(0);
+
+    await expect(page.locator('lv-config-dialog .error-banner')).not.toBeVisible();
+    await expect(autocrlf.locator('.scope-badge')).toHaveText('not set');
+    await expect(autocrlf.locator('.setting-value select')).toHaveValue('');
+  });
+
+  test('should show the value uncovered from a broader scope after clearing', async ({ page }) => {
+    // core.autocrlf is also set globally, so dropping the repository-scoped
+    // value leaves the global one in effect.
+    await injectCommandMock(page, {
+      get_common_settings: [
+        { key: 'core.autocrlf', value: 'true', scope: 'global' },
+        { key: 'push.default', value: 'current', scope: 'global' },
+        { key: 'pull.rebase', value: '', scope: 'unset' },
+        { key: 'core.editor', value: '', scope: 'unset' },
+      ],
+    });
+
+    const autocrlf = page.locator('lv-config-dialog .setting-item').nth(0);
+    await autocrlf.locator('.setting-value select').selectOption({ value: '' });
+
+    await expect(autocrlf.locator('.scope-badge')).toHaveText('global');
+    await expect(autocrlf.locator('.setting-value select')).toHaveValue('true');
+  });
+
+  test('should show error banner when clearing a setting fails', async ({ page }) => {
+    await injectCommandError(page, 'unset_config_value', 'Cannot unset a multi-valued key');
+
+    const autocrlf = page.locator('lv-config-dialog .setting-item').nth(0);
+    await autocrlf.locator('.setting-value select').selectOption({ value: '' });
+
+    await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
+    // The failed clear must leave the row showing what git still has.
+    await expect(autocrlf.locator('.scope-badge')).toHaveText('local');
   });
 
   test('should show error banner when setting save fails', async ({ page }) => {

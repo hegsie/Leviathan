@@ -269,6 +269,122 @@ describe('lv-config-dialog', () => {
     expect(updated.scope).to.equal('local');
   });
 
+  it('clears a setting through unset instead of writing an empty value', async () => {
+    commonSettings = [{ key: 'push.default', value: 'simple', scope: 'local' }];
+
+    const el = await openSettingsTab();
+
+    // After the unset the backend reports the key as no longer configured.
+    commonSettings = [{ key: 'push.default', value: '', scope: 'unset' }];
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select')!;
+    select.value = '';
+    select.dispatchEvent(new Event('change'));
+
+    await waitUntil(
+      () => uiStore.getState().toasts.some(t => t.type === 'success'),
+      'the clear completed',
+    );
+
+    // The guard this test owns: an empty selection must never reach
+    // set_config_value. `git config push.default ""` is accepted on write and
+    // then makes every later git command in the repo die with
+    // `fatal: bad config variable 'push.default'`.
+    expect(
+      invoked.filter(i => i.command === 'set_config_value'),
+      'an emptied setting must not be written as an empty string',
+    ).to.have.lengthOf(0);
+
+    const unsetCall = invoked.find(i => i.command === 'unset_config_value');
+    expect(unsetCall, 'clearing must go through unset_config_value').to.not.be.undefined;
+    expect(unsetCall!.args).to.deep.equal({
+      path: '/test/repo',
+      key: 'push.default',
+      global: false,
+    });
+
+    expect(uiStore.getState().toasts.find(t => t.type === 'success')!.message).to.equal(
+      'Setting cleared',
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = (el as any).settings.find((s: { key: string }) => s.key === 'push.default');
+    expect(updated.value).to.equal('');
+    expect(updated.scope).to.equal('unset');
+
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.scope-badge')!.textContent!.trim()).to.equal('not set');
+  });
+
+  it('shows the value uncovered from a broader scope after clearing', async () => {
+    commonSettings = [{ key: 'pull.rebase', value: 'merges', scope: 'local' }];
+
+    const el = await openSettingsTab();
+
+    // Dropping the repository-scoped key uncovers the global one; the row must
+    // show what git actually resolves now, not "not set".
+    commonSettings = [{ key: 'pull.rebase', value: 'true', scope: 'global' }];
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select')!;
+    select.value = '';
+    select.dispatchEvent(new Event('change'));
+
+    await waitUntil(
+      () => uiStore.getState().toasts.some(t => t.type === 'success'),
+      'the clear completed',
+    );
+    await el.updateComplete;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = (el as any).settings.find((s: { key: string }) => s.key === 'pull.rebase');
+    expect(updated.value, 'the global value is now the effective one').to.equal('true');
+    expect(updated.scope).to.equal('global');
+    expect(el.shadowRoot!.querySelector('.scope-badge')!.textContent!.trim()).to.equal('global');
+    expect(
+      el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select')!.value,
+    ).to.equal('true');
+  });
+
+  it('clears a free-form setting when its input is emptied', async () => {
+    commonSettings = [{ key: 'core.editor', value: 'vim', scope: 'local' }];
+
+    const el = await openSettingsTab();
+
+    commonSettings = [{ key: 'core.editor', value: '', scope: 'unset' }];
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input')!;
+    input.value = '';
+    input.dispatchEvent(new Event('change'));
+
+    await waitUntil(
+      () => uiStore.getState().toasts.some(t => t.type === 'success'),
+      'the clear completed',
+    );
+
+    expect(invoked.filter(i => i.command === 'set_config_value')).to.have.lengthOf(0);
+    expect(invoked.find(i => i.command === 'unset_config_value')).to.not.be.undefined;
+  });
+
+  it('shows an error and keeps the value when clearing a setting fails', async () => {
+    failingCommands.add('unset_config_value');
+    commonSettings = [{ key: 'push.default', value: 'simple', scope: 'local' }];
+
+    const el = await openSettingsTab();
+
+    const select = el.shadowRoot!.querySelector<HTMLSelectElement>('.setting-value select')!;
+    select.value = '';
+    select.dispatchEvent(new Event('change'));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await waitUntil(() => (el as any).error !== null, 'the failure surfaced');
+
+    expect(uiStore.getState().toasts.filter(t => t.type === 'success')).to.have.lengthOf(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const setting = (el as any).settings.find((s: { key: string }) => s.key === 'push.default');
+    expect(setting.value, 'a failed clear must leave the row alone').to.equal('simple');
+    expect(setting.scope).to.equal('local');
+  });
+
   it('marks a saved setting as repository-scoped', async () => {
     const el = await fixture<LvConfigDialog>(
       html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
