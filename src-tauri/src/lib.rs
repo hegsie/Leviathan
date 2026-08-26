@@ -128,7 +128,7 @@ pub fn run() {
         .setup(|app| {
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
-            app.manage(create_ai_state(config_dir));
+            app.manage(create_ai_state(config_dir.clone()));
 
             // Initialize local AI state with models directory
             let models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
@@ -143,8 +143,20 @@ pub fn run() {
                 service.set_local_ai_state(local_ai_state);
             }
 
-            // Initialize MCP server state
-            app.manage(create_mcp_state());
+            // Initialize MCP server state from the saved configuration
+            let mcp_state = create_mcp_state(config_dir);
+            app.manage(mcp_state.clone());
+
+            // Restart the MCP server if it was running when the app last exited.
+            // A bind failure is recorded in the status so Settings can explain it.
+            tauri::async_runtime::spawn(async move {
+                let mut server = mcp_state.write().await;
+                if server.get_config().enabled {
+                    if let Err(e) = server.start().await {
+                        tracing::warn!("Failed to auto-start MCP server: {}", e);
+                    }
+                }
+            });
 
             // Initialize embedding index state
             let embedding_models_dir = app.path().app_data_dir().unwrap_or_default().join("models");

@@ -362,9 +362,16 @@ export class LvSettingsDialog extends LitElement {
   @state() private recommendedModel: ModelEntry | null = null;
 
   // MCP settings
-  @state() private mcpStatus: McpStatus = { running: false, port: 3001, url: null };
+  @state() private mcpStatus: McpStatus = {
+    running: false,
+    port: 3001,
+    url: null,
+    lastError: null,
+  };
   @state() private mcpPort = 3001;
+  @state() private mcpEnabled = false;
   @state() private mcpToggling = false;
+  @state() private mcpError: string | null = null;
 
   // Event listener cleanup
   private downloadProgressUnlisten: UnlistenFn | null = null;
@@ -974,25 +981,58 @@ export class LvSettingsDialog extends LitElement {
     }
     if (configResult.success && configResult.data) {
       this.mcpPort = configResult.data.port;
+      this.mcpEnabled = configResult.data.enabled;
     }
   }
 
   private async handleMcpToggle(): Promise<void> {
     this.mcpToggling = true;
-    this.aiError = null;
+    this.mcpError = null;
 
     if (this.mcpStatus.running) {
       const result = await mcpService.stopMcpServer();
       if (!result.success) {
-        this.aiError = result.error?.message ?? 'Failed to stop MCP server';
+        this.mcpError = result.error?.message ?? 'Failed to stop MCP server';
       }
     } else {
-      // Save config first, then start
-      await mcpService.setMcpConfig({ enabled: true, port: this.mcpPort, allowedOrigins: [] });
+      // Persist the config first so the server comes back on the next launch
+      const saved = await mcpService.setMcpConfig({
+        enabled: true,
+        port: this.mcpPort,
+        allowedOrigins: [],
+      });
+      if (!saved.success) {
+        this.mcpError = saved.error?.message ?? 'Failed to save MCP settings';
+        this.mcpToggling = false;
+        return;
+      }
+      this.mcpEnabled = true;
       const result = await mcpService.startMcpServer();
       if (!result.success) {
-        this.aiError = result.error?.message ?? 'Failed to start MCP server';
+        this.mcpError = result.error?.message ?? 'Failed to start MCP server';
       }
+    }
+
+    await this.loadMcpStatus();
+    this.mcpToggling = false;
+  }
+
+  /**
+   * Turn off the launch-time restart for a server that is enabled but not running.
+   * `stopMcpServer` rejects when nothing is running, so persisting `enabled: false`
+   * is the only way out of a start that keeps failing on every launch.
+   */
+  private async handleMcpDisable(): Promise<void> {
+    this.mcpToggling = true;
+    this.mcpError = null;
+
+    const result = await mcpService.setMcpConfig({
+      enabled: false,
+      port: this.mcpPort,
+      allowedOrigins: [],
+    });
+    if (!result.success) {
+      this.mcpError = result.error?.message ?? 'Failed to disable the MCP server';
     }
 
     await this.loadMcpStatus();
@@ -1002,6 +1042,18 @@ export class LvSettingsDialog extends LitElement {
   private async handleMcpPortChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     this.mcpPort = Math.max(1024, Math.min(65535, parseInt(input.value, 10) || 3001));
+
+    // Persist the port so it survives a restart even while the server is stopped.
+    // Keep the saved enabled flag: a server that failed to bind is still enabled,
+    // and changing its port must not silently turn off the launch-time restart.
+    const result = await mcpService.setMcpConfig({
+      enabled: this.mcpEnabled,
+      port: this.mcpPort,
+      allowedOrigins: [],
+    });
+    this.mcpError = result.success
+      ? null
+      : (result.error?.message ?? 'Failed to save MCP port');
   }
 
   private async handleReset(): Promise<void> {
@@ -1652,22 +1704,50 @@ export class LvSettingsDialog extends LitElement {
             <div class="setting-label">
               <span class="setting-name">Context Proxy</span>
               <span class="setting-description">
-                Allow external tools (Cursor, VS Code) to query Git context via MCP
+                Allow external tools (Cursor, VS Code) to query Git context via MCP.
+                Restarts automatically on launch while enabled.
               </span>
             </div>
             <div style="display: flex; gap: 8px; align-items: center;">
               <span class="status-indicator ${this.mcpStatus.running ? 'configured' : 'not-configured'}">
                 <span class="status-dot"></span>
-                ${this.mcpStatus.running ? 'Running' : 'Stopped'}
+                ${this.mcpStatus.running ? 'Running' : this.mcpEnabled ? 'Stopped' : 'Disabled'}
               </span>
+              ${!this.mcpStatus.running && this.mcpEnabled ? html`
+                <button
+                  class="mcp-disable"
+                  @click=${this.handleMcpDisable}
+                  ?disabled=${this.mcpToggling}
+                >
+                  Disable
+                </button>
+              ` : nothing}
               <button
+                class="mcp-toggle"
                 @click=${this.handleMcpToggle}
                 ?disabled=${this.mcpToggling}
               >
-                ${this.mcpToggling ? '...' : this.mcpStatus.running ? 'Stop' : 'Start'}
+                ${this.mcpToggling
+                  ? '...'
+                  : this.mcpStatus.running
+                    ? 'Stop'
+                    : this.mcpEnabled
+                      ? 'Retry'
+                      : 'Start'}
               </button>
             </div>
           </div>
+
+          ${this.mcpError ??
+          (!this.mcpStatus.running && this.mcpEnabled ? this.mcpStatus.lastError : null)
+            ? html`
+                <div class="setting-row">
+                  <span class="error-text">
+                    ${this.mcpError ?? this.mcpStatus.lastError}
+                  </span>
+                </div>
+              `
+            : nothing}
 
           <div class="setting-row">
             <div class="setting-label">
