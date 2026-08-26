@@ -3,7 +3,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
-import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
+import { openCloneDestinationDialog, showConfirm } from '../../services/dialog.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import * as localAiService from '../../services/local-ai.service.ts';
 import * as mcpService from '../../services/mcp.service.ts';
@@ -317,6 +317,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private theme: Theme = 'dark';
   @state() private appVersion = '';
   @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
+  @state() private resetting = false;
   @state() private latestVersion = '';
   @state() private fontSize: FontSize = 'medium';
   @state() private density: Density = 'comfortable';
@@ -864,7 +865,7 @@ export class LvSettingsDialog extends LitElement {
       };
     });
 
-    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
+    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean; loadError?: string }>('model-download-complete', (event) => {
       // Remove from progress tracking and refresh the model list
       const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
       this.downloadProgress = rest;
@@ -874,6 +875,10 @@ export class LvSettingsDialog extends LitElement {
       if (event.payload.loaded) {
         this.loadAiProviders();
         window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+      } else if (event.payload.loaded === false) {
+        // The download succeeded but the engine refused the model - the user
+        // still has no AI, so say so instead of silently refreshing the list.
+        this.aiError = `Loading failed for ${event.payload.modelId}: ${event.payload.loadError ?? 'unknown error'}`;
       }
     });
 
@@ -999,9 +1004,36 @@ export class LvSettingsDialog extends LitElement {
     this.mcpPort = Math.max(1024, Math.min(65535, parseInt(input.value, 10) || 3001));
   }
 
-  private handleReset(): void {
-    settingsStore.getState().resetToDefaults();
-    this.loadSettings();
+  private async handleReset(): Promise<void> {
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // that runs before the native dialog takes focus, and this button stays on
+    // screen for that whole window, so a flag claimed after the await lets a
+    // double-click stack a second prompt for the same reset.
+    if (this.resetting) return;
+    this.resetting = true;
+    try {
+      // One click here wipes the remote allowlist, offline mode, the default
+      // clone path and every other preference on this screen, with no undo —
+      // the same bar as every other destructive action in the app.
+      const confirmed = await showConfirm(
+        'Reset Settings',
+        'Reset all settings to their defaults? This clears the remote allowlist, offline mode, the default clone path and every other preference on this screen.',
+        'warning'
+      );
+      if (!confirmed) return;
+
+      settingsStore.getState().resetToDefaults();
+      this.loadSettings();
+      // The same notification every other handler in this file performs.
+      // app-shell re-renders avatars, commit size, graph colours and
+      // stale-branch marking off this event, so without it the rest of the app
+      // keeps painting the pre-reset settings until some other setting is
+      // touched.
+      window.dispatchEvent(new CustomEvent('settings-changed'));
+      showToast('Settings reset to defaults', 'success');
+    } finally {
+      this.resetting = false;
+    }
   }
 
   private handleClose(): void {
@@ -1695,7 +1727,7 @@ export class LvSettingsDialog extends LitElement {
       </div>
 
       <div class="footer">
-        <button class="danger" @click=${this.handleReset}>Reset to Defaults</button>
+        <button class="danger" @click=${this.handleReset} ?disabled=${this.resetting}>Reset to Defaults</button>
         <button class="primary" @click=${this.handleClose}>Done</button>
       </div>
     `;

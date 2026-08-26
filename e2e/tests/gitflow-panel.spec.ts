@@ -4,6 +4,7 @@ import {
   startCommandCaptureWithMocks,
   findCommand,
   injectCommandMock,
+  injectCommandError,
 } from '../fixtures/test-helpers';
 
 /**
@@ -48,7 +49,7 @@ async function injectGitflowPanel(page: import('@playwright/test').Page): Promis
 
   // Wait for the component to finish rendering with Playwright auto-piercing locators
   await page
-    .locator('lv-gitflow-panel#e2e-gitflow .init-section, lv-gitflow-panel#e2e-gitflow .section, lv-gitflow-panel#e2e-gitflow .loading')
+    .locator('lv-gitflow-panel#e2e-gitflow .init-section, lv-gitflow-panel#e2e-gitflow .section, lv-gitflow-panel#e2e-gitflow .load-error, lv-gitflow-panel#e2e-gitflow .loading')
     .first()
     .waitFor({ state: 'visible' });
 }
@@ -632,6 +633,86 @@ test.describe('GitFlow Panel - Finish Feature Failure', () => {
 });
 
 // --------------------------------------------------------------------------
+// Operations - Release Finish Refused (version tag collision)
+// --------------------------------------------------------------------------
+test.describe('GitFlow Panel - Release Finish Tag Collision', () => {
+  const COLLISION =
+    "Tag 'v2.0.0' already exists and does not contain 'release/2.0.0'. "
+    + 'Delete or rename the tag, or finish with a different version.';
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'develop',
+          shorthand: 'develop',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'release/2.0.0',
+          shorthand: 'release/2.0.0',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'rel1',
+          isStale: false,
+        },
+      ],
+      gitflow_finish_release: { __error__: COLLISION },
+    });
+
+    await injectGitflowPanel(page);
+  });
+
+  test('should show the tag-collision error and keep the release listed', async ({ page }) => {
+    const releaseSection = page.locator('lv-gitflow-panel#e2e-gitflow .section').nth(1);
+    await expect(releaseSection.locator('.item-name')).toHaveText('2.0.0');
+
+    await releaseSection.locator('.item-finish-btn:not(.item-squash-btn)').first().click();
+
+    // Finishing a release prompts for the tag message first.
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible({ timeout: 3000 });
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    const banner = page.locator('lv-gitflow-panel#e2e-gitflow .error-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("Tag 'v2.0.0' already exists");
+
+    // The refusal is not a merge conflict — no resolution dialog.
+    await expect(page.locator('lv-conflict-resolution-dialog[open]')).toHaveCount(0);
+
+    // The release survives the refused finish.
+    await expect(releaseSection.locator('.item-name')).toHaveText('2.0.0');
+  });
+});
+
+// --------------------------------------------------------------------------
 // Loading State
 // --------------------------------------------------------------------------
 test.describe('GitFlow Panel - Loading State', () => {
@@ -658,5 +739,135 @@ test.describe('GitFlow Panel - Loading State', () => {
 
     const commands = await findCommand(page, 'get_gitflow_config');
     expect(commands.length).toBeGreaterThan(0);
+  });
+});
+
+
+// --------------------------------------------------------------------------
+// Config Load Failure
+// --------------------------------------------------------------------------
+// A failed get_gitflow_config must not be presented as "not initialized" —
+// the Initialize button rewrites the repo's gitflow config with the defaults.
+test.describe('GitFlow Panel - Config Load Failure', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, { get_branches: [] });
+    await injectCommandError(page, 'get_gitflow_config', 'failed to open repository');
+    await injectGitflowPanel(page);
+  });
+
+  test('shows the load error instead of the initialize prompt', async ({ page }) => {
+    await expect(
+      page.locator('lv-gitflow-panel#e2e-gitflow .load-error-message')
+    ).toContainText('failed to open repository');
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .init-section')).toHaveCount(0);
+  });
+
+  test('Retry re-runs the config load', async ({ page }) => {
+    await injectCommandMock(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'feature/x',
+          shorthand: 'feature/x',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+      ],
+    });
+
+    await page.locator('lv-gitflow-panel#e2e-gitflow .load-error .btn').click();
+
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section').first()).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item-name')).toContainText('x');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Branch Listing Failure
+// --------------------------------------------------------------------------
+test.describe('GitFlow Panel - Branch Listing Failure', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_gitflow_config: {
+        initialized: true,
+        masterBranch: 'main',
+        developBranch: 'develop',
+        featurePrefix: 'feature/',
+        releasePrefix: 'release/',
+        hotfixPrefix: 'hotfix/',
+        supportPrefix: 'support/',
+        versionTagPrefix: 'v',
+      },
+      get_branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'abc123',
+          isStale: false,
+        },
+        {
+          name: 'develop',
+          shorthand: 'develop',
+          isHead: true,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'def456',
+          isStale: false,
+        },
+        {
+          name: 'feature/existing-feature',
+          shorthand: 'feature/existing-feature',
+          isHead: false,
+          isRemote: false,
+          upstream: null,
+          targetOid: 'feat1',
+          isStale: false,
+        },
+      ],
+    });
+
+    await injectGitflowPanel(page);
+  });
+
+  test('should clear active items and show the error banner when the branch listing fails on repository switch', async ({
+    page,
+  }) => {
+    // The first repo's active feature is listed.
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item')).toHaveCount(1);
+
+    // Switch to a repo whose config loads but whose branch listing fails. The
+    // Finish buttons bind to these rows, so keeping the previous repo's items
+    // would aim a Finish at the wrong repository's branch.
+    await injectCommandError(page, 'get_branches', 'failed to open repository');
+    await page.evaluate(() => {
+      const panel = document.querySelector('lv-gitflow-panel#e2e-gitflow') as HTMLElement & {
+        repositoryPath: string;
+      };
+      panel.repositoryPath = '/tmp/other-repo';
+    });
+
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item')).toHaveCount(0);
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .error-banner')).toBeVisible();
+    await expect(
+      page.locator('lv-gitflow-panel#e2e-gitflow .empty-section').first()
+    ).toHaveText('No active items');
   });
 });
