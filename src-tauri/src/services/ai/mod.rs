@@ -808,35 +808,35 @@ impl AiService {
     /// Doing so would also silently undo an explicit "Unload" from Settings on
     /// the very next AI action.
     async fn resolve_provider(&self) -> Result<(&dyn AiProvider, AiProviderType), String> {
-        let local_is_active = self.config.active_provider == Some(AiProviderType::LocalInference);
+        let active = self.config.active_provider;
 
-        // Something already available serves the request as-is — no load needed.
-        if !local_is_active {
-            if let Some(found) = self.find_available_provider().await {
-                return Ok(found);
+        // The provider the user chose is available and serves the request
+        // as-is — nothing has to be loaded. Only the active provider may
+        // short-circuit the load: `find_available_provider` ranks local
+        // inference above every other fallback, so returning a fallback here
+        // would send the request off-device on a request that would otherwise
+        // have stayed local.
+        if active != Some(AiProviderType::LocalInference) {
+            if let Some((provider, pt)) = self.find_available_provider().await {
+                if Some(pt) == active {
+                    return Ok((provider, pt));
+                }
             }
         }
 
-        // Local inference is either the provider the user chose or the only
-        // candidate left. Load it now — deferred from startup to avoid races.
+        // Local inference is either the provider the user chose or the
+        // highest-ranked remaining candidate. Load it now — deferred from
+        // startup to avoid races.
         if let Err(e) = self.ensure_local_model_loaded().await {
             tracing::debug!("Lazy model load skipped: {}", e);
         }
 
-        if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
-            if provider.is_available().await {
-                return Ok((provider.as_ref(), AiProviderType::LocalInference));
-            }
-        }
-
-        // The chosen local model could not load — anything else available still serves.
-        if local_is_active {
-            if let Some(found) = self.find_available_provider().await {
-                return Ok(found);
-            }
-        }
-
-        Err("No AI provider available. Please configure a provider in Settings.".to_string())
+        // Resolve again now the local model has had its chance: this picks it
+        // up when it loaded, and falls back to any other available provider
+        // when it did not (or when nothing was downloaded).
+        self.find_available_provider().await.ok_or_else(|| {
+            "No AI provider available. Please configure a provider in Settings.".to_string()
+        })
     }
 
     /// Save configuration to disk
@@ -1252,6 +1252,34 @@ mod tests {
             providers::LocalModelStatus::Unloaded,
             "the user's chosen local model must still be loaded"
         );
+        assert_eq!(result.unwrap().summary, "feat: stub");
+    }
+
+    /// When the active provider is unreachable, the downloaded local model —
+    /// which `find_available_provider` ranks above every other fallback — must
+    /// still get first refusal. Short-circuiting on a stale cloud key would
+    /// send a request off-device that used to be answered locally.
+    #[tokio::test]
+    async fn test_unavailable_active_provider_gives_the_local_model_first_refusal() {
+        let (mut service, _config_dir, _models_dir) = service_fixture().await;
+        // Ollama is the chosen provider but its endpoint is a closed port.
+        service.set_active_provider(AiProviderType::Ollama).unwrap();
+        // ...while a stale cloud key is still configured behind it.
+        service
+            .providers
+            .insert(AiProviderType::Anthropic, Box::new(StubProvider));
+
+        let result = service
+            .generate_commit_message("diff --git a/a b/a".to_string())
+            .await;
+
+        assert_ne!(
+            service.get_local_model_status().await,
+            providers::LocalModelStatus::Unloaded,
+            "the local model outranks a non-active fallback, so it must be loaded first"
+        );
+        // The GGUF is deliberately invalid, so the load fails and the
+        // configured cloud provider still serves the request.
         assert_eq!(result.unwrap().summary, "feat: stub");
     }
 
