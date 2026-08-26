@@ -23,14 +23,42 @@ async function waitUntil(predicate: () => boolean, what: string): Promise<void> 
   throw new Error(`timed out waiting for ${what}`);
 }
 
+/** Give any pending handler continuation plenty of turns to run. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 let failingCommands: Set<string> = new Set();
+
+/**
+ * Commands parked until the test settles them, so two writes can be resolved
+ * out of the order they were issued.
+ */
+let deferredCommands: Set<string> = new Set();
+interface DeferredWrite {
+  command: string;
+  succeed: () => void;
+  fail: () => void;
+}
+let deferredWrites: DeferredWrite[] = [];
 
 const mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (failingCommands.has(command)) {
     throw new Error(WRITE_ERROR);
+  }
+  if (deferredCommands.has(command)) {
+    return new Promise((resolve, reject) => {
+      deferredWrites.push({
+        command,
+        succeed: () => resolve(null),
+        fail: () => reject(new Error(WRITE_ERROR)),
+      });
+    });
   }
 
   switch (command) {
@@ -133,6 +161,8 @@ describe('lv-settings-dialog external tools write failures', () => {
 
   beforeEach(async () => {
     failingCommands = new Set();
+    deferredCommands = new Set();
+    deferredWrites = [];
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().addRepository({
       path: REPO_PATH,
@@ -271,6 +301,119 @@ describe('lv-settings-dialog external tools write failures', () => {
     expect(toolState(el).diffToolCmd, 'diffToolCmd reverted').to.equal('');
     expect(toolState(el).diffToolName, 'custom row stays open for a retry').to.equal('__custom__');
     expect(settingsChangedCount, 'settings-changed suppressed on failure').to.equal(0);
+  });
+
+  it('keeps the newer saved merge tool when an older failed write resolves late', async () => {
+    deferredCommands.add('set_merge_tool_config');
+
+    const select = rowSelect(el, 'Merge Tool');
+    select.value = 'meld';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 1, 'the first merge tool write');
+
+    select.value = 'vimdiff';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 2, 'the second merge tool write');
+
+    // The newer write lands first and succeeds...
+    deferredWrites[1].succeed();
+    await waitUntil(() => settingsChangedCount === 1, 'the newer merge tool save');
+    await el.updateComplete;
+    expect(select.value).to.equal('vimdiff');
+
+    // ...then the superseded write fails. It must not roll the control back.
+    deferredWrites[0].fail();
+    await settle();
+    await el.updateComplete;
+
+    expect(select.value, 'newer saved tool survives').to.equal('vimdiff');
+    expect(toolState(el).mergeToolName).to.equal('vimdiff');
+    expect(errorToasts(), 'no rollback toast for a superseded write').to.be.empty;
+    expect(settingsChangedCount, 'only the newer save dispatched').to.equal(1);
+  });
+
+  it('keeps the newer saved diff tool when an older failed write resolves late', async () => {
+    deferredCommands.add('set_diff_tool');
+
+    const select = rowSelect(el, 'Diff Tool');
+    select.value = 'meld';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 1, 'the first diff tool write');
+
+    select.value = 'vimdiff';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 2, 'the second diff tool write');
+
+    deferredWrites[1].succeed();
+    await waitUntil(() => settingsChangedCount === 1, 'the newer diff tool save');
+    await el.updateComplete;
+    expect(select.value).to.equal('vimdiff');
+
+    deferredWrites[0].fail();
+    await settle();
+    await el.updateComplete;
+
+    expect(select.value, 'newer saved tool survives').to.equal('vimdiff');
+    expect(toolState(el).diffToolName).to.equal('vimdiff');
+    expect(errorToasts(), 'no rollback toast for a superseded write').to.be.empty;
+    expect(settingsChangedCount, 'only the newer save dispatched').to.equal(1);
+  });
+
+  it('leaves the merge tool on None when an in-flight write fails after the user picks None', async () => {
+    const select = rowSelect(el, 'Merge Tool');
+    select.value = 'meld';
+    change(select);
+    await waitUntil(() => settingsChangedCount === 1, 'the first merge tool save');
+    await el.updateComplete;
+
+    deferredCommands.add('set_merge_tool_config');
+    select.value = 'vimdiff';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 1, 'the merge tool write');
+
+    // The user gives up on external merge tools before the write comes back.
+    select.value = '';
+    change(select);
+    await el.updateComplete;
+
+    deferredWrites[0].fail();
+    await settle();
+    await el.updateComplete;
+
+    expect(select.value, 'the None choice survives').to.equal('');
+    expect(toolState(el).mergeToolName).to.be.null;
+    expect(errorToasts(), 'no rollback toast for a superseded write').to.be.empty;
+    expect(settingsChangedCount, 'only the first save dispatched').to.equal(1);
+  });
+
+  it('does not roll the custom diff tool command back over a newer tool selection', async () => {
+    const select = rowSelect(el, 'Diff Tool');
+    select.value = '__custom__';
+    change(select);
+    await el.updateComplete;
+
+    deferredCommands.add('set_diff_tool');
+    const input = rowInput(el, 'Diff Tool Command');
+    input.value = '/usr/bin/meld $LOCAL $REMOTE';
+    change(input);
+    await waitUntil(() => deferredWrites.length === 1, 'the custom command write');
+
+    // The user switches to a named tool while the command write is still open.
+    select.value = 'vimdiff';
+    change(select);
+    await waitUntil(() => deferredWrites.length === 2, 'the named tool write');
+    deferredWrites[1].succeed();
+    await waitUntil(() => settingsChangedCount === 1, 'the named tool save');
+    await el.updateComplete;
+
+    deferredWrites[0].fail();
+    await settle();
+    await el.updateComplete;
+
+    expect(select.value, 'the named tool survives').to.equal('vimdiff');
+    expect(toolState(el).diffToolName).to.equal('vimdiff');
+    expect(errorToasts(), 'no rollback toast for a superseded write').to.be.empty;
+    expect(settingsChangedCount).to.equal(1);
   });
 
   it('dispatches settings-changed and keeps the value when the merge tool write succeeds', async () => {

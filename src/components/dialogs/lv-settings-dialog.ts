@@ -379,6 +379,12 @@ export class LvSettingsDialog extends LitElement {
   @state() private availableDiffTools: AvailableDiffTool[] = [];
   @state() private loadingTools = false;
 
+  // Monotonic write tokens. Only the newest write for a tool owns its controls,
+  // so a slow failure can no longer roll the UI back over a newer save that
+  // already landed.
+  private mergeToolWriteToken = 0;
+  private diffToolWriteToken = 0;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
@@ -601,6 +607,7 @@ export class LvSettingsDialog extends LitElement {
   private async handleMergeToolChange(e: Event): Promise<void> {
     const select = e.target as HTMLSelectElement;
     const value = select.value;
+    const token = ++this.mergeToolWriteToken;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo) return;
 
@@ -622,6 +629,9 @@ export class LvSettingsDialog extends LitElement {
     this.mergeToolCmd = null;
     const result = await gitService.setMergeToolConfig(repo.repository.path, value);
     if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.mergeToolWriteToken) return;
       // The write never landed, so put the control back on what git still holds
       // instead of letting the choice silently snap back on the next open.
       this.mergeToolName = previousName;
@@ -638,6 +648,7 @@ export class LvSettingsDialog extends LitElement {
 
   private async handleMergeToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const token = ++this.mergeToolWriteToken;
     const previousCmd = this.mergeToolCmd;
     this.mergeToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
@@ -649,6 +660,9 @@ export class LvSettingsDialog extends LitElement {
       this.mergeToolCmd,
     );
     if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.mergeToolWriteToken) return;
       // Keep mergeToolName on '__custom__' so the command row stays on screen
       // and the user can retry rather than hitting a dead end.
       this.mergeToolCmd = previousCmd;
@@ -665,6 +679,7 @@ export class LvSettingsDialog extends LitElement {
   private async handleDiffToolChange(e: Event): Promise<void> {
     const select = e.target as HTMLSelectElement;
     const value = select.value;
+    const token = ++this.diffToolWriteToken;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo) return;
 
@@ -686,6 +701,9 @@ export class LvSettingsDialog extends LitElement {
     this.diffToolCmd = null;
     const result = await gitService.setDiffTool(repo.repository.path, value);
     if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.diffToolWriteToken) return;
       // The write never landed, so put the control back on what git still holds
       // instead of letting the choice silently snap back on the next open.
       this.diffToolName = previousName;
@@ -702,6 +720,7 @@ export class LvSettingsDialog extends LitElement {
 
   private async handleDiffToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const token = ++this.diffToolWriteToken;
     const previousCmd = this.diffToolCmd;
     this.diffToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
@@ -713,6 +732,9 @@ export class LvSettingsDialog extends LitElement {
       this.diffToolCmd,
     );
     if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.diffToolWriteToken) return;
       // Keep diffToolName on '__custom__' so the command row stays on screen
       // and the user can retry rather than hitting a dead end.
       this.diffToolCmd = previousCmd;
