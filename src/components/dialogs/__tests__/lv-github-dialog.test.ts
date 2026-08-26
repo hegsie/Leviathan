@@ -197,6 +197,10 @@ let appConfigResponse: unknown = { connected: true, user: null, scopes: ['app-in
 // returning the same fixture for every call.
 let prPages: Record<number, unknown[]> | null = null;
 let prPageThatFails: number | null = null;
+// A pull-request page parked on a promise, so a test can hold one page load in
+// flight while another restarts the list.
+let prPageGates: Record<number, Promise<void>> = {};
+let runPageThatFails: number | null = null;
 let issuePages: Record<number, { issues: unknown[]; nextPage: number | null }> | null = null;
 let releasePages: Record<number, unknown[]> | null = null;
 let runPages: Record<number, unknown[]> | null = null;
@@ -279,6 +283,8 @@ function setupMockInvoke(): void {
     if (command === 'detect_github_repo') return detectedRepoResponse;
     if (command === 'list_pull_requests') {
       const page = requestedPage(params);
+      const gate = prPageGates[page];
+      if (gate) await gate;
       if (prPageThatFails !== null && page === prPageThatFails) {
         throw new Error('Rate limit exceeded');
       }
@@ -292,6 +298,9 @@ function setupMockInvoke(): void {
     }
     if (command === 'get_workflow_runs') {
       const page = requestedPage(params);
+      if (runPageThatFails !== null && page === runPageThatFails) {
+        throw new Error('Rate limit exceeded');
+      }
       return runPages ? (runPages[page] ?? []) : mockWorkflowRuns;
     }
     if (command === 'list_releases') {
@@ -318,6 +327,8 @@ describe('lv-github-dialog', () => {
     appConfigResponse = { connected: true, user: null, scopes: ['app-installation'] };
     prPages = null;
     prPageThatFails = null;
+    prPageGates = {};
+    runPageThatFails = null;
     issuePages = null;
     releasePages = null;
     runPages = null;
@@ -1293,6 +1304,126 @@ describe('lv-github-dialog', () => {
       expect(loadMoreButton(el)).to.be.null;
       const calls = callsTo('get_workflow_runs');
       expect(calls[calls.length - 1].page).to.equal(2);
+    });
+
+    it('does not append a superseded page after the pull request filter changed', async () => {
+      prPages = { 1: makePullRequests(30, 100), 2: makePullRequests(5, 70) };
+      let releaseSecondPage = (): void => {};
+      prPageGates[2] = new Promise<void>((resolve) => {
+        releaseSecondPage = resolve;
+      });
+
+      const el = await openOnTab('Pull Requests');
+
+      // Load more is still in flight...
+      loadMoreButton(el)!.click();
+      await el.updateComplete;
+
+      // ...when the filter changes and restarts the list at page 1.
+      const select = el.shadowRoot!.querySelector('.filter-select') as HTMLSelectElement;
+      select.value = 'closed';
+      select.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      releaseSecondPage();
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.pr-item').length,
+        'the superseded page belongs to the old filter and must not be appended'
+      ).to.equal(30);
+      expect(el.shadowRoot!.textContent).to.not.contain('Generated PR 70');
+
+      // The cursor belongs to the new list too: the next page is 2, not 3.
+      delete prPageGates[2];
+      await clickLoadMore(el);
+      const calls = callsTo('list_pull_requests');
+      expect(
+        calls[calls.length - 1].page,
+        'a superseded page must not advance the new list\'s cursor'
+      ).to.equal(2);
+    });
+
+    it('does not overwrite the issue cursor with a superseded page', async () => {
+      const el = await openOnTab('Issues');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+
+      let releaseStalePage = (): void => {};
+      const stalePage = new Promise<void>((resolve) => {
+        releaseStalePage = resolve;
+      });
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_issues' || command === 'list_github_issues') {
+          if (requestedPage(args as Record<string, unknown>) === 5) {
+            await stalePage;
+            return { issues: [mockIssues[0]], nextPage: 6 };
+          }
+          return { issues: [], nextPage: null };
+        }
+        return null;
+      };
+
+      dialog.issues = [];
+      dialog.issuesNextPage = 5;
+      const superseded = dialog.loadIssues('tok', true);
+      // A restart lands first and reports that the list ends here.
+      await dialog.loadIssues('tok');
+      releaseStalePage();
+      await superseded;
+
+      expect(
+        dialog.issuesNextPage,
+        'a superseded page must not resurrect a cursor the restart retired'
+      ).to.equal(null);
+      expect(dialog.issues.length, 'a superseded page must not be appended').to.equal(0);
+    });
+
+    it('clears the stale error banner when a workflow-run retry succeeds', async () => {
+      runPages = { 1: makeWorkflowRuns(20, 1), 2: makeWorkflowRuns(4, 21) };
+      runPageThatFails = 2;
+
+      const el = await openOnTab('Actions');
+      await clickLoadMore(el);
+      expect(
+        el.shadowRoot!.querySelector('.error-message')?.textContent,
+        'the failed page is reported'
+      ).to.contain('Rate limit exceeded');
+
+      runPageThatFails = null;
+      await clickLoadMore(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.workflow-item').length).to.equal(24);
+      // Compared as text, not as a node: a failure must print a string rather
+      // than an element the test runner cannot serialise.
+      expect(
+        el.shadowRoot!.querySelector('.error-message')?.textContent ?? null,
+        'a successful retry must not leave the previous failure banner standing'
+      ).to.equal(null);
+    });
+
+    it('clears the stale error when an issues load succeeds after a failure', async () => {
+      const el = await openOnTab('Issues');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.error = 'Rate limit exceeded';
+
+      await dialog.loadIssues('tok');
+
+      expect(dialog.issues.length, 'the retry loaded issues').to.be.greaterThan(0);
+      expect(dialog.error, 'a successful load must clear the previous failure').to.equal(null);
+    });
+
+    it('clears the stale error when a releases load succeeds after a failure', async () => {
+      const el = await openOnTab('Releases');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dialog = el as any;
+      dialog.error = 'Rate limit exceeded';
+
+      await dialog.loadReleases('tok');
+
+      expect(dialog.releases.length, 'the retry loaded releases').to.be.greaterThan(0);
+      expect(dialog.error, 'a successful load must clear the previous failure').to.equal(null);
     });
   });
 

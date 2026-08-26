@@ -794,6 +794,14 @@ export class LvGitHubDialog extends LitElement {
   @state() private runsPage = 1;
   @state() private hasMoreRuns = false;
   @state() private isLoadingMore = false;
+  // Request generations, one per paged list. A restart (a filter change, a
+  // reload after a create) supersedes an in-flight page load: the superseded
+  // result must neither append to the list that replaced it nor overwrite its
+  // cursor. Plain fields — they drive no rendering.
+  private prRequestId = 0;
+  private runsRequestId = 0;
+  private issuesRequestId = 0;
+  private releasesRequestId = 0;
   @state() private isLoading = false;
   @state() private error: string | null = null;
   @state() private tokenInput = '';
@@ -1122,6 +1130,7 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     const requestedPage = append ? this.prPage + 1 : 1;
+    const requestId = ++this.prRequestId;
     // Appending must not swap the rendered list for the "Loading…" placeholder,
     // so it uses its own flag.
     if (append) {
@@ -1142,6 +1151,7 @@ export class LvGitHubDialog extends LitElement {
         token
       );
 
+      if (requestId !== this.prRequestId) return;
       if (result.success && result.data) {
         this.pullRequests = append ? [...this.pullRequests, ...result.data] : result.data;
         this.prPage = requestedPage;
@@ -1152,6 +1162,7 @@ export class LvGitHubDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load pull requests';
       }
     } catch (err) {
+      if (requestId !== this.prRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load pull requests';
     } finally {
       if (append) {
@@ -1167,7 +1178,11 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     const requestedPage = append ? this.runsPage + 1 : 1;
+    const requestId = ++this.runsRequestId;
     if (append) this.isLoadingMore = true;
+    // Same as loadPullRequests: a load that succeeds must not leave the
+    // previous attempt's banner standing.
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1180,6 +1195,7 @@ export class LvGitHubDialog extends LitElement {
         token
       );
 
+      if (requestId !== this.runsRequestId) return;
       if (result.success && result.data) {
         this.workflowRuns = append ? [...this.workflowRuns, ...result.data] : result.data;
         this.runsPage = requestedPage;
@@ -1191,6 +1207,7 @@ export class LvGitHubDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load workflow runs';
       }
     } catch (err) {
+      if (requestId !== this.runsRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load workflow runs';
     } finally {
       if (append) this.isLoadingMore = false;
@@ -1206,7 +1223,9 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     const requestedPage = append ? (this.issuesNextPage ?? 1) : 1;
+    const requestId = ++this.issuesRequestId;
     if (append) this.isLoadingMore = true;
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1220,6 +1239,7 @@ export class LvGitHubDialog extends LitElement {
         token
       );
 
+      if (requestId !== this.issuesRequestId) return;
       if (result.success && result.data) {
         this.issues = append ? [...this.issues, ...result.data.issues] : result.data.issues;
         this.issuesNextPage = result.data.nextPage ?? null;
@@ -1227,6 +1247,7 @@ export class LvGitHubDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load issues';
       }
     } catch (err) {
+      if (requestId !== this.issuesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load issues';
     } finally {
       if (append) this.isLoadingMore = false;
@@ -1260,7 +1281,9 @@ export class LvGitHubDialog extends LitElement {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
     const requestedPage = append ? this.releasesPage + 1 : 1;
+    const requestId = ++this.releasesRequestId;
     if (append) this.isLoadingMore = true;
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1272,6 +1295,7 @@ export class LvGitHubDialog extends LitElement {
         token
       );
 
+      if (requestId !== this.releasesRequestId) return;
       if (result.success && result.data) {
         this.releases = append ? [...this.releases, ...result.data] : result.data;
         this.releasesPage = requestedPage;
@@ -1280,6 +1304,7 @@ export class LvGitHubDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load releases';
       }
     } catch (err) {
+      if (requestId !== this.releasesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load releases';
     } finally {
       if (append) this.isLoadingMore = false;
