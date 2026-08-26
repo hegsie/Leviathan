@@ -436,7 +436,10 @@ test.describe('File History - opening over another center-pane view', () => {
     rightPanel = new RightPanelPage(page);
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      // These tests only assert which pane is mounted, so they use the fixture
+      // declared right above rather than the shared commit list the list-rendering
+      // suites tune for their own assertions.
+      get_file_history: [HISTORY_COMMIT],
       get_commit_files: [
         { path: 'src/main.ts', status: 'modified', additions: 10, deletions: 5 },
         { path: 'src/other.ts', status: 'modified', additions: 2, deletions: 1 },
