@@ -289,7 +289,10 @@ test.describe('Operation Banner', () => {
 
     const toast = page.locator('.toast').first();
     await expect(toast).toBeVisible({ timeout: 5000 });
-    await expect(toast).toContainText(/Skipped/i);
+    // The repository state is git's own token, `cherrypick`. The banner right
+    // beside this toast says "Cherry-pick in progress", so the toast must not
+    // be the one place the app spells it differently.
+    await expect(toast).toContainText('Skipped cherry-pick');
 
     const calls = await findCommand(page, 'skip_cherry_pick');
     expect(calls).toHaveLength(1);
@@ -379,8 +382,14 @@ test.describe('Operation Banner', () => {
     // Accept: the skip runs.
     await autoConfirmDialogs(page);
     await page.locator('.operation-skip-btn').click();
-    await expect(page.locator('.toast').first()).toContainText(/Skipped/i);
+    await expect(page.locator('.toast').first()).toContainText('Skipped cherry-pick');
     expect(await findCommand(page, 'skip_cherry_pick')).toHaveLength(1);
+
+    // The prompt itself reads as prose too, not as the raw state token.
+    const prompts = await findCommand(page, 'plugin:dialog|message');
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(prompts[0].args)).toContain('cherry-pick');
+    expect(JSON.stringify(prompts[0].args)).not.toContain('cherrypick');
   });
 
   test('should show Resolve Conflicts button for cherry-pick state', async ({ page }) => {

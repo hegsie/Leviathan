@@ -300,9 +300,29 @@ fn resolve_sequence<'repo>(
 /// rewind to the commit the whole range started from.
 fn resume_sequence(repo: &git2::Repository) -> Result<Option<Commit>> {
     let seq_path = repo.path().join(CHERRY_PICK_SEQUENCE);
-    let Ok(contents) = std::fs::read_to_string(&seq_path) else {
-        clear_sequencer_state(repo);
-        return Ok(None);
+    let contents = match std::fs::read_to_string(&seq_path) {
+        Ok(contents) => contents,
+        // No sequence file: this was a single pick, not a range. Nothing queued,
+        // nothing to resume.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            clear_sequencer_state(repo);
+            return Ok(None);
+        }
+        // The file IS there but unreadable (permissions, corruption, a
+        // half-written line). It still names commits the user asked for, so
+        // treating it as "nothing queued" would report the cherry-pick as
+        // finished and drop the rest of the range without a word. Surface it
+        // instead, and drop the sidecar only when no cherry-pick is left in
+        // progress — the same rule the resolve failure below follows, so a
+        // stale CHERRY_PICK_SEQUENCE_HEAD can never rewind a later, unrelated
+        // abort past commits it never touched.
+        Err(e) => {
+            clear_sequencer_state_if_not_in_progress(repo);
+            return Err(LeviathanError::OperationFailed(format!(
+                "Could not read the queued cherry-pick sequence: {}",
+                e
+            )));
+        }
     };
 
     let remaining: Vec<String> = contents
@@ -3997,6 +4017,53 @@ mod tests {
             std::fs::read_to_string(test_repo.path.join("dirty.txt")).unwrap(),
             "uncommitted"
         );
+    }
+
+    #[tokio::test]
+    async fn test_skip_cherry_pick_reports_an_unreadable_sequence_file() {
+        // An unreadable CHERRY_PICK_SEQUENCE is not the same as an absent one:
+        // it still names commits the user queued. Reporting success and
+        // dropping them would end the range silently, with no error and no
+        // in-progress state left to tell the user anything went wrong.
+        let test_repo = TestRepo::with_initial_commit();
+        let (_m, a, b, c) = setup_range(&test_repo);
+
+        let result = cherry_pick_range(
+            test_repo.path_str(),
+            vec![a.to_string(), b.to_string(), c.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LeviathanError::CherryPickConflict)));
+
+        // C is still queued; corrupt the file so read_to_string fails with
+        // something other than NotFound (invalid UTF-8 -> InvalidData).
+        let seq_path = test_repo.repo().path().join(CHERRY_PICK_SEQUENCE);
+        assert_eq!(
+            std::fs::read_to_string(&seq_path).unwrap().trim(),
+            c.to_string()
+        );
+        std::fs::write(&seq_path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let err = skip_cherry_pick(test_repo.path_str())
+            .await
+            .expect_err("an unreadable sequence must not report success");
+        assert!(
+            err.to_string()
+                .contains("Could not read the queued cherry-pick sequence"),
+            "unexpected error: {}",
+            err
+        );
+
+        // The queued C was never applied, and nothing pretended it was.
+        assert!(!test_repo.path.join("c.txt").exists());
+
+        // No cherry-pick is left in progress, so the sidecars must be gone —
+        // a stale CHERRY_PICK_SEQUENCE_HEAD would let a later, unrelated
+        // abort rewind past commits it never touched.
+        let git_dir = test_repo.repo().path().to_path_buf();
+        assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE).exists());
+        assert!(!git_dir.join(CHERRY_PICK_SEQUENCE_HEAD).exists());
     }
 
     #[tokio::test]

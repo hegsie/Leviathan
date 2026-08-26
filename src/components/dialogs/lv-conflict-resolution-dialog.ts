@@ -1109,6 +1109,23 @@ export class LvConflictResolutionDialog extends LitElement {
 
     this.skipping = true;
     try {
+      // Skip drops the stopped pick — and with it every conflict resolution
+      // made for it in this dialog. Abort here is behind an explicit confirm
+      // for exactly that reason, and the banner's Skip confirms as soon as the
+      // repo has conflicted files; a one-click Skip in the surface where the
+      // resolution work actually happens was the only unguarded path to that
+      // loss. On an empty stop (nothing conflicted, nothing resolved) there is
+      // nothing to lose, so it stays a single click there.
+      if (this.conflicts.length > 0 || this.resolvedFiles.size > 0) {
+        const confirmed = await showConfirm(
+          `Skip ${this.getOperationTitle().toLowerCase()}?`,
+          `This commit will not be applied and the conflict resolutions for it are ` +
+            `discarded. Commits already applied stay, and the rest of the range continues.`,
+          'warning',
+        );
+        if (!confirmed) return;
+      }
+
       const result =
         this.operationType === 'cherry-pick'
           ? await gitService.skipCherryPick({ path: this.repositoryPath })

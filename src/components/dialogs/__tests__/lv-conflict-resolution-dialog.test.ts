@@ -1702,7 +1702,15 @@ describe('lv-conflict-resolution-dialog', () => {
   // The backend's empty-pick error tells the user to "Skip or abort"; these pin
   // the Skip half, which keeps already-applied picks instead of rewinding them.
   describe('skip flow', () => {
-    beforeEach(() => clearToasts());
+    beforeEach(() => {
+      clearToasts();
+      // Skip is behind showConfirm() -> plugin-dialog's confirm(), which
+      // resolves to `result === okLabel`. Accept by default so these tests
+      // exercise the skip itself; the decline case overrides this.
+      const base = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) =>
+        command === 'plugin:dialog|message' ? 'Ok' : base(command, args);
+    });
 
     async function openDialog(
       operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash'
@@ -1768,6 +1776,7 @@ describe('lv-conflict-resolution-dialog', () => {
         if (command === 'skip_cherry_pick')
           throw { code: 'CHERRY_PICK_CONFLICT', message: 'Cherry-pick conflict' };
         if (command === 'get_conflicts') return [makeConflict('src/next.ts')];
+        if (command === 'plugin:dialog|message') return 'Ok';
         return null;
       };
 
@@ -1781,12 +1790,66 @@ describe('lv-conflict-resolution-dialog', () => {
       expect(uiStore.getState().toasts.find(t => t.type === 'success')).to.be.undefined;
     });
 
+    it('asks before discarding the resolution work Skip throws away', async () => {
+      // Abort in this dialog is behind an explicit confirm because it loses
+      // every resolution made here; Skip loses the same work for the stopped
+      // pick and was a single click. The banner's Skip already confirms as
+      // soon as the repo has conflicted files.
+      const el = await openDialog('cherry-pick');
+      expect(
+        (el as unknown as { conflicts: ConflictFile[] }).conflicts.length,
+        'the dialog is showing resolution work',
+      ).to.be.greaterThan(0);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'plugin:dialog|message') return 'Cancel';
+        return null;
+      };
+      invokeHistory.length = 0;
+
+      await (el as unknown as { handleSkip: () => Promise<void> }).handleSkip.bind(el)();
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.some(c => c.command === 'plugin:dialog|message'),
+        'the user is asked first',
+      ).to.be.true;
+      expect(
+        invokeHistory.find(c => c.command === 'skip_cherry_pick'),
+        'a declined confirm must not run the skip',
+      ).to.be.undefined;
+      expect(el.open, 'the dialog stays open').to.be.true;
+      expect(
+        (el as unknown as { skipping: boolean }).skipping,
+        'declining must not wedge the button',
+      ).to.be.false;
+    });
+
+    it('skips an empty stop without a confirm', async () => {
+      // No conflicts and nothing marked resolved means nothing to lose — a
+      // scary prompt there is pure friction, exactly as on the banner.
+      setupDefaultMocks([]);
+      const el = await openDialog('cherry-pick');
+      invokeHistory.length = 0;
+
+      await (el as unknown as { handleSkip: () => Promise<void> }).handleSkip.bind(el)();
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.some(c => c.command === 'plugin:dialog|message'),
+        'nothing to confirm away',
+      ).to.be.false;
+      expect(invokeHistory.find(c => c.command === 'skip_cherry_pick')).to.not.be.undefined;
+    });
+
     it('a failed skip surfaces the error and keeps the dialog open', async () => {
       const el = await openDialog('cherry-pick');
       mockInvoke = async (command: string) => {
         if (command === 'skip_cherry_pick')
           throw { code: 'COMMAND_ERROR', message: 'Repository is busy' };
         if (command === 'get_conflicts') return TEST_CONFLICTS;
+        if (command === 'plugin:dialog|message') return 'Ok';
         return null;
       };
 

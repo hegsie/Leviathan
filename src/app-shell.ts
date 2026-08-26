@@ -38,6 +38,19 @@ const ABORTABLE_STATES: readonly RepositoryState[] = [
  * and listing it here without a switch arm would render a dead button.
  */
 const SKIPPABLE_STATES: readonly RepositoryState[] = ['cherrypick', 'revert'];
+
+/**
+ * How a repository state reads in user-facing prose.
+ *
+ * The stored state is git's own token, so the raw value produces "Skipped
+ * cherrypick" / "Abort cherrypick?" — wording that appears nowhere else in the
+ * app. The banner beside these controls already says "Cherry-pick in progress",
+ * and the conflict dialog's own Skip/Abort toasts say "cherry-pick"; this keeps
+ * the banner's confirms and toasts consistent with both.
+ */
+function operationLabel(state: RepositoryState): string {
+  return state === 'cherrypick' ? 'cherry-pick' : state;
+}
 import './components/toolbar/lv-toolbar.ts';
 import './components/welcome/lv-welcome.ts';
 import './components/graph/lv-graph-canvas.ts';
@@ -2637,9 +2650,9 @@ export class AppShell extends LitElement {
     this.abortInProgress = true;
 
     const confirmed = await showConfirm(
-      `Abort ${state}?`,
+      `Abort ${operationLabel(state)}?`,
       `This discards all conflict resolutions and restores the working tree to ` +
-        `its state before the ${state} began. This cannot be undone.`,
+        `its state before the ${operationLabel(state)} began. This cannot be undone.`,
       'warning'
     );
 
@@ -2674,7 +2687,7 @@ export class AppShell extends LitElement {
       }
 
       if (result.success) {
-        showToast(`Aborted ${state}`, 'success');
+        showToast(`Aborted ${operationLabel(state)}`, 'success');
         // `path` was captured before the abort await — pin the refresh to it so
         // a mid-abort tab switch doesn't refresh the wrong repo.
         this.refreshConflictDialogRepo(path);
@@ -2726,9 +2739,12 @@ export class AppShell extends LitElement {
       // there are conflicted files there IS resolution work to lose, so gate it
       // like Abort; on an empty stop there is nothing to lose and a scary
       // confirm would be pure friction.
-      if (this.hasConflictedFiles) {
+      // Gated on the TARGETED repo's status, not `hasConflictedFiles` — that
+      // getter reads the ACTIVE tab, which is a different repository whenever
+      // this runs with a pinned path.
+      if ((repo.status ?? []).some((f) => f.isConflicted)) {
         const confirmed = await showConfirm(
-          `Skip ${state}?`,
+          `Skip ${operationLabel(state)}?`,
           `This commit will not be applied and the conflict resolutions for it are ` +
             `discarded. Commits already applied stay, and the rest of the range continues.`,
           'warning'
@@ -2752,7 +2768,7 @@ export class AppShell extends LitElement {
       }
 
       if (result.success) {
-        showToast(`Skipped ${state}`, 'success');
+        showToast(`Skipped ${operationLabel(state)}`, 'success');
         // `path` was captured before the skip await — pin the refresh to it so
         // a mid-skip tab switch doesn't refresh the wrong repo.
         this.refreshConflictDialogRepo(path);
