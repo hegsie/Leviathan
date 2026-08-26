@@ -123,8 +123,11 @@ fn is_lfs_enabled(repo_path: &Path) -> bool {
 
     // Nested attributes files, taken from the index rather than a directory
     // walk: it costs no directory IO and still sees files that are not checked
-    // out. Prefer the working-tree copy when there is one so uncommitted edits
-    // count, and fall back to the committed blob.
+    // out. The working-tree copy is what git actually applies, so when the file
+    // is there it is the only thing consulted -- `git lfs untrack` empties a
+    // rule long before that removal is committed, and falling through to the
+    // old blob would keep reporting the repo as configured. The committed blob
+    // is only for entries with no file on disk at all (sparse/partial clones).
     let Ok(index) = repo.index() else {
         return false;
     };
@@ -134,12 +137,75 @@ fn is_lfs_enabled(repo_path: &Path) -> bool {
         if rel.file_name() != Some(std::ffi::OsStr::new(".gitattributes")) {
             return false;
         }
-        file_enables_lfs(&repo_path.join(rel))
-            || repo
-                .find_blob(entry.id)
-                .map(|b| enables_lfs(&String::from_utf8_lossy(b.content())))
-                .unwrap_or(false)
+        let checked_out = repo_path.join(rel);
+        if checked_out.exists() {
+            return file_enables_lfs(&checked_out);
+        }
+        repo.find_blob(entry.id)
+            .map(|b| enables_lfs(&String::from_utf8_lossy(b.content())))
+            .unwrap_or(false)
     })
+}
+
+/// The pattern a `git lfs track` listing line reports, and the attributes file
+/// that defines it. Lines look like `    assets/*.psd (assets/.gitattributes)`,
+/// optionally with a ` [lockable]` marker before the source.
+fn parse_track_line(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let (left, source) = line.rsplit_once('(')?;
+    let source = source.strip_suffix(')')?.trim();
+    let pattern = left.split_whitespace().next()?;
+    Some((pattern, source))
+}
+
+/// Whether a `git lfs track` listing still reports `pattern`.
+fn lists_pattern(track_output: &str, pattern: &str) -> bool {
+    track_output
+        .lines()
+        .any(|line| parse_track_line(line).is_some_and(|(listed, _)| listed == pattern))
+}
+
+/// Where `git lfs untrack` has to run to remove `pattern`, and the pattern as
+/// written in the attributes file it lives in.
+///
+/// `git lfs track` reports patterns relative to the repository root and names
+/// the file that defines each one, so a rule written as `*.psd` in
+/// `assets/.gitattributes` is listed as `assets/*.psd`. `git lfs untrack` only
+/// rewrites the `.gitattributes` in its own working directory, and matches
+/// lines by the pattern exactly as written there. Run from the root with the
+/// listed name it therefore rewrites the root file, leaves the nested rule
+/// alone and still exits 0 -- which is what made Remove report success and
+/// change nothing.
+///
+/// Returns the directory relative to the repository root ("" for the root
+/// itself) and the pattern to pass. `None` when the listing does not mention
+/// the pattern, or when it comes from inside the git directory
+/// (`.git/info/attributes`), which `git lfs untrack` cannot rewrite at all --
+/// the caller falls back to the root and the check afterwards reports the
+/// pattern is still tracked.
+fn resolve_untrack_target(track_output: &str, pattern: &str) -> Option<(String, String)> {
+    let source = track_output.lines().find_map(|line| {
+        parse_track_line(line).and_then(|(listed, source)| (listed == pattern).then_some(source))
+    })?;
+
+    let dir = Path::new(source)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+
+    if dir.is_empty() || dir == "." {
+        return Some((String::new(), pattern.to_string()));
+    }
+
+    if dir == ".git" || dir.starts_with(".git/") {
+        return None;
+    }
+
+    let raw = pattern
+        .strip_prefix(&format!("{}/", dir))
+        .unwrap_or(pattern)
+        .to_string();
+    Some((dir, raw))
 }
 
 /// Get LFS version
@@ -289,7 +355,37 @@ pub async fn lfs_track(path: String, pattern: String) -> Result<()> {
 #[command]
 pub async fn lfs_untrack(path: String, pattern: String) -> Result<()> {
     let repo_path = Path::new(&path);
-    run_lfs_command(repo_path, &["untrack", &pattern])?;
+
+    // A rule defined in a nested `.gitattributes` has to be removed from the
+    // directory that defines it -- see `resolve_untrack_target`. When the
+    // listing is unavailable, or does not name the pattern, fall back to the
+    // repository root, which is where every pattern used to be removed from.
+    let (dir, raw) = run_lfs_command(repo_path, &["track"])
+        .ok()
+        .and_then(|output| resolve_untrack_target(&output, &pattern))
+        .unwrap_or_else(|| (String::new(), pattern.clone()));
+
+    let work_dir = if dir.is_empty() {
+        repo_path.to_path_buf()
+    } else {
+        repo_path.join(&dir)
+    };
+
+    run_lfs_command(&work_dir, &["untrack", &raw])?;
+
+    // `git lfs untrack` rewrites the attributes file in its working directory
+    // and exits 0 even when it matched nothing, so a success here is not proof
+    // the rule is gone. Confirm it, rather than letting the dialog report
+    // "No longer tracking ..." over a pattern that is still there.
+    if let Ok(output) = run_lfs_command(repo_path, &["track"]) {
+        if lists_pattern(&output, &pattern) {
+            return Err(LeviathanError::OperationFailed(format!(
+                "{} is still tracked. Remove it from the .gitattributes that defines it.",
+                pattern
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -567,6 +663,130 @@ mod tests {
         );
 
         assert!(!is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_not_enabled_when_nested_attributes_emptied_in_working_tree() {
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_commit(
+            "Track assets",
+            &[(
+                "assets/.gitattributes",
+                "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+            )],
+        );
+
+        // What `git lfs untrack` leaves behind: the file is still checked out,
+        // the rule is gone, and the removal is not committed yet. The stale
+        // blob must not keep the repo reading as configured.
+        repo.create_file("assets/.gitattributes", "\n");
+
+        assert!(!is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_lfs_not_enabled_when_root_attributes_emptied_in_working_tree() {
+        let repo = TestRepo::with_initial_commit();
+
+        repo.create_commit(
+            "Track binaries",
+            &[(
+                ".gitattributes",
+                "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+            )],
+        );
+
+        repo.create_file(".gitattributes", "*.txt text\n");
+
+        assert!(!is_lfs_enabled(&repo.path));
+    }
+
+    #[test]
+    fn test_parse_track_line_root_and_nested() {
+        assert_eq!(
+            parse_track_line("    *.psd (.gitattributes)"),
+            Some(("*.psd", ".gitattributes"))
+        );
+        assert_eq!(
+            parse_track_line("    assets/*.psd (assets/.gitattributes)"),
+            Some(("assets/*.psd", "assets/.gitattributes"))
+        );
+        assert_eq!(
+            parse_track_line("    assets/*.psd [lockable] (assets/.gitattributes)"),
+            Some(("assets/*.psd", "assets/.gitattributes"))
+        );
+        assert_eq!(parse_track_line("Listing tracked patterns"), None);
+        assert_eq!(parse_track_line(""), None);
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_nested_runs_from_defining_directory() {
+        let output = "Listing tracked patterns\n    *.bin (.gitattributes)\n    assets/*.psd (assets/.gitattributes)\n";
+
+        // The listed name is repo-relative; the file itself says "*.psd".
+        assert_eq!(
+            resolve_untrack_target(output, "assets/*.psd"),
+            Some(("assets".to_string(), "*.psd".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_deeply_nested() {
+        let output = "    a/b/c/*.psd (a/b/c/.gitattributes)\n";
+
+        assert_eq!(
+            resolve_untrack_target(output, "a/b/c/*.psd"),
+            Some(("a/b/c".to_string(), "*.psd".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_root_stays_at_root() {
+        let output = "Listing tracked patterns\n    *.bin (.gitattributes)\n";
+
+        assert_eq!(
+            resolve_untrack_target(output, "*.bin"),
+            Some((String::new(), "*.bin".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_lockable_pattern() {
+        let output = "    assets/*.psd [lockable] (assets/.gitattributes)\n";
+
+        assert_eq!(
+            resolve_untrack_target(output, "assets/*.psd"),
+            Some(("assets".to_string(), "*.psd".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_unknown_pattern() {
+        let output = "Listing tracked patterns\n    *.bin (.gitattributes)\n";
+
+        // Nothing to redirect to; the caller falls back to the repository root.
+        assert_eq!(resolve_untrack_target(output, "*.psd"), None);
+    }
+
+    #[test]
+    fn test_resolve_untrack_target_ignores_git_dir_source() {
+        // `.git/info/attributes` is not a file `git lfs untrack` can rewrite,
+        // and its directory is not a place to run from.
+        let output = "    .git/info/*.psd (.git/info/attributes)\n";
+
+        assert_eq!(resolve_untrack_target(output, ".git/info/*.psd"), None);
+    }
+
+    #[test]
+    fn test_lists_pattern() {
+        let output = "Listing tracked patterns\n    *.bin (.gitattributes)\n    assets/*.psd (assets/.gitattributes)\n";
+
+        assert!(lists_pattern(output, "*.bin"));
+        assert!(lists_pattern(output, "assets/*.psd"));
+        assert!(!lists_pattern(output, "*.psd"));
+        assert!(!lists_pattern(output, ""));
+        assert!(!lists_pattern("", "*.bin"));
     }
 
     #[test]
