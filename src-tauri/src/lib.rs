@@ -651,6 +651,7 @@ pub fn run() {
             commands::ai::auto_detect_ai_providers,
             commands::ai::generate_commit_message,
             commands::ai::is_ai_available,
+            commands::ai::ai_unavailable_reason,
             commands::ai::suggest_conflict_resolution,
             commands::ai::generate_changelog,
             commands::ai::analyze_staged_changes,

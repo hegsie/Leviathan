@@ -686,6 +686,8 @@ export class LvCommitPanel extends LitElement {
 
   // AI state
   @state() private aiAvailable: boolean = false;
+  /** Why AI is unavailable — names the selected provider when it is the one at fault. */
+  @state() private aiUnavailableReason: string = '';
   @state() private isGenerating: boolean = false;
   @state() private generationError: string | null = null;
 
@@ -871,6 +873,12 @@ export class LvCommitPanel extends LitElement {
 
   private async checkAiAvailability(): Promise<void> {
     this.aiAvailable = await aiService.isAiAvailable();
+    // A selected provider is never substituted, so "unavailable" usually means
+    // that one provider is unreachable rather than nothing being configured.
+    // Carry the reason so the tooltip can say which provider needs attention.
+    this.aiUnavailableReason = this.aiAvailable
+      ? ''
+      : ((await aiService.getAiUnavailableReason())?.reason ?? '');
     console.log('[lv-commit-panel] checkAiAvailability:', this.aiAvailable);
   }
 
@@ -1374,7 +1382,7 @@ export class LvCommitPanel extends LitElement {
             ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
             title=${this.aiAvailable
               ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
-              : (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages')}
+              : (this.aiUnavailableReason || (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages'))}
           >
             ${this.isGenerating ? html`
               <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
