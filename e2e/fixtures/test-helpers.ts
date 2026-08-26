@@ -298,3 +298,27 @@ export async function startCommandCaptureWithMocks(
     };
   }, overrides);
 }
+
+/**
+ * Deliver a backend Tauri event to every listener the app registered.
+ *
+ * Backend-driven flows (e.g. a model download that fails minutes after the
+ * command returned) can only be exercised by emitting the event the Rust side
+ * would emit. Requires the mock installed by `setupTauriMocks`.
+ */
+export async function emitBackendEvent(
+  page: Page,
+  event: string,
+  payload: unknown
+): Promise<void> {
+  await page.evaluate(
+    ({ event: name, payload: data }) => {
+      const emit = (window as unknown as {
+        __EMIT_TAURI_EVENT__?: (event: string, payload: unknown) => void;
+      }).__EMIT_TAURI_EVENT__;
+      if (!emit) throw new Error('Tauri event mock is not installed');
+      emit(name, data);
+    },
+    { event, payload }
+  );
+}
