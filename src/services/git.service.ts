@@ -2348,6 +2348,13 @@ export interface Worktree {
   lockReason: string | null;
   isBare: boolean;
   isPrunable: boolean;
+  /**
+   * Resolved by the backend against the filesystem: true for the worktree the
+   * repo path was opened at. Optional because test doubles and any pre-flag
+   * payload simply omit it — consumers must fall back, never assume `false`
+   * means "not current".
+   */
+  isCurrent?: boolean;
 }
 
 export async function getWorktrees(
