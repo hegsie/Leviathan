@@ -433,6 +433,9 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return null;
       }
       case 'push_tag':
+      // Deleting a tag offers to delete the remote copy too — the local
+      // delete leaves it behind and the tag fetch refspec restores it.
+      case 'delete_remote_tag':
         return null;
 
       // Rewrite commands (cherry-pick, revert, reset, merge, rebase)
@@ -949,6 +952,8 @@ export async function setupTauriMocks(
             return null;
           }
           case 'push_tag':
+          // See the other builder's switch — tag delete offers the remote too.
+          case 'delete_remote_tag':
             return null;
 
           // === Stash mutations ===

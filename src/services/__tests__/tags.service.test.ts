@@ -20,6 +20,7 @@ import {
   getTags,
   createTag,
   deleteTag,
+  deleteRemoteTag,
   pushTag,
   getTagDetails,
   editTagMessage,
@@ -271,6 +272,31 @@ describe('git.service - Tag operations', () => {
       const result = await deleteTag({ path: '/invalid/repo', name: 'v1.0.0' });
       expect(result.success).to.be.false;
       expect(result.error?.code).to.equal('REPOSITORY_NOT_FOUND');
+    });
+  });
+
+  describe('deleteRemoteTag', () => {
+    // deleteTag above is local-only, and the tag fetch refspec copies a pushed
+    // tag straight back — so the remote copy needs its own command.
+    it('invokes delete_remote_tag with path, name and remote', async () => {
+      mockInvoke = () => Promise.resolve(null);
+
+      const result = await deleteRemoteTag({ path: '/test/repo', name: 'v1.0.0', remote: 'origin' });
+      expect(lastInvokedCommand).to.equal('delete_remote_tag');
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.path).to.equal('/test/repo');
+      expect(args.name).to.equal('v1.0.0');
+      expect(args.remote).to.equal('origin');
+      expect(result.success).to.be.true;
+    });
+
+    it('surfaces a remote refusal as an error result', async () => {
+      mockInvoke = () =>
+        Promise.reject({ code: 'OPERATION_FAILED', message: 'remote ref does not exist' });
+
+      const result = await deleteRemoteTag({ path: '/test/repo', name: 'v1.0.0', remote: 'origin' });
+      expect(result.success).to.be.false;
+      expect(result.error?.message).to.contain('remote ref does not exist');
     });
   });
 

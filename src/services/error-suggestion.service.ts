@@ -67,10 +67,9 @@ export function getErrorSuggestion(
     // refspec-generic pre-check, and neither pulling nor "newer changes"
     // describes it.
     if (context?.operation === 'push-tag') {
-      // "Delete the remote tag first" named something Leviathan cannot do —
-      // there is no remote-tag deletion anywhere in the app. push_tag already
-      // implements the force refspec, so offer that instead of advice the user
-      // cannot follow.
+      // "Delete the remote tag first" is a two-step detour (the tag's Delete
+      // flow can now do it), and push_tag already implements the force
+      // refspec — so offer the one-click recovery instead.
       return {
         message: 'The remote already has this tag at a different commit.',
         action: {

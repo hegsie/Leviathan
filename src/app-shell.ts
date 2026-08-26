@@ -133,6 +133,7 @@ import {
   releaseMaintenance,
   isMaintenanceBlocked,
 } from './utils/maintenance-confirms.ts';
+import { confirmDeleteTag, offerRemoteTagDelete } from './utils/tag-delete.ts';
 import {
   tryAcquireRefOp,
   releaseRefOp,
@@ -2354,14 +2355,9 @@ export class AppShell extends LitElement {
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     // Gated to match the sidebar's tag delete (lv-tag-list.ts) — the graph ref
-    // menu deletes the same tag and must not be the one unguarded path.
-    const confirmed = await showConfirm(
-      'Delete Tag',
-      // See handleRefDeleteBranch — the sidebar says this too.
-      `Are you sure you want to delete the tag "${tagName}"?\n\n` +
-        `This action cannot be undone.`,
-      'warning'
-    );
+    // menu deletes the same tag and must not be the one unguarded path. Shared
+    // wording so the two surfaces cannot drift.
+    const confirmed = await confirmDeleteTag(tagName);
 
     if (!confirmed) {
       this.releaseRefOperation(repoPath);
@@ -2374,6 +2370,10 @@ export class AppShell extends LitElement {
       if (result.success) {
         this.refreshConflictDialogRepo(repoPath);
         showToast(`Deleted tag ${tagName}`, 'success');
+        // The local ref is gone; the remote copy is not, and the tag fetch
+        // refspec would restore it. Asked here, inside the claim, so the
+        // follow-up push is serialized with the rest of this repo's ref ops.
+        await offerRemoteTagDelete(repoPath, tagName);
       } else {
         log.error('Delete tag failed:', result.error);
         showToast(result.error?.message || 'Delete tag failed', 'error');
