@@ -8,8 +8,13 @@ import type { CommandResult } from '../types/api.types.ts';
 
 /**
  * AI provider types
+ *
+ * These literals are the serde wire format of the Rust `AiProviderType` enum,
+ * which is annotated `#[serde(rename_all = "snake_case")]`. That means the
+ * `OpenAi` variant crosses the IPC boundary (and is persisted in the AI config
+ * file) as `open_ai` — not `openai`.
  */
-export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot' | 'google_gemini' | 'local_inference';
+export type AiProviderType = 'ollama' | 'lm_studio' | 'open_ai' | 'anthropic' | 'github_copilot' | 'google_gemini' | 'local_inference';
 
 /**
  * AI provider information
@@ -296,7 +301,7 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
       return 'Ollama';
     case 'lm_studio':
       return 'LM Studio';
-    case 'openai':
+    case 'open_ai':
       return 'OpenAI';
     case 'anthropic':
       return 'Anthropic Claude';
@@ -313,5 +318,5 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
  * Check if a provider requires an API key
  */
 export function providerRequiresApiKey(providerType: AiProviderType): boolean {
-  return providerType === 'openai' || providerType === 'anthropic' || providerType === 'github_copilot' || providerType === 'google_gemini';
+  return providerType === 'open_ai' || providerType === 'anthropic' || providerType === 'github_copilot' || providerType === 'google_gemini';
 }

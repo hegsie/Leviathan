@@ -10,6 +10,7 @@ import {
   pushOverlay,
   removeOverlay,
   isTopOverlay,
+  isOverlayOpen,
   resetOverlayStack,
 } from '../overlay-stack.ts';
 
@@ -78,5 +79,24 @@ describe('overlay-stack', () => {
 
     expect(isTopOverlay(a)).to.be.true;
     expect(isTopOverlay(b)).to.be.false;
+  });
+
+  it('reports whether anything is covering the app', () => {
+    // Global single-key shortcuts ask this before running: a plain `s` behind
+    // an open dialog used to stage the whole working tree.
+    const dialog = {};
+    const palette = {};
+
+    expect(isOverlayOpen(), 'nothing open').to.be.false;
+
+    pushOverlay(dialog);
+    expect(isOverlayOpen(), 'a dialog is up').to.be.true;
+
+    pushOverlay(palette);
+    removeOverlay(palette);
+    expect(isOverlayOpen(), 'the dialog underneath is still up').to.be.true;
+
+    removeOverlay(dialog);
+    expect(isOverlayOpen(), 'everything closed').to.be.false;
   });
 });

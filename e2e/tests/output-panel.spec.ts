@@ -374,6 +374,12 @@ test.describe('Output Panel - In-app integration', () => {
     // Run a state-changing git command through the real palette flow — the
     // IPC layer logs it into the panel
     await app.executeCommand('Create stash');
+    // Stashes are nameable now: the palette entry opens the themed prompt
+    // before it reaches the backend.
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('panel probe');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
     await expect(
       appPanel.locator('.entry-command', { hasText: 'create_stash' }).first()
     ).toBeVisible();
