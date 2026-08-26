@@ -70,6 +70,38 @@ describe('error-suggestion.service', () => {
       expect(result!.action).to.be.undefined;
     });
 
+    // A repository that already has a remote operation in flight. The backend
+    // refuses with LeviathanError::RemoteOperationInFlight; its message is
+    // already user-facing and explains that a timed-out operation can still be
+    // running, so the suggestion service must pass it through UNCHANGED rather
+    // than let a later rule rewrite it.
+    const inFlightMessage =
+      'A push is already running for this repository. Wait for it to finish and try again — an operation that timed out can still be finishing in the background.';
+
+    it('should keep the in-flight refusal verbatim instead of calling it a timeout', () => {
+      const result = getErrorSuggestion(inFlightMessage, { operation: 'push' });
+      expect(result).to.not.be.null;
+      expect(result!.message).to.equal(inFlightMessage);
+      // The timeout rule would otherwise claim it (the message says "timed
+      // out") and offer Open Settings, which fixes nothing here.
+      expect(result!.action).to.be.undefined;
+    });
+
+    it('should recognise the in-flight refusal by its error code', () => {
+      const result = getErrorSuggestion('REMOTE_OPERATION_IN_FLIGHT: a pull is already running');
+      expect(result).to.not.be.null;
+      expect(result!.message).to.include('already running');
+      expect(result!.action).to.be.undefined;
+    });
+
+    it('should not mistake the in-flight refusal for a stuck lock file', () => {
+      const result = getErrorSuggestion(
+        'A fetch is already running for this repository. Wait for it to finish and try again.'
+      );
+      expect(result).to.not.be.null;
+      expect(result!.message).to.not.include('lock file');
+    });
+
     it('should return suggestion for operation timeout', () => {
       const result = getErrorSuggestion('The operation timed out after 300 seconds');
       expect(result).to.not.be.null;
@@ -372,6 +404,51 @@ describe('error-suggestion.service', () => {
       }
       expect(detail!.tagName).to.equal('v1.2.0');
       expect(detail!.repoPath).to.equal('/repo/a');
+    });
+
+    it('Force Push Tag carries the remote the rejected push was aimed at', () => {
+      // The rejected push went to the remote the user picked in the menu. A
+      // force retry that left the destination to the backend resolver would
+      // move the tag on a DIFFERENT remote — `origin` in a fork checkout — and
+      // report success.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+        remote: 'upstream',
+      });
+      let detail: { remote?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ remote?: string }>).detail;
+      };
+      window.addEventListener('force-push-tag', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push-tag', handler);
+      }
+      expect(detail!.remote).to.equal('upstream');
+    });
+
+    it('Force Push Tag leaves the remote unset when the push named none', () => {
+      // The graph ref menu pushes without choosing a remote; the retry must
+      // stay on the backend resolver rather than inventing a destination.
+      const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
+        operation: 'push-tag',
+        branchName: 'v1.2.0',
+        repoPath: '/repo/a',
+      });
+      let detail: { remote?: string } | null = null;
+      const handler = (e: Event): void => {
+        detail = (e as CustomEvent<{ remote?: string }>).detail;
+      };
+      window.addEventListener('force-push-tag', handler);
+      try {
+        result!.action!.callback();
+      } finally {
+        window.removeEventListener('force-push-tag', handler);
+      }
+      expect(detail!.remote).to.equal(undefined);
     });
 
     it('being behind the remote still offers Pull Now', () => {

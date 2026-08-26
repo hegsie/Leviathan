@@ -18,6 +18,7 @@ import {
   isRefOpRunning,
   subscribeRefOps,
 } from '../../utils/ref-lock.ts';
+import { samePath } from '../../utils/path-compare.ts';
 
 type DialogMode = 'list' | 'add';
 
@@ -573,10 +574,26 @@ export class LvWorktreeDialog extends LitElement {
     }
   }
 
-  /** True when `worktree` is the one this dialog's repository points at. */
-  private isCurrentWorktree(worktree: { path: string }): boolean {
-    const strip = (p: string) => p.replace(/[\\/]+$/, '');
-    return strip(worktree.path) === strip(this.pinnedRepoPath || this.repositoryPath);
+  /**
+   * True when `worktree` is the one this dialog's repository points at.
+   *
+   * `isCurrent` is resolved by the backend against the filesystem — the only
+   * place a symlinked repo path (/var vs /private/var) can be settled. The
+   * path compare stays as the fallback, and normalizes what a string can: git
+   * prints Windows paths with forward slashes (C:/work/repo) while the OS file
+   * dialog hands back C:\work\repo. Comparing the raw strings left this guard
+   * — and the disabled Remove button that shares it — dead on Windows.
+   *
+   * The two layers are OR'd on purpose: a `false` from the backend is NOT
+   * authoritative, because `get_worktrees` itself falls back to a raw string
+   * compare when canonicalize fails on either side, and that fallback can only
+   * produce a false negative. Trusting it would re-open the bug.
+   */
+  private isCurrentWorktree(worktree: { path: string; isCurrent?: boolean }): boolean {
+    if (worktree.isCurrent) return true;
+    const repoPath = this.pinnedRepoPath || this.repositoryPath;
+    if (!repoPath) return false;
+    return samePath(worktree.path, repoPath);
   }
 
   private async handleRemove(worktree: Worktree): Promise<void> {

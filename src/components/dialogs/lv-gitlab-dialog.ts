@@ -347,6 +347,34 @@ export class LvGitLabDialog extends LitElement {
         color: var(--color-text-secondary);
       }
 
+      /* Label picker on the create-issue form */
+      .label-picker {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      .label-chip {
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        background: var(--color-bg-hover);
+        color: var(--color-text-secondary);
+        border: 1px solid var(--color-border);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .label-chip:hover {
+        background: var(--color-bg-tertiary);
+      }
+
+      .label-chip.selected {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
       .pipeline-item {
         display: flex;
         align-items: center;
@@ -733,8 +761,39 @@ export class LvGitLabDialog extends LitElement {
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
-    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
-      await this.detectRepo();
+    if (changedProperties.has('repositoryPath')) {
+      // The dialog is repo-independent (it stays open across the last tab close),
+      // so an empty path must clear the previously detected repo. Otherwise the
+      // repo-backed tabs keep rendering and acting on the closed repository.
+      // The create-* drafts belong to the repository they were typed against,
+      // so they go too -- otherwise a draft left on screen is submitted into
+      // whichever repository the dialog is repointed at.
+      this.resetRepoScopedDrafts();
+      if (!this.repositoryPath) {
+        this.detectedRepo = null;
+      } else if (this.open) {
+        await this.detectRepo();
+      }
+    }
+  }
+
+  /**
+   * Drop every create-* draft and leave any create-* tab. Called when
+   * repositoryPath changes, because those drafts are scoped to the repository
+   * they were composed against while the create handlers guard only on
+   * detectedRepo, which is re-derived from whatever repository is now current.
+   */
+  private resetRepoScopedDrafts(): void {
+    this.createMrTitle = '';
+    this.createMrDescription = '';
+    this.createMrSource = '';
+    this.createMrTarget = '';
+    this.createMrDraft = false;
+    this.createIssueTitle = '';
+    this.createIssueDescription = '';
+    this.createIssueLabels = [];
+    if (this.activeTab.startsWith('create-')) {
+      this.activeTab = 'connection';
     }
   }
 
@@ -826,13 +885,24 @@ export class LvGitLabDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * OAuth access token first (GitLab OAuth access tokens last ~2h, so without
+   * this a signed-in account reads as disconnected on the next open). Personal
+   * access tokens have no OAuth bundle and are returned unchanged.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
-    if (this.selectedAccountId) {
-      return credentialService.getAccountToken('gitlab', this.selectedAccountId);
-    }
-    return null;
+    if (!this.selectedAccountId) return null;
+    // Refresh against the instance the account was created on — a detected repo
+    // on a DIFFERENT instance must not redirect the refresh grant.
+    const account = getAccountById(this.selectedAccountId);
+    const instanceUrl =
+      account?.config.type === 'gitlab' ? account.config.instanceUrl : this.instanceUrlInput;
+    return credentialService.getFreshAccountToken(
+      'gitlab',
+      this.selectedAccountId,
+      'gitlab',
+      instanceUrl || undefined
+    );
   }
 
   /**
@@ -889,7 +959,14 @@ export class LvGitLabDialog extends LitElement {
   private async detectRepo(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    const result = await gitService.detectGitLabRepo(this.repositoryPath);
+    // The dialog outlives the repository -- it stays open when the last tab
+    // closes -- so a detect issued for one path can resolve after the path has
+    // changed. Dropping the stale result stops the closed (or previously
+    // selected) repository from being re-detected and re-loaded over the
+    // current one.
+    const requestedPath = this.repositoryPath;
+    const result = await gitService.detectGitLabRepo(requestedPath);
+    if (this.repositoryPath !== requestedPath) return;
     if (result.success && result.data) {
       this.detectedRepo = result.data;
       this.instanceUrlInput = result.data.instanceUrl;
@@ -997,6 +1074,9 @@ export class LvGitLabDialog extends LitElement {
 
       if (result.success && result.data) {
         this.labels = result.data;
+        // A different project (account/repo switch) has a different label set —
+        // drop selections that no longer exist so they can't be submitted invisibly.
+        this.createIssueLabels = this.createIssueLabels.filter(l => this.labels.includes(l));
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to load labels';
       }
@@ -1097,6 +1177,8 @@ export class LvGitLabDialog extends LitElement {
       this.mergeRequests = [];
       this.issues = [];
       this.pipelines = [];
+      this.labels = [];
+      this.createIssueLabels = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
       showToast(this.error, 'error');
@@ -1441,6 +1523,12 @@ export class LvGitLabDialog extends LitElement {
     }
   }
 
+  private toggleCreateIssueLabel(label: string): void {
+    this.createIssueLabels = this.createIssueLabels.includes(label)
+      ? this.createIssueLabels.filter(l => l !== label)
+      : [...this.createIssueLabels, label];
+  }
+
   private handleClose(): void {
     this.dispatchEvent(new CustomEvent('close'));
   }
@@ -1665,7 +1753,7 @@ export class LvGitLabDialog extends LitElement {
           <option value="closed" ?selected=${this.issueFilter === 'closed'}>Closed</option>
           <option value="all" ?selected=${this.issueFilter === 'all'}>All</option>
         </select>
-        <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+        <button class="btn" @click=${() => { this.activeTab = 'create-issue'; this.loadLabels(); }}>
           + New Issue
         </button>
       </div>
@@ -1842,6 +1930,23 @@ export class LvGitLabDialog extends LitElement {
             @input=${(e: Event) => this.createIssueDescription = (e.target as HTMLTextAreaElement).value}
           ></textarea>
         </div>
+        ${this.labels.length > 0 ? html`
+          <div class="form-group">
+            <label>Labels</label>
+            <div class="label-picker">
+              ${this.labels.map(label => html`
+                <button
+                  type="button"
+                  class="label-chip ${this.createIssueLabels.includes(label) ? 'selected' : ''}"
+                  aria-pressed=${this.createIssueLabels.includes(label) ? 'true' : 'false'}
+                  @click=${() => this.toggleCreateIssueLabel(label)}
+                >
+                  ${label}
+                </button>
+              `)}
+            </div>
+          </div>
+        ` : ''}
         <div class="btn-row">
           <button class="btn" @click=${() => this.activeTab = 'issues'}>
             Cancel

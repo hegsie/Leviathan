@@ -14,6 +14,32 @@ pub struct SquashResult {
     pub success: bool,
 }
 
+/// Refuse a commit the replay loops below cannot re-apply.
+///
+/// Both loops replay a commit by diffing it against its FIRST parent, so a
+/// merge would be flattened: its topology is lost and the merged-in side is
+/// applied twice, because the plain revwalk also yields the side commits and
+/// replays them individually. The root of an unrelated merged-in history has
+/// no first parent at all and would hard-error mid-replay. `git rebase -i`
+/// never picks a merge either — refuse while nothing has been moved yet.
+fn ensure_replayable(commit: &git2::Commit, action: &str, position: &str) -> Result<()> {
+    if commit.parent_count() > 1 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Cannot {action}: commit {} {position} is a merge. \
+             Use an interactive rebase instead.",
+            commit.id()
+        )));
+    }
+    if commit.parent_count() == 0 {
+        return Err(LeviathanError::OperationFailed(format!(
+            "Cannot {action}: commit {} {position} has no parent (an unrelated \
+             history was merged in). Use an interactive rebase instead.",
+            commit.id()
+        )));
+    }
+    Ok(())
+}
+
 /// Squash a range of commits into one
 ///
 /// Takes commits between from_oid (exclusive) and to_oid (inclusive) and squashes them
@@ -130,7 +156,9 @@ pub async fn squash_commits(
     revwalk.hide(to)?;
     revwalk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
     for oid in revwalk {
-        commits_after.push(repo.find_commit(oid?)?);
+        let commit = repo.find_commit(oid?)?;
+        ensure_replayable(&commit, "squash", "after the squashed range")?;
+        commits_after.push(commit);
     }
 
     let mut new_head_oid = new_oid;
@@ -263,8 +291,13 @@ pub async fn fixup_commit(
     // Get the current HEAD
     let head_commit = repo.head()?.peel_to_commit()?;
 
-    // Verify that target_commit is an ancestor of HEAD
-    if !repo.graph_descendant_of(head_commit.id(), target_commit.id())? {
+    // The target must be HEAD itself or an ancestor of it. libgit2 does not
+    // consider a commit a descendant of itself, so the graph check alone would
+    // reject the most common target of all — the tip commit, i.e. `git commit
+    // --amend`, for which the replay below is simply a no-op.
+    if head_commit.id() != target_commit.id()
+        && !repo.graph_descendant_of(head_commit.id(), target_commit.id())?
+    {
         return Err(LeviathanError::OperationFailed(
             "Target commit is not an ancestor of HEAD".to_string(),
         ));
@@ -280,6 +313,7 @@ pub async fn fixup_commit(
     for oid in revwalk {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
+        ensure_replayable(&commit, "fixup", "after the target commit")?;
         commits_after_target.push(commit);
     }
 
@@ -291,63 +325,42 @@ pub async fn fixup_commit(
     let staged_tree_oid = index.write_tree()?;
     let staged_tree = repo.find_tree(staged_tree_oid)?;
 
-    // Merge the staged tree with the target tree
-    // We need to create a tree that has target's content + our staged changes
-    // The simplest approach: use the current staged tree as the new content for the target
-
-    // Get the diff between HEAD tree and staged tree (our staged changes)
-    let changes_diff = repo.diff_tree_to_tree(Some(&head_tree), Some(&staged_tree), None)?;
-
-    // Apply these changes to the target tree
-    let mut treebuilder = repo.treebuilder(Some(&target_tree))?;
-
-    for delta in changes_diff.deltas() {
-        let new_path = delta.new_file().path().unwrap();
-
-        match delta.status() {
-            git2::Delta::Added | git2::Delta::Modified => {
-                // Get the blob from the staged tree
-                let entry = staged_tree.get_path(new_path)?;
-                treebuilder.insert(new_path, entry.id(), entry.filemode())?;
-            }
-            git2::Delta::Deleted => {
-                treebuilder.remove(new_path)?;
-            }
-            _ => {}
-        }
+    // Apply the staged changes to the target tree with a three-way merge:
+    // HEAD is the base, so exactly `staged_tree - head_tree` — what the user
+    // staged — is replayed onto the target tree. A treebuilder cannot be used
+    // here: it operates on a single tree level and rejects entry names
+    // containing '/', so any staged file inside a subdirectory would fail.
+    let mut merge_result = repo.merge_trees(&head_tree, &target_tree, &staged_tree, None)?;
+    if merge_result.has_conflicts() {
+        // Nothing has been moved yet — the repository is untouched.
+        return Err(LeviathanError::OperationFailed(format!(
+            "Cannot fixup: the staged changes conflict with commit {}. \
+             Use an interactive rebase instead.",
+            target_commit.id()
+        )));
     }
-
-    let new_target_tree_oid = treebuilder.write()?;
-    let new_target_tree = repo.find_tree(new_target_tree_oid)?;
+    let new_target_tree = repo.find_tree(merge_result.write_tree_to(&repo)?)?;
 
     // Create the new target commit with the merged tree
     let signature = repo.signature()?;
     let commit_message =
         amend_message.unwrap_or_else(|| target_commit.message().unwrap_or("").to_string());
 
-    // Get parent of target commit
-    let target_parent = target_commit.parent(0).ok();
+    // Keep every parent of the target commit. The target may now be HEAD, so it
+    // may be a merge commit, and rewriting it must not silently flatten the
+    // merge — `git commit --amend` keeps both parents. A root commit yields an
+    // empty parent list, exactly as before.
+    let target_parents: Vec<git2::Commit> = target_commit.parents().collect();
+    let parent_refs: Vec<&git2::Commit> = target_parents.iter().collect();
 
-    let new_target_oid = if let Some(ref parent) = target_parent {
-        repo.commit(
-            None,
-            &target_commit.author(),
-            &signature,
-            &commit_message,
-            &new_target_tree,
-            &[parent],
-        )?
-    } else {
-        // Root commit
-        repo.commit(
-            None,
-            &target_commit.author(),
-            &signature,
-            &commit_message,
-            &new_target_tree,
-            &[],
-        )?
-    };
+    let new_target_oid = repo.commit(
+        None,
+        &target_commit.author(),
+        &signature,
+        &commit_message,
+        &new_target_tree,
+        &parent_refs,
+    )?;
 
     // Now replay all commits after target onto the new target
     let mut current_base_oid = new_target_oid;
@@ -424,6 +437,241 @@ pub async fn fixup_commit(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    /// Record a real merge of `other_oid` into HEAD (two parents, merged tree)
+    /// and leave the working tree matching it, so the pre-flight cleanliness
+    /// checks see an untouched repository.
+    fn commit_merge(repo: &TestRepo, message: &str, other_oid: git2::Oid) -> git2::Oid {
+        let git = repo.repo();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        let other = git.find_commit(other_oid).unwrap();
+        let mut merged = git.merge_commits(&head, &other, None).unwrap();
+        assert!(!merged.has_conflicts());
+        let tree_oid = merged.write_tree_to(&git).unwrap();
+        let tree = git.find_tree(tree_oid).unwrap();
+        let sig = git.signature().unwrap();
+        let oid = git
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head, &other])
+            .unwrap();
+        let obj = git.find_object(oid, None).unwrap();
+        git.reset(&obj, git2::ResetType::Hard, None).unwrap();
+        oid
+    }
+
+    /// c0 - c1 - c2 - c3 - M, where M merges a side branch off c2.
+    /// Returns (c0, c2, merge_oid).
+    fn repo_with_merge_after_range(repo: &TestRepo) -> (git2::Oid, git2::Oid, git2::Oid) {
+        let c0 = repo.head_oid();
+        let main = repo.current_branch();
+        repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let c2 = repo.create_commit("Commit 2", &[("file2.txt", "content2")]);
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let s1 = repo.create_commit("Side work", &[("side.txt", "side")]);
+        repo.checkout_branch(&main);
+        repo.create_commit("Commit 3", &[("file3.txt", "content3")]);
+        let m = commit_merge(repo, "Merge branch 'side'", s1);
+        (c0, c2, m)
+    }
+
+    #[tokio::test]
+    async fn test_squash_refuses_when_a_merge_follows_the_range() {
+        let repo = TestRepo::with_initial_commit();
+        let (c0, c2, m) = repo_with_merge_after_range(&repo);
+        let head_before = repo.head_oid();
+
+        let result = squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            c2.to_string(),
+            "Squashed".to_string(),
+        )
+        .await;
+
+        let err = result
+            .expect_err("squashing under a merge must be refused")
+            .to_string();
+        assert!(err.contains("merge"), "unexpected error: {}", err);
+
+        // Nothing moved: the branch still points at the merge, with both parents.
+        assert_eq!(repo.head_oid(), head_before);
+        let git = repo.repo();
+        assert_eq!(git.find_commit(m).unwrap().parent_count(), 2);
+        assert_eq!(head_before, m);
+    }
+
+    #[tokio::test]
+    async fn test_fixup_refuses_when_a_merge_follows_the_target() {
+        let repo = TestRepo::with_initial_commit();
+        let main = repo.current_branch();
+        let target = repo.create_commit("Target commit", &[("target.txt", "original")]);
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let s1 = repo.create_commit("Side work", &[("side.txt", "side")]);
+        repo.checkout_branch(&main);
+        repo.create_commit("After commit", &[("after.txt", "after")]);
+        let m = commit_merge(&repo, "Merge branch 'side'", s1);
+
+        // Stage the fix that would be folded into the target commit.
+        repo.create_file("target.txt", "modified");
+        repo.stage_file("target.txt");
+        let head_before = repo.head_oid();
+
+        let result = fixup_commit(repo.path_str(), target.to_string(), None).await;
+
+        let err = result
+            .expect_err("fixup under a merge must be refused")
+            .to_string();
+        assert!(err.contains("merge"), "unexpected error: {}", err);
+
+        // Nothing moved and the merge topology survives.
+        assert_eq!(repo.head_oid(), head_before);
+        let git = repo.repo();
+        assert_eq!(git.find_commit(m).unwrap().parent_count(), 2);
+
+        // The user's staged work is still staged, and still on disk.
+        let head_tree = git.head().unwrap().peel_to_tree().unwrap();
+        let index = git.index().unwrap();
+        let diff = git
+            .diff_tree_to_index(Some(&head_tree), Some(&index), None)
+            .unwrap();
+        assert_eq!(diff.deltas().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("target.txt")).unwrap(),
+            "modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fixup_into_a_mid_history_merge_keeps_both_parents() {
+        // The guard above refuses a merge that FOLLOWS the target, because the
+        // replay loop would flatten it. The target itself is a different case:
+        // it is rebuilt in place from all of its parents, so a merge that is
+        // the target survives with its topology, even when later commits are
+        // replayed on top of it.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+        repo.create_commit("Base", &[("b.txt", "base")]);
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side = repo.create_commit("Side work", &[("side.txt", "s")]);
+        repo.checkout_branch(&default_branch);
+
+        let merge = commit_merge(&repo, "Merge side", side);
+        let parents_before: Vec<git2::Oid> = {
+            let git = repo.repo();
+            let ids = git.find_commit(merge).unwrap().parent_ids().collect();
+            ids
+        };
+        assert_eq!(parents_before.len(), 2);
+
+        // A plain commit on top, so the merge is mid-history and the replay
+        // loop actually runs.
+        repo.create_commit("After commit", &[("after.txt", "after")]);
+
+        repo.create_file("b.txt", "fixed");
+        repo.stage_file("b.txt");
+
+        let result = fixup_commit(repo.path_str(), merge.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup into a mid-history merge must succeed: {:?}",
+            result.err()
+        );
+
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(new_head.summary().unwrap(), Some("After commit"));
+
+        // The replayed tip still sits on the rewritten merge, and that merge
+        // still has both parents, in order.
+        let rewritten_merge = new_head.parent(0).unwrap();
+        assert_eq!(rewritten_merge.summary().unwrap(), Some("Merge side"));
+        assert_eq!(
+            rewritten_merge.parent_count(),
+            2,
+            "amending a mid-history merge must keep the merge"
+        );
+        assert_eq!(
+            rewritten_merge.parent_ids().collect::<Vec<_>>(),
+            parents_before,
+            "both parents are preserved, in order"
+        );
+
+        // The fix landed in the merge, and nothing was lost from either side.
+        assert!(rewritten_merge.tree().unwrap().get_name("b.txt").is_some());
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("b.txt")).unwrap(),
+            "fixed"
+        );
+        assert!(repo.path.join("side.txt").exists(), "side branch content");
+        assert!(repo.path.join("after.txt").exists(), "replayed commit");
+    }
+
+    #[tokio::test]
+    async fn test_squash_refuses_when_an_unrelated_root_follows_the_range() {
+        let repo = TestRepo::with_initial_commit();
+        let c0 = repo.head_oid();
+        repo.create_commit("Commit 1", &[("file1.txt", "content1")]);
+        let c2 = repo.create_commit("Commit 2", &[("file2.txt", "content2")]);
+
+        // An orphan root, merged in like `git merge --allow-unrelated-histories`.
+        let root_oid = {
+            let git = repo.repo();
+            let blob = git.blob(b"unrelated").unwrap();
+            let mut builder = git.treebuilder(None).unwrap();
+            builder.insert("unrelated.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git.find_tree(tree_oid).unwrap();
+            let sig = git.signature().unwrap();
+            git.commit(None, &sig, &sig, "Unrelated root", &tree, &[])
+                .unwrap()
+        };
+        commit_merge(&repo, "Merge unrelated history", root_oid);
+        let head_before = repo.head_oid();
+
+        let result = squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            c2.to_string(),
+            "Squashed".to_string(),
+        )
+        .await;
+
+        let err = result
+            .expect_err("squashing under an unrelated merged-in root must be refused")
+            .to_string();
+        assert!(err.contains("Cannot squash"), "unexpected error: {}", err);
+        assert_eq!(repo.head_oid(), head_before);
+    }
+
+    #[tokio::test]
+    async fn test_squash_range_containing_a_merge_still_squashes() {
+        // The guard applies to the commits REPLAYED after the range, not to the
+        // range itself: squashing up to and including a merge still collapses to
+        // that merge's tree.
+        let repo = TestRepo::with_initial_commit();
+        let (c0, _c2, m) = repo_with_merge_after_range(&repo);
+
+        let result = squash_commits(
+            repo.path_str(),
+            c0.to_string(),
+            m.to_string(),
+            "Squashed".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(new_head.summary().unwrap(), Some("Squashed"));
+        assert_eq!(new_head.parent_count(), 1);
+        assert_eq!(new_head.parent(0).unwrap().id(), c0);
+        for f in ["file1.txt", "file2.txt", "file3.txt", "side.txt"] {
+            assert!(repo.path.join(f).exists(), "missing {}", f);
+        }
+    }
 
     #[tokio::test]
     async fn test_squash_commits_basic() {
@@ -753,6 +1001,270 @@ mod tests {
         // Verify both files exist
         assert!(repo.path.join("file.txt").exists());
         assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_into_head_amends_tip() {
+        // Fixing staged changes into the tip commit is `git commit --amend`,
+        // the most common target of all. libgit2 does not call a commit a
+        // descendant of itself, so the ancestor guard used to reject it.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Base", &[("b.txt", "base")]);
+        let target = repo.create_commit("Tip commit", &[("tip.txt", "original")]);
+
+        let parent_before = {
+            let git = repo.repo();
+            let id = git.find_commit(target).unwrap().parent(0).unwrap().id();
+            id
+        };
+
+        repo.create_file("tip.txt", "fixed");
+        repo.stage_file("tip.txt");
+
+        let result = fixup_commit(repo.path_str(), target.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup into HEAD must amend the tip: {:?}",
+            result.err()
+        );
+        let fixup_result = result.unwrap();
+
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(new_head.summary().unwrap(), Some("Tip commit"));
+        assert_eq!(
+            new_head.parent(0).unwrap().id(),
+            parent_before,
+            "the tip was amended, not stacked on top of"
+        );
+        assert_eq!(new_head.id().to_string(), fixup_result.new_oid);
+
+        let content = std::fs::read_to_string(repo.path.join("tip.txt")).unwrap();
+        assert_eq!(content, "fixed");
+
+        let mut revwalk = git.revwalk().unwrap();
+        revwalk.push_head().unwrap();
+        assert_eq!(revwalk.count(), 3, "no commit was appended or lost");
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_into_root_head() {
+        // The tip may also be the root commit: no parents at all.
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file("extra.txt", "x");
+        repo.stage_file("extra.txt");
+
+        let head = repo.head_oid();
+        let result = fixup_commit(repo.path_str(), head.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup into a root HEAD must amend it: {:?}",
+            result.err()
+        );
+
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            new_head.parent_count(),
+            0,
+            "root commit stays a root commit"
+        );
+        assert_eq!(new_head.summary().unwrap(), Some("Initial commit"));
+        let tree = new_head.tree().unwrap();
+        assert!(tree.get_name("README.md").is_some());
+        assert!(tree.get_name("extra.txt").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_into_merge_head_keeps_both_parents() {
+        // Amending a merge tip must keep the merge, exactly as `git commit
+        // --amend` does — rebuilding it from parent 0 alone would silently
+        // drop the side branch from history.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+        repo.create_commit("Base", &[("b.txt", "base")]);
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side = repo.create_commit("Side work", &[("side.txt", "s")]);
+        repo.checkout_branch(&default_branch);
+
+        let merge = commit_merge(&repo, "Merge side", side);
+        let parents_before: Vec<git2::Oid> = {
+            let git = repo.repo();
+            let ids = git.find_commit(merge).unwrap().parent_ids().collect();
+            ids
+        };
+        assert_eq!(parents_before.len(), 2);
+
+        repo.create_file("b.txt", "fixed");
+        repo.stage_file("b.txt");
+
+        let result = fixup_commit(repo.path_str(), merge.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup into a merge tip must succeed: {:?}",
+            result.err()
+        );
+
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            new_head.parent_count(),
+            2,
+            "amending a merge tip must keep the merge"
+        );
+        assert_eq!(
+            new_head.parent_ids().collect::<Vec<_>>(),
+            parents_before,
+            "both parents are preserved, in order"
+        );
+        assert_eq!(new_head.summary().unwrap(), Some("Merge side"));
+
+        let content = std::fs::read_to_string(repo.path.join("b.txt")).unwrap();
+        assert_eq!(content, "fixed");
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_rejects_unrelated_commit() {
+        // The guard is narrowed for HEAD, not removed: a commit on another
+        // branch is still not a legal fixup target.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side_only = repo.create_commit("Side only", &[("side.txt", "s")]);
+
+        repo.checkout_branch(&default_branch);
+        repo.create_commit("Main work", &[("m.txt", "m")]);
+
+        repo.create_file("m.txt", "staged");
+        repo.stage_file("m.txt");
+
+        let head_before = repo.head_oid();
+        let result = fixup_commit(repo.path_str(), side_only.to_string(), None).await;
+
+        assert!(result.is_err(), "an unrelated commit is not a fixup target");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not an ancestor"), "unexpected message: {msg}");
+        assert_eq!(repo.head_oid(), head_before, "nothing was rewritten");
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_nested_path() {
+        // Every real project stages files inside directories, and a treebuilder
+        // rejects entry names containing '/', so this is the normal case.
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit("Target commit", &[("src/dir/file.txt", "original\n")]);
+        repo.create_commit("After commit", &[("after.txt", "after\n")]);
+
+        repo.create_file("src/dir/file.txt", "modified\n");
+        repo.stage_file("src/dir/file.txt");
+
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup of a file in a subdirectory failed: {:?}",
+            result.err()
+        );
+
+        // The change landed in the target commit, not on top of HEAD.
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("After commit"));
+        let rewritten_target = head.parent(0).unwrap();
+        assert_eq!(rewritten_target.summary().unwrap(), Some("Target commit"));
+        let entry = rewritten_target
+            .tree()
+            .unwrap()
+            .get_path(Path::new("src/dir/file.txt"))
+            .unwrap();
+        assert_eq!(
+            git_repo.find_blob(entry.id()).unwrap().content(),
+            b"modified\n"
+        );
+
+        // Working tree and the later commit survive.
+        let content =
+            std::fs::read_to_string(repo.path.join("src").join("dir").join("file.txt")).unwrap();
+        assert_eq!(content, "modified\n");
+        assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_nested_deletion() {
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit(
+            "Target commit",
+            &[("src/keep.txt", "keep\n"), ("src/gone.txt", "gone\n")],
+        );
+        repo.create_commit("After commit", &[("after.txt", "after\n")]);
+
+        // Stage the deletion of a file in a subdirectory (staged, so the
+        // unstaged-changes guard does not fire).
+        std::fs::remove_file(repo.path.join("src").join("gone.txt")).unwrap();
+        {
+            let git_repo = repo.repo();
+            let mut index = git_repo.index().unwrap();
+            index.remove_path(Path::new("src/gone.txt")).unwrap();
+            index.write().unwrap();
+        }
+
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup of a deletion in a subdirectory failed: {:?}",
+            result.err()
+        );
+
+        let git_repo = repo.repo();
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = head.parent(0).unwrap().tree().unwrap();
+        assert!(
+            tree.get_path(Path::new("src/gone.txt")).is_err(),
+            "the deletion belongs to the target commit"
+        );
+        assert!(tree.get_path(Path::new("src/keep.txt")).is_ok());
+        assert!(!repo.path.join("src").join("gone.txt").exists());
+        assert!(repo.path.join("after.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_fixup_commit_refuses_conflicting_staged_change() {
+        // A later commit rewrote the same line, so the staged fix cannot be
+        // replayed onto the target — refuse and leave the repository untouched.
+        let repo = TestRepo::with_initial_commit();
+        let target_oid = repo.create_commit("Target commit", &[("src/f.txt", "v1\n")]);
+        repo.create_commit("After commit", &[("src/f.txt", "v2\n")]);
+
+        repo.create_file("src/f.txt", "v3\n");
+        repo.stage_file("src/f.txt");
+
+        let head_before = repo.head_oid();
+        let result = fixup_commit(repo.path_str(), target_oid.to_string(), None).await;
+        assert!(result.is_err(), "a conflicting fixup must be refused");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Cannot fixup") && msg.contains("conflict"),
+            "unexpected message: {msg}"
+        );
+
+        // Nothing was rewritten and the staged change is still staged.
+        assert_eq!(repo.head_oid(), head_before);
+        let content = std::fs::read_to_string(repo.path.join("src").join("f.txt")).unwrap();
+        assert_eq!(content, "v3\n");
+        let git_repo = repo.repo();
+        let index = git_repo.index().unwrap();
+        let head_tree = git_repo.head().unwrap().peel_to_tree().unwrap();
+        let diff = git_repo
+            .diff_tree_to_index(Some(&head_tree), Some(&index), None)
+            .unwrap();
+        assert_eq!(
+            diff.deltas().len(),
+            1,
+            "the staged change must survive the refusal"
+        );
     }
 
     #[tokio::test]

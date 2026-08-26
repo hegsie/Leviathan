@@ -513,7 +513,7 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: renamed,
+      save_unified_profile: { profile: renamed, failedRepositories: [] },
     });
 
     await expect(dashboardProfileName(page)).toHaveText('Work');
@@ -531,6 +531,42 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
     await expect(dashboardProfileName(page)).toHaveText('Client A', { timeout: 5000 });
   });
 
+  // Saving an edited profile re-writes the git identity of every repository
+  // assigned to it. The ones the backend could not rewrite must be named, not
+  // hidden behind a generic "Profile saved".
+  test('editing a profile warns about repositories that kept the old identity', async ({ page }) => {
+    const dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile],
+      accounts: [githubWork],
+    });
+
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile],
+        accounts: [githubWork],
+        repositoryAssignments: { '/repo/personal': workProfile.id },
+      },
+      get_migration_backup_info: { hasBackup: false },
+      save_unified_profile: {
+        profile: { ...workProfile, gitEmail: 'new@company.com' },
+        failedRepositories: ['/repo/personal'],
+      },
+    });
+
+    await openProfileManager(page, dialogs);
+    await page.locator('.profile-item').first().click();
+
+    await page.getByPlaceholder(/john@example.com/i).fill('new@company.com');
+    await page.getByRole('button', { name: 'Save Profile' }).click();
+
+    const warning = page.locator('lv-toast-container .toast.warning .toast-message');
+    await expect(warning).toBeVisible({ timeout: 5000 });
+    await expect(warning).toContainText('personal');
+  });
+
   test('creating the first profile marked default makes it the active profile', async ({ page }) => {
     const dialogs = new DialogsPage(page);
 
@@ -546,7 +582,7 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: newProfile,
+      save_unified_profile: { profile: newProfile, failedRepositories: [] },
       get_unified_profile: newProfile,
       apply_unified_profile: null,
     });
@@ -605,6 +641,95 @@ test.describe('Cross-component propagation - toolbar reflects dialog state', () 
     expect(applies.length).toBeGreaterThan(0);
     const applyArgs = applies[applies.length - 1].args as { profileId: string };
     expect(applyArgs.profileId).toBe('profile-personal');
+  });
+
+  test('switching profile from the dashboard confirms it and refreshes the identity listeners', async ({ page }) => {
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile, personalProfile],
+      accounts: [githubWork],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile, personalProfile],
+        accounts: [githubWork],
+        repositoryAssignments: {},
+      },
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+    });
+
+    await expect(dashboardProfileName(page)).toHaveText('Work');
+
+    // Clears the capture buffer, so any get_user_identity seen below is a
+    // consequence of the switch, not of the initial repository load.
+    await startCommandCaptureWithMocks(page, {
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+      get_user_identity: {
+        name: 'John Personal',
+        email: 'johnd@personal.com',
+        nameIsGlobal: false,
+        emailIsGlobal: false,
+      },
+    });
+
+    await page.locator('lv-context-dashboard .profile-selector-btn').click();
+    await page.locator('lv-context-dashboard .profile-dropdown .dropdown-item', {
+      hasText: 'Personal',
+    }).click();
+
+    // The chip reflects the new profile...
+    await expect(dashboardProfileName(page)).toHaveText('Personal', { timeout: 5000 });
+
+    // ...the switch confirms itself instead of completing silently...
+    await expect(
+      page.locator('lv-toast-container .toast.success .toast-message')
+    ).toContainText('Personal', { timeout: 5000 });
+
+    // ...and the repository-refresh reaches the commit panel, which re-reads
+    // the git identity behind its commit-template author placeholder. Without
+    // it the rest of the app keeps the old identity until an unrelated refresh.
+    await expect
+      .poll(async () => (await findCommand(page, 'get_user_identity')).length, { timeout: 5000 })
+      .toBeGreaterThan(0);
+  });
+
+  test("switching profile from the dashboard dropdown flips the profile card to 'Manually assigned'", async ({ page }) => {
+    await setupProfilesAndAccounts(page, {
+      profiles: [workProfile, personalProfile],
+      accounts: [githubWork],
+    });
+    await injectCommandMock(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [workProfile, personalProfile],
+        accounts: [githubWork],
+        repositoryAssignments: {},
+      },
+      apply_unified_profile: null,
+      get_unified_profile: personalProfile,
+    });
+
+    // Expand the dashboard so the profile card (and its assignment badge) render.
+    const dashboard = page.locator('lv-context-dashboard');
+    await expect(dashboard).toBeVisible({ timeout: 5000 });
+    await dashboard.locator('.expand-btn').click();
+    await expect(dashboard.locator('.card-grid')).toBeVisible({ timeout: 5000 });
+
+    // workProfile is the default profile and has no repository assignment.
+    const badge = page.locator('lv-context-dashboard lv-profile-card .assignment-source');
+    await expect(badge).toHaveText('Default profile', { timeout: 5000 });
+
+    // Switch to a non-default profile with no URL patterns. The only thing that
+    // can justify a badge now is the repo assignment the backend just saved.
+    await dashboard.locator('.profile-selector-btn').click();
+    await dashboard.locator('.profile-dropdown .dropdown-item', { hasText: 'Personal' }).click();
+
+    await expect(badge).toHaveText('Manually assigned', { timeout: 5000 });
+    await expect(
+      page.locator('lv-context-dashboard lv-profile-card .assignment-source.fallback')
+    ).toHaveCount(0);
   });
 
   test('saving a PAT in the GitHub dialog flips the toolbar dot from Reconnect to connected', async ({ page }) => {
@@ -1144,7 +1269,10 @@ test.describe('Workflow - Profile Manager ↔ Integration dialogs', () => {
     // Save the profile and verify the backend received the auto-attached
     // account as the profile's github default — not just UI-only state.
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { ...personalProfile, defaultAccounts: { github: newAccount.id } },
+      save_unified_profile: {
+        profile: { ...personalProfile, defaultAccounts: { github: newAccount.id } },
+        failedRepositories: [],
+      },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
     await waitForCommand(page, 'save_unified_profile');
@@ -1338,7 +1466,7 @@ test.describe('Remaining flows - Profile Manager', () => {
         repositoryAssignments: {},
       },
       get_migration_backup_info: { hasBackup: false },
-      save_unified_profile: { ...profile, isDefault: true },
+      save_unified_profile: { profile: { ...profile, isDefault: true }, failedRepositories: [] },
     });
 
     await openProfileManager(page, dialogs);
@@ -1352,7 +1480,7 @@ test.describe('Remaining flows - Profile Manager', () => {
     }
 
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { ...profile, isDefault: true },
+      save_unified_profile: { profile: { ...profile, isDefault: true }, failedRepositories: [] },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
     await waitForCommand(page, 'save_unified_profile');
@@ -1387,15 +1515,18 @@ test.describe('Remaining flows - Profile Manager', () => {
 
     await startCommandCaptureWithMocks(page, {
       save_unified_profile: {
-        id: 'profile-multi',
-        name: 'Multi-Pattern',
-        gitName: 'Multi User',
-        gitEmail: 'multi@example.com',
-        signingKey: null,
-        urlPatterns: ['github.com/acme/*', 'gitlab.acme.com/*', 'bitbucket.org/team/*'],
-        isDefault: false,
-        color: '#3b82f6',
-        defaultAccounts: {},
+        profile: {
+          id: 'profile-multi',
+          name: 'Multi-Pattern',
+          gitName: 'Multi User',
+          gitEmail: 'multi@example.com',
+          signingKey: null,
+          urlPatterns: ['github.com/acme/*', 'gitlab.acme.com/*', 'bitbucket.org/team/*'],
+          isDefault: false,
+          color: '#3b82f6',
+          defaultAccounts: {},
+        },
+        failedRepositories: [],
       },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();

@@ -1,6 +1,7 @@
 /**
  * Multi-repo correctness tests for app-shell:
- * - autofetch results from BACKGROUND repos must not drive the toolbar badge
+ * - autofetch results are written per-repo, so a BACKGROUND repo's counts land
+ *   on its own tab badge and never under the active tab
  * - remote-update toasts must name the repo they belong to
  * - watcher events for background repos mark them stale instead of refreshing
  * - closing a repo tears down its watcher and search index
@@ -40,6 +41,7 @@ function mockRepo(path: string, name: string): Repository {
     isValid: true,
     isBare: false,
     headRef: 'main',
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
@@ -48,6 +50,40 @@ function mockRepo(path: string, name: string): Repository {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+function mockBranch(aheadBehind?: { ahead: number; behind: number }) {
+  return {
+    name: 'main',
+    shorthand: 'main',
+    isHead: true,
+    isRemote: false,
+    upstream: 'origin/main',
+    targetOid: 'abc',
+    isStale: false,
+    ...(aheadBehind ? { aheadBehind } : {}),
+  };
+}
+
+/** Seed an OPEN repo with a current branch so ahead/behind has somewhere to land. */
+function seedRepo(path: string, name: string, aheadBehind?: { ahead: number; behind: number }) {
+  repositoryStore.getState().addRepository(mockRepo(path, name));
+  repositoryStore.getState().updateRepoData(path, { currentBranch: mockBranch(aheadBehind) as any });
+}
+
+/** The status bar's ↑/↓ spans, if rendered. */
+function statusBadges(el: AppShell) {
+  const footer = el.shadowRoot!.querySelector('footer.status-bar');
+  return {
+    ahead: footer?.querySelector('.status-ahead') ?? null,
+    behind: footer?.querySelector('.status-behind') ?? null,
+  };
+}
+
+function aheadBehindOf(path: string) {
+  return repositoryStore
+    .getState()
+    .openRepositories.find((r) => r.repository.path === path)?.currentBranch?.aheadBehind;
+}
 
 /**
  * Make a REAL dialog element in app-shell's shadow root look open and pinned
@@ -92,9 +128,12 @@ describe('app-shell multi-repo behavior', () => {
     searchIndexService.invalidate();
   });
 
+  // Both remote badges (tab bar and status bar) render the store's
+  // currentBranch.aheadBehind, so these assert on that one field.
   describe('autofetch badge scoping', () => {
-    it('updates the badge when the ACTIVE repo fetched', () => {
+    it("updates the ACTIVE repo's counts when it fetched", () => {
       const el = createAppShell();
+      seedRepo('/repo/active', 'active', { ahead: 0, behind: 0 });
       (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
 
       (el as any).handleAutoFetchCompleted({
@@ -104,13 +143,14 @@ describe('app-shell multi-repo behavior', () => {
         behind: 2,
       });
 
-      expect((el as any).remoteStatus).to.deep.equal({ ahead: 1, behind: 2 });
+      expect(aheadBehindOf('/repo/active')).to.deep.equal({ ahead: 1, behind: 2 });
     });
 
-    it('ignores results from BACKGROUND repos', () => {
+    it("a BACKGROUND repo's result never lands on the active repo", () => {
       const el = createAppShell();
+      seedRepo('/repo/active', 'active', { ahead: 0, behind: 0 });
+      seedRepo('/repo/background', 'background', { ahead: 0, behind: 0 });
       (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
-      (el as any).remoteStatus = { ahead: 0, behind: 0 };
 
       (el as any).handleAutoFetchCompleted({
         repoPath: '/repo/background',
@@ -119,13 +159,14 @@ describe('app-shell multi-repo behavior', () => {
         behind: 9,
       });
 
-      expect((el as any).remoteStatus).to.deep.equal({ ahead: 0, behind: 0 });
+      expect(aheadBehindOf('/repo/background')).to.deep.equal({ ahead: 9, behind: 9 });
+      expect(aheadBehindOf('/repo/active')).to.deep.equal({ ahead: 0, behind: 0 });
     });
 
     it('ignores failed fetches', () => {
       const el = createAppShell();
+      seedRepo('/repo/active', 'active', { ahead: 0, behind: 0 });
       (el as any).activeRepository = { repository: mockRepo('/repo/active', 'active') };
-      (el as any).remoteStatus = { ahead: 0, behind: 0 };
 
       (el as any).handleAutoFetchCompleted({
         repoPath: '/repo/active',
@@ -134,7 +175,7 @@ describe('app-shell multi-repo behavior', () => {
         behind: 5,
       });
 
-      expect((el as any).remoteStatus).to.deep.equal({ ahead: 0, behind: 0 });
+      expect(aheadBehindOf('/repo/active')).to.deep.equal({ ahead: 0, behind: 0 });
     });
   });
 
@@ -333,8 +374,6 @@ describe('app-shell multi-repo behavior', () => {
 
       const bg = repositoryStore.getState().openRepositories[0];
       expect(bg.currentBranch?.aheadBehind).to.deep.equal({ ahead: 3, behind: 7 });
-      // The toolbar badge still only follows the ACTIVE repo
-      expect((el as any).remoteStatus).to.be.null;
     });
   });
 
@@ -495,37 +534,30 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
-  describe('footer ahead/behind badge on tab switch', () => {
-    it("resets to the newly active repo's last-known counts", async () => {
+  describe('status-bar ahead/behind badge on tab switch', () => {
+    it("follows the newly active repo's counts", async () => {
       const el = createAppShell();
       document.body.appendChild(el);
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'));
         repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
         repositoryStore.getState().updateRepoData('/repo/a', {
-          currentBranch: {
-            name: 'main',
-            shorthand: 'main',
-            isHead: true,
-            isRemote: false,
-            upstream: 'origin/main',
-            targetOid: 'abc',
-            isStale: false,
-            aheadBehind: { ahead: 0, behind: 3 },
-          },
+          currentBranch: mockBranch({ ahead: 0, behind: 3 }) as any,
         });
-        // Simulate a badge left over from the previously active repo
-        (el as any).remoteStatus = { ahead: 9, behind: 9 };
 
         repositoryStore.getState().setActiveIndex(0);
-        await new Promise((r) => setTimeout(r, 0));
-        expect((el as any).remoteStatus).to.deep.equal({ ahead: 0, behind: 3 });
+        await waitUntil(
+          () => statusBadges(el).behind?.textContent?.includes('3') === true,
+          "repo A's counts reach the status bar",
+        );
 
         // Switching to a repo with no known counts clears the badge instead
         // of showing the previous repo's numbers
         repositoryStore.getState().setActiveIndex(1);
-        await new Promise((r) => setTimeout(r, 0));
-        expect((el as any).remoteStatus).to.be.null;
+        await waitUntil(
+          () => !statusBadges(el).behind && !statusBadges(el).ahead,
+          "repo A's counts do not paint under repo B",
+        );
       } finally {
         el.remove();
       }
@@ -1858,6 +1890,151 @@ describe('closing the last repository closes its dialogs', () => {
     expect(internal.showWorktrees, 'worktrees must not outlive its repository').to.be.false;
     expect(internal.showLfs, 'LFS must not outlive its repository').to.be.false;
     expect(internal.showSettings, 'settings is not repo-scoped').to.be.true;
+
+    el.remove();
+  });
+
+  // The mirror image: these dialogs render OUTSIDE the activeRepository block,
+  // so their element is never destroyed and the spring-back-open failure the
+  // sweep exists to prevent cannot happen to them. Every one is reachable with
+  // zero repositories — the welcome screen offers the profile manager, and the
+  // palette's SSH, profiles and provider entries are not repo-guarded — so
+  // clearing their flags only kills a session the user deliberately started.
+  it('leaves repo-independent dialogs open when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const repoIndependent = [
+      'showSsh',
+      'showProfileManager',
+      'showMigrationDialog',
+      'showGitHub',
+      'showGitLab',
+      'showBitbucket',
+      'showAzureDevOps',
+      'showOidc',
+    ];
+    const internal = el as unknown as Record<string, unknown>;
+    for (const key of repoIndependent) internal[key] = true;
+    // Control: GPG renders inside the activeRepository block, so it must still
+    // be swept — proof the exclusion did not simply disable the sweep.
+    internal.showGpg = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    for (const key of repoIndependent) {
+      expect(internal[key], `${key} is not repo-scoped`).to.be.true;
+    }
+    expect(internal.showGpg, 'GPG must not outlive its repository').to.be.false;
+
+    el.remove();
+  });
+
+  it('keeps an in-progress account connect alive when the last tab closes', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as Record<string, unknown>;
+    internal.showProfileManager = true;
+    await el.updateComplete;
+
+    // Drive the REAL handler: the manager stacks a provider dialog on itself to
+    // connect an account to a profile. The listener is bound directly on the
+    // element, so the event does not need to bubble.
+    el.shadowRoot!.querySelector('lv-profile-manager-dialog')!.dispatchEvent(
+      new CustomEvent('open-github', {
+        detail: {
+          returnTo: 'profile-manager',
+          integrationType: 'github',
+          profileId: 'p1',
+          profileName: 'Work',
+          attach: true,
+        },
+      })
+    );
+    await el.updateComplete;
+
+    expect(internal.showGitHub, 'the connect flow opened the provider dialog').to.be.true;
+    expect(internal.integrationContext, 'the connect flow recorded its return context').to.not.be
+      .null;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    const gh = el.shadowRoot!.querySelector('lv-github-dialog') as HTMLElement & {
+      open: boolean;
+    };
+    expect(gh.open, 'the connect dialog survives the tab close').to.be.true;
+    const pm = el.shadowRoot!.querySelector('lv-profile-manager-dialog') as HTMLElement & {
+      open: boolean;
+    };
+    expect(pm.open, 'the manager underneath stays open').to.be.true;
+    expect(internal.integrationContext, 'return context is not stranded without a dialog').to.not
+      .be.null;
+
+    el.remove();
+  });
+
+  // Over-reach guard. This passes with or without the exclusions above; it is
+  // here so that widening REPO_INDEPENDENT_DIALOGS to a dialog that really does
+  // render inside the activeRepository block fails loudly.
+  it('still sweeps every dialog that renders inside the repository block', async () => {
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const repoScoped = [
+      'showRemotes',
+      'showClean',
+      'showBisect',
+      'showSubmodules',
+      'showWorktrees',
+      'showLfs',
+      'showGpg',
+      'showConfig',
+      'showCredentials',
+      'showHooksDialog',
+      'showRepositoryHealth',
+      'showReflog',
+    ];
+    const internal = el as unknown as Record<string, unknown>;
+    for (const key of repoScoped) internal[key] = true;
+    await el.updateComplete;
+
+    repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
+    await el.updateComplete;
+
+    for (const key of repoScoped) {
+      expect(internal[key], `${key} must not outlive its repository`).to.be.false;
+    }
 
     el.remove();
   });

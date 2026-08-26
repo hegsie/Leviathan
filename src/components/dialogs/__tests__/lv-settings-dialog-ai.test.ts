@@ -1,12 +1,16 @@
 /**
  * Settings Dialog AI Tests
  *
- * Tests that handleModelChange dispatches ai-settings-changed event.
+ * Tests that handleModelChange dispatches ai-settings-changed event, and that
+ * handleTestProvider reports the tested provider by name.
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+
+/** Result returned by the mocked `test_ai_provider` command. */
+let testProviderResult: unknown = null;
 
 const mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
@@ -14,6 +18,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
   switch (command) {
     case 'get_ai_providers':
       return [];
+    case 'test_ai_provider':
+      return testProviderResult;
     case 'set_ai_model':
       return null;
     case 'set_ai_provider':
@@ -80,5 +86,58 @@ describe('lv-settings-dialog AI events', () => {
     await (el as any).handleProviderSelect('ollama');
 
     expect(eventFired).to.be.true;
+  });
+});
+
+describe('lv-settings-dialog provider test feedback', () => {
+  beforeEach(() => {
+    testProviderResult = null;
+  });
+
+  it('names the provider in the failure message', async () => {
+    const el = await fixture<LvSettingsDialog>(
+      html`<lv-settings-dialog></lv-settings-dialog>`,
+    );
+
+    testProviderResult = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleTestProvider('open_ai');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const aiError = (el as any).aiError as string | null;
+    expect(aiError).to.equal('OpenAI is not available. Check your API key and try again.');
+    expect(aiError).to.not.contain('undefined');
+  });
+
+  it('records a failed status for the tested provider', async () => {
+    const el = await fixture<LvSettingsDialog>(
+      html`<lv-settings-dialog></lv-settings-dialog>`,
+    );
+
+    testProviderResult = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleTestProvider('open_ai');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).providerTestStatus['open_ai']).to.equal('failed');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).testingProvider).to.be.null;
+  });
+
+  it('clears the error and records success when the test passes', async () => {
+    const el = await fixture<LvSettingsDialog>(
+      html`<lv-settings-dialog></lv-settings-dialog>`,
+    );
+
+    testProviderResult = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).aiError = 'stale error';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleTestProvider('open_ai');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).aiError).to.be.null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).providerTestStatus['open_ai']).to.equal('success');
   });
 });

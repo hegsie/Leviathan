@@ -19,6 +19,7 @@ import type {
   UnifiedProfilesConfig,
   IntegrationAccount,
   CurrentGitIdentity,
+  SaveProfileResult,
   MigrationPreview,
   MigrationBackupInfo,
   UnifiedMigrationResult,
@@ -67,15 +68,18 @@ export async function getUnifiedProfile(profileId: string): Promise<UnifiedProfi
 
 /**
  * Save a unified profile (create or update)
+ *
+ * The backend also re-applies the identity to every repository assigned to this
+ * profile; repositories it could not rewrite come back in `failedRepositories`.
  */
-export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<UnifiedProfile> {
-  const result = await invokeCommand<UnifiedProfile>('save_unified_profile', { profile });
+export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<SaveProfileResult> {
+  const result = await invokeCommand<SaveProfileResult>('save_unified_profile', { profile });
   if (!result.success) {
     throw new Error(result.error?.message || 'Failed to save unified profile');
   }
 
   // Update store
-  const saved = result.data!;
+  const { profile: saved, failedRepositories } = result.data!;
   const store = unifiedProfileStore.getState();
   const existingProfile = store.profiles.find((p) => p.id === saved.id);
   if (existingProfile) {
@@ -96,7 +100,7 @@ export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<Unifi
     }
   }
 
-  return saved;
+  return { profile: saved, failedRepositories };
 }
 
 /**
@@ -435,6 +439,14 @@ export async function applyUnifiedProfile(path: string, profileId: string): Prom
     throw new Error(result.error?.message || 'Failed to apply profile');
   }
 
+  // The Rust command also persists the repo→profile assignment
+  // (config.assign_profile). Mirror it here — must run AFTER the success check
+  // so a rejected apply never records an assignment the backend did not save —
+  // otherwise the dashboard's "Manually assigned" badge and the profile
+  // manager's assigned-repository list stay stale until the next full
+  // loadUnifiedProfiles().
+  unifiedProfileStore.getState().setRepositoryAssignment(path, profileId);
+
   // Update active profile in store
   const profile = unifiedProfileStore.getState().profiles.find((p) => p.id === profileId);
   if (profile) {
@@ -663,16 +675,30 @@ export async function refreshAccountCachedUser(
   const store = unifiedProfileStore.getState();
 
   try {
-    // Get the token for this account. For Azure DevOps OAuth accounts, refresh an
-    // expiring Entra access token first — otherwise the ~1h expiry would make this
-    // path (periodic validation, "Refresh account", profile manager) mark the
-    // account disconnected even though a valid refresh token exists.
+    // Get the token for this account. For OAuth accounts, refresh an expiring
+    // access token first — otherwise the short expiry (~1h Entra, ~2h GitLab /
+    // Bitbucket) makes this path (periodic validation, "Refresh account", the
+    // profile manager) mark the account disconnected even though a valid
+    // refresh token exists.
     let token: string | null;
-    if (account.integrationType === 'azure-devops') {
-      const { getFreshAccountToken } = await import('./credential.service.ts');
-      token = await getFreshAccountToken('azure-devops', account.id, 'azure');
-    } else {
-      token = await AccountCredentials.getToken(account.integrationType, account.id);
+    const { getFreshAccountToken } = await import('./credential.service.ts');
+    switch (account.integrationType) {
+      case 'azure-devops':
+        token = await getFreshAccountToken('azure-devops', account.id, 'azure');
+        break;
+      case 'gitlab':
+        token = await getFreshAccountToken(
+          'gitlab',
+          account.id,
+          'gitlab',
+          account.config.type === 'gitlab' ? account.config.instanceUrl : undefined
+        );
+        break;
+      case 'bitbucket':
+        token = await getFreshAccountToken('bitbucket', account.id, 'bitbucket');
+        break;
+      default:
+        token = await AccountCredentials.getToken(account.integrationType, account.id);
     }
     if (!token) {
       log.debug(` No token for account ${account.id}, skipping refresh`);

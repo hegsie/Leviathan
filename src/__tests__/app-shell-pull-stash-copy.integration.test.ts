@@ -37,6 +37,30 @@ import { uiStore } from '../stores/ui.store.ts';
 // Import the real component
 import '../app-shell.ts';
 
+// Side-effect import so showPrompt finds the singleton already in the DOM.
+import '../components/dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../components/dialogs/lv-prompt-dialog.ts';
+
+/**
+ * The stash shortcut/palette path now asks for an optional stash message, so
+ * these tests install a stub that answers it immediately. '' is "OK with
+ * nothing typed", which keeps git's default naming and the exact behaviour
+ * asserted below.
+ */
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  const dialog = document.querySelector('lv-prompt-dialog');
+  if (dialog) dialog.remove();
+}
+
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
 
@@ -46,6 +70,7 @@ const mockRepository: Repository = {
   isValid: true,
   isBare: false,
   headRef: 'refs/heads/main',
+  detachedHeadOid: null,
   state: 'clean',
   isShallow: false,
   isPartialClone: false,
@@ -97,6 +122,11 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
     clearHistory();
     setupDefaultMocks();
     uiStore.setState({ toasts: [] });
+    setupMockPrompt('');
+  });
+
+  afterEach(() => {
+    cleanupMockPrompt();
   });
 
   describe('handlePull', () => {
@@ -331,6 +361,147 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
       expect(shell.blameCommitOid).to.equal('abc123');
       expect(shell.showDiff).to.be.false;
       expect(shell.diffFile).to.be.null;
+    });
+  });
+
+  describe('handleShowFileHistory (show-file-history from the right panel)', () => {
+    it('opens the history pane and closes an open working-tree diff', () => {
+      // The right panel stays clickable while a diff covers the center pane,
+      // and the center pane renders the diff ahead of file history — so
+      // leaving the diff up means the History click shows the user nothing.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showDiff = true;
+      shell.diffFile = { path: 'src/x.ts', status: 'modified', isStaged: false, isConflicted: false };
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/x.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/x.ts');
+      expect(shell.showDiff, 'the diff no longer covers the history pane').to.be.false;
+      expect(shell.diffFile).to.be.null;
+    });
+
+    it('closes a commit-file diff and an open blame view too', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showDiff = true;
+      shell.diffFile = null;
+      shell.diffCommitFile = { commitOid: 'abc123', filePath: 'src/x.ts' };
+      shell.showBlame = true;
+      shell.blameFile = 'src/y.ts';
+      shell.blameCommitOid = 'abc123';
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/z.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/z.ts');
+      expect(shell.showDiff).to.be.false;
+      expect(shell.diffCommitFile).to.be.null;
+      // Blame also outranks file history in the center pane
+      expect(shell.showBlame).to.be.false;
+      expect(shell.blameFile).to.be.null;
+      expect(shell.blameCommitOid).to.be.null;
+    });
+
+    it('leaves the other panes alone when nothing else is open', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+
+      shell.handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/a.ts' } })
+      );
+
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/a.ts');
+      expect(shell.showDiff).to.be.false;
+      expect(shell.showBlame).to.be.false;
+      expect(uiStore.getState().toasts.length, 'nothing was lost, so nothing is said').to.equal(0);
+    });
+  });
+
+  describe('picking another file while file history is open (inverse navigation)', () => {
+    it('handleFileSelected clears the history pane so closing the diff does not uncover it', () => {
+      // Open history for one file, then click a different file in Changes.
+      // The diff outranks history in the center pane, so a stale
+      // showFileHistory is invisible right up until the diff closes — and
+      // then the old file's history appears unbidden.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+
+      shell.handleFileSelected(
+        new CustomEvent('file-selected', {
+          detail: {
+            file: { path: 'src/new.ts', status: 'modified', isStaged: false, isConflicted: false },
+          },
+        })
+      );
+
+      expect(shell.showDiff).to.be.true;
+      expect(shell.showFileHistory, 'the unrelated history pane is gone').to.be.false;
+      expect(shell.fileHistoryPath).to.be.null;
+
+      // Closing the diff must leave the center pane empty, not reveal history.
+      shell.handleCloseDiff();
+      expect(shell.showDiff).to.be.false;
+      expect(shell.showFileHistory).to.be.false;
+    });
+
+    it('handleCommitFileSelected clears the history pane too', () => {
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+
+      shell.handleCommitFileSelected(
+        new CustomEvent('commit-file-selected', {
+          detail: { commitOid: 'abc123', filePath: 'src/new.ts' },
+        })
+      );
+
+      expect(shell.showDiff).to.be.true;
+      expect(shell.diffCommitFile).to.deep.equal({ commitOid: 'abc123', filePath: 'src/new.ts' });
+      expect(shell.showFileHistory, 'the unrelated history pane is gone').to.be.false;
+      expect(shell.fileHistoryPath).to.be.null;
+    });
+
+    it('a conflicted file opens the merge editor and leaves history untouched', () => {
+      // The conflicted branch returns before any pane swap — it opens a
+      // dialog rather than replacing the center pane, so there is nothing
+      // for the history pane to hide under.
+      const el = createAppShell();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.showFileHistory = true;
+      shell.fileHistoryPath = 'src/old.ts';
+      let openedPath: string | null = null;
+      shell.openConflictDialogFromState = (path: string) => {
+        openedPath = path;
+      };
+
+      shell.handleFileSelected(
+        new CustomEvent('file-selected', {
+          detail: {
+            file: { path: 'src/conflict.ts', status: 'conflicted', isStaged: false, isConflicted: true },
+          },
+        })
+      );
+
+      expect(openedPath).to.equal('src/conflict.ts');
+      expect(shell.showDiff, 'no diff was opened').to.be.false;
+      expect(shell.showFileHistory).to.be.true;
+      expect(shell.fileHistoryPath).to.equal('src/old.ts');
     });
   });
 
