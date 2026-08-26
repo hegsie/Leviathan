@@ -88,7 +88,12 @@ pub async fn init_gitflow(
     version_tag_prefix: Option<String>,
 ) -> Result<GitFlowConfig> {
     let repo = git2::Repository::open(Path::new(&path))?;
-    let mut config = repo.config()?;
+    // The local level specifically. set_str already landed here, but the
+    // rollback below also has to READ what .git/config holds: repo.config()
+    // resolves through the user's global and system files too, so a snapshot
+    // taken from it would "restore" an inherited value by writing it into the
+    // repository, inventing a local key that was never there.
+    let mut config = repo.config()?.open_level(git2::ConfigLevel::Local)?;
 
     let develop = develop_branch.unwrap_or_else(|| "develop".to_string());
     let feature = feature_prefix.unwrap_or_else(|| "feature/".to_string());
@@ -128,7 +133,11 @@ pub async fn init_gitflow(
             })?,
     };
 
-    // Ensure develop branch exists
+    // Ensure develop branch exists. Whether THIS call created it matters: if
+    // the config below cannot be persisted the branch has to go back, or a
+    // retry would silently reuse a develop cut from a base the user may no
+    // longer have selected. A develop that was already there is left alone.
+    let mut created_develop = false;
     if repo.find_branch(&develop, git2::BranchType::Local).is_err() {
         // Create develop from the resolved master
         let base = repo
@@ -136,6 +145,7 @@ pub async fn init_gitflow(
             .map_err(|_| LeviathanError::BranchNotFound(master.clone()))?;
         let commit = base.get().peel_to_commit()?;
         repo.branch(&develop, &commit, false)?;
+        created_develop = true;
     }
 
     // Written last, once every branch this config names is known to exist. A
@@ -145,20 +155,51 @@ pub async fn init_gitflow(
     //
     // Each set_str is its own write to .git/config, so the sequence is not
     // atomic: any of them can fail on its own (a lock held by another process,
-    // a disk that just filled, a key a hand-edit left as a multivar).
+    // a disk that just filled, a key a hand-edit left as a multivar). Persist
+    // them as a unit instead — snapshot what the local config holds now, and
+    // on the first failure put every key back the way this call found it and
+    // drop a develop this call created, so a failed init leaves the repository
+    // as it was rather than half-configured.
+    //
     // gitflow.branch.master is the key get_gitflow_config keys `initialized`
     // off, so it goes LAST — writing the marker before the six values it
     // vouches for would let a failure part-way through leave the repository
     // flagged initialized while develop and the prefixes silently fall back to
     // defaults at read time, and the panel would never offer the init section
     // again.
-    config.set_str("gitflow.branch.develop", &develop)?;
-    config.set_str("gitflow.prefix.feature", &feature)?;
-    config.set_str("gitflow.prefix.release", &release)?;
-    config.set_str("gitflow.prefix.hotfix", &hotfix)?;
-    config.set_str("gitflow.prefix.support", &support)?;
-    config.set_str("gitflow.prefix.versiontag", &version_tag)?;
-    config.set_str("gitflow.branch.master", &master)?;
+    let entries = [
+        ("gitflow.branch.develop", develop.as_str()),
+        ("gitflow.prefix.feature", feature.as_str()),
+        ("gitflow.prefix.release", release.as_str()),
+        ("gitflow.prefix.hotfix", hotfix.as_str()),
+        ("gitflow.prefix.support", support.as_str()),
+        ("gitflow.prefix.versiontag", version_tag.as_str()),
+        ("gitflow.branch.master", master.as_str()),
+    ];
+    let snapshot: Vec<(&str, Option<String>)> = entries
+        .iter()
+        .map(|(key, _)| (*key, config.get_string(key).ok()))
+        .collect();
+
+    if let Err(err) = entries
+        .iter()
+        .try_for_each(|(key, value)| config.set_str(key, value))
+    {
+        // Best effort, and deliberately so: the write error is what the user
+        // needs to see, and a rollback step that also fails must not mask it.
+        for (key, previous) in snapshot {
+            let _ = match previous {
+                Some(value) => config.set_str(key, &value),
+                None => config.remove(key),
+            };
+        }
+        if created_develop {
+            if let Ok(mut branch) = repo.find_branch(&develop, git2::BranchType::Local) {
+                let _ = branch.delete();
+            }
+        }
+        return Err(err.into());
+    }
 
     Ok(GitFlowConfig {
         initialized: true,
@@ -1243,6 +1284,70 @@ mod tests {
                 .get_string("gitflow.branch.master")
                 .is_err(),
             "the initialized marker must not be persisted by a failed init"
+        );
+        // The keys written before the failure are rolled back, not left
+        // lying around: gitflow.branch.develop is written first and succeeds.
+        assert!(
+            repo.repo()
+                .config()
+                .unwrap()
+                .get_string("gitflow.branch.develop")
+                .is_err(),
+            "a key this attempt wrote must be removed again when a later write fails"
+        );
+        // And the branch this attempt cut goes back too. Left behind, a retry
+        // would reuse it instead of cutting develop from the selected base.
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_err(),
+            "a failed init must not leave the develop branch it created behind"
+        );
+    }
+
+    /// Re-initializing an already-configured repository must not shred the
+    /// configuration it already had. The rollback restores each key to the
+    /// value this call found rather than deleting it, and leaves a develop it
+    /// did not create alone.
+    #[tokio::test]
+    async fn test_init_gitflow_failed_reinit_restores_the_previous_config() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .expect("first init must succeed");
+
+        // Duplicate gitflow.prefix.release so that exactly one write of the
+        // re-init fails — the two keys written before it succeed first.
+        let config_path = repo.path.join(".git").join("config");
+        let mut existing = std::fs::read_to_string(&config_path).unwrap();
+        existing.push_str("[gitflow \"prefix\"]\n\trelease = duplicate/\n");
+        std::fs::write(&config_path, existing).unwrap();
+
+        init_gitflow(
+            repo.path_str(),
+            None,
+            None,
+            Some("feat/".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("re-init must fail when a gitflow config key cannot be written");
+
+        let config = get_gitflow_config(repo.path_str()).await.unwrap();
+        assert!(config.initialized, "the repo stays initialized as it was");
+        assert_eq!(
+            config.feature_prefix, "feature/",
+            "a key the failed attempt overwrote must be restored to its previous value"
+        );
+        assert_eq!(config.master_branch, "main");
+        assert!(
+            repo.repo()
+                .find_branch("develop", git2::BranchType::Local)
+                .is_ok(),
+            "a develop this attempt did not create must be left alone"
         );
     }
 
