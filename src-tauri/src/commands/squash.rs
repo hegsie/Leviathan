@@ -543,6 +543,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fixup_into_a_mid_history_merge_keeps_both_parents() {
+        // The guard above refuses a merge that FOLLOWS the target, because the
+        // replay loop would flatten it. The target itself is a different case:
+        // it is rebuilt in place from all of its parents, so a merge that is
+        // the target survives with its topology, even when later commits are
+        // replayed on top of it.
+        let repo = TestRepo::with_initial_commit();
+        let default_branch = repo.current_branch();
+        repo.create_commit("Base", &[("b.txt", "base")]);
+
+        repo.create_branch("side");
+        repo.checkout_branch("side");
+        let side = repo.create_commit("Side work", &[("side.txt", "s")]);
+        repo.checkout_branch(&default_branch);
+
+        let merge = commit_merge(&repo, "Merge side", side);
+        let parents_before: Vec<git2::Oid> = {
+            let git = repo.repo();
+            let ids = git.find_commit(merge).unwrap().parent_ids().collect();
+            ids
+        };
+        assert_eq!(parents_before.len(), 2);
+
+        // A plain commit on top, so the merge is mid-history and the replay
+        // loop actually runs.
+        repo.create_commit("After commit", &[("after.txt", "after")]);
+
+        repo.create_file("b.txt", "fixed");
+        repo.stage_file("b.txt");
+
+        let result = fixup_commit(repo.path_str(), merge.to_string(), None).await;
+        assert!(
+            result.is_ok(),
+            "fixup into a mid-history merge must succeed: {:?}",
+            result.err()
+        );
+
+        let git = repo.repo();
+        let new_head = git.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(new_head.summary().unwrap(), Some("After commit"));
+
+        // The replayed tip still sits on the rewritten merge, and that merge
+        // still has both parents, in order.
+        let rewritten_merge = new_head.parent(0).unwrap();
+        assert_eq!(rewritten_merge.summary().unwrap(), Some("Merge side"));
+        assert_eq!(
+            rewritten_merge.parent_count(),
+            2,
+            "amending a mid-history merge must keep the merge"
+        );
+        assert_eq!(
+            rewritten_merge.parent_ids().collect::<Vec<_>>(),
+            parents_before,
+            "both parents are preserved, in order"
+        );
+
+        // The fix landed in the merge, and nothing was lost from either side.
+        assert!(rewritten_merge.tree().unwrap().get_name("b.txt").is_some());
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("b.txt")).unwrap(),
+            "fixed"
+        );
+        assert!(repo.path.join("side.txt").exists(), "side branch content");
+        assert!(repo.path.join("after.txt").exists(), "replayed commit");
+    }
+
+    #[tokio::test]
     async fn test_squash_refuses_when_an_unrelated_root_follows_the_range() {
         let repo = TestRepo::with_initial_commit();
         let c0 = repo.head_oid();
