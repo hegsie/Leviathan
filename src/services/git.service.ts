@@ -4689,10 +4689,14 @@ export interface RemoteOperationResult {
   /**
    * IPC error code of a failed completion (MERGE_CONFLICT, REBASE_CONFLICT,
    * ...) — the same code the command itself would have returned.
+   *
+   * `null`, not absent, on a successful completion: the Rust field is an
+   * `Option<String>` with no skip, so the wire always carries the key — the
+   * same shape every other Option-backed field is typed with.
    */
-  errorCode?: string;
+  errorCode: string | null;
   /** Arrived after the command already reported a timeout to its caller. */
-  late?: boolean;
+  late: boolean;
 }
 
 let remoteOperationUnlisten: UnlistenFn | null = null;
@@ -4734,7 +4738,11 @@ export async function setupRemoteOperationListeners(): Promise<void> {
         // `merge-conflict` is bound on the app-shell ELEMENT, not on window —
         // a window dispatch would be orphaned. The handler pins the dialog to
         // repositoryPath and refreshes that repo, so no extra refresh here.
-        const shell = conflict ? document.querySelector("app-shell") : null;
+        // The tag is `lv-app-shell` (see the @customElement in app-shell.ts);
+        // querying "app-shell" found nothing in the real UI, so every late
+        // conflict fell through to the plain refresh below and left the
+        // repository mid-merge with no dialog.
+        const shell = conflict ? document.querySelector("lv-app-shell") : null;
         if (shell) {
           shell.dispatchEvent(
             new CustomEvent("merge-conflict", {
