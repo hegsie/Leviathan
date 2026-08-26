@@ -3614,6 +3614,14 @@ export class AppShell extends LitElement {
     this.showBlame = false;
     this.blameFile = null;
     this.blameCommitOid = null;
+    // Close file history if open. It sits last in the center pane's
+    // priority order, so leaving it set hides it under the new diff and then
+    // uncovers it — history for a file the user moved on from — the moment
+    // the diff is closed. Unlike the diff a file-history pane opens
+    // (`handleFileHistoryViewDiff`), this selection comes from the right
+    // panel, not from history, so there is no drill-down to return to.
+    this.showFileHistory = false;
+    this.fileHistoryPath = null;
     // Working directory file selected - show diff
     this.diffFile = e.detail.file;
     this.diffFilePartiallyStaged = e.detail.isPartiallyStaged ?? false;
@@ -3626,6 +3634,10 @@ export class AppShell extends LitElement {
     this.showBlame = false;
     this.blameFile = null;
     this.blameCommitOid = null;
+    // Close file history if open — same reason as handleFileSelected: it
+    // would otherwise reappear under the user when this diff is closed.
+    this.showFileHistory = false;
+    this.fileHistoryPath = null;
     // Commit file selected - show diff
     this.diffCommitFile = {
       commitOid: e.detail.commitOid,
@@ -5069,6 +5081,23 @@ export class AppShell extends LitElement {
   }
 
   private handleShowFileHistory(e: CustomEvent<{ filePath: string }>): void {
+    // The center pane renders one view at a time — diff first, then blame,
+    // then file history — while the right panel that raises this event stays
+    // interactive underneath a diff. So opening history has to close whatever
+    // is already up, exactly like handleShowBlame does; otherwise the click
+    // does nothing the user can see and the history pane ambushes them later,
+    // when closing the diff (or Escape) uncovers it. Dropping the diff
+    // unmounts the inline editor with it, same teardown as the x button.
+    this.warnIfDiscardingEdits();
+    // Close diff if open
+    this.showDiff = false;
+    this.diffFile = null;
+    this.diffCommitFile = null;
+    // Close blame if open
+    this.showBlame = false;
+    this.blameFile = null;
+    this.blameCommitOid = null;
+    // Open file history
     this.fileHistoryPath = e.detail.filePath;
     this.showFileHistory = true;
   }

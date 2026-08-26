@@ -368,6 +368,22 @@ describe('app-shell destructive guards', () => {
       expect((el as any).showBlame, 'and blame still opens').to.equal(true);
     });
 
+    it('opening file history from the commit panel warns the same way', async () => {
+      // Same swap as Blame: the History button in the commit panel replaces
+      // lv-diff-view in the center pane, so it drops the typed text with it.
+      const el = shellWithDirtyEditor('src/main.ts');
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/other.ts' } }),
+      );
+
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'the loss is reported').to.not.be.undefined;
+      expect(warning!.message).to.contain('src/main.ts');
+      expect((el as any).showFileHistory, 'and the history pane still opens').to.equal(true);
+    });
+
     it('closing with no diff open says nothing', async () => {
       const el = shellOnRepo();
       uiStore.setState({ toasts: [] });
