@@ -1891,4 +1891,143 @@ describe('lv-azure-devops-dialog', () => {
       expect(dialog.error, 'a failed work-items load is surfaced').to.contain('unauthorized');
     });
   });
+  // A PAT connect that succeeds but fails to write the keyring git credential must
+  // say so: storeGitCredentials resolves to a CommandResult and never throws, so
+  // discarding it left the dialog showing "Connected" while push/pull would still
+  // prompt for credentials.
+  describe('PAT connect surfaces keyring credential-write failures', () => {
+    // Fail every store_git_credentials call (invokeCommand turns the rejection
+    // into { success: false }), or only the ones matching `urlMatch`.
+    function failKeyringWrites(urlMatch?: string): void {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'store_git_credentials') {
+          const url = (args as { url?: string } | undefined)?.url ?? '';
+          if (!urlMatch || url.includes(urlMatch)) throw new Error('keyring locked');
+        }
+        return origMock(command, args);
+      };
+    }
+
+    const credFailureToasts = (): number =>
+      uiStore
+        .getState()
+        .toasts.filter((t) => t.type === 'error' && /saving git credentials failed/i.test(t.message))
+        .length;
+
+    // Load while DISCONNECTED so the load-time checkConnection does not
+    // pre-populate lastSyncedGitCredKey, then flip to connected for the handler.
+    async function mountDisconnected(): Promise<LvAzureDevOpsDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      connectionResponse = mockConnectedStatus;
+      const api = el as unknown as {
+        selectedAccountId: string | null;
+        organizationInput: string;
+        tokenInput: string;
+      };
+      api.selectedAccountId = 'ado-acc-1';
+      api.organizationInput = 'testorg';
+      await el.updateComplete;
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+      return el;
+    }
+
+    it('happy path: handleSaveToken writes both credentials, records the sync key, and shows no warning', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const writes = invokeHistory.filter((h) => h.command === 'store_git_credentials');
+      expect(writes.length, 'both credential URL formats written').to.equal(2);
+      const urls = writes.map((w) => (w.args as { url: string }).url);
+      expect(urls).to.include('https://dev.azure.com');
+      expect(urls).to.include('https://testorg.visualstudio.com');
+
+      expect(credFailureToasts(), 'no warning on success').to.equal(0);
+      expect(
+        (el as unknown as { lastSyncedGitCredKey: string | null }).lastSyncedGitCredKey,
+        'successful write is recorded so checkConnection does not re-write it'
+      ).to.equal('testorg::new-rotated-pat');
+    });
+
+    it('error path: handleSaveToken warns the user when the keyring write fails, without failing the connect', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      failKeyringWrites();
+
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      expect(credFailureToasts(), 'user is told push/pull may prompt').to.equal(1);
+      const api = el as unknown as {
+        connectionStatus: { connected: boolean } | null;
+        error: string | null;
+        lastSyncedGitCredKey: string | null;
+      };
+      expect(api.connectionStatus?.connected, 'connection itself still succeeded').to.equal(true);
+      expect(api.error, 'keyring failure is non-fatal — no inline error banner').to.equal(null);
+      expect(api.lastSyncedGitCredKey, 'failed write is not marked synced').to.equal(null);
+    });
+
+    it('edge: a partial failure (only {org}.visualstudio.com fails) is still surfaced on the stored-token path', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = '';
+      await el.updateComplete;
+      failKeyringWrites('visualstudio.com');
+
+      await (
+        el as unknown as { handleConnectWithStoredToken: () => Promise<void> }
+      ).handleConnectWithStoredToken();
+      await el.updateComplete;
+
+      expect(credFailureToasts(), 'half-written credential is not silent').to.equal(1);
+      const api = el as unknown as {
+        connectionStatus: { connected: boolean } | null;
+        error: string | null;
+      };
+      expect(api.connectionStatus?.connected, 'connect is not failed by a keyring error').to.equal(true);
+      expect(api.error).to.equal(null);
+    });
+
+    it('edge: a failed write is retried on the next connect rather than stickily suppressed', async () => {
+      const el = await mountDisconnected();
+      const api = el as unknown as {
+        tokenInput: string;
+        handleSaveToken: () => Promise<void>;
+        lastSyncedGitCredKey: string | null;
+      };
+      const workingMock = mockInvoke;
+
+      api.tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      failKeyringWrites();
+      await api.handleSaveToken();
+      await el.updateComplete;
+      expect(credFailureToasts(), 'first attempt warns').to.equal(1);
+
+      // Keyring recovers; the same (org, token) must be written again.
+      mockInvoke = workingMock;
+      invokeHistory.length = 0;
+      api.tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      await api.handleSaveToken();
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.filter((h) => h.command === 'store_git_credentials').length,
+        'retry re-writes both credentials'
+      ).to.equal(2);
+      expect(credFailureToasts(), 'no second warning once it succeeds').to.equal(1);
+      expect(api.lastSyncedGitCredKey).to.equal('testorg::new-rotated-pat');
+    });
+  });
 });

@@ -273,6 +273,48 @@ test.describe('Azure DevOps Dialog - Connection Tab', () => {
     await expect(dialogs.azureDevOps.connectionStatus).toBeVisible({ timeout: 10000 });
   });
 
+  // Regression: a PAT connect whose keyring credential write fails used to show
+  // "Connected" with no warning at all, so the user only found out when a later
+  // HTTPS push/pull prompted for credentials.
+  test('warns when the keyring git-credential write fails but keeps the connection', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await startCommandCaptureWithMocks(page, {
+      check_ado_connection: {
+        connected: true,
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+        organization: 'testorg',
+      },
+      check_ado_connection_with_token: {
+        connected: true,
+        user: { displayName: 'Test User', emailAddress: 'test@example.com', id: 'user-1' },
+        organization: 'testorg',
+      },
+      save_global_account: {
+        id: 'new-ado-account',
+        name: 'Azure DevOps (Test User)',
+        integrationType: 'azure-devops',
+        config: { type: 'pat', organization: 'testorg' },
+        color: null,
+        cachedUser: null,
+        urlPatterns: [],
+        isDefault: false,
+      },
+    });
+    await injectCommandError(page, 'store_git_credentials', 'keyring locked');
+
+    await dialogs.azureDevOps.organizationInput.fill('testorg');
+    await dialogs.azureDevOps.tokenInput.fill('valid-pat-token');
+    await dialogs.azureDevOps.connectButton.click();
+
+    await expect(
+      page.locator('.toast.error', { hasText: /saving git credentials failed/i })
+    ).toBeVisible({ timeout: 10000 });
+    // The connect itself still succeeded — a keyring failure must not undo it.
+    await expect(dialogs.azureDevOps.connectionStatus).toBeVisible({ timeout: 10000 });
+  });
+
   test('shows error on failed PAT validation', async ({ page }) => {
     await app.executeCommand('Azure DevOps');
     await expect(dialogs.azureDevOps.dialog).toBeVisible();

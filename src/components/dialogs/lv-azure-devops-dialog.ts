@@ -41,6 +41,10 @@ type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'cr
  */
 const WORK_ITEMS_PAGE_SIZE = 50;
 
+/** Shown when a PAT connect succeeded but writing the keyring git credential did not. */
+const GIT_CRED_WRITE_FAILED_TOAST =
+  'Connected, but saving git credentials failed — push/pull may prompt for credentials';
+
 /** OAuth tokens carried from an Entra sign-in through org resolution to persistence. */
 interface EntraTokens {
   accessToken: string;
@@ -980,10 +984,12 @@ export class LvAzureDevOpsDialog extends LitElement {
    * has been VERIFIED to work (a connected check) — never a stale fallback, which
    * would clobber a previously-valid credential. Deduped by (org, token) to avoid
    * redundant keyring writes on hot paths.
+   * Returns false when a keyring write failed, so a user-initiated connect can
+   * tell the user push/pull will still prompt.
    */
-  private async syncGitCredentials(org: string, token: string): Promise<void> {
+  private async syncGitCredentials(org: string, token: string): Promise<boolean> {
     const syncKey = `${org}::${token}`;
-    if (syncKey === this.lastSyncedGitCredKey) return;
+    if (syncKey === this.lastSyncedGitCredKey) return true;
     // storeGitCredentials resolves to a CommandResult (it never throws), so check
     // .success and only mark synced on success — otherwise a failed write would be
     // stickily suppressed and never retried.
@@ -991,9 +997,10 @@ export class LvAzureDevOpsDialog extends LitElement {
     const c2 = await gitService.storeGitCredentials(`https://${org}.visualstudio.com`, 'pat', token);
     if (c1.success && c2.success) {
       this.lastSyncedGitCredKey = syncKey;
-    } else {
-      log.warn('Failed to sync Azure DevOps git credentials to keyring:', c1.error ?? c2.error);
+      return true;
     }
+    log.warn('Failed to sync Azure DevOps git credentials to keyring:', c1.error ?? c2.error);
+    return false;
   }
 
   /**
@@ -1526,9 +1533,13 @@ export class LvAzureDevOpsDialog extends LitElement {
         });
       }
 
-      // Sync git credentials
-      await gitService.storeGitCredentials('https://dev.azure.com', 'pat', token);
-      await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', token);
+      // Sync git credentials so git push/pull outside this dialog authenticate.
+      // storeGitCredentials resolves to a CommandResult (it never throws), so a
+      // failed keyring write must be surfaced rather than silently reporting Connected.
+      // Non-fatal: the connection itself succeeded.
+      if (!(await this.syncGitCredentials(organization, token))) {
+        showToast(GIT_CRED_WRITE_FAILED_TOAST, 'error');
+      }
 
       // Load data if connected and repo detected
       if (this.connectionStatus?.connected && this.detectedRepo) {
@@ -1625,9 +1636,14 @@ export class LvAzureDevOpsDialog extends LitElement {
       // Store git credentials in keyring for push/pull operations
       // Username must be non-empty for macOS Keychain - use 'pat' as a placeholder
       // Store for both dev.azure.com and {org}.visualstudio.com formats
-      await gitService.storeGitCredentials('https://dev.azure.com', 'pat', tokenToSave);
-      await gitService.storeGitCredentials(`https://${organization}.visualstudio.com`, 'pat', tokenToSave);
-      log.debug(`Stored git credentials in keyring for dev.azure.com and ${organization}.visualstudio.com`);
+      // storeGitCredentials resolves to a CommandResult (it never throws), so only
+      // claim success when both writes actually landed; a failure is non-fatal to
+      // the connection but must be told to the user.
+      if (await this.syncGitCredentials(organization, tokenToSave)) {
+        log.debug(`Stored git credentials in keyring for dev.azure.com and ${organization}.visualstudio.com`);
+      } else {
+        showToast(GIT_CRED_WRITE_FAILED_TOAST, 'error');
+      }
 
       // Load data if connected and repo detected
       // Pass the token directly since storage might not be ready yet
