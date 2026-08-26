@@ -1010,6 +1010,18 @@ pub async fn push(
     }
 }
 
+/// URL configured for `remote_name`, used to scope an injected credential
+/// helper to the one host the token belongs to.
+///
+/// `None` when the repository or the remote cannot be read; the caller then
+/// installs no helper, which fails the push to authenticate rather than
+/// offering the token to whatever host git happens to ask about.
+fn remote_url(path: &str, remote_name: &str) -> Option<String> {
+    let repo = git2::Repository::open(Path::new(path)).ok()?;
+    let remote = repo.find_remote(remote_name).ok()?;
+    remote.url().ok().map(|url| url.to_owned())
+}
+
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
 #[allow(clippy::too_many_arguments)]
 fn push_via_cli(
@@ -1071,8 +1083,14 @@ fn push_via_cli(
     // The net effect was that Force Push — the only route through this
     // function — failed to authenticate on HTTPS precisely BECAUSE a token was
     // found, while pushing with no token stored worked.
+    //
+    // The helper is scoped to this remote's own host, so it is resolved here
+    // rather than inside the helper: a token must only ever be offered to the
+    // host it belongs to.
     if let Some(ref token_value) = token {
-        apply_token_credentials(&mut cmd, token_value);
+        if let Some(remote_url) = remote_url(path, remote_name) {
+            apply_token_credentials(&mut cmd, token_value, &remote_url);
+        }
     }
 
     let output = cmd.output().map_err(|e| {
@@ -1492,6 +1510,56 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- a token is only ever offered to its own remote's host ----
+
+    #[test]
+    fn test_remote_url_resolves_the_configured_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://git.example.com/o/r.git");
+        repo.add_remote("fork", "https://fork.example.net/o/r.git");
+
+        assert_eq!(
+            remote_url(&repo.path_str(), "origin").as_deref(),
+            Some("https://git.example.com/o/r.git")
+        );
+        // Force-pushing to a second remote must scope the helper to THAT
+        // remote, not to whichever one happens to be called origin.
+        assert_eq!(
+            remote_url(&repo.path_str(), "fork").as_deref(),
+            Some("https://fork.example.net/o/r.git")
+        );
+    }
+
+    #[test]
+    fn test_remote_url_is_none_when_it_cannot_be_read() {
+        let repo = TestRepo::with_initial_commit();
+
+        assert_eq!(remote_url(&repo.path_str(), "origin"), None);
+        assert_eq!(remote_url("/definitely/not/a/repository", "origin"), None);
+    }
+
+    #[test]
+    fn test_push_token_helper_is_scoped_to_the_pushed_remote() {
+        // End to end for the push path: the env push_via_cli would hand the
+        // child must name the remote's host, never a bare credential.helper.
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://git.example.com/o/r.git");
+
+        let mut cmd = create_command("git");
+        let url = remote_url(&repo.path_str(), "origin").expect("the remote is configured");
+        apply_token_credentials(&mut cmd, "s3cr3t", &url);
+
+        let key = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_CONFIG_KEY_0"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(
+            key.as_deref(),
+            Some("credential.https://git.example.com.helper")
+        );
+    }
 
     // ---- pull strategy comes from git config ----
 
