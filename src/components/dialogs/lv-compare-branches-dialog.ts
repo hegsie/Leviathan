@@ -230,6 +230,14 @@ export class LvCompareBranchesDialog extends LitElement {
   @property({ type: String }) repositoryPath = '';
 
   private pinnedRepoPath = '';
+
+  /**
+   * Bumped on every open and every close. Each read captures it before its
+   * await and drops its result if it no longer matches, so a response for the
+   * repository the dialog was closed on cannot land in a dialog that has
+   * since reopened against a different tab.
+   */
+  private openGeneration = 0;
   private isOpen = false;
 
   @state() private branches: Branch[] = [];
@@ -283,6 +291,7 @@ export class LvCompareBranchesDialog extends LitElement {
     }
 
     this.reset();
+    this.openGeneration++;
     this.pinnedRepoPath = this.repositoryPath;
     this.isOpen = true;
     if (compareRef) {
@@ -303,6 +312,7 @@ export class LvCompareBranchesDialog extends LitElement {
 
   public close(): void {
     this.isOpen = false;
+    this.openGeneration++;
     if (this.modal) this.modal.open = false;
   }
 
@@ -342,11 +352,13 @@ export class LvCompareBranchesDialog extends LitElement {
     const repoPath = this.pinnedRepoPath;
     if (!repoPath) return;
 
+    const generation = this.openGeneration;
     this.loadingBranches = true;
     this.error = '';
 
     try {
       const result = await gitService.getBranches(repoPath);
+      if (generation !== this.openGeneration) return;
       if (result.success && result.data) {
         this.branches = result.data;
         const head = result.data.find((b) => b.isHead);
@@ -369,9 +381,10 @@ export class LvCompareBranchesDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load branches';
       }
     } catch (err) {
+      if (generation !== this.openGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load branches';
     } finally {
-      this.loadingBranches = false;
+      if (generation === this.openGeneration) this.loadingBranches = false;
     }
   }
 
@@ -426,6 +439,7 @@ export class LvCompareBranchesDialog extends LitElement {
       return;
     }
 
+    const generation = this.openGeneration;
     this.comparing = true;
     this.error = '';
     this.comparison = null;
@@ -435,15 +449,17 @@ export class LvCompareBranchesDialog extends LitElement {
         includeCommits: true,
         includeFiles: true,
       });
+      if (generation !== this.openGeneration) return;
       if (result.success && result.data) {
         this.comparison = result.data;
       } else {
         this.error = result.error?.message ?? 'Failed to compare refs';
       }
     } catch (err) {
+      if (generation !== this.openGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to compare refs';
     } finally {
-      this.comparing = false;
+      if (generation === this.openGeneration) this.comparing = false;
     }
   }
 
@@ -584,7 +600,7 @@ export class LvCompareBranchesDialog extends LitElement {
               <select
                 id="base-ref-select"
                 @change=${this.handleBaseChange}
-                ?disabled=${this.loadingBranches || this.comparing || this.branches.length === 0}
+                ?disabled=${this.loadingBranches || this.comparing || this.branches.length < 2}
               >
                 ${options}
               </select>
@@ -595,7 +611,7 @@ export class LvCompareBranchesDialog extends LitElement {
               type="button"
               title="Swap base and compare"
               aria-label="Swap base and compare"
-              ?disabled=${this.loadingBranches || this.comparing || this.branches.length === 0}
+              ?disabled=${this.loadingBranches || this.comparing || this.branches.length < 2}
               @click=${this.handleSwap}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -611,7 +627,7 @@ export class LvCompareBranchesDialog extends LitElement {
               <select
                 id="compare-ref-select"
                 @change=${this.handleCompareChange}
-                ?disabled=${this.loadingBranches || this.comparing || this.branches.length === 0}
+                ?disabled=${this.loadingBranches || this.comparing || this.branches.length < 2}
               >
                 ${options}
               </select>
@@ -627,6 +643,13 @@ export class LvCompareBranchesDialog extends LitElement {
           ${!this.loadingBranches && this.branches.length === 0 && !this.error
             ? html`<div class="status" data-testid="no-branches">
                 This repository has no branches to compare yet.
+              </div>`
+            : nothing}
+
+          ${!this.loadingBranches && this.branches.length === 1 && !this.error
+            ? html`<div class="status" data-testid="single-branch">
+                ${this.branches[0].name} is the only branch here — there is nothing to compare it
+                with yet.
               </div>`
             : nothing}
 

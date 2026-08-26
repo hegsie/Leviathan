@@ -150,6 +150,48 @@ test.describe('Compare Branches Dialog', () => {
     await expect(page.locator(MODAL)).toBeVisible();
   });
 
+  test('explains a single-branch repository instead of a Compare that never enables', async ({
+    page,
+  }) => {
+    // Only the branch the user is on, so there is no second ref to pick and
+    // both pickers land on it.
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const original = internals.invoke;
+      internals.invoke = (cmd: string, args?: unknown) => {
+        if (cmd === 'get_branches') {
+          return Promise.resolve([
+            {
+              name: 'main',
+              shorthand: 'main',
+              isHead: true,
+              isRemote: false,
+              upstream: null,
+              targetOid: 'oid-main',
+              isStale: false,
+            },
+          ]);
+        }
+        return original(cmd, args);
+      };
+    });
+
+    await openViaCommandPalette(page, 'Compare branches');
+    await expect(page.locator(MODAL)).toBeVisible();
+
+    const explanation = page.locator(`${DIALOG} [data-testid="single-branch"]`);
+    await expect(explanation).toBeVisible();
+    await expect(explanation).toContainText('is the only branch here');
+
+    // The dead end is explained, and every control that cannot help is inert.
+    await expect(page.locator(`${DIALOG} .btn-primary`)).toBeDisabled();
+    await expect(page.locator(`${DIALOG} #base-ref-select`)).toBeDisabled();
+    await expect(page.locator(`${DIALOG} #compare-ref-select`)).toBeDisabled();
+    await expect(page.locator(`${DIALOG} .swap-btn`)).toBeDisabled();
+  });
+
   test('closes with Escape', async ({ page }) => {
     await openFromContextMenu(page, 'feature/test');
     await page.keyboard.press('Escape');

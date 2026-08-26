@@ -318,5 +318,174 @@ describe('lv-compare-branches-dialog', () => {
     expect(el.pinnedRepositoryPathIfOpen).to.equal('/test/repo');
     expect(el.operationInFlight).to.be.false;
   });
+
+  it('explains a repository with no branches at all', async () => {
+    installMock({ get_branches: [] });
+    const el = await makeDialog();
+    await openAndSettle(el);
+
+    expect(el.renderRoot.querySelector('[data-testid="no-branches"]'), 'the empty state is shown')
+      .to.exist;
+    expect(el.renderRoot.querySelector('[data-testid="single-branch"]')).to.not.exist;
+  });
+
+  it('explains a single-branch repository instead of a Compare that can never enable', async () => {
+    installMock({ get_branches: [branch('main', true)] });
+    const el = await makeDialog();
+    await openAndSettle(el);
+
+    const baseSelect = el.renderRoot.querySelector('#base-ref-select') as HTMLSelectElement;
+    const compareSelect = el.renderRoot.querySelector('#compare-ref-select') as HTMLSelectElement;
+    expect(baseSelect.value, 'both pickers land on the only branch').to.equal('main');
+    expect(compareSelect.value).to.equal('main');
+
+    const compareBtn = el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement;
+    expect(compareBtn.disabled, 'there is no second ref, so Compare cannot enable').to.be.true;
+
+    expect(
+      el.renderRoot.querySelector('[data-testid="single-branch"]'),
+      'the dead end is explained rather than left as a disabled button',
+    ).to.exist;
+    expect(text(el)).to.contain('is the only branch here');
+
+    // The pickers and swap have nothing to offer, so they go inert with it.
+    expect(baseSelect.disabled, 'base picker is inert').to.be.true;
+    expect(compareSelect.disabled, 'compare picker is inert').to.be.true;
+    expect(
+      (el.renderRoot.querySelector('.swap-btn') as HTMLButtonElement).disabled,
+      'swap is inert',
+    ).to.be.true;
+  });
+
+  it('drops a branch list that arrives after the dialog was closed and reopened', async () => {
+    let releaseFirst: ((value: unknown) => void) | undefined;
+    let loads = 0;
+    const OTHER_REPO = [branch('release', true), branch('hotfix')];
+    mockInvoke = (command: string) => {
+      if (command === 'get_branches') {
+        loads += 1;
+        if (loads === 1) return new Promise((resolve) => { releaseFirst = resolve; });
+        return Promise.resolve(OTHER_REPO);
+      }
+      return Promise.resolve(null);
+    };
+
+    const el = await makeDialog();
+    // First open: the branch load never settles while the dialog is up.
+    await openAndSettle(el);
+    expect(el.renderRoot.querySelectorAll('#base-ref-select option'), 'still loading')
+      .to.have.length(0);
+
+    el.close();
+    await el.updateComplete;
+
+    // Reopened against another tab, which loads its own branches.
+    await openAndSettle(el);
+    const names = () =>
+      Array.from(el.renderRoot.querySelectorAll('#base-ref-select option')).map(
+        (o) => (o as HTMLOptionElement).value,
+      );
+    expect(names(), 'the reopened dialog shows its own repository').to.deep.equal([
+      'release',
+      'hotfix',
+    ]);
+
+    // The abandoned load now resolves with the previous repository's branches.
+    releaseFirst?.(BRANCHES);
+    await settle(el);
+
+    expect(names(), 'the stale branch list was discarded').to.deep.equal(['release', 'hotfix']);
+    expect(el.renderRoot.querySelector('[data-testid="single-branch"]')).to.not.exist;
+  });
+
+  it('drops a comparison that resolves after the dialog was closed and reopened', async () => {
+    let releaseFirst: ((value: unknown) => void) | undefined;
+    let comparisons = 0;
+    mockInvoke = (command: string) => {
+      if (command === 'get_branches') return Promise.resolve(BRANCHES);
+      if (command === 'compare_branches') {
+        comparisons += 1;
+        if (comparisons === 1) return new Promise((resolve) => { releaseFirst = resolve; });
+        return Promise.resolve(IDENTICAL);
+      }
+      return Promise.resolve(null);
+    };
+
+    const el = await makeDialog();
+    await openAndSettle(el, 'feature');
+    (el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement).click();
+    await settle(el);
+    expect(
+      el.renderRoot.querySelector('[data-testid="commits-ahead"]'),
+      'the first comparison is still in flight',
+    ).to.not.exist;
+
+    el.close();
+    await el.updateComplete;
+
+    // Reopened, and this time the comparison completes on its own.
+    await openAndSettle(el, 'feature');
+    (el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement).click();
+    await settle(el);
+    expect(
+      el.renderRoot.querySelector('[data-testid="identical"]'),
+      'the reopened dialog rendered its own result',
+    ).to.exist;
+
+    // The abandoned comparison now resolves with the previous pair's result.
+    releaseFirst?.(COMPARISON);
+    await settle(el);
+
+    expect(
+      el.renderRoot.querySelector('[data-testid="identical"]'),
+      'the reopened result is still the one on screen',
+    ).to.exist;
+    expect(
+      el.renderRoot.querySelector('[data-testid="commits-ahead"]'),
+      'the stale comparison was discarded',
+    ).to.not.exist;
+  });
+
+  it('drops a comparison failure belonging to a dialog that was already closed', async () => {
+    let failFirst: ((reason: unknown) => void) | undefined;
+    let comparisons = 0;
+    mockInvoke = (command: string) => {
+      if (command === 'get_branches') return Promise.resolve(BRANCHES);
+      if (command === 'compare_branches') {
+        comparisons += 1;
+        if (comparisons === 1) return new Promise((_resolve, reject) => { failFirst = reject; });
+        return Promise.resolve(IDENTICAL);
+      }
+      return Promise.resolve(null);
+    };
+
+    const el = await makeDialog();
+    await openAndSettle(el, 'feature');
+    (el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement).click();
+    await settle(el);
+
+    el.close();
+    await el.updateComplete;
+
+    // Reopened, and its own comparison succeeds.
+    await openAndSettle(el, 'feature');
+    (el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement).click();
+    await settle(el);
+    expect(el.renderRoot.querySelector('[data-testid="identical"]')).to.exist;
+
+    // The abandoned comparison now fails.
+    failFirst?.(new Error('the tab went away'));
+    await settle(el);
+
+    expect(
+      el.renderRoot.querySelector('.error-message'),
+      'a failure from the previous open does not surface here',
+    ).to.not.exist;
+    expect(text(el)).to.not.contain('the tab went away');
+    expect(
+      el.renderRoot.querySelector('[data-testid="identical"]'),
+      'and it does not wipe the result the reopened dialog produced',
+    ).to.exist;
+  });
 });
 
