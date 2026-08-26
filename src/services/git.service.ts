@@ -4702,8 +4702,21 @@ export async function getRemoteStatus(
 export interface RemoteOperationResult {
   operation: string;
   remote: string;
+  /** Repository the operation ran on, so a late completion refreshes the right tab. */
+  repoPath: string;
   success: boolean;
   message: string;
+  /**
+   * IPC error code of a failed completion (MERGE_CONFLICT, REBASE_CONFLICT,
+   * ...) — the same code the command itself would have returned.
+   *
+   * `null`, not absent, on a successful completion: the Rust field is an
+   * `Option<String>` with no skip, so the wire always carries the key — the
+   * same shape every other Option-backed field is typed with.
+   */
+  errorCode: string | null;
+  /** Arrived after the command already reported a timeout to its caller. */
+  late: boolean;
 }
 
 let remoteOperationUnlisten: UnlistenFn | null = null;
@@ -4722,6 +4735,56 @@ export async function setupRemoteOperationListeners(): Promise<void> {
   remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
     "remote-operation-completed",
     (result) => {
+      // A pull or push that lands AFTER the command reported a timeout has
+      // already changed refs and the working tree, and the caller that would
+      // normally refresh returned an error long ago. Say so plainly and
+      // refresh the repository it actually changed — pinned by repoPath, since
+      // the user may have switched tabs in the minutes since.
+      if (result.late) {
+        // A late pull that ended in conflicts is not merely "a pull that
+        // failed": MERGE_HEAD (or the rebase state) is on disk and the only
+        // way out is the conflict dialog's Complete/Abort. app-shell's normal
+        // pull path keys that off the error CODE, so route a late conflict
+        // into the very same flow instead of leaving a red toast and a
+        // repository stuck mid-merge.
+        const conflict =
+          result.errorCode === "MERGE_CONFLICT" ||
+          result.errorCode === "REBASE_CONFLICT";
+        showToast(
+          result.message,
+          result.success || conflict ? "warning" : "error",
+          8000,
+        );
+        // `merge-conflict` is bound on the app-shell ELEMENT, not on window —
+        // a window dispatch would be orphaned. The handler pins the dialog to
+        // repositoryPath and refreshes that repo, so no extra refresh here.
+        // The tag is `lv-app-shell` (see the @customElement in app-shell.ts);
+        // querying "app-shell" found nothing in the real UI, so every late
+        // conflict fell through to the plain refresh below and left the
+        // repository mid-merge with no dialog.
+        const shell = conflict ? document.querySelector("lv-app-shell") : null;
+        if (shell) {
+          shell.dispatchEvent(
+            new CustomEvent("merge-conflict", {
+              detail: {
+                repositoryPath: result.repoPath,
+                operationType:
+                  result.errorCode === "REBASE_CONFLICT" ? "rebase" : "merge",
+              },
+            }),
+          );
+          return;
+        }
+        if (result.repoPath) {
+          window.dispatchEvent(
+            new CustomEvent("repository-refresh", {
+              detail: { repoPath: result.repoPath },
+            }),
+          );
+        }
+        return;
+      }
+
       // Show toast notifications for all remote operations
       if (result.success) {
         // Success notifications
