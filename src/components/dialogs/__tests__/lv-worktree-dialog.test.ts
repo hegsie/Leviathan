@@ -413,6 +413,21 @@ describe('lv-worktree-dialog', () => {
       expect(invokedCommands).to.not.include('remove_worktree');
     });
 
+    // `get_worktrees` falls back to a raw string compare when canonicalize
+    // fails on either side, so an explicit `isCurrent: false` can be a false
+    // negative. The spelling fallback must still run — treating the backend's
+    // `false` as authoritative would re-open the bug this guard exists for.
+    it('blocks removal when the backend said false but the spellings match', async () => {
+      const el = await open('C:\\work\\repo');
+
+      await (el as any) // eslint-disable-line @typescript-eslint/no-explicit-any
+        .handleRemove({ ...mockWorktrees[1], path: 'C:/work/repo', isCurrent: false });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).error).to.contain('currently have open');
+      expect(invokedCommands).to.not.include('remove_worktree');
+    });
+
     it('blocks removal when only the backend can tell (a symlinked repo path)', async () => {
       const el = await open('/var/folders/x/repo');
 

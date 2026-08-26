@@ -3,8 +3,6 @@
  * can spell the same directory differently.
  */
 
-import { isWindows } from './platform.ts';
-
 /** A drive-letter path (C:\… / C:/…) or a UNC share (\\server\share). */
 const WINDOWS_STYLE = /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/])/;
 
@@ -23,6 +21,11 @@ function normalize(path: string): string {
  * that differ only in case name the same directory. POSIX paths stay
  * case-SENSITIVE: /srv/Repo and /srv/repo are two directories.
  *
+ * Case sensitivity follows the SHAPE of the two paths, never the host the app
+ * happens to run on. Keying it off the host made a POSIX-shaped pair fold on
+ * Windows, which would fire the guard on the wrong worktree, and made the
+ * function answer differently on each platform for the same input.
+ *
  * This is a spelling comparison only — it cannot resolve symlinks. Prefer a
  * backend-resolved answer where one exists.
  */
@@ -30,6 +33,6 @@ export function samePath(a: string, b: string): boolean {
   const left = normalize(a);
   const right = normalize(b);
   if (!left || !right) return false;
-  const caseInsensitive = isWindows() || (WINDOWS_STYLE.test(a) && WINDOWS_STYLE.test(b));
+  const caseInsensitive = WINDOWS_STYLE.test(a) && WINDOWS_STYLE.test(b);
   return caseInsensitive ? left.toLowerCase() === right.toLowerCase() : left === right;
 }

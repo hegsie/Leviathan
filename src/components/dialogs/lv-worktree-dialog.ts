@@ -579,11 +579,15 @@ export class LvWorktreeDialog extends LitElement {
    *
    * `isCurrent` is resolved by the backend against the filesystem — the only
    * place a symlinked repo path (/var vs /private/var) can be settled. The
-   * path compare stays as the fallback for payloads without the flag, and
-   * normalizes what a string can: git prints Windows paths with forward
-   * slashes (C:/work/repo) while the OS file dialog hands back C:\work\repo.
-   * Comparing the raw strings left this guard — and the disabled Remove button
-   * that shares it — dead on Windows.
+   * path compare stays as the fallback, and normalizes what a string can: git
+   * prints Windows paths with forward slashes (C:/work/repo) while the OS file
+   * dialog hands back C:\work\repo. Comparing the raw strings left this guard
+   * — and the disabled Remove button that shares it — dead on Windows.
+   *
+   * The two layers are OR'd on purpose: a `false` from the backend is NOT
+   * authoritative, because `get_worktrees` itself falls back to a raw string
+   * compare when canonicalize fails on either side, and that fallback can only
+   * produce a false negative. Trusting it would re-open the bug.
    */
   private isCurrentWorktree(worktree: { path: string; isCurrent?: boolean }): boolean {
     if (worktree.isCurrent) return true;
