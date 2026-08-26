@@ -130,24 +130,38 @@ pub async fn pop_stash(path: String, index: usize) -> Result<()> {
     Ok(())
 }
 
+/// The path a delta refers to, preferring the new side — a deletion only has an
+/// old side.
+fn delta_path(delta: &git2::DiffDelta<'_>) -> String {
+    delta
+        .new_file()
+        .path()
+        .or_else(|| delta.old_file().path())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 /// Append one diff's files (with per-file line counts) to `files`, returning
 /// that diff's total insertions and deletions.
 ///
-/// The per-file line map is built and applied per diff — the entries this diff
-/// contributed are `files[start..]` — so a path present in two diffs keeps two
-/// independent sets of counts.
-fn collect_diff_files(diff: &git2::Diff<'_>, files: &mut Vec<StashFile>) -> Result<(u32, u32)> {
+/// Deltas whose path is in `skip` are left out of both the file list and the
+/// returned totals. The per-file line map is built and applied per diff — the
+/// entries this diff contributed are `files[start..]` — so a path present in
+/// two diffs keeps two independent sets of counts.
+fn collect_diff_files(
+    diff: &git2::Diff<'_>,
+    skip: &std::collections::HashSet<String>,
+    files: &mut Vec<StashFile>,
+) -> Result<(u32, u32)> {
     let stats = diff.stats()?;
     let start = files.len();
 
     diff.foreach(
         &mut |delta, _| {
-            let file_path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let file_path = delta_path(&delta);
+            if skip.contains(&file_path) {
+                return true;
+            }
 
             let status = match delta.status() {
                 git2::Delta::Added => "added",
@@ -181,12 +195,7 @@ fn collect_diff_files(diff: &git2::Diff<'_>, files: &mut Vec<StashFile>) -> Resu
         None,
         None,
         Some(&mut |delta, _hunk, line| {
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let path = delta_path(&delta);
 
             let mut stats = file_stats.borrow_mut();
             let entry = stats.entry(path).or_insert((0, 0));
@@ -208,7 +217,18 @@ fn collect_diff_files(diff: &git2::Diff<'_>, files: &mut Vec<StashFile>) -> Resu
         }
     }
 
-    Ok((stats.insertions() as u32, stats.deletions() as u32))
+    // `diff.stats()` covers every delta, including the ones `skip` dropped, so
+    // take those files' lines back out before reporting this diff's totals.
+    let mut insertions = stats.insertions() as u32;
+    let mut deletions = stats.deletions() as u32;
+    for path in skip {
+        if let Some((adds, dels)) = file_stats.get(path) {
+            insertions = insertions.saturating_sub(*adds);
+            deletions = deletions.saturating_sub(*dels);
+        }
+    }
+
+    Ok((insertions, deletions))
 }
 
 /// Show stash contents
@@ -261,10 +281,26 @@ pub async fn stash_show(
     // capture has only two parents — hence the guard below. libgit2 also
     // writes an EMPTY third parent when untracked capture was
     // requested but nothing was untracked — which simply yields no deltas.
-    let mut diffs = vec![diff];
+    //
+    // One path can land in BOTH trees: stage a deletion of a tracked file and
+    // then recreate it on disk, and libgit2 records it in the worktree tree (as
+    // a modification of the committed version) AND in the untracked parent.
+    // Git itself refuses to preview such a stash at all ("worktree and
+    // untracked commit have duplicate entries"), but `git stash apply` restores
+    // the worktree copy and leaves the untracked one unused — so the worktree
+    // delta is the one that describes what applying actually produces. Report
+    // that row alone rather than emitting the same path twice and
+    // double-counting its lines in the totals.
+    let mut diffs: Vec<(git2::Diff<'_>, std::collections::HashSet<String>)> =
+        vec![(diff, std::collections::HashSet::new())];
     if stash_commit.parent_count() >= 3 {
         let untracked_tree = stash_commit.parent(2)?.tree()?;
-        diffs.push(repo.diff_tree_to_tree(None, Some(&untracked_tree), None)?);
+        let duplicates: std::collections::HashSet<String> =
+            diffs[0].0.deltas().map(|d| delta_path(&d)).collect();
+        diffs.push((
+            repo.diff_tree_to_tree(None, Some(&untracked_tree), None)?,
+            duplicates,
+        ));
     }
 
     // Collect file stats
@@ -274,8 +310,8 @@ pub async fn stash_show(
 
     // Get stats if requested (default true)
     if stat.unwrap_or(true) {
-        for diff in &diffs {
-            let (additions, deletions) = collect_diff_files(diff, &mut files)?;
+        for (diff, skip) in &diffs {
+            let (additions, deletions) = collect_diff_files(diff, skip, &mut files)?;
             total_additions += additions;
             total_deletions += deletions;
         }
@@ -284,8 +320,14 @@ pub async fn stash_show(
     // Generate patch if requested
     let patch_output = if patch.unwrap_or(false) {
         let mut patch_buf = Vec::new();
-        for diff in &diffs {
-            diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        for (diff, skip) in &diffs {
+            diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+                // Skip the duplicate-path deltas left out of the file list, so
+                // the patch shows the same set of files the stat does.
+                if !skip.is_empty() && skip.contains(&delta_path(&delta)) {
+                    return true;
+                }
+
                 // Add the origin character for context/add/delete lines
                 let origin = line.origin();
                 if origin == '+' || origin == '-' || origin == ' ' {
@@ -870,5 +912,58 @@ mod tests {
         assert_eq!(show.files.len(), 1, "unexpected files: {:?}", show.files);
         assert_eq!(show.files[0].path, "file.txt");
         assert_eq!(show.files[0].status, "modified");
+    }
+
+    #[tokio::test]
+    async fn test_stash_show_path_in_both_tracked_and_untracked_trees() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "dup.txt", "old line\n");
+
+        // Stage the file's deletion, then recreate it on disk. It is now
+        // untracked (gone from the index) while HEAD still has it, so libgit2
+        // records it in the worktree tree AND in the untracked parent.
+        std::fs::remove_file(repo.path.join("dup.txt")).unwrap();
+        let git_repo = repo.repo();
+        let mut index = git_repo.index().unwrap();
+        index.remove_path(std::path::Path::new("dup.txt")).unwrap();
+        index.write().unwrap();
+        repo.create_file("dup.txt", "brand new\ncontent\n");
+
+        create_stash(repo.path_str(), Some("Overlap".to_string()), Some(true))
+            .await
+            .unwrap()
+            .expect("expected a stash");
+
+        let show = stash_show(repo.path_str(), 0, Some(true), Some(true))
+            .await
+            .unwrap();
+
+        // One row, not two: `git stash apply` restores the worktree copy, so
+        // that is the delta the preview must describe.
+        let rows: Vec<&StashFile> = show.files.iter().filter(|f| f.path == "dup.txt").collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "duplicate rows for one path: {:?}",
+            show.files
+        );
+        assert_eq!(rows[0].status, "modified");
+        assert_eq!(rows[0].additions, 2);
+        assert_eq!(rows[0].deletions, 1);
+
+        // Totals count the file once — not the +4/-1 two independent diffs give.
+        assert_eq!(show.total_additions, 2);
+        assert_eq!(show.total_deletions, 1);
+
+        // The patch must not carry the file twice either.
+        let patch = show.patch.expect("patch requested");
+        assert_eq!(
+            patch.matches("diff --git a/dup.txt b/dup.txt").count(),
+            1,
+            "patch repeats the file: {}",
+            patch
+        );
+        assert!(patch.contains("-old line"), "patch: {}", patch);
+        assert!(patch.contains("+brand new"), "patch: {}", patch);
     }
 }
