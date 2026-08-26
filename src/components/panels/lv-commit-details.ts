@@ -649,9 +649,14 @@ export class LvCommitDetails extends LitElement {
   @state() private noteError: string | null = null;
   @state() private editingNote = false;
   @state() private noteDraft = '';
-  /** A note write (save or remove) is in flight — every note control is
-   *  disabled while it is, so a double click cannot issue two writes. */
-  @state() private noteBusy = false;
+  /**
+   * Commit+ref keys with a note write (save or remove) in flight. Keyed
+   * rather than a single flag: a write started against one commit must not
+   * leave the *next* commit's controls looking busy just because the user
+   * clicked away before it settled — only the write's own commit+ref is
+   * disabled, so a double click on it still cannot issue two writes.
+   */
+  @state() private busyNoteKeys: Set<string> = new Set();
   @state() private allNotes: GitNote[] = [];
   @state() private notesOverviewError: string | null = null;
   @state() private showNotesOverview = false;
@@ -798,6 +803,27 @@ export class LvCommitDetails extends LitElement {
     this.noteDrafts.delete(this.noteDraftKey(commitOid, notesRef));
   }
 
+  /** Whether the commit+ref currently on screen — not necessarily the one a
+   *  write was started against — has a write in flight. Every render and
+   *  guard checks this instead of a single flag, so switching commit or ref
+   *  while a write is still settling shows the new selection as idle. */
+  private get noteBusy(): boolean {
+    if (!this.commit) return false;
+    return this.busyNoteKeys.has(this.noteDraftKey(this.commit.oid, this.notesRef));
+  }
+
+  private setNoteBusy(commitOid: string, notesRef: string, busy: boolean): void {
+    const key = this.noteDraftKey(commitOid, notesRef);
+    if (this.busyNoteKeys.has(key) === busy) return;
+    const next = new Set(this.busyNoteKeys);
+    if (busy) {
+      next.add(key);
+    } else {
+      next.delete(key);
+    }
+    this.busyNoteKeys = next;
+  }
+
   /** Drop every trace of the previous repository's notes. */
   private resetNotesState(): void {
     this.notesRefs = [DEFAULT_NOTES_REF];
@@ -806,6 +832,10 @@ export class LvCommitDetails extends LitElement {
     this.notesOverviewError = null;
     this.showNotesOverview = false;
     this.noteDrafts.clear();
+    // A commit+ref key is not unique across repositories, so a write left in
+    // flight in the previous repo could otherwise be mistaken for one on the
+    // new repo's identically-keyed commit.
+    this.busyNoteKeys = new Set();
     this.resetNoteEditorState();
   }
 
@@ -1023,7 +1053,7 @@ export class LvCommitDetails extends LitElement {
       commitOid !== this.commit?.oid ||
       notesRef !== this.notesRef;
 
-    this.noteBusy = true;
+    this.setNoteBusy(commitOid, notesRef, true);
     this.noteError = null;
 
     try {
@@ -1060,7 +1090,7 @@ export class LvCommitDetails extends LitElement {
       if (isStale()) return;
       this.noteError = err instanceof Error ? err.message : 'Failed to save note';
     } finally {
-      this.noteBusy = false;
+      this.setNoteBusy(commitOid, notesRef, false);
     }
   }
 
@@ -1077,7 +1107,7 @@ export class LvCommitDetails extends LitElement {
 
     // Claimed before the confirm, not after: showConfirm is an IPC round trip,
     // so a claim taken afterwards would not serialize a double click.
-    this.noteBusy = true;
+    this.setNoteBusy(commitOid, notesRef, true);
     this.noteError = null;
 
     try {
@@ -1113,7 +1143,7 @@ export class LvCommitDetails extends LitElement {
       if (isStale()) return;
       this.noteError = err instanceof Error ? err.message : 'Failed to remove note';
     } finally {
-      this.noteBusy = false;
+      this.setNoteBusy(commitOid, notesRef, false);
     }
   }
 

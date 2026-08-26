@@ -494,6 +494,131 @@ describe('lv-commit-details notes section', () => {
     expect(showsEmptyState, 'the second commit keeps its own empty state').to.be.true;
   });
 
+  it('does not busy the commit the user moved to while a save is still in flight', async () => {
+    const el = await mount();
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note for the first commit');
+
+    // Park the save so it is still outstanding when the panel moves on.
+    const releaseSave = gate('set_note');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+
+    // `noteBusy` used to be one flag for the whole component, so the write
+    // in flight for the first commit left every control here disabled too —
+    // even though this commit has never been touched.
+    expect(
+      buttonWithText(el, 'Add note').disabled,
+      'the new commit\u2019s own controls must not be busied by someone else\u2019s write',
+    ).to.be.false;
+    const select = q<HTMLSelectElement>(el, '.notes-ref-select')!;
+    expect(select.disabled, 'the ref selector must not be busied either').to.be.false;
+
+    releaseSave();
+    await settle(el);
+  });
+
+  it('does not busy the commit the user moved to while a removal is still in flight', async () => {
+    notesByRef['refs/notes/commits'] = [
+      { commitOid: mockCommit.oid, message: 'Old note', notesRef: 'refs/notes/commits' },
+      { commitOid: otherCommit.oid, message: 'Other commit\u2019s note', notesRef: 'refs/notes/commits' },
+    ];
+    const el = await mount();
+
+    const releaseRemove = gate('remove_note');
+    buttonWithText(el, 'Remove').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+
+    // The second commit has its own note and must stay fully interactive
+    // while the first commit's removal is still settling.
+    expect(
+      buttonWithText(el, 'Edit').disabled,
+      'the new commit\u2019s Edit must not be busied by someone else\u2019s write',
+    ).to.be.false;
+    expect(
+      buttonWithText(el, 'Remove').disabled,
+      'the new commit\u2019s Remove must not be busied by someone else\u2019s write',
+    ).to.be.false;
+
+    releaseRemove();
+    await settle(el);
+  });
+
+  it('lets the user issue a save on the new commit while the previous commit\u2019s write is still settling', async () => {
+    const el = await mount();
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note for the first commit');
+
+    // Both calls below share this one gate — the point is not that they
+    // resolve independently, but that the second commit's save is not
+    // *blocked from being issued* by the first commit's write still sitting
+    // open, the way a single component-global busy flag would block it.
+    const releaseSave = gate('set_note');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note for the second commit');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    releaseSave();
+    await settle(el);
+
+    // Both writes reached the backend, each against its own commit.
+    const secondCall = invoked.find(
+      (c) => c.command === 'set_note' && c.args?.commitOid === otherCommit.oid,
+    );
+    expect(secondCall, 'the second commit\u2019s save must have been issued').to.not.be.undefined;
+    expect(secondCall!.args).to.include({ message: 'Note for the second commit' });
+    // The panel is still looking at the second commit, so its own write is
+    // the one reflected on screen.
+    expect(q(el, '.note-body')!.textContent).to.contain('Note for the second commit');
+  });
+
+  it('does not busy a commit whose write already finished after switching to a different ref', async () => {
+    notesRefs = ['refs/notes/commits', 'refs/notes/review'];
+    const el = await mount();
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note on the commits ref');
+
+    const releaseSave = gate('set_note');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    // Switch ref while the write against `refs/notes/commits` is still in
+    // flight. The panel now looks at `refs/notes/review` for the same
+    // commit, which has never been written to.
+    const select = q<HTMLSelectElement>(el, '.notes-ref-select')!;
+    select.value = 'refs/notes/review';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+
+    expect(
+      buttonWithText(el, 'Add note').disabled,
+      'the newly selected ref must not be busied by a write against the other ref',
+    ).to.be.false;
+
+    releaseSave();
+    await settle(el);
+  });
+
   it('surfaces a failure to list the notes in the ref', async () => {
     failingCommands.add('get_notes');
     const el = await mount();
