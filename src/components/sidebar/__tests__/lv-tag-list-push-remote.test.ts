@@ -48,6 +48,8 @@ interface PushCall {
 }
 
 let pushCalls: PushCall[] = [];
+/** When set, push_tag rejects with this instead of succeeding. */
+let pushFailure: { code: string; message: string } | null = null;
 /** The in-flight get_remotes call for the most recent context-menu open. */
 let remotesCall: Promise<unknown> | null = null;
 
@@ -68,6 +70,7 @@ async function createComponent(remotes: ReturnType<typeof remote>[] | 'fail'): P
     }
     if (command === 'push_tag') {
       pushCalls.push(args as PushCall);
+      if (pushFailure) return Promise.reject(pushFailure);
       return Promise.resolve(null);
     }
     return Promise.resolve(null);
@@ -122,6 +125,7 @@ describe('lv-tag-list push destination', () => {
   beforeEach(() => {
     const state = uiStore.getState();
     state.toasts.forEach((t) => state.removeToast(t.id));
+    pushFailure = null;
   });
 
   it('names the sole remote in the menu and pushes to it', async () => {
@@ -220,5 +224,103 @@ describe('lv-tag-list push destination', () => {
     );
     const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
     expect(toast!.message).to.equal('Pushed tag v1.0.0 to remote');
+  });
+
+  it('a push clicked before the remote read lands still asks which remote', async () => {
+    // The read is fired when the menu opens and the menu paints immediately,
+    // so a click can land first. Pushing then leaves the destination to the
+    // backend resolver — `origin` in a fork checkout — and the picker the menu
+    // was about to render is never offered.
+    pushCalls = [];
+    let landRemotes: (value: unknown) => void = () => undefined;
+    mockInvoke = (command: string, args?: unknown) => {
+      if (command === 'get_tags') return Promise.resolve([TAG]);
+      if (command === 'get_tag_sort_mode') return Promise.resolve('name');
+      if (command === 'get_remotes') {
+        return new Promise((resolvePending) => {
+          landRemotes = resolvePending;
+        });
+      }
+      if (command === 'push_tag') {
+        pushCalls.push(args as PushCall);
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    };
+
+    const el = await fixture<LvTagList>(
+      html`<lv-tag-list .repositoryPath=${REPO_PATH}></lv-tag-list>`
+    );
+    await el.updateComplete;
+    await waitUntil(
+      () => el.shadowRoot!.querySelector('.tag-item') !== null,
+      'the tag row to render'
+    );
+
+    el.shadowRoot!
+      .querySelector('.tag-item')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    await el.updateComplete;
+    await waitUntil(() => pushItem(el) !== undefined, 'the push menu item');
+
+    pushItem(el)!.click();
+    await el.updateComplete;
+    expect(pushCalls, 'nothing is pushed while the destination is unknown').to.have.length(0);
+
+    landRemotes([remote('origin'), remote('upstream')]);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect(pushCalls, 'the waiting click resolves into the picker, not a push')
+      .to.have.length(0);
+    const choices = Array.from(
+      el.shadowRoot!.querySelectorAll('.push-remote-item')
+    ) as HTMLButtonElement[];
+    expect(choices.map((b) => b.textContent!.trim())).to.deep.equal(['origin', 'upstream']);
+
+    choices[1].click();
+    await waitUntil(() => pushCalls.length === 1, 'push_tag to be invoked');
+    expect(pushCalls[0].remote).to.equal('upstream');
+  });
+
+  it('a rejected push offers a force retry to the same remote it was aimed at', async () => {
+    // Without the remote the retry re-resolves the destination and force-moves
+    // the tag on `origin` — a destructive write to a remote the user never
+    // aimed at, reported as success.
+    pushFailure = {
+      code: 'COMMAND_ERROR',
+      message: 'cannot push non-fastforwardable reference',
+    };
+    const el = await createComponent([remote('origin'), remote('upstream')]);
+    await openMenu(el);
+
+    pushItem(el)!.click();
+    await el.updateComplete;
+    const choices = Array.from(
+      el.shadowRoot!.querySelectorAll('.push-remote-item')
+    ) as HTMLButtonElement[];
+    choices[1].click();
+    await waitUntil(() => pushCalls.length === 1, 'push_tag to be invoked');
+    expect(pushCalls[0].remote).to.equal('upstream');
+
+    await waitUntil(
+      () => uiStore.getState().toasts.some((t) => t.action?.label === 'Force Push Tag'),
+      'the force-retry action'
+    );
+    const toast = uiStore.getState().toasts.find((t) => t.action?.label === 'Force Push Tag');
+
+    let detail: { tagName?: string; remote?: string } | null = null;
+    const handler = (e: Event): void => {
+      detail = (e as CustomEvent<{ tagName?: string; remote?: string }>).detail;
+    };
+    window.addEventListener('force-push-tag', handler);
+    try {
+      toast!.action!.callback();
+    } finally {
+      window.removeEventListener('force-push-tag', handler);
+    }
+    expect(detail!.tagName).to.equal('v1.0.0');
+    expect(detail!.remote, 'the retry goes back to the remote the user picked')
+      .to.equal('upstream');
   });
 });

@@ -351,6 +351,13 @@ export class LvTagList extends LitElement {
    * behaviour and lets the backend resolve the push destination.
    */
   @state() private remotes: Remote[] | null = null;
+  /**
+   * The remote read for the open context menu, while it is still in flight.
+   *
+   * A Push click that lands before it resolves waits for it, rather than
+   * pushing to whatever the backend resolves.
+   */
+  private remotesLoad: Promise<void> | null = null;
   /** The multi-remote push item's sub-list is open. */
   @state() private pushRemotesExpanded = false;
   /**
@@ -660,8 +667,9 @@ export class LvTagList extends LitElement {
     };
     this.pushRemotesExpanded = false;
     // Re-read on every open, so a remote just added or renamed in the Remote
-    // dialog labels the menu correctly without a reload.
-    void this.loadRemotes();
+    // dialog labels the menu correctly without a reload. Kept, not discarded:
+    // a Push click landing before it resolves awaits it.
+    this.remotesLoad = this.loadRemotes();
   }
 
   /**
@@ -847,10 +855,31 @@ export class LvTagList extends LitElement {
   private async handlePushTag(remote?: string): Promise<void> {
     const tag = this.contextMenu.tag;
     if (!tag) return;
+
+    let destination = remote;
+    // The menu opened and was clicked before its remote read landed. Pushing
+    // now would leave the destination to the backend resolver — on a fork
+    // checkout that is `origin`, and the picker the menu was about to render
+    // would never be offered. Wait for the answer instead.
+    // Captured as a boolean so the check below does not narrow the field: it
+    // is re-read after the await, and the narrowing would survive it.
+    const destinationUnknown = this.remotes === null;
+    if (destination === undefined && destinationUnknown && this.remotesLoad) {
+      await this.remotesLoad;
+      // Dismissed, or moved to another tag, while waiting.
+      if (!this.contextMenu.visible || this.contextMenu.tag !== tag) return;
+      if ((this.remotes?.length ?? 0) > 1) {
+        // Ask, exactly as a click landing after the read would have.
+        this.pushRemotesExpanded = true;
+        return;
+      }
+      if (this.remotes?.length === 1) destination = this.remotes[0].name;
+    }
+
     // A repo with no remote cannot push a tag anywhere. The backend's answer —
     // "Remote not found: origin" — names a remote the user never configured,
     // which reads as a bug rather than as missing setup.
-    if (remote === undefined && this.remotes?.length === 0) {
+    if (destination === undefined && this.remotes?.length === 0) {
       this.contextMenu = { ...this.contextMenu, visible: false };
       showToast('No remotes configured. Add a remote before pushing tags.', 'error');
       return;
@@ -881,13 +910,15 @@ export class LvTagList extends LitElement {
         name: tag.name,
         // Omitted, not undefined: the backend resolver only runs when the key
         // is absent, and git.service's allowlist/token lookups key off it too.
-        ...(remote ? { remote } : {}),
+        ...(destination ? { remote: destination } : {}),
       });
 
       if (result.success) {
         await this.loadTags();
         showToast(
-          remote ? `Pushed tag ${tag.name} to ${remote}` : `Pushed tag ${tag.name} to remote`,
+          destination
+            ? `Pushed tag ${tag.name} to ${destination}`
+            : `Pushed tag ${tag.name} to remote`,
           'success',
         );
         this.dispatchEvent(new CustomEvent('tags-changed', {
@@ -905,6 +936,9 @@ export class LvTagList extends LitElement {
           // suggestion renders a button that dispatches an undefined target.
           branchName: tag.name,
           repoPath,
+          // And the destination: a force retry that re-resolved it would move
+          // the tag on a remote the user never aimed at.
+          remote: destination,
         });
       }
     } finally {

@@ -8,6 +8,7 @@ import {
   waitForCommand,
   injectCommandError,
   injectCommandMock,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -645,5 +646,38 @@ test.describe('Tag Context Menu - Push destination', () => {
 
     const toast = page.locator('lv-toast-container .toast');
     await expect(toast.first()).toContainText('Pushed tag v1.0.0 to upstream');
+  });
+
+  test('the force retry goes back to the remote the rejected push was aimed at', async ({
+    page,
+  }) => {
+    // The rejected push was aimed at upstream. A retry that re-resolved the
+    // destination would force-move the tag on origin — a destructive write to
+    // the canonical repo — and report it as success.
+    await autoConfirmDialogs(page);
+    await injectCommandError(page, 'push_tag', 'cannot push non-fastforwardable reference');
+    await leftPanel.expandTags();
+
+    const tag = leftPanel.getTag('v1.0.0');
+    await tag.click({ button: 'right' });
+
+    await clickMenuItem(page.locator('.context-menu-item', { hasText: /Push to Remote/ }));
+    await clickMenuItem(page.locator('.push-remote-item', { hasText: /^\s*upstream\s*$/ }));
+
+    const forceAction = page.locator('lv-toast-container .toast button', {
+      hasText: /Force Push Tag/,
+    });
+    await expect(forceAction).toBeVisible();
+    await forceAction.click();
+
+    await page.waitForFunction(
+      () =>
+        ((window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+          .__INVOKED_COMMANDS__ ?? []).filter((c) => c.command === 'push_tag').length === 2
+    );
+    const pushCommands = await findCommand(page, 'push_tag');
+    const retry = pushCommands[1].args as { remote?: string; force?: boolean };
+    expect(retry.force).toBe(true);
+    expect(retry.remote).toBe('upstream');
   });
 });
