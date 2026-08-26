@@ -513,6 +513,30 @@ describe('lv-analytics-panel', () => {
       expect(firstStatValue(el)).to.equal('143');
     });
 
+    it('defers the reload when the tab is hidden inside the debounce window', async () => {
+      const el = await renderPanel();
+      expect(firstStatValue(el)).to.equal('142');
+
+      clearHistory();
+      setupDefaultMocks(UPDATED_STATS);
+      // Refresh arrives while Analytics is up, then the user switches tab
+      // before the debounce elapses.
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      el.active = false;
+      await settleRefresh(el);
+
+      // The walk must not run behind a hidden tab.
+      expect(findCommands('get_repo_statistics').length).to.equal(0);
+      expect(firstStatValue(el)).to.equal('142');
+
+      // ...and it must not be forgotten either.
+      el.active = true;
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+      expect(firstStatValue(el)).to.equal('143');
+    });
+
     it('re-fetches statistics when the Overview refresh button is clicked', async () => {
       const el = await renderPanel();
 

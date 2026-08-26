@@ -422,6 +422,10 @@ export class LvAnalyticsPanel extends LitElement {
     this.clearPendingReload();
     this.refreshTimeout = setTimeout(() => {
       this.refreshTimeout = null;
+      // The tab can be hidden inside the debounce window. Bail out and leave
+      // `needsReload` set, so `updated()` re-schedules the walk when Analytics
+      // comes back rather than paying for it behind a hidden tab.
+      if (!this.active) return;
       void this.loadStats();
     }, LvAnalyticsPanel.REFRESH_DEBOUNCE_MS);
   }
