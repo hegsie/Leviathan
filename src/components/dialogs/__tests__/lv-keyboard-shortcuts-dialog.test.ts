@@ -24,6 +24,7 @@ const mockInvoke: MockInvoke = () => Promise.resolve(null);
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
 import { keyboardService } from '../../../services/keyboard.service.ts';
+import { resetOverlayStack } from '../../../utils/overlay-stack.ts';
 import type { LvKeyboardShortcutsDialog } from '../lv-keyboard-shortcuts-dialog.ts';
 import '../lv-keyboard-shortcuts-dialog.ts';
 
@@ -47,8 +48,10 @@ async function openDialog(): Promise<LvKeyboardShortcutsDialog> {
 
 describe('lv-keyboard-shortcuts-dialog recording mode', () => {
   afterEach(() => {
-    // Never leave the service disabled for the next test.
+    // Never leave the service disabled — or an overlay registered — for the
+    // next test.
     keyboardService.setEnabled(true);
+    resetOverlayStack();
   });
 
   it('does not run a shortcut while capturing its replacement', async () => {
@@ -91,6 +94,13 @@ describe('lv-keyboard-shortcuts-dialog recording mode', () => {
       internalOf(el).cancelEditing();
       await el.updateComplete;
 
+      // The assertion is that cancelEditing re-enabled the service. The dialog
+      // has to be closed to see it: an open dialog now blocks plain keys on
+      // purpose, so that reading "S — Stage all changes" and pressing S does
+      // not stage the working tree.
+      el.open = false;
+      await el.updateComplete;
+
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
 
       expect(fired, 'shortcuts work again after cancelling').to.equal(1);
@@ -123,6 +133,33 @@ describe('lv-keyboard-shortcuts-dialog recording mode', () => {
       expect(fired, 'shortcuts must survive a mid-recording teardown').to.equal(1);
     } finally {
       keyboardService.unregister('test-teardown');
+    }
+  });
+
+  // The finding: the dialog silenced the service only while RECORDING. Merely
+  // reading the shortcut list and trying a key ran it — on the one screen
+  // built for pressing keys to see what they do.
+  it('does not run a plain-key shortcut while the dialog is merely open', async () => {
+    let fired = 0;
+    keyboardService.register('test-merely-open', {
+      key: 'y',
+      action: () => { fired++; },
+      description: 'destructive probe',
+      category: 'Test',
+    });
+
+    const el = await openDialog();
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'no shortcut may run behind the open dialog').to.equal(0);
+
+      el.open = false;
+      await el.updateComplete;
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'and it works again once the dialog closes').to.equal(1);
+    } finally {
+      keyboardService.unregister('test-merely-open');
     }
   });
 });
