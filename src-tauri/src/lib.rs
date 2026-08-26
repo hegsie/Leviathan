@@ -789,11 +789,6 @@ pub fn run() {
             commands::clipboard::copy_to_clipboard,
             commands::clipboard::get_commit_info_for_copy,
             commands::clipboard::get_file_path_for_copy,
-            // Keyboard shortcuts
-            commands::shortcuts::get_keyboard_shortcuts,
-            commands::shortcuts::set_keyboard_shortcut,
-            commands::shortcuts::reset_keyboard_shortcuts,
-            commands::shortcuts::get_default_shortcuts,
             // Commit message validation
             commands::validation::validate_commit_message,
             commands::validation::get_commit_message_rules,

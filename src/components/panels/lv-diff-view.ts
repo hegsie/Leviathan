@@ -934,8 +934,26 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
       .diff-virtualized-container {
         overflow: auto;
-        height: 100%;
+        flex: 1;
+        min-height: 0;
         position: relative;
+      }
+
+      .virtual-hunk-header {
+        align-items: center;
+        color: var(--color-text-muted);
+        font-style: italic;
+      }
+
+      .virtual-hunk-header .hunk-actions {
+        margin-left: var(--spacing-sm);
+      }
+
+      .virtual-hunk-header .stage-btn {
+        box-sizing: border-box;
+        height: 16px;
+        padding: 0 6px;
+        font-size: 10px;
       }
     `,
   ];
@@ -2132,7 +2150,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     const offsetY = range.startLine * DIFF_LINE_HEIGHT;
 
     return html`
-      <div class="diff-virtualized-container"
+      <div class="diff-virtualized-container ${this.lineSelectionMode ? 'line-selection-mode' : ''}"
            @scroll=${this.handleDiffScroll}>
         ${this.flatLines.length > 10000 ? html`
           <div class="large-diff-info">
@@ -2141,35 +2159,78 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ` : nothing}
         <div style="height: ${contentHeight}px; position: relative;">
           <div style="position: absolute; top: ${offsetY}px; left: 0; right: 0;">
-            ${visibleItems.map(item => {
-              if (item.type === 'hunk-header') {
-                return html`
-                  <div class="line" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
-                    <div class="line-numbers">
-                      <span class="line-no old"></span>
-                      <span class="line-no new"></span>
-                    </div>
-                    <span class="line-origin"></span>
-                    <span class="line-content" style="color: var(--color-text-muted); font-style: italic;">${item.header}</span>
-                  </div>
-                `;
-              }
-              const line = item.line!;
-              const lineClass = this.getLineClass(line.origin);
-              const originChar = this.getOriginChar(line.origin);
-              return html`
-                <div class="line ${lineClass}" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
-                  <div class="line-numbers">
-                    <span class="line-no old">${line.oldLineNo ?? ''}</span>
-                    <span class="line-no new">${line.newLineNo ?? ''}</span>
-                  </div>
-                  <span class="line-origin">${originChar}</span>
-                  <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
-                </div>
-              `;
-            })}
+            ${visibleItems.map((item) => this.renderVirtualizedItem(item))}
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Render one row of the virtualized diff. Rows carry the same staging
+   * affordances as the hunk view (per-hunk Stage/Unstage buttons, line
+   * checkboxes, context menu) so that "Load full diff" on a huge file does not
+   * drop the user into a read-only view. Every row must stay exactly
+   * DIFF_LINE_HEIGHT tall or the virtual scroll offsets drift.
+   */
+  private renderVirtualizedItem(item: FlatDiffItem): TemplateResult {
+    const hunk = this.diff?.hunks[item.hunkIndex];
+
+    if (item.type === 'hunk-header') {
+      return html`
+        <div class="line virtual-hunk-header" style="height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
+          <div class="line-numbers">
+            <span class="line-no old"></span>
+            <span class="line-no new"></span>
+          </div>
+          <span class="line-origin"></span>
+          <span class="line-content">${item.header}</span>
+          ${hunk
+            ? html`<div class="hunk-actions">${this.renderHunkActions(hunk, item.hunkIndex)}</div>`
+            : nothing}
+        </div>
+      `;
+    }
+
+    const line = item.line!;
+    const lineIndex = item.lineIndex!;
+    const lineClass = this.getLineClass(line.origin);
+    const originChar = this.getOriginChar(line.origin);
+    const isSelectable = line.origin === 'addition' || line.origin === 'deletion';
+    const isSelected = this.isLineSelected(item.hunkIndex, lineIndex);
+
+    return html`
+      <div
+        class="line ${lineClass} ${isSelected ? 'selected' : ''}"
+        style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;"
+        @contextmenu=${(e: MouseEvent) => {
+          if (hunk) this.handleLineContextMenu(e, line, hunk);
+        }}
+        @click=${(e: MouseEvent) => {
+          if (this.lineSelectionMode && isSelectable) {
+            e.preventDefault();
+            this.toggleLineSelection(item.hunkIndex, lineIndex, line);
+          }
+        }}
+      >
+        ${this.lineSelectionMode && isSelectable ? html`
+          <input
+            type="checkbox"
+            class="line-checkbox"
+            .checked=${isSelected}
+            @change=${(e: Event) => {
+              e.stopPropagation();
+              this.toggleLineSelection(item.hunkIndex, lineIndex, line);
+            }}
+            @click=${(e: Event) => e.stopPropagation()}
+          />
+        ` : nothing}
+        <div class="line-numbers">
+          <span class="line-no old">${line.oldLineNo ?? ''}</span>
+          <span class="line-no new">${line.newLineNo ?? ''}</span>
+        </div>
+        <span class="line-origin">${originChar}</span>
+        <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
       </div>
     `;
   }
@@ -2309,11 +2370,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   /**
-   * Select All + Stage/Unstage buttons, shared by the unified and split hunk
-   * separators so both views offer the same hunk staging affordances.
+   * Stage/unstage (and, in line-selection mode, Select All) actions for one hunk.
+   * Shared by the unified, split and virtualized hunk separators so that every
+   * view offers the same staging affordances instead of becoming a read-only
+   * dead end.
    */
   private renderHunkActions(hunk: DiffHunk, hunkIndex: number) {
-    const isStaged = this.file?.isStaged ?? false;
+    // Only working-directory diffs can be staged (not commit diffs).
+    if (this.file === null || this.commitFile) return nothing;
+    const isStaged = this.file.isStaged;
 
     return html`
       ${this.lineSelectionMode ? html`
@@ -2597,12 +2662,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   /**
-   * Actions for the current line selection. Rendered above the view switch so
-   * a selection stays actionable in both the unified and the split view.
+   * Bulk stage/unstage bar for the current line selection. Rendered once in
+   * `render()`, above the view switch, so a selection stays actionable in the
+   * unified, split and virtualized views alike.
    */
   private renderSelectionActions() {
     if (!this.lineSelectionMode || this.selectedLines.size === 0) return nothing;
-
     const isStaged = this.file?.isStaged ?? false;
 
     return html`
