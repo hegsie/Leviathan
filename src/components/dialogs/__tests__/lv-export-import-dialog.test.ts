@@ -137,13 +137,14 @@ function lastToast(): { type: string; message: string } | undefined {
 
 async function openDialogAt(
   opts: ExportImportOpenOptions,
+  commits: Commit[] = COMMITS,
 ): Promise<LvExportImportDialog> {
   const el = await fixture<LvExportImportDialog>(html`
     <lv-export-import-dialog
       .repositoryPath=${REPO_PATH}
       .branches=${BRANCHES}
       .tags=${TAGS}
-      .commits=${COMMITS}
+      .commits=${commits}
     ></lv-export-import-dialog>
   `);
   el.open(opts);
@@ -166,6 +167,11 @@ function modalOf(el: LvExportImportDialog): LvModal {
 
 async function click(el: LvExportImportDialog, selector: string): Promise<void> {
   q<HTMLButtonElement>(el, selector).click();
+  await settle(el);
+}
+
+/** Let a pending answer land and the dialog re-render on it. */
+async function settle(el: LvExportImportDialog): Promise<void> {
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
@@ -281,6 +287,35 @@ describe('lv-export-import-dialog', () => {
         outputPath: '/tmp/patches',
       });
       expect(lastToast()?.type).to.equal('success');
+    });
+
+    it('breaks a commit-time tie with graph order, never child before parent', async () => {
+      // Git stamps commit times to the second, so a parent and the child made
+      // right after it routinely share one. Timestamp alone cannot order them,
+      // and a stable sort would leave them in the order they were ticked.
+      const TIED_CHILD = '5'.repeat(40);
+      const TIED_PARENT = '4'.repeat(40);
+      const tied = [
+        makeCommit(TIED_CHILD, 'child change', 500),
+        makeCommit(TIED_PARENT, 'parent change', 500),
+      ];
+      dialogOpenResult = '/tmp/patches';
+      const el = await openDialogAt({ tab: 'patch', patchMode: 'create' }, tied);
+
+      // Ticked newest-first, exactly how the list reads top to bottom.
+      q<HTMLInputElement>(el, `input[data-oid="${TIED_CHILD}"]`).click();
+      await el.updateComplete;
+      q<HTMLInputElement>(el, `input[data-oid="${TIED_PARENT}"]`).click();
+      await el.updateComplete;
+
+      await click(el, '[data-testid="patch-create"]');
+
+      // Parent first, or `git am` cannot replay the series.
+      expect(argsOf('create_patch')).to.deep.equal({
+        path: REPO_PATH,
+        commitOids: [TIED_PARENT, TIED_CHILD],
+        outputPath: '/tmp/patches',
+      });
     });
 
     it('pre-checks the commit it was deep-linked from', async () => {
@@ -452,6 +487,47 @@ describe('lv-export-import-dialog', () => {
       const warn = q<HTMLElement>(el, '[data-testid="bundle-unimportable"]');
       expect(warn.textContent).to.contain('prerequisite');
       expect(warn.textContent).to.contain('f'.repeat(40));
+    });
+
+    it('ignores a late inspection for a bundle that is no longer the chosen one', async () => {
+      // The Choose button stays live while an inspection runs, so a second
+      // pick can overtake the first. The first bundle's verdict must not be
+      // shown for — or unlock Import on — the bundle chosen after it.
+      const settleVerify: Array<(v: unknown) => void> = [];
+      overrides['bundle_verify'] = () =>
+        new Promise((resolve) => {
+          settleVerify.push(resolve);
+        });
+
+      dialogOpenResult = '/tmp/stale.bundle';
+      const el = await openDialogAt({ tab: 'bundle', bundleMode: 'import' });
+      await click(el, '[data-testid="bundle-choose-file"]');
+
+      dialogOpenResult = '/tmp/current.bundle';
+      await click(el, '[data-testid="bundle-choose-file"]');
+
+      expect(settleVerify).to.have.length(2);
+
+      // The bundle chosen second answers first: it cannot be applied here.
+      settleVerify[1]({
+        isValid: false,
+        refs: BUNDLE_HEADS,
+        requires: ['f'.repeat(40)],
+        message: 'repository lacks these prerequisite commits',
+      });
+      await settle(el);
+
+      // The bundle chosen first answers late, and says it is applicable.
+      settleVerify[0]({ isValid: true, refs: BUNDLE_HEADS, requires: [], message: null });
+      await settle(el);
+
+      expect(q<HTMLElement>(el, '[data-testid="chosen-bundle-file"]').textContent?.trim()).to.equal(
+        '/tmp/current.bundle',
+      );
+      expect(q<HTMLButtonElement>(el, '[data-testid="bundle-import"]').disabled).to.be.true;
+      expect(q<HTMLElement>(el, '[data-testid="bundle-unimportable"]').textContent).to.contain(
+        'prerequisite',
+      );
     });
 
     it('import dispatches bundle-imported with the pinned path and toasts the ref count', async () => {

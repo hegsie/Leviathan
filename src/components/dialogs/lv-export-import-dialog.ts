@@ -289,6 +289,10 @@ export class LvExportImportDialog extends LitElement {
   @state() private bundleHeads: BundleRef[] = [];
   @state() private bundleVerifyResult: BundleVerifyResult | null = null;
   @state() private bundleInspecting = false;
+  /** Bumped for every bundle inspection. A slow answer for the file that was
+   * chosen first must not land on the file that is chosen now, or a stale
+   * `isValid` would enable Import for a bundle nobody verified. */
+  private bundleInspectSeq = 0;
 
   @query('lv-modal') private modal!: LvModal;
 
@@ -365,6 +369,9 @@ export class LvExportImportDialog extends LitElement {
     this.bundleHeads = [];
     this.bundleVerifyResult = null;
     this.bundleInspecting = false;
+    // An inspection still in flight from the previous open must not report
+    // into the freshly reset dialog.
+    this.bundleInspectSeq++;
   }
 
   /** Cancel / × / Escape / overlay all honour the same rule. */
@@ -519,10 +526,22 @@ export class LvExportImportDialog extends LitElement {
     // hands commits over NEWEST-first, so passing the selection through in
     // list order would number the series backwards and make `git am` replay
     // it in reverse. Order by commit time, oldest first.
-    const byOid = new Map(this.commits.map((c) => [c.oid, c]));
-    const oids = [...this.selectedCommits].sort(
-      (a, b) => (byOid.get(a)?.timestamp ?? 0) - (byOid.get(b)?.timestamp ?? 0),
+    //
+    // Commit times are second-resolution, so a parent and its child can carry
+    // the SAME timestamp (scripted or rapid-fire history). Sort is stable, so
+    // those would keep the order they were ticked in and could number a child
+    // before its parent, which `git am` cannot replay. Fall back to graph
+    // order, which is newest-first, so an ancestor always wins the tie.
+    const order = new Map(
+      this.commits.map((c, i) => [c.oid, { timestamp: c.timestamp, index: i }]),
     );
+    const oids = [...this.selectedCommits].sort((a, b) => {
+      const ea = order.get(a);
+      const eb = order.get(b);
+      const byTime = (ea?.timestamp ?? 0) - (eb?.timestamp ?? 0);
+      if (byTime !== 0) return byTime;
+      return (eb?.index ?? Number.MAX_SAFE_INTEGER) - (ea?.index ?? Number.MAX_SAFE_INTEGER);
+    });
 
     this.operationRunning = true;
     this.error = '';
@@ -687,6 +706,10 @@ export class LvExportImportDialog extends LitElement {
     this.bundleVerifyResult = null;
     this.bundleInspecting = true;
     this.error = '';
+    // The Choose button stays live while this runs, so the user can pick a
+    // second bundle before the first answer arrives. Only the newest request
+    // is allowed to write the heads / verify result the Import button reads.
+    const seq = ++this.bundleInspectSeq;
     try {
       // Two separate questions: what the bundle CONTAINS (readable even when
       // this repo lacks the prerequisites) and whether it can be APPLIED here.
@@ -694,6 +717,7 @@ export class LvExportImportDialog extends LitElement {
         gitService.bundleListHeads(file),
         gitService.bundleVerify(this.pinnedRepoPath, file),
       ]);
+      if (seq !== this.bundleInspectSeq) return;
       if (heads.success) {
         this.bundleHeads = heads.data ?? [];
       } else {
@@ -705,9 +729,12 @@ export class LvExportImportDialog extends LitElement {
         this.error = verify.error?.message ?? 'Failed to verify the bundle';
       }
     } catch (err) {
+      if (seq !== this.bundleInspectSeq) return;
       this.error = err instanceof Error ? err.message : 'Failed to read the bundle';
     } finally {
-      this.bundleInspecting = false;
+      // A superseded request must leave the spinner alone — the newer one owns
+      // it and is still running.
+      if (seq === this.bundleInspectSeq) this.bundleInspecting = false;
     }
   }
 
