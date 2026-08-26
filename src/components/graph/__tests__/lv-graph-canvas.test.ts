@@ -2096,3 +2096,110 @@ describe('lv-graph-canvas commit-size setting', () => {
     expect(renderer.config.scaleNodesByCommitSize).to.be.false;
   });
 });
+
+describe('lv-graph-canvas SVG export node sizing', () => {
+  type CanvasInternals = {
+    exportAsSvg(): void;
+    renderer: {
+      config: { nodeRadius: number };
+      setCommitStats(stats: Map<string, { additions: number; deletions: number; filesChanged: number }>): void;
+    };
+  };
+
+  beforeEach(() => {
+    clearHistory();
+    setupDefaultMocks();
+    try {
+      localStorage.removeItem('leviathan-graph-zoom');
+      localStorage.removeItem('leviathan-graph-optional-columns');
+    } catch {
+      // Ignore
+    }
+  });
+
+  afterEach(() => {
+    settingsStore.getState().setShowCommitSize(true);
+  });
+
+  /**
+   * Run the SVG export and return the generated markup. The download is
+   * neutralised so the test never navigates.
+   */
+  async function captureSvgExport(el: LvGraphCanvas): Promise<string> {
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    let captured: Blob | null = null;
+
+    URL.createObjectURL = ((blob: Blob) => {
+      captured = blob;
+      return 'blob:stub';
+    }) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL;
+    HTMLAnchorElement.prototype.click = () => {};
+
+    try {
+      (el as unknown as CanvasInternals).exportAsSvg();
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      HTMLAnchorElement.prototype.click = originalClick;
+    }
+
+    return captured ? await (captured as Blob).text() : '';
+  }
+
+  function circleRadii(svg: string): number[] {
+    return [...svg.matchAll(/<circle [^>]*\br="([\d.]+)"/g)].map((m) => Number(m[1]));
+  }
+
+  /** A large commit and a tiny one, so scaled radii must differ. */
+  function statsFor(oids: string[]): Map<string, { additions: number; deletions: number; filesChanged: number }> {
+    const stats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
+    stats.set(oids[0], { additions: 5000, deletions: 5000, filesChanged: 40 });
+    return stats;
+  }
+
+  it('scales SVG node radii by commit size like the on-screen graph', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+    internals.renderer.setCommitStats(statsFor(defaultCommits.map((c) => c.oid)));
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    // 10000 changes maps to the renderer's maxNodeRadius
+    expect(radii).to.include(10);
+    expect(radii.some((r) => r !== baseRadius)).to.be.true;
+  });
+
+  it('uses uniform SVG node radii when Show Commit Size is off', async () => {
+    settingsStore.getState().setShowCommitSize(false);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+    internals.renderer.setCommitStats(statsFor(defaultCommits.map((c) => c.oid)));
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    expect(radii.every((r) => r === baseRadius)).to.be.true;
+  });
+
+  it('falls back to the base radius for commits with no stats', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    expect(radii.every((r) => r === baseRadius)).to.be.true;
+  });
+});

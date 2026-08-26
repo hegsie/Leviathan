@@ -634,9 +634,10 @@ export class CanvasRenderer {
   }
 
   /**
-   * Get node radius based on commit stats (if available)
+   * Get node radius based on commit stats (if available).
+   * Public so the SVG export can draw the same node sizes as the canvas.
    */
-  private getNodeRadius(oid: string): number {
+  public getNodeRadius(oid: string): number {
     if (!this.config.scaleNodesByCommitSize) {
       return this.config.nodeRadius;
     }

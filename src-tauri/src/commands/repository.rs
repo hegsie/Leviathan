@@ -776,23 +776,34 @@ pub async fn init_repository(
     let mut opts = git2::RepositoryInitOptions::new();
     opts.bare(bare.unwrap_or(false));
 
-    // libgit2 writes `ref: refs/heads/<name>` into HEAD verbatim and validates
-    // nothing, so a bad name here would produce a repository git itself cannot
-    // use. Reject it before anything is created on disk. An absent or blank
-    // value leaves initial_head unset so libgit2 keeps honouring the user's
+    // libgit2 writes the initial_head into HEAD verbatim and validates nothing,
+    // so a bad name here would produce a repository git itself cannot use.
+    // Reject it before anything is created on disk. An absent or blank value
+    // leaves initial_head unset so libgit2 keeps honouring the user's
     // `init.defaultBranch` git config.
     if let Some(branch) = initial_branch
         .as_deref()
         .map(str::trim)
         .filter(|b| !b.is_empty())
     {
-        if !git2::Reference::is_valid_name(&format!("refs/heads/{}", branch)) {
+        // libgit2 only prefixes `refs/heads/` when the name does NOT already
+        // start with `refs/` — otherwise it uses it verbatim. Validating
+        // `refs/heads/{branch}` unconditionally would therefore check a
+        // different ref than the one written: `refs/tags/v1` would pass and
+        // then point HEAD outside the branch namespace. Build the exact ref
+        // libgit2 will use, require it to be a branch, and pass that.
+        let full_ref = if branch.starts_with("refs/") {
+            branch.to_string()
+        } else {
+            format!("refs/heads/{}", branch)
+        };
+        if !full_ref.starts_with("refs/heads/") || !git2::Reference::is_valid_name(&full_ref) {
             return Err(LeviathanError::Custom(format!(
                 "Invalid initial branch name: {}",
                 branch
             )));
         }
-        opts.initial_head(branch);
+        opts.initial_head(&full_ref);
     }
 
     let repo = git2::Repository::init_opts(path, &opts)?;
@@ -1299,6 +1310,51 @@ mod tests {
             !name.is_empty() && name.trim() == name,
             "bad branch: {name:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_rejects_non_branch_ref_as_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("tag-ref-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // libgit2 uses a `refs/`-prefixed initial_head verbatim, so this would
+        // otherwise write `ref: refs/tags/v1` into HEAD and point the new
+        // repository at the tag namespace.
+        let result = init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/tags/v1".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a non-branch ref must be rejected");
+        assert!(
+            err.to_string().contains("Invalid initial branch name"),
+            "unexpected error: {}",
+            err
+        );
+        // Validation runs before anything is created on disk.
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_accepts_fully_qualified_branch_ref() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("qualified-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // A fully qualified branch ref must not be double-prefixed into
+        // `refs/heads/refs/heads/trunk`.
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/heads/trunk".to_string()),
+        )
+        .await
+        .expect("a fully qualified branch ref should be accepted");
+
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
     }
 
     #[tokio::test]

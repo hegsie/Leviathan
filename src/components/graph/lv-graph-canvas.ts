@@ -3112,11 +3112,14 @@ export class LvGraphCanvas extends LitElement {
       const color = theme.laneColors[node.colorIndex % theme.laneColors.length];
       const commit = this.realCommits.get(node.oid);
       const isMerge = commit && commit.parentIds.length > 1;
+      // Reuse the renderer's radius so the export matches what is on screen,
+      // including the "Show Commit Size" setting
+      const radius = this.renderer?.getNodeRadius(node.oid) ?? this.NODE_RADIUS;
 
       if (isMerge) {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
       } else {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${color}"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${color}"/>`);
       }
 
       // Add commit message text
