@@ -285,15 +285,45 @@ pub async fn delete_remote_tag(
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut push_opts = credentials_service::get_push_options(token);
+    let mut push_opts = credentials_service::get_push_options(token.clone());
+
+    // githooks(5) zeroes only the LOCAL side of a deletion line; the remote
+    // object name stays the value the remote advertised. Sending zeros there
+    // told a tag-protection hook the tag did not exist on the remote, so a
+    // hook guarding published tags failed open on the one operation it exists
+    // to stop. Read the advertisement first, the way git does.
+    let remote_oid = advertised_tag_oid(&mut remote_obj, &name, token)?;
 
     // Run pre-push like canonical git — the git2 push path otherwise bypasses
     // it. A non-zero exit aborts the deletion.
-    crate::commands::hooks::run_pre_push_tag_delete(&repo, remote_name, &name)?;
+    crate::commands::hooks::run_pre_push_tag_delete(&repo, remote_name, &name, &remote_oid)?;
 
     remote_obj.push(&[&format!(":refs/tags/{}", name)], Some(&mut push_opts))?;
 
     Ok(())
+}
+
+/// The oid the remote advertises for `refs/tags/<name>`, or [`ZERO_OID`] when
+/// the remote does not have that tag.
+///
+/// Connects in the PUSH direction so the advertisement comes from the same
+/// endpoint the deletion is about to be sent to. The connection is left open on
+/// purpose: `Remote::push` reuses it rather than opening a second one.
+fn advertised_tag_oid(
+    remote: &mut git2::Remote<'_>,
+    name: &str,
+    token: Option<String>,
+) -> Result<String> {
+    let callbacks = credentials_service::get_callbacks_with_progress(token);
+    remote.connect_auth(git2::Direction::Push, Some(callbacks), None)?;
+
+    let refname = format!("refs/tags/{}", name);
+    Ok(remote
+        .list()?
+        .iter()
+        .find(|head| head.name() == refname)
+        .map(|head| head.oid().to_string())
+        .unwrap_or_else(|| crate::commands::hooks::ZERO_OID.to_string()))
 }
 
 /// Edit an annotated tag's message.
@@ -502,6 +532,68 @@ mod tests {
         assert!(
             bare_repo.refname_to_id("refs/tags/v1").is_ok(),
             "an aborted delete must leave the remote tag in place"
+        );
+    }
+
+    /// githooks(5): a deletion zeroes the LOCAL side only — the remote object
+    /// name must be the oid the remote advertises for the ref. Sending zeros
+    /// there tells a tag-protection hook the tag does not exist on the remote,
+    /// which is exactly the check such a hook makes before allowing a delete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_delete_remote_tag_hook_gets_the_advertised_remote_oid() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        repo.create_lightweight_tag("v1");
+
+        push_tag(
+            repo.path_str(),
+            "v1".to_string(),
+            Some("origin".to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let remote_oid = git2::Repository::open(bare.path())
+            .unwrap()
+            .refname_to_id("refs/tags/v1")
+            .unwrap()
+            .to_string();
+
+        let capture = tempfile::tempdir().unwrap();
+        let stdin_file = capture.path().join("stdin");
+        repo.install_hook(
+            "pre-push",
+            &format!("#!/bin/sh\ncat > '{}'\n", stdin_file.display()),
+        );
+
+        delete_remote_tag(
+            repo.path_str(),
+            "v1".to_string(),
+            Some("origin".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let line = std::fs::read_to_string(&stdin_file).unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "pre-push takes four fields per ref, got: {:?}",
+            line
+        );
+        assert_eq!(fields[0], "(delete)", "the local ref spells the deletion");
+        assert_eq!(fields[1], crate::commands::hooks::ZERO_OID);
+        assert_eq!(fields[2], "refs/tags/v1");
+        assert_eq!(
+            fields[3], remote_oid,
+            "the remote object name must be the advertised oid, not zeros"
         );
     }
 
