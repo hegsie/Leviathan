@@ -35,6 +35,7 @@ import '../lv-create-branch-dialog.ts';
 import '../lv-credentials-dialog.ts';
 import '../lv-repository-health-dialog.ts';
 import '../lv-changelog-dialog.ts';
+import '../lv-export-import-dialog.ts';
 
 /**
  * tag → [private in-flight field, value that means "running"].
@@ -63,6 +64,7 @@ const IN_FLIGHT_FIELDS: Array<[string, string, unknown]> = [
   ['lv-credentials-dialog', 'testing', true],
   ['lv-repository-health-dialog', 'runningAction', 'gc'],
   ['lv-changelog-dialog', 'isGenerating', true],
+  ['lv-export-import-dialog', 'operationRunning', true],
 ];
 
 type Probe = HTMLElement & { operationInFlight?: boolean };
