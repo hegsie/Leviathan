@@ -15,6 +15,7 @@ pub mod github_app;
 pub mod keyring_util;
 pub mod loopback_server;
 pub mod oauth;
+pub mod remote_ops;
 pub mod update_service;
 pub mod watcher_service;
 
@@ -23,5 +24,6 @@ pub use autofetch_service::{create_autofetch_state, AutoFetchState};
 pub use cancellation::CancellationRegistry;
 pub use credentials_service::CredentialsHelper;
 pub use git_service::GitService;
+pub use remote_ops::{RemoteOp, RemoteOpRegistry};
 pub use update_service::{create_update_state, UpdateState};
 pub use watcher_service::WatcherService;

@@ -3,6 +3,8 @@
  * Global keyboard shortcut handling for the application
  */
 
+import { isOverlayOpen } from '../utils/overlay-stack.ts';
+
 export interface Shortcut {
   key: string;
   ctrl?: boolean;
@@ -34,6 +36,13 @@ export interface KeyboardSettings {
   customBindings: Record<string, ShortcutBinding>;
 }
 
+/**
+ * The one place shortcut customizations live. Bindings, their action IDs, and
+ * their persistence all belong to this service — a second table of action IDs
+ * kept anywhere else silently drifts out of sync with what
+ * registerDefaultShortcuts actually registers, and nothing that reads it can
+ * act on the difference.
+ */
 const STORAGE_KEY = 'leviathan-keyboard-settings';
 
 class KeyboardService {
@@ -481,6 +490,17 @@ class KeyboardService {
    */
   private handleKeyDown(e: KeyboardEvent): void {
     if (!this.enabled) return;
+
+    // A modal owns the keyboard while it is up. Every shortcut here is
+    // registered on `document` and fired regardless of what was on screen, so
+    // a plain `s` behind an open dialog staged the entire working tree and `u`
+    // unstaged it — invisibly, because the overlay covers the file-status
+    // panel the change would have shown up in. The Keyboard Shortcuts dialog
+    // was the worst of it: the one screen where users press a key to see what
+    // it does, and it silenced the service only while RECORDING a new binding.
+    // Combos carrying Ctrl/Cmd stay live: those are deliberate and
+    // unambiguous, and dialogs are opened with them (Cmd+P, Cmd+,).
+    if (isOverlayOpen() && !e.ctrlKey && !e.metaKey) return;
 
     // Don't handle shortcuts when typing in inputs
     // Use composedPath() to find the actual target inside shadow DOM

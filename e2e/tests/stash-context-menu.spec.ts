@@ -519,3 +519,62 @@ test.describe('Stash Contents Preview', () => {
     await expect(leftPanel.stashDetails).toBeVisible();
   });
 });
+
+test.describe('Stash creation', () => {
+  let leftPanel: LeftPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    leftPanel = new LeftPanelPage(page);
+
+    await setupOpenRepository(page, {
+      stashes: [
+        { index: 0, message: 'WIP on main: abc123 first stash', oid: 'stash1' },
+        { index: 1, message: 'WIP on feature: def456 second stash', oid: 'stash2' },
+        { index: 2, message: 'WIP on develop: ghi789 third stash', oid: 'stash3' },
+      ],
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      create_stash: { index: 0, message: 'On main: fix parser', oid: 'stash-new' },
+    });
+  });
+
+  // Without a message every stash falls back to git's "WIP on <branch>: <sha>
+  // <subject>" — the commit it was based on, not the stashed work — so several
+  // stashes on one branch are indistinguishable before a destructive Pop/Drop.
+  test('naming a stash sends the message to create_stash', async ({ page }) => {
+    await leftPanel.expandStashes();
+
+    await page.locator('lv-stash-list .stash-btn').click();
+
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('fix parser');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'create_stash')).length)
+      .toBe(1);
+
+    const calls = await findCommand(page, 'create_stash');
+    expect((calls[0].args as { message?: string }).message).toBe('fix parser');
+
+    await expect(page.locator('lv-toast-container .toast.success')).toBeVisible();
+  });
+
+  test('cancelling the prompt creates no stash', async ({ page }) => {
+    await leftPanel.expandStashes();
+    expect(await leftPanel.getStashCount()).toBe(3);
+
+    await page.locator('lv-stash-list .stash-btn').click();
+
+    await expect(page.locator('lv-prompt-dialog .prompt-input')).toBeVisible();
+    await page.locator('lv-prompt-dialog .btn-secondary').click();
+    await expect(page.locator('lv-prompt-dialog .prompt-input')).toBeHidden();
+
+    expect(await findCommand(page, 'create_stash')).toHaveLength(0);
+    expect(await leftPanel.getStashCount()).toBe(3);
+  });
+});
+  });
+});
