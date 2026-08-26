@@ -560,6 +560,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   @state() private launchingExternalTool = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
+  /**
+   * Set when AI is unavailable *and* a provider is chosen in Settings. The AI
+   * actions then stay on screen but disabled, carrying the reason: they worked
+   * until the chosen provider stopped answering, and silently removing them
+   * leaves the user with no way to find out why. When no provider was ever
+   * configured the actions stay hidden, as before.
+   */
+  @state() private aiBlockedReason = '';
   @state() private suggestingSegment: number | null = null;
   @state() private suggestingAll = false;
   /** True while a resolve/take-side backend call is in flight. */
@@ -584,8 +592,18 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private syncingScroll = false;
 
   private boundHandleAiSettingsChanged = async () => {
-    this.aiAvailable = await aiService.isAiAvailable();
+    await this.refreshAiAvailability();
   };
+
+  private async refreshAiAvailability(): Promise<void> {
+    this.aiAvailable = await aiService.isAiAvailable();
+    if (this.aiAvailable) {
+      this.aiBlockedReason = '';
+      return;
+    }
+    const unavailable = await aiService.getAiUnavailableReason();
+    this.aiBlockedReason = unavailable?.providerSelected ? unavailable.reason : '';
+  }
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -603,7 +621,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
       await this.checkMergeToolAvailability();
-      this.aiAvailable = await aiService.isAiAvailable();
+      await this.refreshAiAvailability();
     }
   }
 
@@ -2351,14 +2369,16 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             >
               Edit
             </button>
-            ${this.aiAvailable
+            ${this.aiAvailable || this.aiBlockedReason
               ? html`
                   <button
                     class="btn btn-ai conflict-pick-btn"
                     @click=${() => this.handleSuggestSegment(segment.id)}
-                    ?disabled=${this.suggestingSegment !== null ||
+                    ?disabled=${!this.aiAvailable ||
+                    this.suggestingSegment !== null ||
                     this.suggestingAll ||
                     this.actionsBlocked}
+                    title=${this.aiBlockedReason || 'Use AI to resolve this conflict'}
                   >
                     ${isSuggesting ? 'AI...' : 'AI Suggest'}
                   </button>
@@ -2696,14 +2716,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
             : html`<button class="btn btn-theirs" @click=${this.handleAcceptTheirs} ?disabled=${this.loadFailed || this.actionsBlocked} title="Use entire file from ${labels.theirs}">
                 Use Theirs
               </button>`}
-          ${this.aiAvailable && conflictCount > 0 ? html`
+          ${(this.aiAvailable || this.aiBlockedReason) && conflictCount > 0 ? html`
             <button
               class="btn btn-ai"
               @click=${this.handleAiResolveAll}
-              ?disabled=${this.suggestingAll ||
+              ?disabled=${!this.aiAvailable ||
+              this.suggestingAll ||
               this.suggestingSegment !== null ||
               this.actionsBlocked}
-              title="Use AI to resolve all remaining conflicts"
+              title=${this.aiBlockedReason || 'Use AI to resolve all remaining conflicts'}
             >
               ${this.suggestingAll ? 'AI Resolving...' : 'AI Resolve All'}
             </button>

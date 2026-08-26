@@ -129,6 +129,19 @@ pub struct AiProviderInfo {
     pub selected_model: Option<String>,
 }
 
+/// Why AI is unavailable, for the surfaces that have to explain it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiUnavailable {
+    /// Human-readable reason, naming the provider when one is at fault.
+    pub reason: String,
+    /// True when a provider is chosen in Settings but unreachable, rather than
+    /// no provider being configured at all. A surface that hides its AI
+    /// affordances when AI was never set up still shows them, disabled, here —
+    /// they worked before and the user needs to know why they stopped.
+    pub provider_selected: bool,
+}
+
 /// Trait for AI providers
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -1311,6 +1324,55 @@ mod tests {
         let (service, _cfg) = service_with_models(models.path().to_path_buf());
 
         assert!(!service.has_loadable_local_model().await);
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_local_model_does_not_cover_a_different_chosen_provider() {
+        // A local model is downloaded, but the user picked a cloud provider that
+        // is not reachable. A request would fail rather than quietly run on the
+        // local model, so availability must report false — otherwise the AI
+        // affordances light up and every click errors.
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "ready-model", true);
+        let (mut service, _cfg) = service_with_models(models.path().to_path_buf());
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        assert!(service.has_loadable_local_model().await);
+        assert!(!service.has_available_provider().await);
+        let reason = service.unavailable_reason().await.expect("unavailable");
+        assert!(reason.contains("Anthropic Claude"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_local_model_covers_local_inference_when_chosen() {
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "ready-model", true);
+        let (mut service, _cfg) = service_with_models(models.path().to_path_buf());
+        service.config.active_provider = Some(AiProviderType::LocalInference);
+
+        assert!(service.has_available_provider().await);
+        assert!(service.unavailable_reason().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_reason_is_generic_when_nothing_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(&dir);
+        assert!(service.config.active_provider.is_none());
+
+        let reason = service.unavailable_reason().await.expect("unavailable");
+        assert!(reason.contains("No AI provider available"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_reason_is_none_for_the_chosen_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::Anthropic, "test-key");
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        assert!(service.unavailable_reason().await.is_none());
+        assert!(service.has_available_provider().await);
     }
 
     #[tokio::test]
