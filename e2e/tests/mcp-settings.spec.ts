@@ -51,11 +51,18 @@ function mcpPortInput(page: Page) {
     .locator('input');
 }
 
-/** The Start/Stop button in the MCP section */
+/** The Start/Retry/Stop button in the MCP section */
 function mcpToggleButton(page: Page) {
   return page
     .locator('lv-settings-dialog .setting-row', { hasText: 'Context Proxy' })
-    .locator('button');
+    .locator('button.mcp-toggle');
+}
+
+/** The Disable button, shown only while the server is enabled but not running */
+function mcpDisableButton(page: Page) {
+  return page
+    .locator('lv-settings-dialog .setting-row', { hasText: 'Context Proxy' })
+    .locator('button.mcp-disable');
 }
 
 test.describe('Settings Dialog — MCP Server', () => {
@@ -86,6 +93,7 @@ test.describe('Settings Dialog — MCP Server', () => {
     await startCommandCaptureWithMocks(
       page,
       mcpMocks({
+        get_mcp_config: { enabled: true, port: 3001, allowedOrigins: [] },
         get_mcp_status: {
           running: false,
           port: 3001,
@@ -116,7 +124,70 @@ test.describe('Settings Dialog — MCP Server', () => {
     );
     await expect(
       page.locator('lv-settings-dialog .setting-row', { hasText: 'Context Proxy' })
-    ).toContainText('Stopped');
+    ).toContainText('Disabled');
     expect(await findCommand(page, 'start_mcp_server')).toHaveLength(0);
+  });
+
+  test('lets the user turn off a start that keeps failing', async ({ page }) => {
+    await startCommandCaptureWithMocks(
+      page,
+      mcpMocks({
+        get_mcp_config: { enabled: true, port: 3001, allowedOrigins: [] },
+        get_mcp_status: {
+          running: false,
+          port: 3001,
+          url: null,
+          lastError: 'Failed to bind to 127.0.0.1:3001: Address already in use',
+        },
+      })
+    );
+    await openSettings(page);
+
+    // A server that is enabled but not running keeps retrying on every launch,
+    // so the section must offer a way to stop that without a running server
+    await expect(mcpDisableButton(page)).toBeVisible();
+    // ...and the start control reads as a retry, not a fresh start
+    await expect(mcpToggleButton(page)).toHaveText('Retry');
+    await mcpDisableButton(page).click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'set_mcp_config')).length)
+      .toBeGreaterThan(0);
+
+    const saves = await findCommand(page, 'set_mcp_config');
+    expect(saves[saves.length - 1].args).toEqual({
+      config: { enabled: false, port: 3001, allowedOrigins: [] },
+    });
+  });
+
+  test('a disabled server does not advertise a stale start failure', async ({ page }) => {
+    // The backend keeps `lastError` after a disable, so the section must key the
+    // explanation off the persisted enabled flag, not off `running` alone
+    await startCommandCaptureWithMocks(
+      page,
+      mcpMocks({
+        get_mcp_status: {
+          running: false,
+          port: 3001,
+          url: null,
+          lastError: 'Failed to bind to 127.0.0.1:3001: Address already in use',
+        },
+      })
+    );
+    await openSettings(page);
+
+    await expect(
+      page.locator('lv-settings-dialog .setting-row', { hasText: 'Context Proxy' })
+    ).toContainText('Disabled');
+    await expect(mcpDisableButton(page)).toHaveCount(0);
+    await expect(page.locator('lv-settings-dialog .error-text')).toHaveCount(0);
+  });
+
+  test('offers no disable action while the server is stopped and disabled', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+
+    await expect(mcpToggleButton(page)).toHaveText('Start');
+    await expect(mcpDisableButton(page)).toHaveCount(0);
   });
 });

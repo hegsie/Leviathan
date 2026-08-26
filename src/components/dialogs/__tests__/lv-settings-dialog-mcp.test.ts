@@ -3,7 +3,8 @@
  *
  * The MCP server configuration is persisted on the backend, so the dialog must
  * save the port when it changes, report a failed save instead of swallowing it,
- * and explain why the server is stopped after a failed launch-time start.
+ * explain why the server is stopped after a failed launch-time start, and let the
+ * user turn off a start that keeps failing.
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
@@ -52,6 +53,7 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
       return mcpConfig;
     case 'set_mcp_config':
       if (setMcpConfigError) throw new Error(setMcpConfigError);
+      mcpConfig = { ...(args as { config: Record<string, unknown> }).config };
       return null;
     case 'start_mcp_server':
       return null;
@@ -69,6 +71,14 @@ import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+/** Let the awaited invoke chain behind a click settle, then re-render */
+async function flush(el: LvSettingsDialog): Promise<void> {
+  for (let i = 0; i < 10; i += 1) {
+    await Promise.resolve();
+    await el.updateComplete;
+  }
+}
 
 describe('lv-settings-dialog MCP settings', () => {
   beforeEach(() => {
@@ -127,6 +137,7 @@ describe('lv-settings-dialog MCP settings', () => {
   });
 
   it('shows why the MCP server is stopped after a failed auto-start', async () => {
+    mcpConfig = { enabled: true, port: 3001, allowedOrigins: [] };
     mcpStatus = {
       running: false,
       port: 3001,
@@ -141,5 +152,77 @@ describe('lv-settings-dialog MCP settings', () => {
 
     const rendered = el.shadowRoot?.textContent ?? '';
     expect(rendered).to.contain('Failed to bind to 127.0.0.1:3001: Address already in use');
+  });
+
+  it('offers a disable action when the server is enabled but it is not running', async () => {
+    mcpConfig = { enabled: true, port: 3001, allowedOrigins: [] };
+    mcpStatus = {
+      running: false,
+      port: 3001,
+      url: null,
+      lastError: 'Failed to bind to 127.0.0.1:3001: Address already in use',
+    };
+
+    const el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+    await (el as any).loadMcpStatus();
+    await el.updateComplete;
+
+    const disable = el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-disable');
+    expect(disable, 'an enabled-but-stopped server must offer a way out').to.exist;
+
+    disable?.click();
+    await flush(el);
+
+    const saves = invoked.filter((c) => c.command === 'set_mcp_config');
+    expect(saves[saves.length - 1].args).to.deep.equal({
+      config: { enabled: false, port: 3001, allowedOrigins: [] },
+    });
+
+    // The disabled server no longer advertises the stale bind failure, and the
+    // control reflects the persisted state rather than only the runtime state
+    expect((el as any).mcpEnabled).to.be.false;
+    expect(el.shadowRoot?.querySelector('button.mcp-disable')).to.not.exist;
+    expect(el.shadowRoot?.textContent ?? '').to.not.contain('Address already in use');
+  });
+
+  it('shows an error when disabling the MCP server fails', async () => {
+    mcpConfig = { enabled: true, port: 3001, allowedOrigins: [] };
+    mcpStatus = { running: false, port: 3001, url: null, lastError: 'Address already in use' };
+
+    const el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+    await (el as any).loadMcpStatus();
+    await el.updateComplete;
+
+    setMcpConfigError = 'Failed to write MCP config: disk full';
+    await (el as any).handleMcpDisable();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.textContent ?? '').to.contain('Failed to write MCP config: disk full');
+    // The failed save must not fake a disabled server
+    expect((el as any).mcpEnabled).to.be.true;
+    expect(el.shadowRoot?.querySelector('button.mcp-disable')).to.exist;
+  });
+
+  it('offers no disable action while the server is already disabled', async () => {
+    const el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+    await (el as any).loadMcpStatus();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('button.mcp-disable')).to.not.exist;
+    const toggle = el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-toggle');
+    expect(toggle?.textContent?.trim()).to.equal('Start');
+  });
+
+  it('offers no disable action while the server is running', async () => {
+    mcpConfig = { enabled: true, port: 3001, allowedOrigins: [] };
+    mcpStatus = { running: true, port: 3001, url: 'http://127.0.0.1:3001', lastError: null };
+
+    const el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+    await (el as any).loadMcpStatus();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('button.mcp-disable')).to.not.exist;
+    const toggle = el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-toggle');
+    expect(toggle?.textContent?.trim()).to.equal('Stop');
   });
 });

@@ -943,6 +943,28 @@ export class LvSettingsDialog extends LitElement {
     this.mcpToggling = false;
   }
 
+  /**
+   * Turn off the launch-time restart for a server that is enabled but not running.
+   * `stopMcpServer` rejects when nothing is running, so persisting `enabled: false`
+   * is the only way out of a start that keeps failing on every launch.
+   */
+  private async handleMcpDisable(): Promise<void> {
+    this.mcpToggling = true;
+    this.mcpError = null;
+
+    const result = await mcpService.setMcpConfig({
+      enabled: false,
+      port: this.mcpPort,
+      allowedOrigins: [],
+    });
+    if (!result.success) {
+      this.mcpError = result.error?.message ?? 'Failed to disable the MCP server';
+    }
+
+    await this.loadMcpStatus();
+    this.mcpToggling = false;
+  }
+
   private async handleMcpPortChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     this.mcpPort = Math.max(1024, Math.min(65535, parseInt(input.value, 10) || 3001));
@@ -1586,18 +1608,35 @@ export class LvSettingsDialog extends LitElement {
             <div style="display: flex; gap: 8px; align-items: center;">
               <span class="status-indicator ${this.mcpStatus.running ? 'configured' : 'not-configured'}">
                 <span class="status-dot"></span>
-                ${this.mcpStatus.running ? 'Running' : 'Stopped'}
+                ${this.mcpStatus.running ? 'Running' : this.mcpEnabled ? 'Stopped' : 'Disabled'}
               </span>
+              ${!this.mcpStatus.running && this.mcpEnabled ? html`
+                <button
+                  class="mcp-disable"
+                  @click=${this.handleMcpDisable}
+                  ?disabled=${this.mcpToggling}
+                >
+                  Disable
+                </button>
+              ` : nothing}
               <button
+                class="mcp-toggle"
                 @click=${this.handleMcpToggle}
                 ?disabled=${this.mcpToggling}
               >
-                ${this.mcpToggling ? '...' : this.mcpStatus.running ? 'Stop' : 'Start'}
+                ${this.mcpToggling
+                  ? '...'
+                  : this.mcpStatus.running
+                    ? 'Stop'
+                    : this.mcpEnabled
+                      ? 'Retry'
+                      : 'Start'}
               </button>
             </div>
           </div>
 
-          ${this.mcpError ?? (!this.mcpStatus.running ? this.mcpStatus.lastError : null)
+          ${this.mcpError ??
+          (!this.mcpStatus.running && this.mcpEnabled ? this.mcpStatus.lastError : null)
             ? html`
                 <div class="setting-row">
                   <span class="error-text">
