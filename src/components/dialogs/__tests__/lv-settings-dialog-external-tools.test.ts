@@ -170,6 +170,7 @@ describe('lv-settings-dialog external tools write failures', () => {
       isValid: true,
       isBare: false,
       headRef: 'main',
+      detachedHeadOid: null,
       state: 'clean',
       isShallow: false,
       isPartialClone: false,
