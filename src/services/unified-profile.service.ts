@@ -19,6 +19,7 @@ import type {
   UnifiedProfilesConfig,
   IntegrationAccount,
   CurrentGitIdentity,
+  SaveProfileResult,
   MigrationPreview,
   MigrationBackupInfo,
   UnifiedMigrationResult,
@@ -67,15 +68,18 @@ export async function getUnifiedProfile(profileId: string): Promise<UnifiedProfi
 
 /**
  * Save a unified profile (create or update)
+ *
+ * The backend also re-applies the identity to every repository assigned to this
+ * profile; repositories it could not rewrite come back in `failedRepositories`.
  */
-export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<UnifiedProfile> {
-  const result = await invokeCommand<UnifiedProfile>('save_unified_profile', { profile });
+export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<SaveProfileResult> {
+  const result = await invokeCommand<SaveProfileResult>('save_unified_profile', { profile });
   if (!result.success) {
     throw new Error(result.error?.message || 'Failed to save unified profile');
   }
 
   // Update store
-  const saved = result.data!;
+  const { profile: saved, failedRepositories } = result.data!;
   const store = unifiedProfileStore.getState();
   const existingProfile = store.profiles.find((p) => p.id === saved.id);
   if (existingProfile) {
@@ -96,7 +100,7 @@ export async function saveUnifiedProfile(profile: UnifiedProfile): Promise<Unifi
     }
   }
 
-  return saved;
+  return { profile: saved, failedRepositories };
 }
 
 /**

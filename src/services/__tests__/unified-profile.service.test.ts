@@ -266,7 +266,7 @@ describe('unified-profile.service - saveUnifiedProfile default-badge sync', () =
     mockInvoke = async (command: string, args?: unknown) => {
       const params = args as Record<string, unknown> | undefined;
       if (command === 'save_unified_profile') {
-        return params?.profile;
+        return { profile: params?.profile, failedRepositories: [] };
       }
       return null;
     };
@@ -303,6 +303,31 @@ describe('unified-profile.service - saveUnifiedProfile default-badge sync', () =
 
     const profiles = unifiedProfileStore.getState().profiles;
     expect(profiles.find((p) => p.id === 'p-a')!.isDefault).to.be.true;
+  });
+
+  // Saving re-applies the profile's identity to every repository assigned to it.
+  // The caller needs the repositories the backend could not rewrite so it can
+  // tell the user which ones kept the pre-edit identity.
+  it('returns the repositories the backend could not update and stores the saved profile', async () => {
+    const pA = makeTestProfile('p-a', { name: 'A', isDefault: true });
+    const pB = makeTestProfile('p-b', { name: 'B', isDefault: false });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [pA, pB],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+    mockInvoke = async () => ({
+      profile: { ...pB, name: 'B renamed' },
+      failedRepositories: ['/repo/gone'],
+    });
+
+    const result = await saveUnifiedProfile({ ...pB, name: 'B renamed' });
+
+    expect(result.failedRepositories).to.deep.equal(['/repo/gone']);
+    expect(result.profile.name).to.equal('B renamed');
+    const profiles = unifiedProfileStore.getState().profiles;
+    expect(profiles.find((p) => p.id === 'p-b')!.name).to.equal('B renamed');
   });
 });
 
