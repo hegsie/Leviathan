@@ -1097,9 +1097,13 @@ pub async fn create_azure_devops_work_item(
 
 /// Path of the repository-metadata endpoint for `repository` (name or GUID).
 ///
-/// Encoded because Azure DevOps repository names may contain spaces.
+/// `repository` comes from `parse_ado_url`, which keeps the remote URL's path
+/// segment verbatim, and Azure DevOps clone URLs already percent-encode the
+/// names that need it (`My Repo` is cloned from `.../_git/My%20Repo`). Encoding
+/// again here would request `My%2520Repo` and 404, so the segment is used as-is
+/// — exactly like the sibling `git/repositories/{repository}/pullrequests`.
 fn ado_repository_lookup_path(repository: &str) -> String {
-    format!("git/repositories/{}", urlencoding::encode(repository))
+    format!("git/repositories/{}", repository)
 }
 
 /// Build the `build/builds` query fragment for a repository-scoped run listing.
@@ -1602,10 +1606,28 @@ mod tests {
     }
 
     #[test]
-    fn test_ado_repository_lookup_path_encodes_name() {
+    fn test_ado_repository_lookup_path_preserves_encoded_name() {
+        // `parse_ado_url` hands back the clone URL's path segment verbatim, and
+        // Azure DevOps already percent-encodes it. Re-encoding would look up
+        // `My%2520Repo` and 404.
         assert_eq!(
-            ado_repository_lookup_path("my repo"),
-            "git/repositories/my%20repo"
+            ado_repository_lookup_path("My%20Repo"),
+            "git/repositories/My%20Repo"
+        );
+    }
+
+    #[test]
+    fn test_ado_repository_lookup_path_matches_pull_request_path() {
+        // The pipeline lookup must scope by the same segment the repo-scoped PR
+        // listing already uses, otherwise one of the two tabs resolves a
+        // different repository for the same detected remote.
+        let (_, _, repository) =
+            parse_ado_url("https://dev.azure.com/mycompany/MyProject/_git/My%20Repo").unwrap();
+
+        assert_eq!(repository, "My%20Repo");
+        assert_eq!(
+            ado_repository_lookup_path(&repository),
+            format!("git/repositories/{}", repository)
         );
     }
 
