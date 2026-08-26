@@ -66,6 +66,7 @@ import './components/dialogs/lv-conflict-resolution-dialog.ts';
 import type { GitflowFinishContext } from './components/dialogs/lv-conflict-resolution-dialog.ts';
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
+import './components/dialogs/lv-search-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
 import './components/dialogs/lv-remote-dialog.ts';
 import './components/dialogs/lv-changelog-dialog.ts';
@@ -107,6 +108,7 @@ import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dia
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
+import type { SearchDialogMode } from './components/dialogs/lv-search-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
 import type { LvRemoteDialog } from './components/dialogs/lv-remote-dialog.ts';
 import type { LvRepositoryHealthDialog } from './components/dialogs/lv-repository-health-dialog.ts';
@@ -682,6 +684,11 @@ export class AppShell extends LitElement {
 
   // Reflog dialog
   @state() private showReflog = false;
+
+  // Content/diff/pickaxe search dialog. The `show[A-Z]` name is load-bearing:
+  // closeRepoScopedDialogs() enumerates Lit's reactive properties for it.
+  @state() private showSearchDialog = false;
+  @state() private searchDialogMode: SearchDialogMode = 'files';
 
   // Keyboard shortcuts dialog
   @state() private showShortcuts = false;
@@ -1499,6 +1506,11 @@ export class AppShell extends LitElement {
             dismissed: 'undo history closed',
             running: 'reset',
             clearFlag: () => { this.showReflog = false; },
+          },
+          'lv-search-dialog': {
+            dismissed: 'search closed',
+            running: 'search',
+            clearFlag: () => { this.showSearchDialog = false; },
           },
           'lv-remote-dialog': {
             dismissed: 'remote management closed',
@@ -3610,11 +3622,17 @@ export class AppShell extends LitElement {
   }
 
   private handleFileSelected(e: CustomEvent<{ file: StatusEntry; isPartiallyStaged?: boolean }>): void {
+    this.openWorkingTreeDiff(e.detail.file, e.detail.isPartiallyStaged ?? false);
+  }
+
+  /** Shared by the file list and the diff search, so both route conflicts and
+   * blame teardown identically. */
+  private openWorkingTreeDiff(file: StatusEntry, isPartiallyStaged = false): void {
     // A conflicted file is resolved in the merge editor, never shown as a raw
     // diff — its working-tree content is git's conflict-marker text. Open the
     // dialog on the file that was actually clicked.
-    if (e.detail.file.isConflicted) {
-      this.openConflictDialogFromState(e.detail.file.path);
+    if (file.isConflicted) {
+      this.openConflictDialogFromState(file.path);
       return;
     }
     // Close blame if open
@@ -3630,8 +3648,8 @@ export class AppShell extends LitElement {
     this.showFileHistory = false;
     this.fileHistoryPath = null;
     // Working directory file selected - show diff
-    this.diffFile = e.detail.file;
-    this.diffFilePartiallyStaged = e.detail.isPartiallyStaged ?? false;
+    this.diffFile = file;
+    this.diffFilePartiallyStaged = isPartiallyStaged;
     this.diffCommitFile = null;
     this.showDiff = true;
   }
@@ -3949,6 +3967,34 @@ export class AppShell extends LitElement {
     this.blameFile = e.detail.filePath;
     this.blameCommitOid = e.detail.commitOid ?? null;
     this.showBlame = true;
+  }
+
+  private openSearchDialog(mode: SearchDialogMode): void {
+    this.searchDialogMode = mode;
+    this.showSearchDialog = true;
+  }
+
+  /**
+   * A hit from the diff search opens that file's working-tree diff.
+   *
+   * The search ran against `git diff` output, so the file was modified when
+   * the query ran — but a stage/discard/refresh in between can retire the
+   * entry. Reporting the miss keeps the row from being a dead click.
+   */
+  private handleShowWorkingDiff(e: CustomEvent<{ filePath: string; staged: boolean }>): void {
+    const status = this.activeRepository?.status ?? [];
+    const entry =
+      status.find((f) => f.path === e.detail.filePath && f.isStaged === e.detail.staged) ??
+      status.find((f) => f.path === e.detail.filePath);
+    if (!entry) {
+      showToast(
+        'That file is no longer in the working-tree changes — refresh and search again',
+        'info',
+        4000,
+      );
+      return;
+    }
+    this.openWorkingTreeDiff(entry);
   }
 
   private handleSearchChange(e: CustomEvent<{ filter: SearchFilter }>): void {
@@ -4333,6 +4379,27 @@ export class AppShell extends LitElement {
         icon: 'search',
         shortcut: `${mod}F`,
         action: () => this.handleToggleSearch(),
+      },
+      {
+        id: 'search-in-files',
+        label: 'Search in files',
+        category: 'action',
+        icon: 'search',
+        action: this.requiresRepository(() => this.openSearchDialog('files')),
+      },
+      {
+        id: 'search-in-diff',
+        label: 'Search in current diff',
+        category: 'action',
+        icon: 'search',
+        action: this.requiresRepository(() => this.openSearchDialog('diff')),
+      },
+      {
+        id: 'search-commit-content',
+        label: 'Find commits that changed text',
+        category: 'action',
+        icon: 'search',
+        action: this.requiresRepository(() => this.openSearchDialog('commits')),
       },
       {
         id: 'stage-all',
@@ -5721,6 +5788,16 @@ export class AppShell extends LitElement {
           }}
           @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
+
+        <lv-search-dialog
+          ?open=${this.showSearchDialog}
+          .mode=${this.searchDialogMode}
+          .repositoryPath=${this.activeRepository.repository.path}
+          @close=${() => { this.showSearchDialog = false; }}
+          @mode-changed=${(e: CustomEvent<{ mode: SearchDialogMode }>) => { this.searchDialogMode = e.detail.mode; }}
+          @show-blame=${this.handleShowBlame}
+          @show-working-diff=${this.handleShowWorkingDiff}
+        ></lv-search-dialog>
       ` : ''}
 
       <lv-keyboard-shortcuts-dialog
