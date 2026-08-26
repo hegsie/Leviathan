@@ -638,6 +638,125 @@ test.describe('Diff View - Stage Hunk', () => {
     const stageLineCommands = await findCommand(page, 'stage_lines');
     expect(stageHunkCommands.length + stageFileCommands.length + stageLineCommands.length).toBeGreaterThan(0);
   });
+
+  // Split view used to be read-only — no stage buttons and no way to act on a
+  // line selection — so a user who preferred it could not stage at all.
+  test('should stage a hunk from split view', async ({ page }) => {
+    await startCommandCapture(page);
+
+    const file = rightPanel.getUnstagedFile('src/main.ts');
+    await file.click();
+
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page.locator('lv-diff-view .view-btn[title="Split view"]').click();
+    await expect(page.locator('lv-diff-view .split-pane')).toHaveCount(2);
+
+    await page
+      .locator('lv-diff-view .split-pane')
+      .nth(1)
+      .locator('button.stage-btn.stage[title="Stage this hunk"]')
+      .first()
+      .click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+
+    const stageHunkCommands = await findCommand(page, 'stage_hunk');
+    expect(stageHunkCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should stage a single line from split view', async ({ page }) => {
+    await startCommandCapture(page);
+
+    const file = rightPanel.getUnstagedFile('src/main.ts');
+    await file.click();
+
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page
+      .locator(
+        'lv-diff-view .view-btn[title="Toggle line selection mode for staging individual lines"]'
+      )
+      .click();
+    await page.locator('lv-diff-view .view-btn[title="Split view"]').click();
+    await expect(page.locator('lv-diff-view .split-pane')).toHaveCount(2);
+
+    await page.locator('lv-diff-view .split-line.code-addition').first().click();
+
+    const selectionActions = page.locator('lv-diff-view .selection-actions');
+    await expect(selectionActions).toBeVisible();
+    await expect(selectionActions).toContainText('1 line selected');
+
+    await selectionActions.locator('.selection-btn.primary').click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+
+    const stageHunkCommands = await findCommand(page, 'stage_hunk');
+    expect(stageHunkCommands.length).toBeGreaterThan(0);
+  });
+
+  test('should drop a line selection after staging a line from the context menu', async ({ page }) => {
+    // Selection keys are positional hunk/line indices. Staging reloads the diff
+    // and renumbers them, so keeping the old selection would point at other code.
+    await injectCommandMock(page, {
+      get_file_diff: {
+        path: 'src/main.ts',
+        oldPath: null,
+        status: 'modified',
+        hunks: [
+          {
+            header: '@@ -1,4 +1,4 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 4,
+            lines: [
+              { content: 'line 1', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'old a', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'old b', origin: 'deletion', oldLineNo: 3, newLineNo: null },
+              { content: 'new a', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'new b', origin: 'addition', oldLineNo: null, newLineNo: 3 },
+            ],
+          },
+        ],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 2,
+        deletions: 2,
+      },
+      stage_hunk: null,
+    });
+
+    await startCommandCapture(page);
+
+    await rightPanel.getUnstagedFile('src/main.ts').click();
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page
+      .locator('lv-diff-view button.view-btn[title="Toggle line selection mode for staging individual lines"]')
+      .click();
+
+    // Select two lines the way a user would.
+    const checkboxes = page.locator('lv-diff-view .line-checkbox');
+    await checkboxes.nth(0).check();
+    await checkboxes.nth(1).check();
+    await expect(page.locator('lv-diff-view .selection-info')).toHaveText(/2 lines selected/);
+
+    // Stage a different line through the context menu.
+    await page.locator('lv-diff-view .line.code-addition').last().click({ button: 'right' });
+    await page.locator('lv-diff-view .context-menu-item', { hasText: 'Stage line' }).click();
+
+    // The reloaded diff invalidated the old keys, so the selection bar is gone.
+    await expect(page.locator('lv-diff-view .selection-actions')).toHaveCount(0);
+    expect((await findCommand(page, 'stage_hunk')).length).toBeGreaterThan(0);
+  });
 });
 
 test.describe('Diff Error Scenarios', () => {
@@ -820,5 +939,219 @@ test.describe('Diff - UI Outcome Verification', () => {
     // Verify Swipe is now active and Onion Skin is not
     await expect(swipeBtn).toHaveClass(/active/);
     await expect(onionSkinBtn).not.toHaveClass(/active/);
+  });
+});
+
+// Large diffs are truncated at 3000 lines with a "Load full diff" affordance.
+// Loading the full diff flips the unified view into its virtualized renderer,
+// which must keep the staging affordances the user loaded the diff for.
+function buildLargeDiff() {
+  const padLines: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 5100; i++) {
+    padLines.push({ content: `pad ${i}`, origin: 'context', oldLineNo: 900 + i, newLineNo: 900 + i });
+  }
+  return {
+    path: 'src/main.ts',
+    oldPath: null,
+    status: 'modified',
+    isBinary: false,
+    isImage: false,
+    imageType: null,
+    additions: 2,
+    deletions: 2,
+    truncated: false,
+    hunks: [
+      {
+        header: '@@ -1,4 +1,5 @@',
+        oldStart: 1,
+        oldLines: 4,
+        newStart: 1,
+        newLines: 5,
+        lines: [
+          { content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+          { content: 'old first', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+          { content: 'first hunk change', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+          { content: 'omega', origin: 'context', oldLineNo: 3, newLineNo: 3 },
+        ],
+      },
+      {
+        header: '@@ -80,4 +81,5 @@',
+        oldStart: 80,
+        oldLines: 4,
+        newStart: 81,
+        newLines: 5,
+        lines: [
+          { content: 'beta', origin: 'context', oldLineNo: 80, newLineNo: 81 },
+          { content: 'old second', origin: 'deletion', oldLineNo: 81, newLineNo: null },
+          { content: 'second hunk change', origin: 'addition', oldLineNo: null, newLineNo: 82 },
+          { content: 'zeta', origin: 'context', oldLineNo: 82, newLineNo: 83 },
+        ],
+      },
+      {
+        header: '@@ -900,5100 +900,5100 @@',
+        oldStart: 900,
+        oldLines: 5100,
+        newStart: 900,
+        newLines: 5100,
+        lines: padLines,
+      },
+    ],
+  };
+}
+
+test.describe('Diff View - Large diff staging after Load full diff', () => {
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+
+    // First load is capped by the backend, so the view is truncated.
+    await injectCommandMock(page, {
+      get_file_diff: {
+        path: 'src/main.ts',
+        oldPath: null,
+        status: 'modified',
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 1,
+        deletions: 1,
+        truncated: true,
+        totalLines: 60000,
+        hunks: [
+          {
+            header: '@@ -1,4 +1,5 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 5,
+            lines: [
+              { content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'old first', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'first hunk change', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'omega', origin: 'context', oldLineNo: 3, newLineNo: 3 },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
+  async function loadFullDiff(page: import('@playwright/test').Page) {
+    await rightPanel.getUnstagedFile('src/main.ts').click();
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    const loadFullBtn = page.locator('lv-diff-view .large-diff-info .btn-link');
+    await expect(loadFullBtn).toBeVisible();
+
+    await startCommandCapture(page);
+    await injectCommandMock(page, { get_file_diff: buildLargeDiff(), stage_hunk: null });
+
+    await loadFullBtn.click();
+    await expect(page.locator('lv-diff-view .diff-virtualized-container')).toBeVisible();
+  }
+
+  test('staging a hunk still works after Load full diff on a large file', async ({ page }) => {
+    await loadFullDiff(page);
+
+    const stageBtn = page
+      .locator('lv-diff-view .diff-virtualized-container button.stage-btn.stage[title="Stage this hunk"]')
+      .first();
+    await expect(stageBtn).toBeVisible();
+    await stageBtn.click();
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __INVOKED_COMMANDS__?: { command: string }[] })
+        .__INVOKED_COMMANDS__?.some((c) => c.command === 'stage_hunk')
+    );
+    const calls = await findCommand(page, 'stage_hunk');
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  test('line selection is available in the virtualized view', async ({ page }) => {
+    await loadFullDiff(page);
+
+    await page.locator('lv-diff-view button.view-btn[title^="Toggle line selection"]').click();
+    await page
+      .locator('lv-diff-view .diff-virtualized-container .line.code-addition')
+      .first()
+      .click();
+
+    const bar = page.locator('lv-diff-view .selection-actions');
+    await expect(bar).toBeVisible();
+    await expect(bar).toContainText('Stage Selected');
+  });
+});
+
+test.describe('Word Wrap setting', () => {
+  let rightPanel: RightPanelPage;
+  let graph: GraphPanelPage;
+
+  // The diff view has its own `.diff-content` inside the app-shell wrapper of the
+  // same name, so scope the assertion to the component.
+  const DIFF_CONTENT = 'lv-diff-view .diff-content';
+  const WORD_WRAP_TOGGLE =
+    'lv-settings-dialog .setting-row:has(.setting-name:text-is("Word Wrap")) .toggle-switch';
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    graph = new GraphPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('Settings > Word Wrap wraps the open diff', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(DIFF_CONTENT)).not.toHaveClass(/word-wrap/);
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator('lv-settings-dialog')).toBeVisible();
+    await page.locator(`${WORD_WRAP_TOGGLE} .toggle-slider`).click();
+    await page.locator('lv-settings-dialog button:has-text("Done")').click();
+
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+  });
+
+  test('the toolbar button is the same preference as the setting', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).not.toBeChecked();
+    await page.locator('lv-settings-dialog button:has-text("Done")').click();
+
+    await page.locator('lv-diff-view [title="Toggle word wrap"]').click();
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).toBeChecked();
+  });
+
+  test('wrapping survives closing and reopening the diff', async ({ page }) => {
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await page.locator('lv-diff-view [title="Toggle word wrap"]').click();
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
+
+    await graph.closeDiff();
+    await expect(graph.diffOverlay).not.toBeVisible();
+
+    await rightPanel.openFileDiff('src/main.ts');
+    await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
+    await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
   });
 });

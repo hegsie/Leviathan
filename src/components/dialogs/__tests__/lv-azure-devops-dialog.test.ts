@@ -304,6 +304,135 @@ describe('lv-azure-devops-dialog', () => {
       }
     });
 
+    // Regression: these provider dialogs are repo-independent (they stay open
+    // when the last repository tab closes), at which point repositoryPath goes
+    // to ''. The detected repo must be cleared, or the dialog keeps showing --
+    // and acting on -- the repository whose tab was just closed.
+    it('clears the detected repo when repositoryPath becomes empty', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header with a repository open'
+      ).to.equal(1);
+
+      // Last repository tab closed: the host rebinds repositoryPath to ''.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'stale repo header after the last repository tab closed'
+      ).to.equal(0);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const repoTab = Array.from(tabs).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      repoTab.click();
+      await waitForLoad(el);
+
+      const emptyText = el.shadowRoot!.querySelector('.empty-state')?.textContent?.trim() ?? '';
+      expect(emptyText, 'repo-backed tab after the last repository tab closed').to.contain(
+        'No Azure DevOps repository detected'
+      );
+    });
+
+    // Regression: the dialog outlives the repository, so a detect_ado_repo
+    // issued for the repository whose tab has since closed can resolve
+    // afterwards. Its result must be dropped, or the repo header -- and the
+    // repo-backed loaders behind it -- come back for a repository that is gone.
+    it('ignores a repository detection that resolves after the repository closed', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Hold the detection open so it can be made to land late.
+      const baseInvoke = mockInvoke;
+      const pendingDetects: Array<() => void> = [];
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_ado_repo') {
+          await new Promise<void>((resolve) => pendingDetects.push(resolve));
+        }
+        return baseInvoke(command, args);
+      };
+
+      el.repositoryPath = '/mock/repo';
+      await waitForLoad(el);
+      expect(pendingDetects.length, 'detection in flight').to.equal(1);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header while the detection is still in flight'
+      ).to.equal(0);
+
+      // Last repository tab closed while the detection was still in flight.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      pendingDetects.forEach((resolve) => resolve());
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header restored by a detection for the closed repository'
+      ).to.equal(0);
+    });
+
+    // Regression: a create-* draft is scoped to the repository it was composed
+    // against, but the create handlers guard only on the detected repo. Leaving
+    // the draft on screen when the dialog is repointed would submit it into the
+    // new repository.
+    it('drops the pull request draft when the repository changes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const listTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      listTab.click();
+      await waitForLoad(el);
+
+      const newButton = Array.from(el.shadowRoot!.querySelectorAll('button.btn')).find(
+        (b) => b.textContent?.trim() === '+ New PR'
+      ) as HTMLButtonElement;
+      expect(newButton === undefined, 'missing + New PR button').to.be.false;
+      newButton.click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector(
+        'input[placeholder="Pull request title"]'
+      ) as HTMLInputElement | null;
+      expect(titleInput === null, 'missing draft title input').to.be.false;
+      titleInput!.value = 'Draft for the first repository';
+      titleInput!.dispatchEvent(new Event('input'));
+      await waitForLoad(el);
+
+      // The user switches to a different repository with the draft on screen.
+      el.repositoryPath = '/mock/other-repo';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('input[placeholder="Pull request title"]').length,
+        'submittable draft form after the repository changed'
+      ).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).createPrTitle, 'retained draft title').to.equal('');
+    });
+
     it('shows account selector when accounts exist', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);
 
@@ -840,6 +969,67 @@ describe('lv-azure-devops-dialog', () => {
       // Status indicator should exist
       const statusDot = firstPipeline.querySelector('.pipeline-status');
       expect(statusDot).to.not.be.null;
+    });
+
+    it('scopes the pipeline run listing to the detected repository', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      invokeHistory.length = 0;
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const pipelinesTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pipelines') as HTMLButtonElement;
+      pipelinesTab.click();
+      await waitForLoad(el);
+
+      const call = invokeHistory.find((c) => c.command === 'list_ado_pipeline_runs');
+      expect(call, 'pipeline runs requested').to.not.be.undefined;
+
+      const args = call!.args as Record<string, unknown>;
+      // Without a repository the backend lists builds for every repo in the project.
+      expect(args.repository).to.equal('test-repo');
+      expect(args.organization).to.equal('testorg');
+      expect(args.project).to.equal('test-project');
+      expect(args.top).to.equal(20);
+    });
+
+    it('surfaces a repository resolution failure in the pipelines tab', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      // The backend only resolves (and can only fail to resolve) the repository
+      // GUID when the dialog actually sends a repository, so the failure is
+      // modelled that way: no repository argument, no repository-scoped error.
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const repository = (args as Record<string, unknown> | undefined)?.repository;
+        if (command === 'list_ado_pipeline_runs' && repository) {
+          throw new Error(
+            `Failed to resolve repository '${String(repository)}': Azure DevOps API error 404: not found`
+          );
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const pipelinesTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pipelines') as HTMLButtonElement;
+      pipelinesTab.click();
+      await waitForLoad(el);
+
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner, 'error banner rendered').to.not.be.null;
+      expect(errorBanner!.textContent).to.include('test-repo');
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(0);
     });
   });
 
@@ -1699,6 +1889,145 @@ describe('lv-azure-devops-dialog', () => {
       await dialog.loadWorkItems('tok');
 
       expect(dialog.error, 'a failed work-items load is surfaced').to.contain('unauthorized');
+    });
+  });
+  // A PAT connect that succeeds but fails to write the keyring git credential must
+  // say so: storeGitCredentials resolves to a CommandResult and never throws, so
+  // discarding it left the dialog showing "Connected" while push/pull would still
+  // prompt for credentials.
+  describe('PAT connect surfaces keyring credential-write failures', () => {
+    // Fail every store_git_credentials call (invokeCommand turns the rejection
+    // into { success: false }), or only the ones matching `urlMatch`.
+    function failKeyringWrites(urlMatch?: string): void {
+      const origMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'store_git_credentials') {
+          const url = (args as { url?: string } | undefined)?.url ?? '';
+          if (!urlMatch || url.includes(urlMatch)) throw new Error('keyring locked');
+        }
+        return origMock(command, args);
+      };
+    }
+
+    const credFailureToasts = (): number =>
+      uiStore
+        .getState()
+        .toasts.filter((t) => t.type === 'error' && /saving git credentials failed/i.test(t.message))
+        .length;
+
+    // Load while DISCONNECTED so the load-time checkConnection does not
+    // pre-populate lastSyncedGitCredKey, then flip to connected for the handler.
+    async function mountDisconnected(): Promise<LvAzureDevOpsDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      connectionResponse = mockConnectedStatus;
+      const api = el as unknown as {
+        selectedAccountId: string | null;
+        organizationInput: string;
+        tokenInput: string;
+      };
+      api.selectedAccountId = 'ado-acc-1';
+      api.organizationInput = 'testorg';
+      await el.updateComplete;
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+      return el;
+    }
+
+    it('happy path: handleSaveToken writes both credentials, records the sync key, and shows no warning', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      const writes = invokeHistory.filter((h) => h.command === 'store_git_credentials');
+      expect(writes.length, 'both credential URL formats written').to.equal(2);
+      const urls = writes.map((w) => (w.args as { url: string }).url);
+      expect(urls).to.include('https://dev.azure.com');
+      expect(urls).to.include('https://testorg.visualstudio.com');
+
+      expect(credFailureToasts(), 'no warning on success').to.equal(0);
+      expect(
+        (el as unknown as { lastSyncedGitCredKey: string | null }).lastSyncedGitCredKey,
+        'successful write is recorded so checkConnection does not re-write it'
+      ).to.equal('testorg::new-rotated-pat');
+    });
+
+    it('error path: handleSaveToken warns the user when the keyring write fails, without failing the connect', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      failKeyringWrites();
+
+      await (el as unknown as { handleSaveToken: () => Promise<void> }).handleSaveToken();
+      await el.updateComplete;
+
+      expect(credFailureToasts(), 'user is told push/pull may prompt').to.equal(1);
+      const api = el as unknown as {
+        connectionStatus: { connected: boolean } | null;
+        error: string | null;
+        lastSyncedGitCredKey: string | null;
+      };
+      expect(api.connectionStatus?.connected, 'connection itself still succeeded').to.equal(true);
+      expect(api.error, 'keyring failure is non-fatal — no inline error banner').to.equal(null);
+      expect(api.lastSyncedGitCredKey, 'failed write is not marked synced').to.equal(null);
+    });
+
+    it('edge: a partial failure (only {org}.visualstudio.com fails) is still surfaced on the stored-token path', async () => {
+      const el = await mountDisconnected();
+      (el as unknown as { tokenInput: string }).tokenInput = '';
+      await el.updateComplete;
+      failKeyringWrites('visualstudio.com');
+
+      await (
+        el as unknown as { handleConnectWithStoredToken: () => Promise<void> }
+      ).handleConnectWithStoredToken();
+      await el.updateComplete;
+
+      expect(credFailureToasts(), 'half-written credential is not silent').to.equal(1);
+      const api = el as unknown as {
+        connectionStatus: { connected: boolean } | null;
+        error: string | null;
+      };
+      expect(api.connectionStatus?.connected, 'connect is not failed by a keyring error').to.equal(true);
+      expect(api.error).to.equal(null);
+    });
+
+    it('edge: a failed write is retried on the next connect rather than stickily suppressed', async () => {
+      const el = await mountDisconnected();
+      const api = el as unknown as {
+        tokenInput: string;
+        handleSaveToken: () => Promise<void>;
+        lastSyncedGitCredKey: string | null;
+      };
+      const workingMock = mockInvoke;
+
+      api.tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      failKeyringWrites();
+      await api.handleSaveToken();
+      await el.updateComplete;
+      expect(credFailureToasts(), 'first attempt warns').to.equal(1);
+
+      // Keyring recovers; the same (org, token) must be written again.
+      mockInvoke = workingMock;
+      invokeHistory.length = 0;
+      api.tokenInput = 'new-rotated-pat';
+      await el.updateComplete;
+      await api.handleSaveToken();
+      await el.updateComplete;
+
+      expect(
+        invokeHistory.filter((h) => h.command === 'store_git_credentials').length,
+        'retry re-writes both credentials'
+      ).to.equal(2);
+      expect(credFailureToasts(), 'no second warning once it succeeds').to.equal(1);
+      expect(api.lastSyncedGitCredKey).to.equal('testorg::new-rotated-pat');
     });
   });
 });

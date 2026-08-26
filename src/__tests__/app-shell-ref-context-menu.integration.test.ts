@@ -42,6 +42,7 @@ const mockRepository: Repository = {
   isValid: true,
   isBare: false,
   headRef: 'refs/heads/main',
+  detachedHeadOid: null,
   state: 'clean',
   isShallow: false,
   isPartialClone: false,
@@ -505,6 +506,36 @@ describe('app-shell ref context menu handlers (integration)', () => {
       await (el as any).handleRefDeleteTag();
 
       expect(findCommands('open_repository').length).to.be.greaterThan(0);
+    });
+
+    it('offers the same remote delete the sidebar does', async () => {
+      // delete_tag removes the local ref only; the tag fetch refspec copies a
+      // pushed tag back. The sidebar asks about the remote copy, and this
+      // surface deletes the same tag — it must not be the one that does not.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'origin', url: 'https://example.test/r.git', pushUrl: null },
+          ]);
+        }
+        if (command === 'delete_remote_tag') return Promise.resolve(null);
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v1.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefDeleteTag();
+
+      const calls = findCommands('delete_remote_tag');
+      expect(calls.length, 'the graph ref menu offers the remote delete too').to.equal(1);
+      expect(calls[0].args).to.deep.include({
+        path: REPO_PATH,
+        name: 'v1.0.0',
+        remote: 'origin',
+      });
     });
   });
 

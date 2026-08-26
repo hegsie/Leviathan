@@ -31,7 +31,7 @@ let cbId = 0;
 };
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
-import { expect } from '@open-wc/testing';
+import { expect, waitUntil } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
@@ -49,6 +49,7 @@ function mockRepo(path: string, name: string): Repository {
     isValid: true,
     isBare: false,
     headRef: 'main',
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
@@ -414,6 +415,69 @@ describe('app-shell remote-operation feedback', () => {
       expect(pushTag!.args.force).to.equal(true);
     });
 
+    it('the tag force push goes to the remote the rejected push was aimed at', async () => {
+      // The rejected push was sent to a remote the user picked in the tag
+      // menu. Leaving the retry's destination to the backend resolver
+      // force-moves the tag on `origin` in a fork checkout — a destructive
+      // write to a remote the user never aimed at, reported as success.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one', 'upstream');
+
+      const pushTag = invokeCallArgs.find((c) => c.command === 'push_tag');
+      expect(pushTag).to.not.be.undefined;
+      expect(pushTag!.args.remote).to.equal('upstream');
+      expect(
+        uiStore.getState().toasts.some((t) => t.message === 'Force pushed tag v1.2.0 to upstream'),
+        'the confirmation names where the tag actually went',
+      ).to.equal(true);
+    });
+
+    it('a tag force push with no chosen remote still leaves the key off', async () => {
+      // The graph ref menu names no remote; the backend resolver has to keep
+      // running, so the key must be absent rather than undefined.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one');
+
+      const pushTag = invokeCallArgs.find((c) => c.command === 'push_tag');
+      expect('remote' in pushTag!.args, 'no remote key at all').to.equal(false);
+    });
+
+    it('the force-push-tag event carries the remote through to the push', async () => {
+      // The suggestion service dispatches on `window`; the remote has to
+      // survive the hop or the retry re-resolves the destination anyway.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      await (el as any).updateComplete;
+      try {
+        let seen: string | undefined = 'unset';
+        (el as any).forcePushTag = (
+          _tag: string,
+          _repo: string,
+          remote?: string,
+        ): Promise<void> => {
+          seen = remote;
+          return Promise.resolve();
+        };
+        window.dispatchEvent(
+          new CustomEvent('force-push-tag', {
+            detail: { tagName: 'v1.2.0', repoPath: '/repo/one', remote: 'upstream' },
+          }),
+        );
+        await new Promise((r) => setTimeout(r, 0));
+        expect(seen).to.equal('upstream');
+      } finally {
+        el.remove();
+      }
+    });
+
     it('declining blocks the tag force push', async () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
       mockResponses['plugin:dialog|message'] = () => 'Cancel';
@@ -619,6 +683,181 @@ describe('app-shell remote-operation feedback', () => {
         expect((el as any).rightPanelVisible).to.equal(true);
         expect(heard).to.equal(1);
       } finally {
+        el.remove();
+      }
+    });
+  });
+
+
+  /**
+   * The status bar's ahead/behind badge used to render a private
+   * `remoteStatus` field that only the tab switch, the fetch-on-focus handler
+   * and auto-fetch ever wrote. push/pull/fetch end at handleRefresh, which
+   * refreshes the repository, the graph and the indexes — never that field —
+   * so a pushed-away "↑3" sat there until the next auto-fetch tick, tab switch
+   * or refocus, contradicting the tab badge a few pixels away. The badge now
+   * renders the store's `currentBranch.aheadBehind`, the same field the tab
+   * badge reads.
+   */
+  describe('the status-bar ahead/behind badge', () => {
+    function branch(aheadBehind?: { ahead: number; behind: number }) {
+      return {
+        name: 'main',
+        shorthand: 'main',
+        isHead: true,
+        isRemote: false,
+        upstream: 'origin/main',
+        targetOid: 'abc',
+        isStale: false,
+        ...(aheadBehind ? { aheadBehind } : {}),
+      };
+    }
+
+    function footerOf(el: AppShell): Element | null {
+      return el.shadowRoot!.querySelector('footer.status-bar');
+    }
+    const aheadOf = (el: AppShell) => footerOf(el)?.querySelector('.status-ahead') ?? null;
+    const behindOf = (el: AppShell) => footerOf(el)?.querySelector('.status-behind') ?? null;
+
+    /** Mount a shell on an open repo whose branch data is already known. */
+    async function mountOnRepo(
+      aheadBehind?: { ahead: number; behind: number } | 'no-branch',
+    ): Promise<AppShell> {
+      // Quiet the sidebar lists that mount with the shell — an unmocked
+      // command resolves to null and each list toasts its own load failure.
+      for (const cmd of ['get_stashes', 'get_tags', 'get_status', 'get_remotes']) {
+        if (!mockResponses[cmd]) mockResponses[cmd] = () => [];
+      }
+      const el = createAppShell();
+      document.body.appendChild(el);
+      await (el as any).updateComplete;
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      if (aheadBehind !== 'no-branch') {
+        repositoryStore
+          .getState()
+          .updateRepoData('/repo/one', { currentBranch: branch(aheadBehind) as any });
+      }
+      await (el as any).updateComplete;
+      return el;
+    }
+
+    it('shows the unpushed count as soon as the branch is known', async () => {
+      const el = await mountOnRepo({ ahead: 3, behind: 0 });
+      try {
+        await waitUntil(() => aheadOf(el) !== null, 'the ahead badge is rendered');
+        expect(aheadOf(el)!.textContent).to.contain('3');
+        expect(behindOf(el), 'nothing to pull').to.be.null;
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a successful push clears it', async () => {
+      // The whole reported chain: push → refreshConflictDialogRepo →
+      // handleRefresh → repository-refresh → the branch list re-reads
+      // get_branches → store → this badge.
+      let pushed = false;
+      mockResponses['open_repository'] = () => mockRepo('/repo/one', 'one');
+      mockResponses['get_status'] = () => [];
+      mockResponses['get_remotes'] = () => [];
+      mockResponses['get_cleanup_candidates'] = () => [];
+      mockResponses['get_branches'] = () => [
+        branch(pushed ? { ahead: 0, behind: 0 } : { ahead: 3, behind: 0 }),
+      ];
+      mockResponses['push'] = () => {
+        pushed = true;
+        return null;
+      };
+
+      const el = await mountOnRepo({ ahead: 3, behind: 0 });
+      try {
+        await waitUntil(() => aheadOf(el)?.textContent?.includes('3') === true, 'starts at 3');
+
+        await (el as any).handlePush();
+
+        await waitUntil(() => aheadOf(el) === null, 'the pushed commits stop being advertised');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a push that fails leaves the unpushed count on screen', async () => {
+      failures['push'] = { code: 'COMMAND_ERROR', message: 'Updates were rejected' };
+      mockResponses['open_repository'] = () => mockRepo('/repo/one', 'one');
+      mockResponses['get_status'] = () => [];
+      mockResponses['get_remotes'] = () => [];
+      mockResponses['get_cleanup_candidates'] = () => [];
+      mockResponses['get_branches'] = () => [branch({ ahead: 3, behind: 0 })];
+
+      const el = await mountOnRepo({ ahead: 3, behind: 0 });
+      try {
+        await waitUntil(() => aheadOf(el)?.textContent?.includes('3') === true, 'starts at 3');
+        uiStore.setState({ toasts: [] });
+
+        await (el as any).handlePush();
+        await (el as any).updateComplete;
+
+        expect(aheadOf(el), 'the commits are still unpushed, so still shown').to.not.be.null;
+        expect(aheadOf(el)!.textContent).to.contain('3');
+        expect(
+          uiStore
+            .getState()
+            .toasts.some((t) => t.type === 'error' && t.action?.label === 'Pull Now'),
+          'and the rejection is reported, with its recovery',
+        ).to.equal(true);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('renders a behind-only repo with the down arrow alone', async () => {
+      const el = await mountOnRepo({ ahead: 0, behind: 2 });
+      try {
+        await waitUntil(() => behindOf(el) !== null, 'the behind badge is rendered');
+        expect(aheadOf(el)).to.be.null;
+        expect(behindOf(el)!.textContent).to.contain('2');
+        // No ahead badge before it, so it keeps the full gap from the path
+        expect(behindOf(el)!.getAttribute('style')).to.contain('margin-left: 12px');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('renders no badge for a branch with no upstream', async () => {
+      const el = await mountOnRepo();
+      try {
+        await (el as any).updateComplete;
+        expect(aheadOf(el), 'never prints an undefined count').to.be.null;
+        expect(behindOf(el)).to.be.null;
+        expect(footerOf(el)!.textContent, 'the path is still shown').to.contain('/repo/one');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('the fetch-on-focus result reaches both badges, not just this one', async () => {
+      const { settingsStore } = await import('../stores/index.ts');
+      settingsStore.setState({ fetchOnFocus: true });
+      mockResponses['get_remote_status'] = () => ({
+        ahead: 0,
+        behind: 4,
+        hasUpstream: true,
+        upstreamName: 'origin/main',
+      });
+      const el = await mountOnRepo({ ahead: 0, behind: 0 });
+      try {
+        window.dispatchEvent(new Event('focus'));
+
+        await waitUntil(
+          () => behindOf(el)?.textContent?.includes('4') === true,
+          'the status bar picks up the fetched counts',
+        );
+        // The tab badge reads the store — on the old code this stayed stale.
+        expect(
+          repositoryStore.getState().openRepositories[0].currentBranch?.aheadBehind,
+        ).to.deep.equal({ ahead: 0, behind: 4 });
+      } finally {
+        settingsStore.setState({ fetchOnFocus: false });
         el.remove();
       }
     });

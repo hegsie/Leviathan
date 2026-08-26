@@ -473,6 +473,14 @@ export class LvConfigDialog extends LitElement {
   private async handleSaveSetting(key: string, value: string): Promise<void> {
     this.error = null;
 
+    // A blanked input means "remove this setting". Writing an empty string
+    // instead leaves `key = ` behind in .git/config, which git rejects on the
+    // next read ("bad boolean config value '' for 'pull.rebase'").
+    if (value.trim() === '') {
+      await this.clearSetting(key);
+      return;
+    }
+
     try {
       const result = await gitService.setConfigValue(
         this.pinnedRepoPath,
@@ -493,6 +501,38 @@ export class LvConfigDialog extends LitElement {
       }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Failed to save setting';
+    }
+  }
+
+  /**
+   * Remove the repository-local value for `key`. A value inherited from the
+   * global or system scope is not this tab's to remove, so it survives the
+   * reload — say so instead of claiming the setting is gone.
+   */
+  private async clearSetting(key: string): Promise<void> {
+    try {
+      const result = await gitService.unsetConfigValue(
+        this.pinnedRepoPath,
+        key,
+        false // local
+      );
+
+      if (result.success) {
+        await this.loadData();
+        const inherited = this.settings.find((s) => s.key === key);
+        if (inherited) {
+          showToast(
+            `Cleared ${key} for this repository — still set in ${inherited.scope} config`,
+            'info'
+          );
+        } else {
+          showToast('Setting cleared', 'success');
+        }
+      } else {
+        this.error = result.error?.message || 'Failed to clear setting';
+      }
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : 'Failed to clear setting';
     }
   }
 
@@ -634,6 +674,10 @@ export class LvConfigDialog extends LitElement {
                 <span class="scope-badge">${setting.scope}</span>
               </div>
               <div class="setting-value">
+                <!-- A plain binding, not live(): a failed save or clear must
+                     leave the text the user typed alone. After a successful one
+                     loadData() re-renders through the loading state, which
+                     rebuilds this input from the reloaded value. -->
                 <input
                   type="text"
                   .value=${setting.value}
@@ -649,6 +693,7 @@ export class LvConfigDialog extends LitElement {
       <div class="form-group" style="margin-top: var(--spacing-md)">
         <div class="hint">
           Changes are saved automatically when you modify a value.
+          Clear a value to remove it from this repository.
           Configure additional settings via git config command.
         </div>
       </div>

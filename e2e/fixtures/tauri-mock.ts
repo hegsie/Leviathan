@@ -9,6 +9,8 @@ export interface MockRepository {
   isValid: boolean;
   isBare: boolean;
   headRef: string | null;
+  /** Commit HEAD points at when detached; absent/null while on a branch. */
+  detachedHeadOid?: string | null;
   state: string;
 }
 
@@ -165,6 +167,20 @@ export const defaultMockData = {
 
   // Remotes
   remotes: [{ name: 'origin', url: 'https://github.com/test/repo.git', pushUrl: null }] as MockRemote[],
+
+  // Git Flow config — an UNINITIALIZED repo (a read that succeeded). Without
+  // this case the command falls through to the unmocked default (null), which
+  // the panel reports as a config READ FAILURE.
+  gitflowConfig: {
+    initialized: false,
+    masterBranch: 'main',
+    developBranch: 'develop',
+    featurePrefix: 'feature/',
+    releasePrefix: 'release/',
+    hotfixPrefix: 'hotfix/',
+    supportPrefix: 'support/',
+    versionTagPrefix: 'v',
+  },
 
   // Settings
   settings: {
@@ -443,6 +459,9 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return null;
       }
       case 'push_tag':
+      // Deleting a tag offers to delete the remote copy too — the local
+      // delete leaves it behind and the tag fetch refspec restores it.
+      case 'delete_remote_tag':
         return null;
 
       // Rewrite commands (cherry-pick, revert, reset, merge, rebase)
@@ -549,6 +568,10 @@ function createMockHandler(mocks: typeof defaultMockData) {
       // AI availability
       case 'is_ai_available':
         return false;
+      // Null = "AI is usable"; a test wanting the unavailable-provider UI
+      // overrides this with { reason, providerSelected }.
+      case 'ai_unavailable_reason':
+        return null;
 
       // AI provider commands
       case 'get_ai_providers':
@@ -675,7 +698,32 @@ export async function setupTauriMocks(
       // Deep clone mock data into mutable state that mutations can update
       const state = JSON.parse(JSON.stringify(mockData)) as typeof defaultMockData;
 
-      const handler = (command: string, args?: Record<string, unknown>): unknown => {
+      // === Backend event delivery ===
+      // Tauri's `listen()` registers a JS callback through `transformCallback`
+      // and then invokes `plugin:event|listen` with that callback's id. Keep
+      // both so tests can emit backend events the app really listens to.
+      const eventCallbacks = new Map<number, (e: unknown) => void>();
+      const eventListeners = new Map<number, { event: string; cb: (e: unknown) => void }>();
+      let nextCallbackId = 1;
+
+      // `unlisten()` from @tauri-apps/api calls into the event plugin's own
+      // internals before the IPC round trip, so it has to exist for teardown.
+      (window as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: () => {},
+      };
+
+      (window as unknown as Record<string, unknown>).__EMIT_TAURI_EVENT__ = (
+        event: string,
+        payload: unknown
+      ) => {
+        for (const listener of eventListeners.values()) {
+          if (listener.event === event) {
+            listener.cb({ event, id: 0, payload });
+          }
+        }
+      };
+
+      const commandHandler = (command: string, args?: Record<string, unknown>): unknown => {
         switch (command) {
           case 'open_repository':
           case 'get_repository_info':
@@ -974,6 +1022,8 @@ export async function setupTauriMocks(
             return null;
           }
           case 'push_tag':
+          // See the other builder's switch — tag delete offers the remote too.
+          case 'delete_remote_tag':
             return null;
 
           // === Stash mutations ===
@@ -1050,6 +1100,8 @@ export async function setupTauriMocks(
           // === AI commands ===
           case 'is_ai_available':
             return false;
+          case 'ai_unavailable_reason':
+            return null;
           case 'generate_commit_message':
             return { summary: 'Auto-generated commit', body: null };
           case 'get_ai_providers':
@@ -1123,6 +1175,10 @@ export async function setupTauriMocks(
               totalLinesDeleted: 0,
             };
 
+          // === Git Flow ===
+          case 'get_gitflow_config':
+            return state.gitflowConfig;
+
           // === Integration detection commands ===
           case 'detect_ado_repo':
           case 'detect_gitlab_repo':
@@ -1142,12 +1198,31 @@ export async function setupTauriMocks(
         }
       };
 
+      const handler = (command: string, args?: Record<string, unknown>): unknown => {
+        switch (command) {
+          case 'plugin:event|listen': {
+            const cb = eventCallbacks.get(args?.handler as number);
+            const id = nextCallbackId++;
+            if (cb) eventListeners.set(id, { event: args?.event as string, cb });
+            return id;
+          }
+          case 'plugin:event|unlisten':
+            eventListeners.delete(args?.eventId as number);
+            return null;
+        }
+        return commandHandler(command, args);
+      };
+
       // Set up the Tauri internals mock
       (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
         invoke: async (command: string, args?: Record<string, unknown>) => {
           return handler(command, args);
         },
-        transformCallback: () => 0,
+        transformCallback: (cb: (e: unknown) => void) => {
+          const id = nextCallbackId++;
+          eventCallbacks.set(id, cb);
+          return id;
+        },
         convertFileSrc: (path: string) => path,
       };
 

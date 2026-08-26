@@ -2,11 +2,12 @@
 //! Manage git submodules
 
 use std::path::Path;
+use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 use crate::utils::cli_safety::reject_flag_like;
-use crate::utils::create_command;
+use crate::utils::{apply_token_credential_helper, create_command};
 
 /// Information about a submodule
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,11 +45,61 @@ pub enum SubmoduleStatus {
     Dirty,
 }
 
+/// The URL of the remote the token was resolved against, named by the caller.
+///
+/// There is deliberately NO fallback to `origin`, nor to "the first remote
+/// with a URL". `getRepoToken` (git.service.ts) probes EVERY remote and returns
+/// a token for the first one a provider claims, so the remote it settles on is
+/// routinely not `origin` — a repo whose `origin` is GitLab and whose
+/// `upstream` is GitHub yields a GitHub token. Scoping that to `origin` would
+/// both offer the GitHub token to the GitLab host and withhold it from the
+/// host it actually belongs to. When the name is absent or matches no remote,
+/// the host is unknown and nothing is injected.
+fn token_remote_url(repo_path: &Path, remote_name: &str) -> Option<String> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+    let remote = repo.find_remote(remote_name).ok()?;
+    remote.url().ok().map(|u| u.to_string())
+}
+
+/// Build the `git` command for a submodule operation, optionally carrying an
+/// auth token.
+///
+/// The token is fed to git through a credential helper in the environment, so
+/// the per-submodule `git clone` / `git fetch` children that `git submodule
+/// update` spawns inherit it too. It is scoped to the host of `token_remote` —
+/// the remote the frontend resolved the token against — because the children
+/// ask for credentials for each submodule's url from .gitmodules, which may
+/// point anywhere, and the token belongs to one provider only.
+fn submodule_command(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+    token_remote: Option<&str>,
+) -> Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path).args(args);
+    if let (Some(token_value), Some(remote_name)) = (token, token_remote) {
+        if let Some(remote_url) = token_remote_url(repo_path, remote_name) {
+            apply_token_credential_helper(&mut cmd, token_value, &remote_url);
+        }
+    }
+    cmd
+}
+
 /// Helper to run git commands
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = create_command("git")
-        .current_dir(repo_path)
-        .args(args)
+    run_git_command_with_token(repo_path, args, None, None)
+}
+
+/// Helper to run git commands, authenticating with `token` when one is given,
+/// scoped to the host of `token_remote`.
+fn run_git_command_with_token(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+    token_remote: Option<&str>,
+) -> Result<String> {
+    let output = submodule_command(repo_path, args, token, token_remote)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
 
@@ -226,22 +277,18 @@ pub async fn update_submodules(
     recursive: Option<bool>,
     remote: Option<bool>,
     token: Option<String>,
+    token_remote: Option<String>,
 ) -> Result<()> {
-    // Note: Standard git submodule update command doesn't easily accept a token argument
-    // since it shells out to git commands internally for each submodule.
-    // However, if we are authenticated via git-credential-manager or similar, it should work.
-    // For our specific token injection, it's more complex with submodules as they might reside on different hosts.
+    // The token the frontend looked up (git.service.ts updateSubmodules) used
+    // to be logged and dropped here, so `git submodule update` ran with
+    // GIT_TERMINAL_PROMPT=0 and no credential at all: Init, Update and Update
+    // All failed on a private submodule for exactly the users whose fetch and
+    // push succeed. It now goes to git as a credential helper in the
+    // environment, which the per-submodule clone/fetch children inherit.
     //
-    // Ideally, we would configure the credential helper for the duration of this command
-    // or pass the token via environment variable if we were using a custom helper.
-    //
-    // For now, we'll proceed without explicit token injection for submodules,
-    // relying on the credential manager/helper being set up correctly,
-    // BUT we will log a warning if a token was provided but can't be used easily here.
-
-    if token.is_some() {
-        tracing::warn!("Token provided for update_submodules but explicit token injection is not yet fully supported for submodules. Operation may fail if credentials are not in keychain.");
-    }
+    // `token_remote` names the remote the frontend resolved that token
+    // against, so the helper is scoped to the host it belongs to rather than
+    // to whichever remote happens to be called `origin`.
 
     let repo_path = Path::new(&path);
 
@@ -271,7 +318,7 @@ pub async fn update_submodules(
         }
     }
 
-    run_git_command(repo_path, &args)?;
+    run_git_command_with_token(repo_path, &args, token.as_deref(), token_remote.as_deref())?;
     Ok(())
 }
 
@@ -392,6 +439,8 @@ pub async fn submodule_foreach(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+    use std::io::Write;
+    use std::process::Stdio;
 
     #[tokio::test]
     async fn test_get_submodules_empty() {
@@ -414,7 +463,7 @@ mod tests {
     async fn test_update_submodules_no_submodules() {
         let repo = TestRepo::with_initial_commit();
         // Update on repo with no submodules should succeed
-        let result = update_submodules(repo.path_str(), None, None, None, None, None).await;
+        let result = update_submodules(repo.path_str(), None, None, None, None, None, None).await;
         assert!(result.is_ok());
     }
 
@@ -524,6 +573,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -538,6 +588,7 @@ mod tests {
             None,
             None,
             Some(true), // recursive
+            None,
             None,
             None,
         )
@@ -733,6 +784,429 @@ mod tests {
             err.to_string().contains("must not start with '-'"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    /// The token the frontend sends must actually reach the per-submodule git
+    /// process. `git submodule update` clones and fetches each submodule in a
+    /// CHILD process, so the credential has to travel in the environment —
+    /// this observes what that child was handed via git's own supported
+    /// `submodule.<name>.update = !command` hook.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_update_submodules_feeds_the_token_to_the_submodule_git_process() {
+        let source = TestRepo::with_initial_commit();
+        let super_repo = TestRepo::with_initial_commit();
+        let super_path = super_repo.path.clone();
+        // The injected helper is scoped to the host of the remote the token was
+        // resolved against, so that remote has to exist for anything to be
+        // exported at all.
+        super_repo.add_remote("origin", "https://example.com/super.git");
+
+        let source_url = source.path.to_string_lossy().to_string();
+        git_in(&super_path, &["submodule", "add", &source_url, "deps/lib"]);
+        git_in(&super_path, &["commit", "-m", "add submodule"]);
+
+        // Advance the submodule and record the new pointer in the superproject,
+        // so `git submodule update` has work to do.
+        let sub_path = super_path.join("deps").join("lib");
+        git_in(&sub_path, &["config", "user.email", "test@example.com"]);
+        git_in(&sub_path, &["config", "user.name", "Test User"]);
+        let old_oid = git_in(&sub_path, &["rev-parse", "HEAD"]);
+        std::fs::write(sub_path.join("v2.txt"), "v2").unwrap();
+        git_in(&sub_path, &["add", "v2.txt"]);
+        git_in(&sub_path, &["commit", "-m", "v2"]);
+        git_in(&super_path, &["add", "deps/lib"]);
+        git_in(&super_path, &["commit", "-m", "bump submodule"]);
+
+        // Move the submodule back. The recorded commit is already present
+        // locally, so git needs no fetch — but the shas differ, which is what
+        // makes git run the update command below.
+        git_in(&sub_path, &["checkout", "--detach", &old_oid]);
+
+        // `!command` update mode is honoured from .git/config (git refuses it
+        // from .gitmodules), and git runs it in a child process — exactly the
+        // process the token has to reach.
+        let out_dir = tempfile::tempdir().unwrap();
+        let seen = out_dir.path().join("token-seen.txt");
+        let update_cmd = format!(
+            "!sh -c 'printf \"%s\" \"$LEVIATHAN_GIT_TOKEN\" > \"{}\"'",
+            seen.display()
+        );
+        git_in(
+            &super_path,
+            &["config", "submodule.deps/lib.update", &update_cmd],
+        );
+
+        let result = update_submodules(
+            super_repo.path_str(),
+            Some(vec!["deps/lib".to_string()]),
+            None,
+            None,
+            None,
+            Some("ghp_test_token".to_string()),
+            Some("origin".to_string()),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "update_submodules failed: {:?}",
+            result.err()
+        );
+
+        let recorded =
+            std::fs::read_to_string(&seen).expect("the submodule update command never ran");
+        assert_eq!(
+            recorded, "ghp_test_token",
+            "update_submodules dropped the token instead of feeding it to the submodule's git process"
+        );
+    }
+
+    /// Injecting an env var git never reads, or a helper string that does not
+    /// expand, would authenticate with garbage just as silently as sending no
+    /// credential at all — the exact regression remote.rs documents. Ask git
+    /// itself what the injected helper resolves to.
+    /// Ask git itself what the injected helper resolves to for a given
+    /// credential request. Returns the `key=value` lines `git credential fill`
+    /// printed.
+    #[cfg(unix)]
+    fn fill_credential(repo: &TestRepo, token: &str, token_remote: &str, request: &str) -> String {
+        let mut cmd = submodule_command(
+            &repo.path,
+            &["credential", "fill"],
+            Some(token),
+            Some(token_remote),
+        );
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("failed to spawn git credential fill");
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(request.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_credential_helper_answers_with_the_token() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=example.com\n\n",
+        );
+
+        assert!(
+            stdout.contains("username=git"),
+            "git did not resolve a username from the injected helper: {}",
+            stdout
+        );
+        assert!(
+            stdout.contains("password=ghp_secret"),
+            "git did not resolve the token from the injected helper: {}",
+            stdout
+        );
+    }
+
+    /// The helper snippet never reads the credential request on stdin, so an
+    /// UNSCOPED injection answers with the token for whatever host git asks
+    /// about. `git submodule update` spawns a clone/fetch child per submodule
+    /// asking for that submodule's OWN url from .gitmodules, which may point at
+    /// any host the superproject's author chose — so an unscoped injection
+    /// hands the superproject's PAT to a third-party host as a Basic-auth
+    /// password. Scoped to the superproject's host, git must not offer it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_does_not_offer_the_token_to_another_host() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=evil.test\n\n",
+        );
+
+        assert!(
+            !stdout.contains("ghp_secret"),
+            "the token was offered to a host it does not belong to: {}",
+            stdout
+        );
+    }
+
+    /// GIT_CONFIG_* is applied LAST, so the injected helper is queried last —
+    /// and git stops at the first helper returning a complete credential. A
+    /// user whose own helper holds a stale or wrong-account entry for the host
+    /// would therefore never have the app's token tried, which is the very
+    /// failure this authentication path exists to fix. The url-scoped empty
+    /// `helper` value resets the list for this url only, making the token the
+    /// deterministic answer for its own host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_token_wins_over_a_stale_user_helper() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+        git_in(
+            &repo.path,
+            &[
+                "config",
+                "--local",
+                "credential.helper",
+                "!f() { echo username=keychainuser; echo password=stalepass; }; f",
+            ],
+        );
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=example.com\n\n",
+        );
+
+        assert!(
+            stdout.contains("password=ghp_secret"),
+            "the user's stale helper shadowed the app's token: {}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("stalepass"),
+            "the user's stale helper shadowed the app's token: {}",
+            stdout
+        );
+    }
+
+    /// The reset must be url-scoped: the user's own helpers have to keep
+    /// answering for every OTHER host, or a submodule on a different host that
+    /// their keychain can authenticate would start failing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_leaves_the_user_helper_for_other_hosts() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+        git_in(
+            &repo.path,
+            &[
+                "config",
+                "--local",
+                "credential.helper",
+                "!f() { echo username=keychainuser; echo password=keychainpass; }; f",
+            ],
+        );
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=other.test\n\n",
+        );
+
+        assert!(
+            stdout.contains("password=keychainpass"),
+            "the injection disabled the user's own helper for an unrelated host: {}",
+            stdout
+        );
+    }
+
+    /// The core of the host-mismatch fix. `getRepoToken` probes EVERY remote
+    /// and returns a token for the first one a provider claims, so the remote
+    /// it settles on is routinely not `origin`. Scoping to `origin` regardless
+    /// both offered that token to an unrelated host and withheld it from the
+    /// host it belongs to — so the operation this path exists to fix still
+    /// failed, while the token leaked to a third party.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_scopes_the_token_to_the_named_remote_not_origin() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://origin-host.test/super.git");
+        repo.add_remote("upstream", "https://token-host.test/super.git");
+
+        // The token was resolved against `upstream`, so it must reach that host
+        let for_token_host = fill_credential(
+            &repo,
+            "ghp_secret",
+            "upstream",
+            "protocol=https\nhost=token-host.test\n\n",
+        );
+        assert!(
+            for_token_host.contains("password=ghp_secret"),
+            "the token was withheld from the host it was resolved for: {}",
+            for_token_host
+        );
+
+        // ...and must NOT be offered to whichever remote happens to be `origin`
+        let for_origin_host = fill_credential(
+            &repo,
+            "ghp_secret",
+            "upstream",
+            "protocol=https\nhost=origin-host.test\n\n",
+        );
+        assert!(
+            !for_origin_host.contains("ghp_secret"),
+            "the token was offered to origin's host, which it does not belong to: {}",
+            for_origin_host
+        );
+    }
+
+    /// A token is a PROVIDER credential, not a transport one: the frontend's
+    /// detection returns one for an SSH remote too. A superproject cloned over
+    /// SSH commonly lists submodules whose .gitmodules url is https on that
+    /// same provider, and those children ask git for https credentials — so
+    /// the SSH spelling has to scope the token to the provider's https host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_scopes_an_ssh_remote_to_the_provider_https_host() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "git@github.com:owner/super.git");
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=github.com\n\n",
+        );
+
+        assert!(
+            stdout.contains("password=ghp_secret"),
+            "an ssh superproject left its https submodules with no credential: {}",
+            stdout
+        );
+
+        let elsewhere = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=evil.test\n\n",
+        );
+        assert!(
+            !elsewhere.contains("ghp_secret"),
+            "the ssh mapping widened the token beyond its own provider: {}",
+            elsewhere
+        );
+    }
+
+    /// When the caller cannot say which remote the token belongs to, the host
+    /// is unknown — and a token offered under a guessed scope is exactly the
+    /// disclosure this scoping exists to prevent. Inject nothing.
+    #[tokio::test]
+    async fn test_submodule_command_without_a_token_remote_injects_nothing() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let cmd = submodule_command(
+            &repo.path,
+            &["submodule", "update"],
+            Some("ghp_secret"),
+            None,
+        );
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !keys.iter().any(|k| k == "GIT_CONFIG_COUNT"),
+            "a token with no remote to scope it to must not be injected under a guessed host"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            "a token with no remote to scope it to must not be exported"
+        );
+    }
+
+    /// Same rule when the named remote no longer exists — it was renamed or
+    /// deleted between the frontend's lookup and the command. Falling back to
+    /// another remote would reintroduce the mismatch.
+    #[tokio::test]
+    async fn test_submodule_command_with_an_unknown_token_remote_injects_nothing() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let cmd = submodule_command(
+            &repo.path,
+            &["submodule", "update"],
+            Some("ghp_secret"),
+            Some("gone"),
+        );
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            "an unresolvable remote must not fall back to another remote's host"
+        );
+    }
+
+    /// With no token stored — a configuration that works today — nothing may be
+    /// injected: an unconditional injection would hand git an empty password
+    /// and shadow the user's own credential helper.
+    #[tokio::test]
+    async fn test_submodule_command_without_a_token_injects_nothing() {
+        let repo = TestRepo::with_initial_commit();
+
+        let cmd = submodule_command(&repo.path, &["submodule", "update"], None, Some("origin"));
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !keys.iter().any(|k| k == "GIT_CONFIG_COUNT"),
+            "a tokenless update must not clobber GIT_CONFIG_COUNT or shadow the user's credential helper"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            "a tokenless update must not export an empty token"
+        );
+    }
+
+    /// Carrying a token must not bypass argument validation, and must not turn
+    /// a git failure into a swallowed success.
+    #[tokio::test]
+    async fn test_update_submodules_with_a_token_still_reports_errors() {
+        let repo = TestRepo::with_initial_commit();
+
+        let err = update_submodules(
+            repo.path_str(),
+            Some(vec!["--all".to_string()]),
+            None,
+            None,
+            None,
+            Some("ghp_test_token".to_string()),
+            Some("origin".to_string()),
+        )
+        .await
+        .expect_err("a flag-like path must never reach git as a positional");
+        assert!(
+            err.to_string().contains("must not start with '-'"),
+            "unexpected error: {}",
+            err
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            update_submodules(
+                tmp.path().to_string_lossy().to_string(),
+                None,
+                None,
+                None,
+                None,
+                Some("ghp_test_token".to_string()),
+                Some("origin".to_string()),
+            )
+            .await
+            .is_err(),
+            "a git failure must still reach the user when a token is present"
         );
     }
 }

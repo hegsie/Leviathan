@@ -150,6 +150,10 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+/** Raw result of `oauth_refresh_token`; null → the refresh fails. */
+let refreshResponse: unknown = null;
+/** Accounts returned by `get_unified_profiles_config`. */
+let accountsResponse: IntegrationAccount[] = [];
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -179,7 +183,7 @@ function setupMockInvoke(): void {
       return {
         version: 3,
         profiles: [],
-        accounts: [mockAccount],
+        accounts: accountsResponse,
         repositoryAssignments: {},
       };
     }
@@ -200,6 +204,7 @@ function setupMockInvoke(): void {
 
     // OAuth
     if (command === 'get_oauth_client_id') return null;
+    if (command === 'oauth_refresh_token') return refreshResponse;
 
     return null;
   };
@@ -210,6 +215,8 @@ describe('lv-gitlab-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    refreshResponse = null;
+    accountsResponse = [mockAccount];
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
   });
@@ -253,6 +260,135 @@ describe('lv-gitlab-dialog', () => {
       if (repoName) {
         expect(repoName.textContent).to.include('test-group/test-project');
       }
+    });
+
+    // Regression: these provider dialogs are repo-independent (they stay open
+    // when the last repository tab closes), at which point repositoryPath goes
+    // to ''. The detected repo must be cleared, or the dialog keeps showing --
+    // and acting on -- the repository whose tab was just closed.
+    it('clears the detected repo when repositoryPath becomes empty', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header with a repository open'
+      ).to.equal(1);
+
+      // Last repository tab closed: the host rebinds repositoryPath to ''.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'stale repo header after the last repository tab closed'
+      ).to.equal(0);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const repoTab = Array.from(tabs).find(
+        (t) => t.textContent?.trim() === 'Merge Requests'
+      ) as HTMLButtonElement;
+      repoTab.click();
+      await waitForLoad(el);
+
+      const emptyText = el.shadowRoot!.querySelector('.empty-state')?.textContent?.trim() ?? '';
+      expect(emptyText, 'repo-backed tab after the last repository tab closed').to.contain(
+        'No GitLab repository detected'
+      );
+    });
+
+    // Regression: the dialog outlives the repository, so a detect_gitlab_repo
+    // issued for the repository whose tab has since closed can resolve
+    // afterwards. Its result must be dropped, or the repo header -- and the
+    // repo-backed loaders behind it -- come back for a repository that is gone.
+    it('ignores a repository detection that resolves after the repository closed', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Hold the detection open so it can be made to land late.
+      const baseInvoke = mockInvoke;
+      const pendingDetects: Array<() => void> = [];
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_gitlab_repo') {
+          await new Promise<void>((resolve) => pendingDetects.push(resolve));
+        }
+        return baseInvoke(command, args);
+      };
+
+      el.repositoryPath = '/mock/repo';
+      await waitForLoad(el);
+      expect(pendingDetects.length, 'detection in flight').to.equal(1);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header while the detection is still in flight'
+      ).to.equal(0);
+
+      // Last repository tab closed while the detection was still in flight.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      pendingDetects.forEach((resolve) => resolve());
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header restored by a detection for the closed repository'
+      ).to.equal(0);
+    });
+
+    // Regression: a create-* draft is scoped to the repository it was composed
+    // against, but the create handlers guard only on the detected repo. Leaving
+    // the draft on screen when the dialog is repointed would submit it into the
+    // new repository.
+    it('drops the merge request draft when the repository changes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const listTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Merge Requests'
+      ) as HTMLButtonElement;
+      listTab.click();
+      await waitForLoad(el);
+
+      const newButton = Array.from(el.shadowRoot!.querySelectorAll('button.btn')).find(
+        (b) => b.textContent?.trim() === '+ New MR'
+      ) as HTMLButtonElement;
+      expect(newButton === undefined, 'missing + New MR button').to.be.false;
+      newButton.click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector(
+        'input[placeholder="Merge request title"]'
+      ) as HTMLInputElement | null;
+      expect(titleInput === null, 'missing draft title input').to.be.false;
+      titleInput!.value = 'Draft for the first repository';
+      titleInput!.dispatchEvent(new Event('input'));
+      await waitForLoad(el);
+
+      // The user switches to a different repository with the draft on screen.
+      el.repositoryPath = '/mock/other-repo';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('input[placeholder="Merge request title"]').length,
+        'submittable draft form after the repository changed'
+      ).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).createMrTitle, 'retained draft title').to.equal('');
     });
 
     it('shows account selector when accounts exist', async () => {
@@ -869,6 +1005,296 @@ describe('lv-gitlab-dialog', () => {
       await el.updateComplete;
 
       expect((el as unknown as { error: string | null }).error).to.equal(null);
+    });
+  });
+  // Regression: GitLab OAuth access tokens expire in ~2h. The dialog used to read
+  // the raw stored access token, so a signed-in account read as disconnected on
+  // the next open (and was marked disconnected app-wide) despite a valid stored
+  // refresh token. The token read must be refresh-aware, like Azure DevOps'.
+  describe('OAuth token refresh (regression)', () => {
+    /** Seed an OAuth bundle whose access token expires within the 5-min window. */
+    function seedExpiringOAuthToken(accountId = 'gl-acc-1'): void {
+      keyringStore.set(`gitlab_token_${accountId}`, 'stale-access');
+      keyringStore.set(
+        `gitlab_token_${accountId}_oauth`,
+        JSON.stringify({
+          accessToken: 'stale-access',
+          refreshToken: 'r1',
+          expiresAt: Date.now() + 60_000,
+        })
+      );
+    }
+
+    function findInvoke(command: string): { command: string; args: unknown } | undefined {
+      return invokeHistory.find((h) => h.command === command);
+    }
+
+    it('refreshes an expiring OAuth access token before checking the connection', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const check = findInvoke('check_gitlab_connection');
+      expect(check, 'connection was checked').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('fresh-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status
+      ).to.equal('connected');
+    });
+
+    it("refreshes against the account's instance, not the detected repo's", async () => {
+      const selfHosted = createTestAccount({
+        id: 'gl-acc-1',
+        name: 'Self-hosted GitLab',
+        integrationType: 'gitlab',
+        config: { type: 'gitlab', instanceUrl: 'https://gitlab.example.com' },
+        isDefault: true,
+      });
+      accountsResponse = [selfHosted];
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([selfHosted]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      // A detected repo (or a typed-in URL) on gitlab.com must not redirect the
+      // refresh grant away from the instance the account belongs to.
+      const priv = el as unknown as {
+        instanceUrlInput: string;
+        checkConnection: () => Promise<void>;
+      };
+      priv.instanceUrlInput = 'https://gitlab.com';
+      // The open-load already rotated the bundle; make it expiring again so this
+      // check has to refresh.
+      seedExpiringOAuthToken();
+      invokeHistory.length = 0;
+      await priv.checkConnection();
+
+      const refresh = findInvoke('oauth_refresh_token');
+      expect(refresh, 'a refresh was attempted').to.not.be.undefined;
+      expect((refresh!.args as { instanceUrl?: string }).instanceUrl).to.equal(
+        'https://gitlab.example.com'
+      );
+    });
+
+    it('falls back to the stored token and reports disconnected when the refresh fails', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = null; // invokeCommand treats null as a failed command
+      connectionResponse = mockDisconnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect(findInvoke('oauth_refresh_token'), 'a refresh was attempted').to.not.be.undefined;
+      const check = findInvoke('check_gitlab_connection');
+      expect(
+        (check!.args as { token: string }).token,
+        'falls back to the stored token rather than dead-ending'
+      ).to.equal('stale-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status
+      ).to.equal('disconnected');
+      // The user is offered the connect form instead of a silent failure.
+      expect(el.shadowRoot!.querySelector('input[type="password"]')).to.not.be.null;
+    });
+
+    it('does not attempt a refresh for a personal access token account', async () => {
+      keyringStore.set('gitlab_token_gl-acc-1', 'glpat-plain');
+      keyringStore.delete('gitlab_token_gl-acc-1_oauth');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      expect(findInvoke('oauth_refresh_token'), 'PATs are never refreshed').to.be.undefined;
+      const check = findInvoke('check_gitlab_connection');
+      expect((check!.args as { token: string }).token).to.equal('glpat-plain');
+    });
+  });
+
+  describe('Create issue labels', () => {
+    async function openCreateIssueTab(): Promise<LvGitLabDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { activeTab: string }).activeTab = 'create-issue';
+      await el.updateComplete;
+      return el;
+    }
+
+    function chips(el: LvGitLabDialog): HTMLElement[] {
+      return Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.label-chip'));
+    }
+
+    function lastCreateIssueInput(): { labels?: string[]; title?: string } | undefined {
+      const entries = invokeHistory.filter((e) => e.command === 'create_gitlab_issue');
+      if (entries.length === 0) return undefined;
+      const args = entries[entries.length - 1].args as Record<string, unknown>;
+      return args.input as { labels?: string[]; title?: string };
+    }
+
+    it('loads the project labels when the New Issue button is clicked', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { activeTab: string }).activeTab = 'issues';
+      await el.updateComplete;
+
+      // Only the click must be credited — the create-issue tab has no other
+      // loader, so opening the form is what has to fetch the labels.
+      const before = invokeHistory.length;
+
+      const newIssueBtn = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.btn')
+      ).find((b) => b.textContent?.trim() === '+ New Issue')!;
+      expect(newIssueBtn, 'New Issue button').to.not.be.undefined;
+      newIssueBtn.click();
+      await waitForLoad(el);
+
+      expect(
+        invokeHistory.slice(before).some((e) => e.command === 'get_gitlab_labels')
+      ).to.be.true;
+      expect(chips(el).length).to.equal(3);
+    });
+
+    it('renders a chip for every project label on the create-issue form', async () => {
+      const el = await openCreateIssueTab();
+
+      const rendered = chips(el);
+      expect(rendered.length).to.equal(3);
+      expect(rendered.map((c) => c.textContent?.trim())).to.deep.equal([
+        'bug',
+        'enhancement',
+        'performance',
+      ]);
+    });
+
+    it('sends the selected labels to create_gitlab_issue', async () => {
+      const el = await openCreateIssueTab();
+
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'Labelled issue';
+      await el.updateComplete;
+
+      const bug = chips(el).find((c) => c.textContent?.trim() === 'bug')!;
+      bug.click();
+      await el.updateComplete;
+
+      expect(
+        chips(el).find((c) => c.textContent?.trim() === 'bug')!.classList.contains('selected')
+      ).to.be.true;
+
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      expect(lastCreateIssueInput()?.labels).to.deep.equal(['bug']);
+      // Successful create resets the picker for the next issue.
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+    });
+
+    it('deselects a label when its chip is clicked again', async () => {
+      const el = await openCreateIssueTab();
+
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'No labels after all';
+      await el.updateComplete;
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+
+      const bug = chips(el).find((c) => c.textContent?.trim() === 'bug')!;
+      expect(bug.classList.contains('selected')).to.be.false;
+      expect(bug.getAttribute('aria-pressed')).to.equal('false');
+
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      // Empty selection is omitted, not sent as an empty array.
+      expect(lastCreateIssueInput()?.labels).to.equal(undefined);
+    });
+
+    it('drops selections for labels the new project does not have', async () => {
+      const el = await openCreateIssueTab();
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([
+        'bug',
+      ]);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_gitlab_labels') return ['enhancement'];
+        return previous(command, args);
+      };
+
+      await (el as unknown as { loadLabels: () => Promise<void> }).loadLabels();
+      await el.updateComplete;
+
+      expect((el as unknown as { labels: string[] }).labels).to.deep.equal(['enhancement']);
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+    });
+
+    it('keeps the picker and reports the failure when the labels request fails', async () => {
+      const el = await openCreateIssueTab();
+      expect(chips(el).length).to.equal(3);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_gitlab_labels') throw new Error('GitLab API error 500');
+        return previous(command, args);
+      };
+
+      await (el as unknown as { loadLabels: () => Promise<void> }).loadLabels();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal('GitLab API error 500');
+      // A failed refresh must not wipe the already-rendered picker.
+      expect(chips(el).length).to.equal(3);
+    });
+
+    it('clears labels and selections on disconnect', async () => {
+      const el = await openCreateIssueTab();
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gl-acc-1';
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      (el as unknown as { activeTab: string }).activeTab = 'create-issue';
+      await el.updateComplete;
+
+      expect((el as unknown as { labels: string[] }).labels).to.deep.equal([]);
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+      expect(chips(el).length).to.equal(0);
     });
   });
 });
