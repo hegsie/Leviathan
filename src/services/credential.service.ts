@@ -471,6 +471,19 @@ export async function getFreshAccountToken(
     try {
       const { refreshToken: refreshOAuthToken } = await import('./oauth.service.ts');
       const refreshed = await refreshOAuthToken(provider, refreshTokenValue, instanceUrl);
+      // The stored credential may have changed while the refresh was in flight:
+      // setToken (a PAT / app password saved over this account) retires the OAuth
+      // bundle, and deleteToken removes it outright. Persisting the rotated bundle
+      // now would recreate the blob and overwrite the main key, resurrecting the
+      // OAuth credential the user just superseded or deleted. Only write back when
+      // the bundle we refreshed from is still the one on disk.
+      const current = await getAccountOAuthToken(integrationType, accountId);
+      if (current?.refreshToken !== refreshTokenValue) {
+        log.debug(
+          ` Discarding refreshed OAuth token for ${integrationType} account ${accountId}; the stored credential changed mid-refresh`
+        );
+        return getAccountToken(integrationType, accountId);
+      }
       await storeAccountOAuthToken(
         integrationType,
         accountId,
