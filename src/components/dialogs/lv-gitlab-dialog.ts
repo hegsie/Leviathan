@@ -347,6 +347,34 @@ export class LvGitLabDialog extends LitElement {
         color: var(--color-text-secondary);
       }
 
+      /* Label picker on the create-issue form */
+      .label-picker {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      .label-chip {
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        font-size: var(--font-size-xs);
+        background: var(--color-bg-hover);
+        color: var(--color-text-secondary);
+        border: 1px solid var(--color-border);
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .label-chip:hover {
+        background: var(--color-bg-tertiary);
+      }
+
+      .label-chip.selected {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
       .pipeline-item {
         display: flex;
         align-items: center;
@@ -1008,6 +1036,9 @@ export class LvGitLabDialog extends LitElement {
 
       if (result.success && result.data) {
         this.labels = result.data;
+        // A different project (account/repo switch) has a different label set —
+        // drop selections that no longer exist so they can't be submitted invisibly.
+        this.createIssueLabels = this.createIssueLabels.filter(l => this.labels.includes(l));
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to load labels';
       }
@@ -1108,6 +1139,8 @@ export class LvGitLabDialog extends LitElement {
       this.mergeRequests = [];
       this.issues = [];
       this.pipelines = [];
+      this.labels = [];
+      this.createIssueLabels = [];
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to disconnect';
       showToast(this.error, 'error');
@@ -1452,6 +1485,12 @@ export class LvGitLabDialog extends LitElement {
     }
   }
 
+  private toggleCreateIssueLabel(label: string): void {
+    this.createIssueLabels = this.createIssueLabels.includes(label)
+      ? this.createIssueLabels.filter(l => l !== label)
+      : [...this.createIssueLabels, label];
+  }
+
   private handleClose(): void {
     this.dispatchEvent(new CustomEvent('close'));
   }
@@ -1676,7 +1715,7 @@ export class LvGitLabDialog extends LitElement {
           <option value="closed" ?selected=${this.issueFilter === 'closed'}>Closed</option>
           <option value="all" ?selected=${this.issueFilter === 'all'}>All</option>
         </select>
-        <button class="btn" @click=${() => this.activeTab = 'create-issue'}>
+        <button class="btn" @click=${() => { this.activeTab = 'create-issue'; this.loadLabels(); }}>
           + New Issue
         </button>
       </div>
@@ -1853,6 +1892,23 @@ export class LvGitLabDialog extends LitElement {
             @input=${(e: Event) => this.createIssueDescription = (e.target as HTMLTextAreaElement).value}
           ></textarea>
         </div>
+        ${this.labels.length > 0 ? html`
+          <div class="form-group">
+            <label>Labels</label>
+            <div class="label-picker">
+              ${this.labels.map(label => html`
+                <button
+                  type="button"
+                  class="label-chip ${this.createIssueLabels.includes(label) ? 'selected' : ''}"
+                  aria-pressed=${this.createIssueLabels.includes(label) ? 'true' : 'false'}
+                  @click=${() => this.toggleCreateIssueLabel(label)}
+                >
+                  ${label}
+                </button>
+              `)}
+            </div>
+          </div>
+        ` : ''}
         <div class="btn-row">
           <button class="btn" @click=${() => this.activeTab = 'issues'}>
             Cancel

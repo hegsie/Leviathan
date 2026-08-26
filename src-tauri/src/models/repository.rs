@@ -11,6 +11,10 @@ pub struct Repository {
     pub is_valid: bool,
     pub is_bare: bool,
     pub head_ref: Option<String>,
+    /// The commit HEAD points straight at when it is detached; `None` when HEAD
+    /// is on a branch or unborn. `head_ref` cannot stand in for it: a detached
+    /// HEAD's shorthand is the literal "HEAD", which names no commit.
+    pub detached_head_oid: Option<String>,
     pub state: RepositoryState,
     pub is_shallow: bool,
     pub is_partial_clone: bool,

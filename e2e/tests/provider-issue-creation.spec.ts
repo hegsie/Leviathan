@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupProfilesAndAccounts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
@@ -285,5 +285,153 @@ test.describe('Azure DevOps Dialog - Create Work Item', () => {
     await expect(
       page.locator('lv-azure-devops-dialog .error, .toast.error').first()
     ).toBeVisible({ timeout: 5000 });
+  });
+});
+
+
+// ============================================================================
+// GitLab - Create Issue with labels
+// ============================================================================
+
+test.describe('GitLab Dialog - Create Issue with labels', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      {
+        profiles: [
+          {
+            id: 'default',
+            name: 'Default',
+            gitName: 'Test User',
+            gitEmail: 'test@example.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: '#3b82f6',
+            defaultAccounts: { gitlab: 'gl-1' },
+          },
+        ],
+        accounts: [
+          {
+            id: 'gl-1',
+            name: 'GitLab',
+            integrationType: 'gitlab',
+            config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+            color: null,
+            cachedUser: { username: 'gluser', displayName: 'GL User', avatarUrl: null },
+            urlPatterns: [],
+            isDefault: false,
+          },
+        ],
+        connectedAccounts: ['gl-1'],
+      },
+      {
+        remotes: [
+          { name: 'origin', url: 'https://gitlab.com/test-group/test-project.git', pushUrl: null },
+        ],
+      },
+    );
+
+    await startCommandCapture(page);
+
+    await injectCommandMock(page, {
+      detect_gitlab_repo: {
+        instanceUrl: 'https://gitlab.com',
+        projectPath: 'test-group/test-project',
+        remoteName: 'origin',
+      },
+      check_gitlab_connection: {
+        connected: true,
+        user: { id: 1, username: 'gluser', name: 'GL User', avatarUrl: '', webUrl: '' },
+        instanceUrl: 'https://gitlab.com',
+      },
+      check_gitlab_connection_with_token: {
+        connected: true,
+        user: { id: 1, username: 'gluser', name: 'GL User', avatarUrl: '', webUrl: '' },
+        instanceUrl: 'https://gitlab.com',
+      },
+      list_gitlab_merge_requests: [],
+      list_gitlab_issues: [],
+      list_gitlab_pipelines: [],
+      get_gitlab_labels: ['bug', 'enhancement'],
+    });
+  });
+
+  async function openCreateIssueForm(page: Page): Promise<void> {
+    await app.executeCommand('GitLab');
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+
+    await dialogs.gitlab.issuesTab.click();
+    await expect(dialogs.gitlab.issuesTab).toHaveClass(/active/);
+
+    await page.locator('lv-gitlab-dialog .btn', { hasText: 'New Issue' }).click();
+  }
+
+  test('attaches the picked label to the created issue', async ({ page }) => {
+    await injectCommandMock(page, {
+      create_gitlab_issue: {
+        iid: 77,
+        title: 'E2E labelled issue',
+        description: null,
+        state: 'opened',
+        author: { id: 1, username: 'gluser', name: 'GL User', avatarUrl: '', webUrl: '' },
+        assignees: [],
+        labels: ['bug'],
+        createdAt: new Date().toISOString(),
+        webUrl: 'https://gitlab.com/test-group/test-project/-/issues/77',
+      },
+    });
+
+    await openCreateIssueForm(page);
+
+    await page.locator('lv-gitlab-dialog .token-form input[type="text"]').fill('E2E labelled issue');
+
+    await expect(dialogs.gitlab.labelChips).toHaveCount(2);
+    const bugChip = dialogs.gitlab.labelChips.filter({ hasText: 'bug' });
+    await bugChip.click();
+    await expect(bugChip).toHaveClass(/selected/);
+
+    await page.locator('lv-gitlab-dialog .btn-primary', { hasText: 'Create Issue' }).click();
+
+    await waitForCommand(page, 'create_gitlab_issue');
+    const cmds = await findCommand(page, 'create_gitlab_issue');
+    expect(cmds.length).toBeGreaterThan(0);
+    const args = cmds[0].args as Record<string, unknown>;
+    const input = args.input as Record<string, unknown>;
+    expect(input.title).toBe('E2E labelled issue');
+    expect(input.labels).toEqual(['bug']);
+
+    // Returns to the issues list and reports success.
+    await expect(dialogs.gitlab.issuesTab).toHaveClass(/active/);
+    await expect(page.locator('lv-toast-container .toast.success').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('shows an error and keeps the picked label when creation fails', async ({ page }) => {
+    await openCreateIssueForm(page);
+
+    await page.locator('lv-gitlab-dialog .token-form input[type="text"]').fill('Will fail');
+
+    await expect(dialogs.gitlab.labelChips).toHaveCount(2);
+    const bugChip = dialogs.gitlab.labelChips.filter({ hasText: 'bug' });
+    await bugChip.click();
+    await expect(bugChip).toHaveClass(/selected/);
+
+    await injectCommandError(page, 'create_gitlab_issue', 'Labels not allowed');
+
+    await page.locator('lv-gitlab-dialog .btn-primary', { hasText: 'Create Issue' }).click();
+
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+    await expect(
+      page.locator('lv-gitlab-dialog .error, .toast.error').first()
+    ).toBeVisible({ timeout: 5000 });
+
+    // The form (and the picked label) survives so the user can retry.
+    await expect(bugChip).toHaveClass(/selected/);
   });
 });

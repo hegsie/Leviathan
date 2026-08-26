@@ -47,6 +47,9 @@ pub struct WorkspaceRepoStatus {
     pub is_valid_repo: bool,
     pub changed_files_count: usize,
     pub current_branch: Option<String>,
+    /// True when HEAD is detached — the dialog renders that state rather than
+    /// a branch name, since `shorthand()` reports the literal "HEAD" there
+    pub is_detached: bool,
     pub ahead: usize,
     pub behind: usize,
 }
@@ -116,6 +119,7 @@ mod tests {
             is_valid_repo: true,
             changed_files_count: 5,
             current_branch: Some("main".to_string()),
+            is_detached: false,
             ahead: 2,
             behind: 1,
         };
@@ -130,6 +134,31 @@ mod tests {
         assert_eq!(deserialized.current_branch, Some("main".to_string()));
         assert_eq!(deserialized.ahead, 2);
         assert_eq!(deserialized.behind, 1);
+    }
+
+    /// A detached HEAD ships as `isDetached` with no branch name, so the
+    /// dialog can render the state instead of a branch called "HEAD".
+    #[test]
+    fn test_workspace_repo_status_detached_head_serialization() {
+        let status = WorkspaceRepoStatus {
+            path: "/test".to_string(),
+            name: "test".to_string(),
+            exists: true,
+            is_valid_repo: true,
+            changed_files_count: 0,
+            current_branch: None,
+            is_detached: true,
+            ahead: 0,
+            behind: 0,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("isDetached"));
+        assert!(!json.contains("is_detached"));
+
+        let deserialized: WorkspaceRepoStatus = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_detached);
+        assert_eq!(deserialized.current_branch, None);
     }
 
     #[test]

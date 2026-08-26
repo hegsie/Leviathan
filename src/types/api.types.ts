@@ -614,26 +614,6 @@ export interface GetAvatarUrlsCommand {
 }
 
 /**
- * Keyboard shortcut types
- */
-export interface KeyboardShortcutConfig {
-  action: string;
-  label: string;
-  shortcut: string;
-  category: string;
-  isCustom: boolean;
-}
-
-export interface GetKeyboardShortcutsCommand {
-  path?: string;
-}
-
-export interface SetKeyboardShortcutCommand {
-  action: string;
-  shortcut: string;
-}
-
-/**
  * Checkout file commands
  */
 export interface CheckoutFileFromCommitCommand {

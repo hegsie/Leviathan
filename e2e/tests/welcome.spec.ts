@@ -123,6 +123,30 @@ test.describe('Welcome Screen with Recent Repositories', () => {
       await expect(app.welcomeScreen).toBeVisible();
     }
   });
+
+  test('surfaces an error toast when a recent repository can no longer be opened', async ({ page }) => {
+    // The recent list is restored from the persisted store, not from a command,
+    // so seed it directly to guarantee an entry to click.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: { setState: (s: Record<string, unknown>) => void };
+      };
+      stores.repositoryStore.setState({
+        recentRepositories: [{ path: '/path/to/gone', name: 'gone', lastOpened: Date.now() }],
+      });
+    });
+    await expect(app.recentItems).toHaveCount(1);
+
+    await startCommandCapture(page);
+    await injectCommandError(page, 'open_repository', 'failed to open repository: /path/to/gone');
+
+    await app.recentItems.first().click();
+
+    // A moved or deleted repo must tell the user — repositoryStore.error is never rendered
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toContainText('failed to open repository', { timeout: 5000 });
+    await expect(app.welcomeScreen).toBeVisible();
+  });
 });
 
 test.describe('Clone Dialog', () => {
@@ -576,5 +600,90 @@ test.describe('Welcome - Extended Tests', () => {
 
     // After successful init, the welcome screen should no longer be visible
     await expect(app.welcomeScreen).not.toBeVisible({ timeout: 10000 });
+  });
+});
+
+test.describe('Welcome Screen - recent repository rows', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    app = new AppPage(page);
+    await app.goto();
+
+    await page.waitForFunction(
+      () => typeof (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ !== 'undefined',
+      { timeout: 10000 }
+    );
+
+    // Seed recents through the store: most recent first ⇒ rows are repo1, repo2.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: {
+          getState: () => {
+            clearRecentRepositories: () => void;
+            addRecentRepository: (path: string, name: string) => void;
+          };
+        };
+      };
+      const state = stores.repositoryStore.getState();
+      state.clearRecentRepositories();
+      state.addRecentRepository('/path/to/repo2', 'repo2');
+      state.addRecentRepository('/path/to/repo1', 'repo1');
+    });
+
+    await expect(app.recentItems).toHaveCount(2);
+  });
+
+  test('reveals the per-row remove control on hover', async () => {
+    const remove = app.recentItems.first().locator('.recent-remove');
+    await expect(remove).toHaveCount(1);
+
+    await expect
+      .poll(() => remove.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe('0');
+
+    await app.recentItems.first().hover();
+
+    await expect
+      .poll(() => remove.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe('1');
+  });
+
+  test('has no stray remove buttons sitting between rows', async () => {
+    await expect(app.welcomeScreen.locator('.recent-list > button.recent-remove')).toHaveCount(0);
+  });
+
+  test('removes only the clicked entry and does not open it', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().hover();
+    await app.recentItems.first().locator('.recent-remove').click();
+
+    await expect(app.recentItems).toHaveCount(1);
+    await expect(app.recentItems.first()).toContainText('repo2');
+    expect(await findCommand(page, 'open_repository')).toHaveLength(0);
+  });
+
+  test('opens a recent repository with the keyboard', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().press('Enter');
+
+    await waitForCommand(page, 'open_repository');
+    const openCmds = await findCommand(page, 'open_repository');
+    expect(openCmds.length).toBeGreaterThan(0);
+    expect((openCmds[0].args as { path: string }).path).toBe('/path/to/repo1');
+  });
+
+  test('Enter on the remove button removes the entry without opening it', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await app.recentItems.first().hover();
+    await app.recentItems.first().locator('.recent-remove').press('Enter');
+
+    await expect(app.recentItems).toHaveCount(1);
+    await expect(app.recentItems.first()).toContainText('repo2');
+    expect(await findCommand(page, 'open_repository')).toHaveLength(0);
   });
 });

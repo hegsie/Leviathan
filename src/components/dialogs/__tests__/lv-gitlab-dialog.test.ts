@@ -998,4 +998,174 @@ describe('lv-gitlab-dialog', () => {
       expect((check!.args as { token: string }).token).to.equal('glpat-plain');
     });
   });
+
+  describe('Create issue labels', () => {
+    async function openCreateIssueTab(): Promise<LvGitLabDialog> {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { activeTab: string }).activeTab = 'create-issue';
+      await el.updateComplete;
+      return el;
+    }
+
+    function chips(el: LvGitLabDialog): HTMLElement[] {
+      return Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.label-chip'));
+    }
+
+    function lastCreateIssueInput(): { labels?: string[]; title?: string } | undefined {
+      const entries = invokeHistory.filter((e) => e.command === 'create_gitlab_issue');
+      if (entries.length === 0) return undefined;
+      const args = entries[entries.length - 1].args as Record<string, unknown>;
+      return args.input as { labels?: string[]; title?: string };
+    }
+
+    it('loads the project labels when the New Issue button is clicked', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      (el as unknown as { activeTab: string }).activeTab = 'issues';
+      await el.updateComplete;
+
+      // Only the click must be credited — the create-issue tab has no other
+      // loader, so opening the form is what has to fetch the labels.
+      const before = invokeHistory.length;
+
+      const newIssueBtn = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.btn')
+      ).find((b) => b.textContent?.trim() === '+ New Issue')!;
+      expect(newIssueBtn, 'New Issue button').to.not.be.undefined;
+      newIssueBtn.click();
+      await waitForLoad(el);
+
+      expect(
+        invokeHistory.slice(before).some((e) => e.command === 'get_gitlab_labels')
+      ).to.be.true;
+      expect(chips(el).length).to.equal(3);
+    });
+
+    it('renders a chip for every project label on the create-issue form', async () => {
+      const el = await openCreateIssueTab();
+
+      const rendered = chips(el);
+      expect(rendered.length).to.equal(3);
+      expect(rendered.map((c) => c.textContent?.trim())).to.deep.equal([
+        'bug',
+        'enhancement',
+        'performance',
+      ]);
+    });
+
+    it('sends the selected labels to create_gitlab_issue', async () => {
+      const el = await openCreateIssueTab();
+
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'Labelled issue';
+      await el.updateComplete;
+
+      const bug = chips(el).find((c) => c.textContent?.trim() === 'bug')!;
+      bug.click();
+      await el.updateComplete;
+
+      expect(
+        chips(el).find((c) => c.textContent?.trim() === 'bug')!.classList.contains('selected')
+      ).to.be.true;
+
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      expect(lastCreateIssueInput()?.labels).to.deep.equal(['bug']);
+      // Successful create resets the picker for the next issue.
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+    });
+
+    it('deselects a label when its chip is clicked again', async () => {
+      const el = await openCreateIssueTab();
+
+      (el as unknown as { createIssueTitle: string }).createIssueTitle = 'No labels after all';
+      await el.updateComplete;
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+
+      const bug = chips(el).find((c) => c.textContent?.trim() === 'bug')!;
+      expect(bug.classList.contains('selected')).to.be.false;
+      expect(bug.getAttribute('aria-pressed')).to.equal('false');
+
+      await (el as unknown as { handleCreateIssue: () => Promise<void> }).handleCreateIssue();
+      await el.updateComplete;
+
+      // Empty selection is omitted, not sent as an empty array.
+      expect(lastCreateIssueInput()?.labels).to.equal(undefined);
+    });
+
+    it('drops selections for labels the new project does not have', async () => {
+      const el = await openCreateIssueTab();
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([
+        'bug',
+      ]);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_gitlab_labels') return ['enhancement'];
+        return previous(command, args);
+      };
+
+      await (el as unknown as { loadLabels: () => Promise<void> }).loadLabels();
+      await el.updateComplete;
+
+      expect((el as unknown as { labels: string[] }).labels).to.deep.equal(['enhancement']);
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+    });
+
+    it('keeps the picker and reports the failure when the labels request fails', async () => {
+      const el = await openCreateIssueTab();
+      expect(chips(el).length).to.equal(3);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_gitlab_labels') throw new Error('GitLab API error 500');
+        return previous(command, args);
+      };
+
+      await (el as unknown as { loadLabels: () => Promise<void> }).loadLabels();
+      await el.updateComplete;
+
+      expect((el as unknown as { error: string | null }).error).to.equal('GitLab API error 500');
+      // A failed refresh must not wipe the already-rendered picker.
+      expect(chips(el).length).to.equal(3);
+    });
+
+    it('clears labels and selections on disconnect', async () => {
+      const el = await openCreateIssueTab();
+      (el as unknown as { selectedAccountId: string | null }).selectedAccountId = 'gl-acc-1';
+
+      chips(el).find((c) => c.textContent?.trim() === 'bug')!.click();
+      await el.updateComplete;
+
+      await (el as unknown as { handleDisconnect: () => Promise<void> }).handleDisconnect();
+      (el as unknown as { activeTab: string }).activeTab = 'create-issue';
+      await el.updateComplete;
+
+      expect((el as unknown as { labels: string[] }).labels).to.deep.equal([]);
+      expect((el as unknown as { createIssueLabels: string[] }).createIssueLabels).to.deep.equal([]);
+      expect(chips(el).length).to.equal(0);
+    });
+  });
 });
