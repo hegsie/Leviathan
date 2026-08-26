@@ -342,6 +342,183 @@ export async function openRepository(
   return invokeCommand<Repository>("open_repository", args);
 }
 
+/**
+ * Host of a clone URL. Covers the forms the clone dialog accepts:
+ * `https://host/path`, `ssh://git@host/path`, and the scp-like
+ * `git@host:owner/repo.git`.
+ *
+ * Matching on the host — not on a substring of the whole URL, as this used to —
+ * keeps a stored token off a look-alike host (`github.com.example.net`) and off
+ * a repo whose PATH merely names a provider.
+ */
+function cloneUrlHost(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed.includes("://")) {
+    const scpLike = /^[^@/]+@([^:/]+):/.exec(trimmed);
+    return scpLike ? scpLike[1].toLowerCase() : null;
+  }
+  try {
+    return new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a stored token may ride this clone URL.
+ *
+ * The token is sent as the HTTPS password, and `validate_clone_url` also
+ * accepts `http://` and `git://` — plaintext transports that would put the
+ * credential on the wire in clear. SSH URLs (`ssh://` and the scheme-less scp
+ * form) authenticate with a key and never transmit it, so they stay eligible.
+ */
+function cloneUrlIsCredentialSafe(url: string): boolean {
+  const trimmed = url.trim();
+  // scp-like `git@host:owner/repo.git` — always the ssh transport.
+  if (!trimmed.includes("://")) return true;
+  return /^(?:https|ssh):\/\//i.test(trimmed);
+}
+
+/**
+ * The Azure DevOps organization a clone URL names. Every connected ADO account
+ * is scoped to exactly one organization, so this is what picks the right one:
+ *
+ *   https://dev.azure.com/{org}/{project}/_git/{repo}
+ *   https://{org}@dev.azure.com/{org}/...        (userinfo ignored by URL)
+ *   https://ssh.dev.azure.com/v3/{org}/{project}/{repo}
+ *   https://{org}.visualstudio.com/{project}/_git/{repo}
+ */
+function adoUrlOrganization(url: string, host: string): string | undefined {
+  if (host.endsWith(".visualstudio.com")) {
+    return host.slice(0, -".visualstudio.com".length) || undefined;
+  }
+  const trimmed = url.trim();
+  let path: string;
+  if (trimmed.includes("://")) {
+    try {
+      path = new URL(trimmed).pathname;
+    } catch {
+      return undefined;
+    }
+  } else {
+    path = /^[^@/]+@[^:/]+:(.*)$/.exec(trimmed)?.[1] ?? "";
+  }
+  const segments = path.split("/").filter(Boolean);
+  // ssh.dev.azure.com paths carry a `v3` protocol-version prefix.
+  return segments[segments[0] === "v3" ? 1 : 0];
+}
+
+/**
+ * The connected Azure DevOps account for `organization`. Matching on the
+ * organization the URL names — rather than taking the global default account —
+ * keeps one org's token off another org's clone in a multi-account setup.
+ */
+async function findAdoAccountForOrg(organization: string) {
+  const { getAccountsByType } = await import("../stores/unified-profile.store.ts");
+  const wanted = organization.toLowerCase();
+  const matches = getAccountsByType("azure-devops").filter(
+    (account) =>
+      account.config.type === "azure-devops" &&
+      account.config.organization.toLowerCase() === wanted,
+  );
+  return matches.find((account) => account.isDefault) ?? matches[0];
+}
+
+/**
+ * The connected GitLab account whose instance serves `host`. GitLab is
+ * self-hostable, so the instance URL — not a fixed domain — identifies it, and
+ * a repo on `git.acme.dev` must clone with THAT instance's token even when a
+ * gitlab.com account is the global default.
+ */
+async function findGitLabAccountForHost(host: string) {
+  const { getAccountsByType } = await import("../stores/unified-profile.store.ts");
+  const matches = getAccountsByType("gitlab").filter(
+    (account) =>
+      account.config.type === "gitlab" &&
+      cloneUrlHost(account.config.instanceUrl) === host,
+  );
+  return matches.find((account) => account.isDefault) ?? matches[0];
+}
+
+/**
+ * The stored token to clone `url` with. Provider coverage mirrors
+ * `getRepoToken` (GitHub, Azure DevOps, GitLab) so the first clone
+ * authenticates against the same connected account every later fetch, pull and
+ * push will use — previously only GitHub resolved, so a private clone from a
+ * connected GitLab or Azure DevOps account failed with no way forward (the
+ * clone dialog has no token field to work around it with).
+ *
+ * There is no repository on disk yet, so the remote-based detection
+ * `getRepoToken` relies on cannot run here; the URL's host is all we have.
+ *
+ * Bitbucket is absent for the same reason it is absent from `getRepoToken`: no
+ * git network operation resolves Bitbucket credentials, and an app password is
+ * a username/password pair the single-token clone command cannot carry.
+ */
+async function getCloneToken(url: string): Promise<string | undefined> {
+  const host = cloneUrlHost(url);
+  if (!host || !cloneUrlIsCredentialSafe(url)) return undefined;
+
+  try {
+    if (host === "github.com" || host.endsWith(".github.com")) {
+      const result = await getGitHubToken();
+      return result.success && result.data ? result.data : undefined;
+    }
+
+    if (
+      host === "dev.azure.com" ||
+      host === "ssh.dev.azure.com" ||
+      host.endsWith(".visualstudio.com")
+    ) {
+      const org = adoUrlOrganization(url, host);
+      const adoAccount = org ? await findAdoAccountForOrg(org) : undefined;
+      if (adoAccount) {
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        // Refreshes an expiring Entra OAuth token, so a long-lived session
+        // still clones with a valid credential.
+        const token = await getFreshAccountToken("azure-devops", adoAccount.id, "azure");
+        if (token) return token;
+      }
+      // Legacy single-token storage, for a user who never created an account.
+      // Deliberately not getAdoToken(): that falls back to the default account
+      // whatever its organization, which would hand another org's token over.
+      const { AzureDevOpsCredentials } = await import("./credential.service.ts");
+      const token = await AzureDevOpsCredentials.getToken();
+      return token ?? undefined;
+    }
+
+    const gitlabAccount = await findGitLabAccountForHost(host);
+    if (gitlabAccount) {
+      const { getFreshAccountToken } = await import("./credential.service.ts");
+      // Refresh-aware for the same reason the Azure DevOps branch is: a GitLab
+      // account connected by OAuth holds an access token that expires, and the
+      // stored one may already be dead. A PAT account has no OAuth bundle, so
+      // this returns its stored token unchanged.
+      const token = await getFreshAccountToken(
+        "gitlab",
+        gitlabAccount.id,
+        "gitlab",
+        gitlabAccount.config.type === "gitlab" ? gitlabAccount.config.instanceUrl : undefined,
+      );
+      if (token) return token;
+    }
+    if (host === "gitlab.com" || host.endsWith(".gitlab.com")) {
+      // Legacy single-token storage, for a user who never created an account.
+      // Deliberately not getGitLabToken(): that falls back to the default
+      // account whatever its instance, which would hand a self-hosted
+      // instance's token to gitlab.com.
+      const { GitLabCredentials } = await import("./credential.service.ts");
+      const token = await GitLabCredentials.getToken();
+      if (token) return token;
+    }
+  } catch (err) {
+    // Same posture as getRepoToken: a credential lookup failure must not stop
+    // the clone — it just proceeds unauthenticated, as it does today.
+    console.error("Failed to auto-detect clone token:", err);
+  }
+  return undefined;
+}
+
 export async function cloneRepository(
   args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
@@ -349,26 +526,12 @@ export async function cloneRepository(
     return blockedResult();
   }
 
-  // If no token is provided, try to find one based on the URL
+  // No token supplied: fall back to the one stored for the account that owns
+  // this URL's host.
   if (args && !args.token) {
-    // We don't have a repo path yet (it's being cloned), so we can't detect by folder.
-    // But we can check the URL domain.
-    if (
-      args.url.includes("github.com") ||
-      args.url.includes("azure.com") ||
-      args.url.includes("visualstudio.com")
-    ) {
-      // Try GitHub first
-      if (args.url.includes("github.com")) {
-        const tokenResult = await getGitHubToken();
-        if (tokenResult.success && tokenResult.data) {
-          args.token = tokenResult.data;
-        }
-      }
-      // Try Azure DevOps (simplified check, would ideally need a specialized helper for URL parsing without repo context)
-      // For now, we'll just support GitHub auto-token on clone, as ADO usually needs organization context which we can infer from URL but it's safer to implement specifically if needed.
-      // But let's at least try the ADO token if we can get it globally (if we had a global getAdoToken).
-      // Since getAdoToken isn't exported globally/generically in this file (it's inside getRepoToken logic), we will stick to GitHub for now.
+    const token = await getCloneToken(args.url);
+    if (token) {
+      args.token = token;
     }
   }
   // Apply the same network timeout fetch/pull/push use. Without it a clone
