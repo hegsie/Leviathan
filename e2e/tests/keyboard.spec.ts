@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository, withVimMode } from '../fixtures/tauri-mock';
+import { setupOpenRepository, initializeRepositoryStore, withVimMode } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import { GraphPanelPage, RightPanelPage } from '../pages/panels.page';
@@ -84,6 +84,36 @@ test.describe('Keyboard Shortcuts', () => {
 
     await page.keyboard.press('?');
     await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+  });
+
+  // keyboardService's localStorage store is the only place a customized
+  // binding lives, so a reload is the honest proof that it is a real
+  // persistence layer and not just in-memory state for the session.
+  test('a rebound shortcut survives a reload', async ({ page }) => {
+    const row = () =>
+      page
+        .locator('lv-keyboard-shortcuts-dialog[open] .shortcut-row')
+        .filter({ hasText: 'Toggle left panel' });
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('B');
+
+    // Ctrl+Alt+Y: no default binding uses Alt, so this cannot collide.
+    await row().locator('.shortcut-keys.editable').click();
+    await expect(row().locator('.shortcut-keys.recording')).toBeVisible();
+    await page.keyboard.press('Control+Alt+KeyY');
+
+    await expect(row()).toHaveClass(/customized/);
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('Y');
+
+    await page.reload();
+    await initializeRepositoryStore(page);
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await expect(row()).toHaveClass(/customized/);
+    await expect(row().locator('.shortcut-keys .key').last()).toHaveText('Y');
   });
 });
 
@@ -293,6 +323,34 @@ test.describe('Staging Shortcuts', () => {
 
     const stageFilesCommands = await findCommand(page, 'stage_files');
     expect(stageFilesCommands.length).toBeGreaterThan(0);
+  });
+
+  // The shortcuts dialog is exactly where a user presses a key to see what it
+  // does — and 's' went straight through to stage-all, behind the modal that
+  // covers the file-status panel, so nothing on screen changed.
+  test('s must not stage while the keyboard shortcuts dialog is open', async ({ page }) => {
+    await startCommandCapture(page);
+
+    await page.keyboard.press('?');
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+
+    await page.keyboard.press('s');
+    // Two auto-retrying UI round trips after the press, which give a stray
+    // stage every chance to land before the count is read.
+    await expect(dialogs.keyboardShortcuts.dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialogs.keyboardShortcuts.dialog).not.toBeVisible();
+
+    expect(
+      (await findCommand(page, 'stage_files')).length,
+      'nothing may be staged behind the modal'
+    ).toBe(0);
+
+    // The same key with no overlay in the way does reach git — so the
+    // assertion above is about the modal, not about a dead harness.
+    await page.keyboard.press('s');
+    await waitForCommand(page, 'stage_files');
+    expect((await findCommand(page, 'stage_files')).length).toBe(1);
   });
 });
 

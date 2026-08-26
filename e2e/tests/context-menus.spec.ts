@@ -16,7 +16,11 @@ import {
  *
  * Uses Playwright's auto-piercing locator to find elements inside shadow DOM.
  */
-async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowIndex: number = 0) {
+async function rightClickOnCommitRow(
+  page: import('@playwright/test').Page,
+  rowIndex: number = 0,
+  button: 'left' | 'right' = 'right'
+) {
   const graphCanvas = page.locator('lv-graph-canvas');
   await expect(graphCanvas).toBeVisible();
 
@@ -43,7 +47,23 @@ async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowI
   const commitX = box.x + 400; // Click in the commit message area
   const commitY = box.y + headerHeight + (rowIndex * rowHeight) + (rowHeight / 2);
 
-  await page.mouse.click(commitX, commitY, { button: 'right' });
+  await page.mouse.click(commitX, commitY, { button });
+}
+
+/**
+ * Read the oid of the commit laid out at a given graph row.
+ */
+async function oidAtRow(page: import('@playwright/test').Page, rowIndex: number): Promise<string> {
+  const graphHandle = await page.locator('lv-graph-canvas').elementHandle();
+  const oid = await page.evaluate(
+    ([el, row]) => {
+      const canvas = el as HTMLElement & { sortedNodesByRow?: Array<{ oid: string }> };
+      return canvas?.sortedNodesByRow?.[row as number]?.oid ?? null;
+    },
+    [graphHandle, rowIndex] as const
+  );
+  if (!oid) throw new Error(`No commit laid out at row ${rowIndex}`);
+  return oid;
 }
 
 test.describe('Commit Context Menu', () => {
@@ -76,6 +96,54 @@ test.describe('Commit Context Menu', () => {
     const menuItems = contextMenu.locator('.context-menu-item');
     const count = await menuItems.count();
     expect(count).toBeGreaterThan(0);
+  });
+
+  test('right-clicking a commit moves the highlight off the previously selected one', async ({ page }) => {
+    // Left-click the first commit so there is a previous selection to move off.
+    await rightClickOnCommitRow(page, 0, 'left');
+    const firstOid = await oidAtRow(page, 0);
+    const secondOid = await oidAtRow(page, 1);
+    expect(secondOid).not.toBe(firstOid);
+
+    const graphHandle = await page.locator('lv-graph-canvas').elementHandle();
+    await page.waitForFunction(
+      ([el, expectedOid]) => {
+        const canvas = el as HTMLElement & { selectedNode?: { oid: string } | null };
+        return canvas?.selectedNode?.oid === expectedOid;
+      },
+      [graphHandle, firstOid] as const
+    );
+
+    // Right-click a different commit: the menu targets it, so the graph must
+    // highlight it too rather than leaving the highlight on the first one.
+    await rightClickOnCommitRow(page, 1);
+    await expect(page.locator('.context-menu')).toBeVisible({ timeout: 3000 });
+
+    await page.waitForFunction(
+      ([el, expectedOid]) => {
+        const canvas = el as HTMLElement & { selectedNode?: { oid: string } | null };
+        return canvas?.selectedNode?.oid === expectedOid;
+      },
+      [graphHandle, secondOid] as const
+    );
+
+    const state = await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & {
+          selectedNode?: { oid: string } | null;
+          selectedNodes?: Set<string>;
+        };
+        return {
+          primary: canvas?.selectedNode?.oid ?? null,
+          selected: canvas?.selectedNodes ? Array.from(canvas.selectedNodes) : [],
+        };
+      },
+      graphHandle
+    );
+
+    expect(state.primary).toBe(secondOid);
+    expect(state.selected).toEqual([secondOid]);
+    expect(state.selected).not.toContain(firstOid);
   });
 
   test('should close context menu on Escape key', async ({ page }) => {
