@@ -168,6 +168,20 @@ export const defaultMockData = {
   // Remotes
   remotes: [{ name: 'origin', url: 'https://github.com/test/repo.git', pushUrl: null }] as MockRemote[],
 
+  // Git Flow config — an UNINITIALIZED repo (a read that succeeded). Without
+  // this case the command falls through to the unmocked default (null), which
+  // the panel reports as a config READ FAILURE.
+  gitflowConfig: {
+    initialized: false,
+    masterBranch: 'main',
+    developBranch: 'develop',
+    featurePrefix: 'feature/',
+    releasePrefix: 'release/',
+    hotfixPrefix: 'hotfix/',
+    supportPrefix: 'support/',
+    versionTagPrefix: 'v',
+  },
+
   // Settings
   settings: {
     theme: 'dark' as const,
@@ -1083,6 +1097,10 @@ export async function setupTauriMocks(
               totalLinesAdded: 0,
               totalLinesDeleted: 0,
             };
+
+          // === Git Flow ===
+          case 'get_gitflow_config':
+            return state.gitflowConfig;
 
           // === Integration detection commands ===
           case 'detect_ado_repo':
