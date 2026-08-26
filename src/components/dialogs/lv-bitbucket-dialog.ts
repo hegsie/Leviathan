@@ -529,6 +529,12 @@ export class LvBitbucketDialog extends LitElement {
         height: 20px;
       }
 
+      .oauth-cancel {
+        width: 100%;
+        justify-content: center;
+        margin-top: var(--spacing-sm);
+      }
+
       .oauth-spinner {
         width: 20px;
         height: 20px;
@@ -1288,6 +1294,19 @@ export class LvBitbucketDialog extends LitElement {
   }
 
   /**
+   * Abandon a sign-in that is waiting on the browser. This also releases the
+   * backend loopback server, so a retry can re-bind Bitbucket's fixed callback
+   * port instead of failing until the flow times out. The local state is set
+   * explicitly rather than relying on the service's notification, so the form
+   * can never stay stuck if there is no pending entry to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('bitbucket');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+  }
+
+  /**
    * Handle OAuth completion
    */
   private async handleOAuthComplete(tokens: OAuthTokenResponse): Promise<void> {
@@ -1600,6 +1619,10 @@ export class LvBitbucketDialog extends LitElement {
               <span>Sign in with Bitbucket</span>
             `}
           </button>
+
+          ${isOAuthPending ? html`
+            <button class="btn oauth-cancel" @click=${this.handleCancelOAuth}>Cancel</button>
+          ` : ''}
 
           ${this.oauthState.status === 'error' ? html`
             <div class="oauth-status error">${this.oauthState.error}</div>

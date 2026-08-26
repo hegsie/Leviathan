@@ -621,6 +621,7 @@ export class BitbucketDialogPage extends BaseDialog {
   readonly oauthButton: Locator;
   readonly appPasswordButton: Locator;
   readonly oauthSignInButton: Locator;
+  readonly oauthCancelButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
 
@@ -646,6 +647,7 @@ export class BitbucketDialogPage extends BaseDialog {
     this.oauthButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("Sign in with Bitbucket")');
     this.appPasswordButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("App Password")');
     this.oauthSignInButton = page.locator('lv-bitbucket-dialog .btn-oauth');
+    this.oauthCancelButton = page.locator('lv-bitbucket-dialog .oauth-cancel');
     this.oauthSpinner = page.locator('lv-bitbucket-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-bitbucket-dialog .oauth-status');
   }
