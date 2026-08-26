@@ -34,6 +34,10 @@ export type SearchDialogMode = 'files' | 'diff' | 'commits';
 const FILE_MATCH_CAP = 500;
 const COMMIT_CAP = 100;
 
+/** Reused so a result list of hundreds of rows does not build one per row. */
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder();
+
 @customElement('lv-search-dialog')
 export class LvSearchDialog extends LitElement {
   static styles = [
@@ -399,6 +403,12 @@ export class LvSearchDialog extends LitElement {
   @state() private repoChanged = false;
   @state() private fileResults: SearchFileResult[] = [];
   @state() private diffResults: SearchResult[] = [];
+  /**
+   * The staged flag the rows on screen were found with. The radio can be
+   * flipped after a search, so reading `staged` at click time would open the
+   * opposite side of the diff from the one the match came from.
+   */
+  @state() private diffResultsStaged = false;
   @state() private commitResults: SearchCommit[] = [];
 
   /**
@@ -505,10 +515,21 @@ export class LvSearchDialog extends LitElement {
   private setMode(mode: SearchDialogMode): void {
     if (this.mode === mode) return;
     this.mode = mode;
+    // A search still in flight belongs to the mode we just left: bumping the
+    // token drops its response, so it cannot mark the new mode searched and
+    // report a false "No matches found" over results it never produced.
+    this.searchToken++;
+    this.searching = false;
     // The result arrays are per-mode, so only the shared banners need clearing.
     this.error = null;
     this.capped = false;
     this.searched = false;
+    // The mode is parent-owned: without telling app-shell, its `.mode` binding
+    // still holds the value it last pushed, so reopening the dialog in that
+    // same mode would be dirty-checked away and land on this one instead.
+    this.dispatchEvent(
+      new CustomEvent('mode-changed', { detail: { mode }, bubbles: true, composed: true }),
+    );
   }
 
   private get canSearch(): boolean {
@@ -548,10 +569,12 @@ export class LvSearchDialog extends LitElement {
           this.fail(result.error?.message);
         }
       } else if (mode === 'diff') {
-        const result = await gitService.searchInDiff(repoPath, query, this.staged);
+        const staged = this.staged;
+        const result = await gitService.searchInDiff(repoPath, query, staged);
         if (token !== this.searchToken) return;
         if (result.success) {
           this.diffResults = result.data ?? [];
+          this.diffResultsStaged = staged;
           this.finishSuccess();
         } else {
           this.fail(result.error?.message);
@@ -623,14 +646,22 @@ export class LvSearchDialog extends LitElement {
     this.close();
   }
 
+  /**
+   * `matchStart`/`matchEnd` are UTF-8 BYTE offsets — the backend finds them with
+   * Rust's `str::find`. JavaScript string indices are UTF-16 code units, so
+   * slicing the string with them mis-highlights every line that carries a
+   * non-ASCII character before the match. Slice the encoded bytes instead.
+   */
   private renderHighlighted(content: string, start: number, end: number) {
-    if (end <= start || start < 0 || start >= content.length) {
+    const bytes = UTF8_ENCODER.encode(content);
+    if (end <= start || start < 0 || start >= bytes.length) {
       return html`${content}`;
     }
-    const safeEnd = Math.min(end, content.length);
-    return html`${content.slice(0, start)}<mark
-        class="result-match"
-      >${content.slice(start, safeEnd)}</mark>${content.slice(safeEnd)}`;
+    const safeEnd = Math.min(end, bytes.length);
+    const before = UTF8_DECODER.decode(bytes.subarray(0, start));
+    const match = UTF8_DECODER.decode(bytes.subarray(start, safeEnd));
+    const after = UTF8_DECODER.decode(bytes.subarray(safeEnd));
+    return html`${before}<mark class="result-match">${match}</mark>${after}`;
   }
 
   private formatDate(timestamp: number): string {
@@ -893,7 +924,7 @@ export class LvSearchDialog extends LitElement {
           () =>
             this.emitAndClose('show-working-diff', {
               filePath: m.filePath,
-              staged: this.staged,
+              staged: this.diffResultsStaged,
             }),
           '',
           html`

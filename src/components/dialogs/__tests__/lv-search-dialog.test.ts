@@ -30,6 +30,7 @@ const invokeCalls: Array<{ command: string; args?: unknown }> = [];
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
+import { render } from 'lit';
 import { resetOverlayStack, pushOverlay, removeOverlay } from '../../../utils/overlay-stack.ts';
 import { deepActiveElement } from '../../../utils/focus.ts';
 import '../lv-search-dialog.ts';
@@ -369,6 +370,131 @@ describe('lv-search-dialog', () => {
     await el.updateComplete;
     expect(el.open, 'the top overlay closes on Escape').to.be.false;
     expect(el.pinnedRepositoryPathIfOpen, 'closed dialogs are not swept').to.be.null;
+  });
+
+  it('switching mode discards a search still in flight', async () => {
+    let release: (value: unknown) => void = () => {};
+    mockInvoke = () => new Promise((resolve) => { release = resolve; });
+
+    const el = await openOn();
+    await type(el, 'token');
+    q<HTMLButtonElement>(el, '.search-btn')!.click();
+    await el.updateComplete;
+
+    setMode(el, 'Diff');
+    await settle(el);
+
+    release([fileHit()]);
+    await settle(el);
+
+    expect(
+      !!q(el, '.empty'),
+      'no "No matches found" for a search diff mode never ran'
+    ).to.be.false;
+    expect(rows(el).length, 'the files response does not paint under diff mode').to.equal(0);
+    expect(q(el, '.status')?.textContent ?? '', 'back to the prompt').to.contain('Enter a search');
+  });
+
+  it('reports a mode the user changed so reopening lands on the parent mode', async () => {
+    mockInvoke = () => Promise.resolve([]);
+
+    // Mirrors app-shell: the parent owns the mode and pushes it through a
+    // dirty-checked `.mode` binding, so an unreported internal change would
+    // make the next open a no-op and leave the dialog on the wrong mode.
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    let parentMode: Dialog['mode'] = 'files';
+    let open = true;
+    const paint = () =>
+      render(
+        html`<lv-search-dialog
+          .repositoryPath=${REPO_A}
+          .mode=${parentMode}
+          .open=${open}
+          @mode-changed=${(e: Event) => {
+            parentMode = (e as CustomEvent<{ mode: Dialog['mode'] }>).detail.mode;
+          }}
+        ></lv-search-dialog>`,
+        host
+      );
+
+    paint();
+    const el = host.querySelector('lv-search-dialog') as Dialog;
+    await settle(el);
+
+    setMode(el, 'Commits');
+    await settle(el);
+    expect(parentMode, 'the parent is told which mode the dialog moved to').to.equal('commits');
+
+    open = false;
+    paint();
+    await settle(el);
+
+    // Reopened by the "search in files" palette entry.
+    parentMode = 'files';
+    open = true;
+    paint();
+    await settle(el);
+
+    expect(el.mode, 'reopened in the mode the parent asked for').to.equal('files');
+    host.remove();
+  });
+
+  it('highlights a match reported at a UTF-8 byte offset', async () => {
+    // 'héllo ' is 7 UTF-8 bytes but 6 UTF-16 code units, so slicing the string
+    // with the backend's byte offsets would highlight 'ken' instead of 'token'.
+    mockInvoke = () =>
+      Promise.resolve([
+        {
+          filePath: 'src/a.ts',
+          matchCount: 1,
+          matches: [
+            {
+              filePath: 'src/a.ts',
+              lineNumber: 3,
+              lineContent: 'héllo token',
+              matchStart: 7,
+              matchEnd: 12,
+            },
+          ],
+        },
+      ]);
+
+    const el = await openOn();
+    await type(el, 'token');
+    await search(el);
+
+    const row = rows(el)[0];
+    expect(row.querySelector('.result-match')!.textContent, 'highlight lands on the match').to.equal(
+      'token'
+    );
+    expect(row.textContent, 'the line still reads whole').to.contain('héllo token');
+  });
+
+  it('a diff row opens the side its match was found on', async () => {
+    mockInvoke = (command) =>
+      command === 'search_in_diff' ? Promise.resolve([diffHit()]) : Promise.resolve(null);
+
+    const el = await openOn();
+    setMode(el, 'Diff');
+    await el.updateComplete;
+    q<HTMLInputElement>(el, '.opt-staged')!.click();
+    await type(el, 'token');
+    await search(el);
+
+    // Flipping the radio afterwards must not re-aim rows already on screen:
+    // they came out of the staged diff.
+    q<HTMLInputElement>(el, '.opt-unstaged')!.click();
+    await el.updateComplete;
+
+    const seen: Array<{ filePath: string; staged: boolean }> = [];
+    el.addEventListener('show-working-diff', (e) => {
+      seen.push((e as CustomEvent<{ filePath: string; staged: boolean }>).detail);
+    });
+    rows(el)[0].click();
+    await el.updateComplete;
+
+    expect(seen).to.deep.equal([{ filePath: 'src/a.ts', staged: true }]);
   });
 
   it('moves focus into the query input when it opens', async () => {

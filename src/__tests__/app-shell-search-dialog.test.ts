@@ -86,6 +86,30 @@ describe('app-shell search dialog wiring', () => {
     });
   }
 
+  it('records the mode the dialog moved to, so the next open is not dirty-checked away', async () => {
+    // `.mode` is a dirty-checked binding: if app-shell keeps pushing the mode
+    // it last set while the dialog sits on another one, reopening in that mode
+    // assigns nothing and the dialog stays where the user left it.
+    const el = createAppShell(true);
+    document.body.appendChild(el);
+    await (el as any).updateComplete;
+    getCommand(el, 'search-in-files').action();
+    await (el as any).updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('lv-search-dialog');
+    expect(dialog === null, 'the search dialog is rendered').to.be.false;
+    dialog!.dispatchEvent(
+      new CustomEvent('mode-changed', {
+        detail: { mode: 'commits' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+
+    expect((el as any).searchDialogMode, 'app-shell owns the mode').to.equal('commits');
+    el.remove();
+  });
+
   it('show-working-diff opens the matching working-tree entry', () => {
     const el = createAppShell(true);
     (el as any).handleShowWorkingDiff(

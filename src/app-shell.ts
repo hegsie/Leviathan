@@ -5527,6 +5527,7 @@ export class AppShell extends LitElement {
           .mode=${this.searchDialogMode}
           .repositoryPath=${this.activeRepository.repository.path}
           @close=${() => { this.showSearchDialog = false; }}
+          @mode-changed=${(e: CustomEvent<{ mode: SearchDialogMode }>) => { this.searchDialogMode = e.detail.mode; }}
           @show-blame=${this.handleShowBlame}
           @show-working-diff=${this.handleShowWorkingDiff}
         ></lv-search-dialog>
