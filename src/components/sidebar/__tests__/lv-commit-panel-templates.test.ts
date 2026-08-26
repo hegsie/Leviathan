@@ -120,6 +120,7 @@ function setupStoreWithBranch(branchName: string): void {
     isValid: true,
     isBare: false,
     headRef: null,
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,

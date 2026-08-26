@@ -108,11 +108,12 @@ pub async fn generate_commit_message(
         .map_err(LeviathanError::OperationFailed)
 }
 
-/// Check if AI is available (any provider is configured and available)
+/// Check if AI is available (a provider is configured and reachable, or a
+/// local model is downloaded and will be loaded on the first request)
 #[command]
 pub async fn is_ai_available(state: State<'_, AiState>) -> Result<bool> {
     let service = state.read().await;
-    let result = service.find_available_provider().await.is_some();
+    let result = service.has_available_provider().await;
     tracing::debug!("is_ai_available check: {}", result);
     Ok(result)
 }
@@ -876,14 +877,37 @@ mod tests {
     fn test_ai_provider_type_serialization() {
         use crate::services::ai::AiProviderType;
 
-        let provider = AiProviderType::OpenAi;
-        let json = serde_json::to_string(&provider).expect("Failed to serialize");
-        assert!(json.contains("open_ai") || json.contains("openai") || json.contains("OpenAi"));
+        // These exact strings are the IPC wire format and the on-disk key
+        // format of the persisted AI config. The TypeScript `AiProviderType`
+        // union in src/services/ai.service.ts must match them exactly, and
+        // renaming one would invalidate existing config files.
+        let expected = [
+            (AiProviderType::Ollama, "\"ollama\""),
+            (AiProviderType::LmStudio, "\"lm_studio\""),
+            (AiProviderType::OpenAi, "\"open_ai\""),
+            (AiProviderType::Anthropic, "\"anthropic\""),
+            (AiProviderType::GithubCopilot, "\"github_copilot\""),
+            (AiProviderType::GoogleGemini, "\"google_gemini\""),
+            (AiProviderType::LocalInference, "\"local_inference\""),
+        ];
 
-        let provider = AiProviderType::Anthropic;
-        let json = serde_json::to_string(&provider).expect("Failed to serialize");
+        for (variant, wire) in expected {
+            let json = serde_json::to_string(&variant).expect("Failed to serialize");
+            assert_eq!(json, wire, "wire format changed for {variant:?}");
+            let round_tripped: AiProviderType =
+                serde_json::from_str(wire).expect("Failed to deserialize");
+            assert_eq!(round_tripped, variant);
+        }
+
+        // Every variant must be covered above, so a newly added one fails here
+        // until its wire value is asserted.
+        assert_eq!(AiProviderType::all().len(), expected.len());
+
+        // "openai" is not a valid wire value — the snake_case rename makes it
+        // "open_ai". Guards against the TypeScript side drifting back.
         assert!(
-            json.contains("anthropic") || json.contains("Anthropic") || json.contains("ANTHROPIC")
+            serde_json::from_str::<AiProviderType>("\"openai\"").is_err(),
+            "\"openai\" must not deserialize"
         );
     }
 

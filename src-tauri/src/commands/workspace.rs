@@ -213,6 +213,7 @@ pub async fn validate_workspace_repositories(
                 is_valid_repo: false,
                 changed_files_count: 0,
                 current_branch: None,
+                is_detached: false,
                 ahead: 0,
                 behind: 0,
             });
@@ -221,10 +222,7 @@ pub async fn validate_workspace_repositories(
 
         match Repository::open(repo_path) {
             Ok(repo) => {
-                let current_branch = repo
-                    .head()
-                    .ok()
-                    .and_then(|head| head.shorthand().ok().map(String::from));
+                let (current_branch, is_detached) = head_branch(&repo);
 
                 let changed_files_count = repo
                     .statuses(Some(
@@ -245,6 +243,7 @@ pub async fn validate_workspace_repositories(
                     is_valid_repo: true,
                     changed_files_count,
                     current_branch,
+                    is_detached,
                     ahead,
                     behind,
                 });
@@ -257,6 +256,7 @@ pub async fn validate_workspace_repositories(
                     is_valid_repo: false,
                     changed_files_count: 0,
                     current_branch: None,
+                    is_detached: false,
                     ahead: 0,
                     behind: 0,
                 });
@@ -399,30 +399,66 @@ pub async fn import_workspace(json_data: String) -> Result<Workspace> {
     Ok(workspace)
 }
 
-/// Compute ahead/behind counts for HEAD relative to its upstream tracking branch
+/// The checked-out branch name, plus whether HEAD is detached.
+///
+/// `shorthand()` returns the literal "HEAD" on a detached HEAD, which the
+/// workspace dialog then rendered as if it were a branch called "HEAD". An
+/// unborn HEAD has no branch yet and is not detached either.
+fn head_branch(repo: &Repository) -> (Option<String>, bool) {
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return (None, false),
+    };
+
+    if !head.is_branch() {
+        return (None, true);
+    }
+
+    (head.shorthand().ok().map(String::from), false)
+}
+
+/// Compute ahead/behind counts for HEAD relative to its configured upstream
+/// tracking branch
 fn compute_ahead_behind(repo: &Repository) -> (usize, usize) {
     let head = match repo.head() {
         Ok(h) => h,
         Err(_) => return (0, 0),
     };
 
+    // A detached HEAD is not a branch, so it has no upstream to compare
+    // against. shorthand() is the literal "HEAD" when detached, which used to
+    // resolve refs/remotes/origin/HEAD — the remote's default-branch pointer —
+    // and count the checked-out commit against it.
+    if !head.is_branch() {
+        return (0, 0);
+    }
+
     let local_oid = match head.target() {
         Some(oid) => oid,
         None => return (0, 0),
     };
 
-    let branch_name = match head.shorthand().ok() {
-        Some(name) => name.to_string(),
-        None => return (0, 0),
-    };
-
-    let upstream_name = format!("refs/remotes/origin/{}", branch_name);
-    let upstream_ref = match repo.find_reference(&upstream_name) {
-        Ok(r) => r,
+    let branch_name = match head.shorthand() {
+        Ok(name) => name,
         Err(_) => return (0, 0),
     };
 
-    let upstream_oid = match upstream_ref.target() {
+    // Follow the branch's own upstream (branch.<name>.remote/merge) rather than
+    // assuming origin/<branch>. A fork tracking upstream/main, a clone whose
+    // remote is not called "origin", and a branch tracking a differently named
+    // remote branch each counted against the wrong ref or reported nothing —
+    // and disagreed with the branches panel for the same repository, which has
+    // always used the configured upstream. A branch with no upstream has
+    // nothing to report, which is not a failure.
+    let upstream = match repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .and_then(|b| b.upstream())
+    {
+        Ok(u) => u,
+        Err(_) => return (0, 0),
+    };
+
+    let upstream_oid = match upstream.get().target() {
         Some(oid) => oid,
         None => return (0, 0),
     };
@@ -434,6 +470,151 @@ fn compute_ahead_behind(repo: &Repository) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestRepo;
+
+    /// Commit on top of `parent` without moving any ref — stands in for
+    /// commits that only exist on the remote-tracking side.
+    fn dangling_commit(repo: &Repository, parent: git2::Oid, message: &str) -> git2::Oid {
+        let parent_commit = repo.find_commit(parent).expect("parent commit");
+        let tree = parent_commit.tree().expect("parent tree");
+        let sig = repo.signature().expect("signature");
+        repo.commit(None, &sig, &sig, message, &tree, &[&parent_commit])
+            .expect("commit")
+    }
+
+    fn set_remote_ref(repo: &Repository, refname: &str, oid: git2::Oid) {
+        repo.reference(refname, oid, true, "test").expect("ref");
+    }
+
+    /// Fork workflow: `origin` is your stale fork, the branch tracks
+    /// `upstream/main`. Counting against origin/<branch> reported "in sync"
+    /// for a branch that is two commits ahead of what it actually tracks.
+    #[test]
+    fn test_ahead_behind_follows_the_configured_upstream_not_origin() {
+        let test_repo = TestRepo::with_initial_commit();
+        let base = test_repo.head_oid();
+        test_repo.create_commit("Local 1", &[("a.txt", "a")]);
+        test_repo.create_commit("Local 2", &[("b.txt", "b")]);
+        let local_tip = test_repo.head_oid();
+
+        let repo = test_repo.repo();
+        let branch = test_repo.current_branch();
+        repo.remote("origin", "https://example.com/fork.git")
+            .unwrap();
+        repo.remote("upstream", "https://example.com/canonical.git")
+            .unwrap();
+
+        // The fork is up to date with the local branch; the real upstream is not.
+        set_remote_ref(&repo, &format!("refs/remotes/origin/{}", branch), local_tip);
+        set_remote_ref(&repo, &format!("refs/remotes/upstream/{}", branch), base);
+
+        repo.find_branch(&branch, git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some(&format!("upstream/{}", branch)))
+            .unwrap();
+
+        assert_eq!(compute_ahead_behind(&repo), (2, 0));
+    }
+
+    /// `git clone -o github` (or a renamed remote): there is no
+    /// refs/remotes/origin/* at all, so a hard-coded origin lookup reported
+    /// 0/0 while git reported divergence in both directions.
+    #[test]
+    fn test_ahead_behind_reports_divergence_when_the_remote_is_not_named_origin() {
+        let test_repo = TestRepo::with_initial_commit();
+        let base = test_repo.head_oid();
+        test_repo.create_commit("Local 1", &[("a.txt", "a")]);
+
+        let repo = test_repo.repo();
+        let branch = test_repo.current_branch();
+        repo.remote("github", "https://example.com/repo.git")
+            .unwrap();
+        assert!(repo.find_remote("origin").is_err(), "origin must not exist");
+
+        let remote_1 = dangling_commit(&repo, base, "Remote 1");
+        let remote_2 = dangling_commit(&repo, remote_1, "Remote 2");
+        set_remote_ref(&repo, &format!("refs/remotes/github/{}", branch), remote_2);
+
+        repo.find_branch(&branch, git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some(&format!("github/{}", branch)))
+            .unwrap();
+
+        assert_eq!(compute_ahead_behind(&repo), (1, 2));
+    }
+
+    /// A branch with no upstream has nothing to report, even when a
+    /// same-named remote-tracking ref happens to exist — git prints no
+    /// ahead/behind for it, so neither should the workspace dialog.
+    #[test]
+    fn test_ahead_behind_is_zero_for_a_branch_with_no_upstream() {
+        let test_repo = TestRepo::with_initial_commit();
+        let base = test_repo.head_oid();
+        // Creates refs/remotes/origin/<branch> only — no branch.<name>.merge.
+        test_repo.create_remote_branch(&test_repo.current_branch(), base);
+        test_repo.create_commit("Local 1", &[("a.txt", "a")]);
+        test_repo.create_commit("Local 2", &[("b.txt", "b")]);
+
+        let repo = test_repo.repo();
+        let branch = test_repo.current_branch();
+        assert!(
+            repo.find_branch(&branch, git2::BranchType::Local)
+                .unwrap()
+                .upstream()
+                .is_err(),
+            "branch must have no configured upstream"
+        );
+
+        assert_eq!(compute_ahead_behind(&repo), (0, 0));
+    }
+
+    /// Detached HEAD: shorthand() is the literal "HEAD", which used to resolve
+    /// refs/remotes/origin/HEAD. In a mirror-style clone that ref is a DIRECT
+    /// ref to the remote's default branch, so the checked-out commit was
+    /// counted against it.
+    #[test]
+    fn test_ahead_behind_on_a_detached_head_ignores_the_remote_head_pointer() {
+        let test_repo = TestRepo::with_initial_commit();
+        let base = test_repo.head_oid();
+        test_repo.create_commit("Local 1", &[("a.txt", "a")]);
+        test_repo.create_commit("Local 2", &[("b.txt", "b")]);
+        let local_tip = test_repo.head_oid();
+
+        let repo = test_repo.repo();
+        set_remote_ref(&repo, "refs/remotes/origin/HEAD", base);
+        repo.set_head_detached(local_tip).unwrap();
+        assert!(
+            !repo.head().unwrap().is_branch(),
+            "HEAD must be detached for this test"
+        );
+
+        assert_eq!(compute_ahead_behind(&repo), (0, 0));
+    }
+
+    /// A detached HEAD is not a branch called "HEAD" — the dialog must not
+    /// print one.
+    #[test]
+    fn test_head_branch_reports_a_detached_head_as_no_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        let repo = test_repo.repo();
+        repo.set_head_detached(test_repo.head_oid()).unwrap();
+
+        assert_eq!(head_branch(&repo), (None, true));
+    }
+
+    /// Guard against over-correcting: a checked-out branch still reports its
+    /// name, and a fresh repository with an unborn HEAD is not "detached".
+    #[test]
+    fn test_head_branch_reports_the_checked_out_branch() {
+        let test_repo = TestRepo::with_initial_commit();
+        assert_eq!(
+            head_branch(&test_repo.repo()),
+            (Some(test_repo.current_branch()), false)
+        );
+
+        let empty = TestRepo::new();
+        assert_eq!(head_branch(&empty.repo()), (None, false));
+    }
 
     #[test]
     fn test_load_default_config() {

@@ -5,6 +5,7 @@ import { codeStyles } from '../../styles/code-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 import { CodeRenderMixin } from '../../mixins/code-render-mixin.ts';
 import type { DiffFile, DiffHunk, DiffLine, StatusEntry } from '../../types/git.types.ts';
 import {
@@ -911,8 +912,26 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
       .diff-virtualized-container {
         overflow: auto;
-        height: 100%;
+        flex: 1;
+        min-height: 0;
         position: relative;
+      }
+
+      .virtual-hunk-header {
+        align-items: center;
+        color: var(--color-text-muted);
+        font-style: italic;
+      }
+
+      .virtual-hunk-header .hunk-actions {
+        margin-left: var(--spacing-sm);
+      }
+
+      .virtual-hunk-header .stage-btn {
+        box-sizing: border-box;
+        height: 16px;
+        padding: 0 6px;
+        font-size: 10px;
       }
     `,
   ];
@@ -926,7 +945,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private viewMode: DiffViewMode = 'unified';
-  @state() private wordWrap: boolean = false;
+  // Word wrap is an app setting (Settings > Editor); the toolbar button below is
+  // the same preference, not a second one.
+  @state() private wordWrap: boolean = settingsStore.getState().wordWrap;
   @state() private editMode = false;
   @state() private editContent = '';
   @state() private originalContent = '';
@@ -946,6 +967,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   // When true, load the diff without a line cap (set by "Load full diff").
   @state() private showFullDiff = false;
 
+  private settingsUnsubscribe: (() => void) | null = null;
   private virtualScrollManager = new DiffVirtualScrollManager();
   private flatLines: FlatDiffItem[] = [];
   private diffScrollTop = 0;
@@ -979,11 +1001,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('click', this.handleDocumentClick);
-    // Restore word wrap preference from localStorage
-    const savedWordWrap = localStorage.getItem('leviathan-diff-word-wrap');
-    if (savedWordWrap !== null) {
-      this.wordWrap = savedWordWrap === 'true';
-    }
+    // Word wrap comes from the shared setting, so the Settings dialog toggle and
+    // the toolbar button below stay in step.
+    this.wordWrap = settingsStore.getState().wordWrap;
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.wordWrap = state.wordWrap;
+    });
     this.addEventListener('keydown', this.handleKeydown);
     // Make host focusable for keyboard shortcuts
     if (!this.hasAttribute('tabindex')) {
@@ -995,6 +1018,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     super.disconnectedCallback();
     document.removeEventListener('click', this.handleDocumentClick);
     this.removeEventListener('keydown', this.handleKeydown);
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
   }
 
   willUpdate(changedProperties: Map<string, unknown>): void {
@@ -1136,8 +1161,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   private toggleWordWrap(): void {
-    this.wordWrap = !this.wordWrap;
-    localStorage.setItem('leviathan-diff-word-wrap', String(this.wordWrap));
+    // Writing the shared setting keeps the Settings dialog toggle and this button
+    // in step; the store subscription updates `this.wordWrap`.
+    settingsStore.getState().setWordWrap(!this.wordWrap);
   }
 
   /**
@@ -1676,12 +1702,16 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
   /**
    * Stage selected lines
+   *
+   * Resolves to true only when the stage was applied and the diff reloaded.
+   * The reload renumbers hunks and lines, so every positional
+   * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
-  private async stageSelectedLines(): Promise<void> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+  private async stageSelectedLines(): Promise<boolean> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch();
-    if (!patch) return;
+    if (!patch) return false;
 
     try {
       const result = await gitService.stageHunk(this.repositoryPath, patch);
@@ -1692,24 +1722,29 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         await this.loadWorkingDiff();
-      } else {
-        console.error('Failed to stage selected lines:', result.error);
-        showToast(`Failed to stage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        return true;
       }
+      console.error('Failed to stage selected lines:', result.error);
+      showToast(`Failed to stage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
     } catch (err) {
       console.error('Failed to stage selected lines:', err);
       showToast(`Failed to stage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
+    return false;
   }
 
   /**
    * Unstage selected lines
+   *
+   * Resolves to true only when the unstage was applied and the diff reloaded.
+   * The reload renumbers hunks and lines, so every positional
+   * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
-  private async unstageSelectedLines(): Promise<void> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return;
+  private async unstageSelectedLines(): Promise<boolean> {
+    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch('unstage');
-    if (!patch) return;
+    if (!patch) return false;
 
     try {
       const result = await gitService.unstageHunk(this.repositoryPath, patch);
@@ -1720,14 +1755,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         await this.loadWorkingDiff();
-      } else {
-        console.error('Failed to unstage selected lines:', result.error);
-        showToast(`Failed to unstage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
+        return true;
       }
+      console.error('Failed to unstage selected lines:', result.error);
+      showToast(`Failed to unstage lines: ${result.error?.message ?? 'Unknown error'}`, 'error');
     } catch (err) {
       console.error('Failed to unstage selected lines:', err);
       showToast(`Failed to unstage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
     }
+    return false;
   }
 
   /**
@@ -1995,8 +2031,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // Temporarily select just this line and stage it
     const prevSelected = this.selectedLines;
     this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
-    await this.stageSelectedLines();
-    this.selectedLines = prevSelected;
+    // A successful stage reloads the diff, which renumbers hunks and lines, so
+    // the saved `${hunkIndex}-${lineIndex}` keys would point at different code.
+    // Put the previous selection back only when nothing was applied.
+    if (!(await this.stageSelectedLines())) {
+      this.selectedLines = prevSelected;
+    }
   }
 
   /**
@@ -2017,8 +2057,12 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // Temporarily select just this line and unstage it
     const prevSelected = this.selectedLines;
     this.selectedLines = new Set([this.getLineKey(hunkIndex, lineIndex)]);
-    await this.unstageSelectedLines();
-    this.selectedLines = prevSelected;
+    // A successful unstage reloads the diff, which renumbers hunks and lines,
+    // so the saved `${hunkIndex}-${lineIndex}` keys would point at different
+    // code. Put the previous selection back only when nothing was applied.
+    if (!(await this.unstageSelectedLines())) {
+      this.selectedLines = prevSelected;
+    }
   }
 
   private buildFlatLines(): void {
@@ -2065,7 +2109,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     const offsetY = range.startLine * DIFF_LINE_HEIGHT;
 
     return html`
-      <div class="diff-virtualized-container"
+      ${this.renderSelectionActions()}
+      <div class="diff-virtualized-container ${this.lineSelectionMode ? 'line-selection-mode' : ''}"
            @scroll=${this.handleDiffScroll}>
         ${this.flatLines.length > 10000 ? html`
           <div class="large-diff-info">
@@ -2074,35 +2119,78 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ` : nothing}
         <div style="height: ${contentHeight}px; position: relative;">
           <div style="position: absolute; top: ${offsetY}px; left: 0; right: 0;">
-            ${visibleItems.map(item => {
-              if (item.type === 'hunk-header') {
-                return html`
-                  <div class="line" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
-                    <div class="line-numbers">
-                      <span class="line-no old"></span>
-                      <span class="line-no new"></span>
-                    </div>
-                    <span class="line-origin"></span>
-                    <span class="line-content" style="color: var(--color-text-muted); font-style: italic;">${item.header}</span>
-                  </div>
-                `;
-              }
-              const line = item.line!;
-              const lineClass = this.getLineClass(line.origin);
-              const originChar = this.getOriginChar(line.origin);
-              return html`
-                <div class="line ${lineClass}" style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
-                  <div class="line-numbers">
-                    <span class="line-no old">${line.oldLineNo ?? ''}</span>
-                    <span class="line-no new">${line.newLineNo ?? ''}</span>
-                  </div>
-                  <span class="line-origin">${originChar}</span>
-                  <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
-                </div>
-              `;
-            })}
+            ${visibleItems.map((item) => this.renderVirtualizedItem(item))}
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Render one row of the virtualized diff. Rows carry the same staging
+   * affordances as the hunk view (per-hunk Stage/Unstage buttons, line
+   * checkboxes, context menu) so that "Load full diff" on a huge file does not
+   * drop the user into a read-only view. Every row must stay exactly
+   * DIFF_LINE_HEIGHT tall or the virtual scroll offsets drift.
+   */
+  private renderVirtualizedItem(item: FlatDiffItem): TemplateResult {
+    const hunk = this.diff?.hunks[item.hunkIndex];
+
+    if (item.type === 'hunk-header') {
+      return html`
+        <div class="line virtual-hunk-header" style="height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;">
+          <div class="line-numbers">
+            <span class="line-no old"></span>
+            <span class="line-no new"></span>
+          </div>
+          <span class="line-origin"></span>
+          <span class="line-content">${item.header}</span>
+          ${hunk
+            ? html`<div class="hunk-actions">${this.renderHunkActions(hunk, item.hunkIndex)}</div>`
+            : nothing}
+        </div>
+      `;
+    }
+
+    const line = item.line!;
+    const lineIndex = item.lineIndex!;
+    const lineClass = this.getLineClass(line.origin);
+    const originChar = this.getOriginChar(line.origin);
+    const isSelectable = line.origin === 'addition' || line.origin === 'deletion';
+    const isSelected = this.isLineSelected(item.hunkIndex, lineIndex);
+
+    return html`
+      <div
+        class="line ${lineClass} ${isSelected ? 'selected' : ''}"
+        style="min-height: ${DIFF_LINE_HEIGHT}px; line-height: ${DIFF_LINE_HEIGHT}px;"
+        @contextmenu=${(e: MouseEvent) => {
+          if (hunk) this.handleLineContextMenu(e, line, hunk);
+        }}
+        @click=${(e: MouseEvent) => {
+          if (this.lineSelectionMode && isSelectable) {
+            e.preventDefault();
+            this.toggleLineSelection(item.hunkIndex, lineIndex, line);
+          }
+        }}
+      >
+        ${this.lineSelectionMode && isSelectable ? html`
+          <input
+            type="checkbox"
+            class="line-checkbox"
+            .checked=${isSelected}
+            @change=${(e: Event) => {
+              e.stopPropagation();
+              this.toggleLineSelection(item.hunkIndex, lineIndex, line);
+            }}
+            @click=${(e: Event) => e.stopPropagation()}
+          />
+        ` : nothing}
+        <div class="line-numbers">
+          <span class="line-no old">${line.oldLineNo ?? ''}</span>
+          <span class="line-no new">${line.newLineNo ?? ''}</span>
+        </div>
+        <span class="line-origin">${originChar}</span>
+        <span class="line-content">${this.renderHighlightedContent(line.content)}</span>
       </div>
     `;
   }
@@ -2241,10 +2329,56 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     `;
   }
 
+  /**
+   * Stage/unstage (and, in line-selection mode, Select All) actions for one hunk.
+   * Shared by the hunk view and the virtualized view so that a large diff keeps
+   * the same staging affordances instead of becoming a read-only dead end.
+   */
+  private renderHunkActions(hunk: DiffHunk, hunkIndex: number) {
+    // Only working-directory diffs can be staged (not commit diffs).
+    if (this.file === null || this.commitFile) return nothing;
+    const isStaged = this.file.isStaged;
+
+    return html`
+      ${this.lineSelectionMode ? html`
+        <button
+          class="stage-btn"
+          @click=${() => this.selectAllInHunk(hunkIndex)}
+          title="Select all lines in this hunk"
+        >
+          Select All
+        </button>
+      ` : nothing}
+      ${isStaged ? html`
+        <button
+          class="stage-btn unstage"
+          @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
+          title="Unstage this hunk"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Unstage
+        </button>
+      ` : html`
+        <button
+          class="stage-btn stage"
+          @click=${(e: Event) => this.handleStageHunk(hunk, e)}
+          title="Stage this hunk"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Stage
+        </button>
+      `}
+    `;
+  }
+
   private renderHunk(hunk: DiffHunk, hunkIndex: number) {
     // Only show stage/unstage button for working directory diffs (not commit diffs)
     const showStageButton = this.file !== null && !this.commitFile;
-    const isStaged = this.file?.isStaged ?? false;
     const isActive = this.currentHunkIndex === hunkIndex;
 
     // Find whitespace-only pairs for this hunk
@@ -2258,78 +2392,14 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             <div class="hunk-separator-line"></div>
             ${showStageButton ? html`
               <div class="hunk-separator-actions">
-                ${this.lineSelectionMode ? html`
-                  <button
-                    class="stage-btn"
-                    @click=${() => this.selectAllInHunk(hunkIndex)}
-                    title="Select all lines in this hunk"
-                  >
-                    Select All
-                  </button>
-                ` : nothing}
-                ${isStaged ? html`
-                  <button
-                    class="stage-btn unstage"
-                    @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
-                    title="Unstage this hunk"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <line x1="5" y1="12" x2="19" y2="12"></line>
-                    </svg>
-                    Unstage
-                  </button>
-                ` : html`
-                  <button
-                    class="stage-btn stage"
-                    @click=${(e: Event) => this.handleStageHunk(hunk, e)}
-                    title="Stage this hunk"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <line x1="12" y1="5" x2="12" y2="19"></line>
-                      <line x1="5" y1="12" x2="19" y2="12"></line>
-                    </svg>
-                    Stage
-                  </button>
-                `}
+                ${this.renderHunkActions(hunk, hunkIndex)}
               </div>
             ` : nothing}
           </div>
         ` : html`
           ${showStageButton ? html`
             <div class="hunk-separator" style="height: auto; padding: 2px var(--spacing-sm); justify-content: flex-end;">
-              ${this.lineSelectionMode ? html`
-                <button
-                  class="stage-btn"
-                  @click=${() => this.selectAllInHunk(hunkIndex)}
-                  title="Select all lines in this hunk"
-                >
-                  Select All
-                </button>
-              ` : nothing}
-              ${isStaged ? html`
-                <button
-                  class="stage-btn unstage"
-                  @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
-                  title="Unstage this hunk"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="5" y1="12" x2="19" y2="12"></line>
-                  </svg>
-                  Unstage
-                </button>
-              ` : html`
-                <button
-                  class="stage-btn stage"
-                  @click=${(e: Event) => this.handleStageHunk(hunk, e)}
-                  title="Stage this hunk"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="12" y1="5" x2="12" y2="19"></line>
-                    <line x1="5" y1="12" x2="19" y2="12"></line>
-                  </svg>
-                  Stage
-                </button>
-              `}
+              ${this.renderHunkActions(hunk, hunkIndex)}
             </div>
           ` : nothing}
         `}
@@ -2467,6 +2537,40 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     `;
   }
 
+  /**
+   * Bulk stage/unstage bar for the current line selection. Shared by the hunk
+   * view and the virtualized view.
+   */
+  private renderSelectionActions() {
+    if (!this.lineSelectionMode || this.selectedLines.size === 0) return nothing;
+    const isStaged = this.file?.isStaged ?? false;
+
+    return html`
+      <div class="selection-actions">
+        <span class="selection-info">${this.selectedLines.size} line${this.selectedLines.size !== 1 ? 's' : ''} selected</span>
+        <button class="selection-btn" @click=${this.clearLineSelection}>
+          Clear
+        </button>
+        ${isStaged ? html`
+          <button class="selection-btn primary" @click=${this.unstageSelectedLines}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Unstage Selected
+          </button>
+        ` : html`
+          <button class="selection-btn primary" @click=${this.stageSelectedLines}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            Stage Selected
+          </button>
+        `}
+      </div>
+    `;
+  }
+
   private renderUnifiedView() {
     if (!this.diff) return nothing;
 
@@ -2475,33 +2579,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       return this.renderVirtualizedUnifiedView();
     }
 
-    const isStaged = this.file?.isStaged ?? false;
-
     return html`
-      ${this.lineSelectionMode && this.selectedLines.size > 0 ? html`
-        <div class="selection-actions">
-          <span class="selection-info">${this.selectedLines.size} line${this.selectedLines.size !== 1 ? 's' : ''} selected</span>
-          <button class="selection-btn" @click=${this.clearLineSelection}>
-            Clear
-          </button>
-          ${isStaged ? html`
-            <button class="selection-btn primary" @click=${this.unstageSelectedLines}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-              Unstage Selected
-            </button>
-          ` : html`
-            <button class="selection-btn primary" @click=${this.stageSelectedLines}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-              Stage Selected
-            </button>
-          `}
-        </div>
-      ` : nothing}
+      ${this.renderSelectionActions()}
       <div class="diff-content ${this.wordWrap ? 'word-wrap' : ''} ${this.lineSelectionMode ? 'line-selection-mode' : ''}">
         ${this.diff.hunks.length === 0
           ? html`<div class="empty">No changes in this file</div>`
