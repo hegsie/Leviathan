@@ -397,6 +397,22 @@ export class LvSettingsDialog extends LitElement {
     this.downloadErrorUnlisten?.();
   }
 
+  protected updated(): void {
+    // A <select>'s `.value` binding commits before the <option>s rendered inside
+    // it in the same Lit update, so a value whose option only appears in that
+    // update is dropped and the select falls back to "None". Re-apply both tool
+    // selects once their options exist.
+    this.syncSelectValue('#merge-tool-select', this.mergeToolName);
+    this.syncSelectValue('#diff-tool-select', this.diffToolName);
+  }
+
+  private syncSelectValue(selector: string, value: string | null): void {
+    const select = this.shadowRoot?.querySelector<HTMLSelectElement>(selector);
+    if (select && select.value !== (value ?? '')) {
+      select.value = value ?? '';
+    }
+  }
+
   private async loadVersion(): Promise<void> {
     this.appVersion = await getAppVersion();
   }
@@ -615,6 +631,22 @@ export class LvSettingsDialog extends LitElement {
         showToast(result.error?.message ?? 'Failed to clear merge tool', 'error');
         return;
       }
+      // The unset only touches this repository's config, but the dialog shows —
+      // and launch_merge_tool uses — the effective value. A merge.tool inherited
+      // from the global/system config survives, so re-read before claiming it is
+      // gone; otherwise the UI says "None" while git still launches the tool.
+      const remaining = await gitService.getMergeToolConfig(repo.repository.path);
+      if (remaining.success && remaining.data?.toolName) {
+        this.mergeToolName = remaining.data.toolName;
+        this.mergeToolCmd = remaining.data.toolCmd;
+        select.value = remaining.data.toolName;
+        showToast(
+          `merge.tool is still set to "${remaining.data.toolName}" outside this repository ` +
+            `(global or system git config); clear it there to use no merge tool.`,
+          'error',
+        );
+        return;
+      }
       this.mergeToolName = null;
       this.mergeToolCmd = null;
       window.dispatchEvent(new CustomEvent('settings-changed'));
@@ -658,6 +690,21 @@ export class LvSettingsDialog extends LitElement {
         // Keep the select showing the tool that is still configured.
         select.value = this.diffToolName ?? '';
         showToast(result.error?.message ?? 'Failed to clear diff tool', 'error');
+        return;
+      }
+      // As above: the unset is repository-local while the dialog and
+      // launch_diff_tool read the effective value, so a diff.tool inherited from
+      // a wider scope survives and must be reported rather than shown as "None".
+      const remaining = await gitService.getDiffToolConfig(repo.repository.path);
+      if (remaining.success && remaining.data?.tool) {
+        this.diffToolName = remaining.data.tool;
+        this.diffToolCmd = remaining.data.cmd;
+        select.value = remaining.data.tool;
+        showToast(
+          `diff.tool is still set to "${remaining.data.tool}" outside this repository ` +
+            `(global or system git config); clear it there to use no diff tool.`,
+          'error',
+        );
         return;
       }
       this.diffToolName = null;
@@ -1144,6 +1191,7 @@ export class LvSettingsDialog extends LitElement {
                   <span class="setting-description">External tool for resolving merge conflicts</span>
                 </div>
                 <select
+                  id="merge-tool-select"
                   .value=${this.mergeToolName ?? ''}
                   @change=${this.handleMergeToolChange}
                   ?disabled=${this.loadingTools}
@@ -1177,6 +1225,7 @@ export class LvSettingsDialog extends LitElement {
                   <span class="setting-description">External tool for viewing diffs</span>
                 </div>
                 <select
+                  id="diff-tool-select"
                   .value=${this.diffToolName ?? ''}
                   @change=${this.handleDiffToolChange}
                   ?disabled=${this.loadingTools}

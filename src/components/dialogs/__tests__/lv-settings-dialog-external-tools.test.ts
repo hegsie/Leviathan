@@ -20,6 +20,8 @@ interface RecordedCall {
 const calls: RecordedCall[] = [];
 let responses: Record<string, unknown> = {};
 const failures: Record<string, string> = {};
+/** Whether each tool is configured outside the repository (global/system). */
+const configuredGlobally = { mergeTool: false, diffTool: false };
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   calls.push({ command, args: args as Record<string, unknown> | undefined });
@@ -28,6 +30,20 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (failures[command] !== undefined) {
     throw new Error(failures[command]);
   }
+
+  // `git config --unset` writes the repository-local file only, while the
+  // get_* commands read the effective value. A globally configured tool
+  // therefore survives the unset, exactly as in the real backend.
+  if (command === 'unset_git_config') {
+    const key = (args as { key?: string } | undefined)?.key;
+    if (key === 'merge.tool' && !configuredGlobally.mergeTool) {
+      responses['get_merge_tool_config'] = { toolName: null, toolCmd: null };
+    }
+    if (key === 'diff.tool' && !configuredGlobally.diffTool) {
+      responses['get_diff_tool'] = { tool: null, cmd: null, prompt: false };
+    }
+  }
+
   if (command in responses) return responses[command];
 
   switch (command) {
@@ -135,6 +151,8 @@ describe('lv-settings-dialog external tools "None"', () => {
   beforeEach(() => {
     calls.length = 0;
     for (const key of Object.keys(failures)) delete failures[key];
+    configuredGlobally.mergeTool = false;
+    configuredGlobally.diffTool = false;
     responses = {
       get_merge_tool_config: { toolName: 'meld', toolCmd: null },
       get_available_merge_tools: [{ name: 'meld', displayName: 'Meld', available: true }],
@@ -152,6 +170,55 @@ describe('lv-settings-dialog external tools "None"', () => {
   afterEach(() => {
     repositoryStore.getState().reset();
     uiStore.setState({ toasts: [] });
+  });
+
+  it('shows the configured tools as selected when the dialog opens', async () => {
+    const el = await renderDialog();
+
+    // The <select>'s .value binding commits before the <option>s rendered in the
+    // same update, so without an explicit re-sync a configured tool shows "None".
+    expect(toolSelect(el, 'Merge Tool').value, 'merge select').to.equal('meld');
+    expect(toolSelect(el, 'Diff Tool').value, 'diff select').to.equal('vscode');
+  });
+
+  it('keeps the merge tool selected when merge.tool is configured outside the repository', async () => {
+    configuredGlobally.mergeTool = true;
+    const el = await renderDialog();
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Merge Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    // The local unset is still attempted, but merge.tool survives it, so the UI
+    // must not claim the tool is gone while git would still launch it.
+    expect(unsetCalls(), 'local unset attempted').to.have.lengthOf(1);
+    expect(eventFired, 'settings-changed NOT dispatched').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('global or system');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolName, 'still configured').to.equal('meld');
+    expect(select.value, 'select still shows the surviving tool').to.equal('meld');
+  });
+
+  it('keeps the diff tool selected when diff.tool is configured outside the repository', async () => {
+    configuredGlobally.diffTool = true;
+    const el = await renderDialog();
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Diff Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(unsetCalls(), 'local unset attempted').to.have.lengthOf(1);
+    expect(eventFired, 'settings-changed NOT dispatched').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('global or system');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).diffToolName, 'still configured').to.equal('vscode');
+    expect(select.value, 'select still shows the surviving tool').to.equal('vscode');
   });
 
   it('unsets merge.tool when Merge Tool is set to None', async () => {
