@@ -56,14 +56,67 @@ pub fn create_command(program: &str) -> Command {
     cmd
 }
 
+/// The host of an SSH remote, in either the `ssh://[user@]host[:port]/path`
+/// form or the scp-like `[user@]host:path` form git also accepts, lowercased.
+///
+/// Any port is dropped: it describes the SSH endpoint and has nothing to do
+/// with the HTTPS request git makes for the same provider.
+fn ssh_remote_host(remote_url: &str) -> Option<String> {
+    let host = match url::Url::parse(remote_url) {
+        // A parseable scheme settles it — only `ssh://` is an SSH remote.
+        // Without this, `https://host/path` would read as host `https` below.
+        Ok(parsed) => {
+            if parsed.scheme() != "ssh" {
+                return None;
+            }
+            parsed.host_str()?.to_lowercase()
+        }
+        // No scheme: scp-like when a colon comes before any slash, which is
+        // exactly how git tells the two apart. What follows the colon is a
+        // PATH, never a port.
+        Err(_) => {
+            let (authority, path) = remote_url.split_once(':')?;
+            if path.is_empty() || authority.contains('/') {
+                return None;
+            }
+            authority.rsplit('@').next()?.to_lowercase()
+        }
+    };
+
+    // Only a plausible hostname becomes a config key; anything else would make
+    // a key that can never match a real credential request anyway.
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return None;
+    }
+    Some(host)
+}
+
 /// The `credential.<url>.helper` config key the token helper is installed
-/// under for `remote_url`, or `None` when the URL is not one git asks HTTP
-/// credentials for (SSH, `git://`, a local path) and a token means nothing.
+/// under for `remote_url`, or `None` when no host can be determined and a
+/// token would have nowhere it demonstrably belongs.
 ///
 /// The port is kept when it is not the scheme's default, because git includes
 /// it in the `host=` field of a credential request and only a config URL
-/// carrying the same port matches.
+/// carrying the same port matches. An explicitly written default port is not:
+/// `Url::port()` normalizes 443/80 away, exactly as git's own request does.
+///
+/// An SSH remote maps to the SAME host over https on purpose. The token is a
+/// PROVIDER credential, not a transport one, and the frontend's detection
+/// hands one back for an SSH remote too (`parse_github_url` takes the
+/// `git@github.com:` form). A superproject cloned over SSH routinely lists
+/// submodules whose .gitmodules url is https on that same provider, and those
+/// children ask git for https credentials for that host — so refusing to scope
+/// the token there left the common SSH-superproject case authenticating with
+/// nothing, which is the failure this whole path exists to fix.
 fn credential_url_key(remote_url: &str) -> Option<String> {
+    if let Some(host) = ssh_remote_host(remote_url) {
+        return Some(format!("credential.https://{}.helper", host));
+    }
+
     let parsed = url::Url::parse(remote_url).ok()?;
     let scheme = match parsed.scheme() {
         "https" => "https",
@@ -163,14 +216,65 @@ mod tests {
         );
     }
 
-    /// Protocols git never asks HTTP credentials for get nothing injected — a
-    /// token is meaningless there and would only widen its exposure.
+    /// An explicitly written DEFAULT port must be normalized away, because
+    /// git's own credential request omits it — a `credential.https://host:443`
+    /// scope would simply never match and the token would go unoffered.
     #[test]
-    fn test_credential_url_key_ignores_non_http_urls() {
-        assert!(credential_url_key("git@github.com:owner/repo.git").is_none());
-        assert!(credential_url_key("ssh://git@github.com/owner/repo.git").is_none());
+    fn test_credential_url_key_drops_an_explicit_default_port() {
+        assert_eq!(
+            credential_url_key("https://github.com:443/owner/repo.git").as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+        assert_eq!(
+            credential_url_key("http://internal.example:80/owner/repo.git").as_deref(),
+            Some("credential.http://internal.example.helper")
+        );
+    }
+
+    /// A token is a PROVIDER credential: an SSH superproject on github.com
+    /// still carries a GitHub token, and its submodules' .gitmodules urls are
+    /// routinely https on that same host. Both SSH spellings must therefore
+    /// scope the token to the provider's https host.
+    #[test]
+    fn test_credential_url_key_maps_ssh_remotes_to_the_provider_https_host() {
+        assert_eq!(
+            credential_url_key("git@github.com:owner/repo.git").as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+        assert_eq!(
+            credential_url_key("ssh://git@GitHub.com/owner/repo.git").as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+    }
+
+    /// The ssh PORT describes the ssh endpoint; git's https credential request
+    /// never carries it, so keeping it would produce a scope that never fires.
+    #[test]
+    fn test_credential_url_key_drops_the_ssh_port() {
+        assert_eq!(
+            credential_url_key("ssh://git@gitlab.example.com:2222/group/repo.git").as_deref(),
+            Some("credential.https://gitlab.example.com.helper")
+        );
+    }
+
+    /// Transports with no host to name, and anything that is not a remote at
+    /// all, get nothing injected — a scope we cannot determine is one the token
+    /// must not be offered under.
+    #[test]
+    fn test_credential_url_key_ignores_urls_with_no_provider_host() {
         assert!(credential_url_key("/srv/git/repo.git").is_none());
+        assert!(credential_url_key("../sibling/repo.git").is_none());
+        assert!(credential_url_key("file:///srv/git/repo.git").is_none());
+        assert!(credential_url_key("git://example.com/repo.git").is_none());
         assert!(credential_url_key("").is_none());
+    }
+
+    /// A Windows drive path parses as a scheme (`c:`), so it must not be
+    /// mistaken for the scp-like form and turned into a host named `c`.
+    #[test]
+    fn test_credential_url_key_ignores_a_windows_drive_path() {
+        assert!(credential_url_key("C:/Users/dev/repo.git").is_none());
+        assert!(credential_url_key("C:\\Users\\dev\\repo.git").is_none());
     }
 
     /// The whole point of the scoping: the injected keys must name the host, so
@@ -207,12 +311,12 @@ mod tests {
         );
     }
 
-    /// Nothing may be injected for a URL git will not use it for — in
+    /// Nothing may be injected for a URL that names no provider host — in
     /// particular the token must not be exported into the environment.
     #[test]
-    fn test_apply_token_credential_helper_injects_nothing_for_ssh() {
+    fn test_apply_token_credential_helper_injects_nothing_without_a_host() {
         let mut cmd = Command::new("git");
-        apply_token_credential_helper(&mut cmd, "ghp_secret", "git@github.com:owner/repo.git");
+        apply_token_credential_helper(&mut cmd, "ghp_secret", "/srv/git/repo.git");
 
         let keys: Vec<String> = cmd
             .get_envs()
@@ -220,5 +324,33 @@ mod tests {
             .collect();
         assert!(!keys.iter().any(|k| k == "GIT_CONFIG_COUNT"));
         assert!(!keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"));
+    }
+
+    /// An SSH remote DOES name a provider host, and the token is a provider
+    /// credential, so it is scoped to that host over https — the transport the
+    /// submodule children actually ask credentials for.
+    #[test]
+    fn test_apply_token_credential_helper_scopes_ssh_to_the_provider_https_host() {
+        let mut cmd = Command::new("git");
+        apply_token_credential_helper(&mut cmd, "ghp_secret", "git@github.com:owner/repo.git");
+
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_1").map(String::as_str),
+            Some("credential.https://github.com.helper")
+        );
+        assert_eq!(
+            envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+            Some("ghp_secret")
+        );
     }
 }

@@ -1010,6 +1010,24 @@ pub async fn push(
     }
 }
 
+/// The URL a push to `remote_name` will actually contact, and therefore the one
+/// whose host a token has to be scoped to.
+///
+/// `pushurl` wins when the remote configures one: git contacts THAT host on a
+/// push, so scoping the credential to the fetch url would leave the push
+/// authenticating with nothing. `None` when the remote is unknown or has no
+/// url, in which case no host can be named and nothing is injected.
+fn push_remote_url(path: &str, remote_name: &str) -> Option<String> {
+    let repo = git2::Repository::open(path).ok()?;
+    let remote = repo.find_remote(remote_name).ok()?;
+    remote
+        .pushurl()
+        .ok()
+        .flatten()
+        .or_else(|| remote.url().ok())
+        .map(|u| u.to_string())
+}
+
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
 #[allow(clippy::too_many_arguments)]
 fn push_via_cli(
@@ -1075,16 +1093,7 @@ fn push_via_cli(
     // Scoped to the remote's own host, so the token is offered to the host it
     // belongs to and nowhere else.
     if let Some(ref token_value) = token {
-        let remote_url: Option<String> = git2::Repository::open(path).ok().and_then(|repo| {
-            let remote = repo.find_remote(remote_name).ok()?;
-            remote
-                .pushurl()
-                .ok()
-                .flatten()
-                .or_else(|| remote.url().ok())
-                .map(|u| u.to_string())
-        });
-        if let Some(remote_url) = remote_url {
+        if let Some(remote_url) = push_remote_url(path, remote_name) {
             crate::utils::apply_token_credential_helper(&mut cmd, token_value, &remote_url);
         }
     }
@@ -2324,6 +2333,77 @@ mod tests {
             origin_repo.refname_to_id("refs/heads/main").unwrap(),
             alice_oid
         );
+    }
+
+    /// Force push is the ONLY route through `push_via_cli`, and it is the one
+    /// path that hands a token to the git CLI. Every other test here pushes
+    /// with `None`, so the token's host scoping — the part that decides whether
+    /// a token-authenticated force push works at all — went uncovered.
+    #[test]
+    fn test_push_remote_url_prefers_the_push_url() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://fetch-host.test/r.git");
+        git_in(
+            &repo.path,
+            &[
+                "config",
+                "remote.origin.pushurl",
+                "https://push-host.test/r.git",
+            ],
+        );
+
+        assert_eq!(
+            push_remote_url(&repo.path_str(), "origin").as_deref(),
+            Some("https://push-host.test/r.git"),
+            "a push contacts the pushurl's host, so the token must be scoped there"
+        );
+
+        // ...and that is the host the credential actually lands under.
+        let mut cmd = crate::utils::create_command("git");
+        crate::utils::apply_token_credential_helper(
+            &mut cmd,
+            "ghp_secret",
+            &push_remote_url(&repo.path_str(), "origin").unwrap(),
+        );
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("credential.https://push-host.test.helper")
+        );
+        assert_eq!(
+            envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+            Some("ghp_secret")
+        );
+    }
+
+    /// With no pushurl configured the fetch url is the one git contacts.
+    #[test]
+    fn test_push_remote_url_falls_back_to_the_fetch_url() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://only-host.test/r.git");
+
+        assert_eq!(
+            push_remote_url(&repo.path_str(), "origin").as_deref(),
+            Some("https://only-host.test/r.git")
+        );
+    }
+
+    /// An unknown remote names no host, so nothing may be injected — a guessed
+    /// scope would offer the token to a host it does not belong to.
+    #[test]
+    fn test_push_remote_url_is_none_for_an_unknown_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://only-host.test/r.git");
+
+        assert!(push_remote_url(&repo.path_str(), "nope").is_none());
     }
 
     // ---- first push sets upstream tracking ----

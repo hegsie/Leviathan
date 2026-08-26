@@ -45,20 +45,20 @@ pub enum SubmoduleStatus {
     Dirty,
 }
 
-/// The superproject's own remote URL — the host the frontend picked the token
-/// for. `origin` wins when it exists, matching the remote the provider
-/// detection settles on; otherwise the first remote that has a URL.
-fn superproject_remote_url(repo_path: &Path) -> Option<String> {
+/// The URL of the remote the token was resolved against, named by the caller.
+///
+/// There is deliberately NO fallback to `origin`, nor to "the first remote
+/// with a URL". `getRepoToken` (git.service.ts) probes EVERY remote and returns
+/// a token for the first one a provider claims, so the remote it settles on is
+/// routinely not `origin` — a repo whose `origin` is GitLab and whose
+/// `upstream` is GitHub yields a GitHub token. Scoping that to `origin` would
+/// both offer the GitHub token to the GitLab host and withhold it from the
+/// host it actually belongs to. When the name is absent or matches no remote,
+/// the host is unknown and nothing is injected.
+fn token_remote_url(repo_path: &Path, remote_name: &str) -> Option<String> {
     let repo = git2::Repository::open(repo_path).ok()?;
-    let url_of = |name: &str| -> Option<String> {
-        let remote = repo.find_remote(name).ok()?;
-        remote.url().ok().map(|u| u.to_string())
-    };
-    if let Some(url) = url_of("origin") {
-        return Some(url);
-    }
-    let names = repo.remotes().ok()?;
-    names.iter().flatten().flatten().find_map(url_of)
+    let remote = repo.find_remote(remote_name).ok()?;
+    remote.url().ok().map(|u| u.to_string())
 }
 
 /// Build the `git` command for a submodule operation, optionally carrying an
@@ -66,14 +66,20 @@ fn superproject_remote_url(repo_path: &Path) -> Option<String> {
 ///
 /// The token is fed to git through a credential helper in the environment, so
 /// the per-submodule `git clone` / `git fetch` children that `git submodule
-/// update` spawns inherit it too. It is scoped to the superproject's own host:
-/// the children ask for credentials for each submodule's url from .gitmodules,
-/// which may point anywhere, and the token belongs to one provider only.
-fn submodule_command(repo_path: &Path, args: &[&str], token: Option<&str>) -> Command {
+/// update` spawns inherit it too. It is scoped to the host of `token_remote` —
+/// the remote the frontend resolved the token against — because the children
+/// ask for credentials for each submodule's url from .gitmodules, which may
+/// point anywhere, and the token belongs to one provider only.
+fn submodule_command(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+    token_remote: Option<&str>,
+) -> Command {
     let mut cmd = create_command("git");
     cmd.current_dir(repo_path).args(args);
-    if let Some(token_value) = token {
-        if let Some(remote_url) = superproject_remote_url(repo_path) {
+    if let (Some(token_value), Some(remote_name)) = (token, token_remote) {
+        if let Some(remote_url) = token_remote_url(repo_path, remote_name) {
             apply_token_credential_helper(&mut cmd, token_value, &remote_url);
         }
     }
@@ -82,16 +88,18 @@ fn submodule_command(repo_path: &Path, args: &[&str], token: Option<&str>) -> Co
 
 /// Helper to run git commands
 fn run_git_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    run_git_command_with_token(repo_path, args, None)
+    run_git_command_with_token(repo_path, args, None, None)
 }
 
-/// Helper to run git commands, authenticating with `token` when one is given.
+/// Helper to run git commands, authenticating with `token` when one is given,
+/// scoped to the host of `token_remote`.
 fn run_git_command_with_token(
     repo_path: &Path,
     args: &[&str],
     token: Option<&str>,
+    token_remote: Option<&str>,
 ) -> Result<String> {
-    let output = submodule_command(repo_path, args, token)
+    let output = submodule_command(repo_path, args, token, token_remote)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git: {}", e)))?;
 
@@ -269,6 +277,7 @@ pub async fn update_submodules(
     recursive: Option<bool>,
     remote: Option<bool>,
     token: Option<String>,
+    token_remote: Option<String>,
 ) -> Result<()> {
     // The token the frontend looked up (git.service.ts updateSubmodules) used
     // to be logged and dropped here, so `git submodule update` ran with
@@ -276,6 +285,10 @@ pub async fn update_submodules(
     // All failed on a private submodule for exactly the users whose fetch and
     // push succeed. It now goes to git as a credential helper in the
     // environment, which the per-submodule clone/fetch children inherit.
+    //
+    // `token_remote` names the remote the frontend resolved that token
+    // against, so the helper is scoped to the host it belongs to rather than
+    // to whichever remote happens to be called `origin`.
 
     let repo_path = Path::new(&path);
 
@@ -305,7 +318,7 @@ pub async fn update_submodules(
         }
     }
 
-    run_git_command_with_token(repo_path, &args, token.as_deref())?;
+    run_git_command_with_token(repo_path, &args, token.as_deref(), token_remote.as_deref())?;
     Ok(())
 }
 
@@ -450,7 +463,7 @@ mod tests {
     async fn test_update_submodules_no_submodules() {
         let repo = TestRepo::with_initial_commit();
         // Update on repo with no submodules should succeed
-        let result = update_submodules(repo.path_str(), None, None, None, None, None).await;
+        let result = update_submodules(repo.path_str(), None, None, None, None, None, None).await;
         assert!(result.is_ok());
     }
 
@@ -560,6 +573,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -574,6 +588,7 @@ mod tests {
             None,
             None,
             Some(true), // recursive
+            None,
             None,
             None,
         )
@@ -783,8 +798,9 @@ mod tests {
         let source = TestRepo::with_initial_commit();
         let super_repo = TestRepo::with_initial_commit();
         let super_path = super_repo.path.clone();
-        // The injected helper is scoped to the superproject's own host, so the
-        // superproject needs one for the token to be exported at all.
+        // The injected helper is scoped to the host of the remote the token was
+        // resolved against, so that remote has to exist for anything to be
+        // exported at all.
         super_repo.add_remote("origin", "https://example.com/super.git");
 
         let source_url = source.path.to_string_lossy().to_string();
@@ -829,6 +845,7 @@ mod tests {
             None,
             None,
             Some("ghp_test_token".to_string()),
+            Some("origin".to_string()),
         )
         .await;
         assert!(
@@ -853,8 +870,13 @@ mod tests {
     /// credential request. Returns the `key=value` lines `git credential fill`
     /// printed.
     #[cfg(unix)]
-    fn fill_credential(repo: &TestRepo, token: &str, request: &str) -> String {
-        let mut cmd = submodule_command(&repo.path, &["credential", "fill"], Some(token));
+    fn fill_credential(repo: &TestRepo, token: &str, token_remote: &str, request: &str) -> String {
+        let mut cmd = submodule_command(
+            &repo.path,
+            &["credential", "fill"],
+            Some(token),
+            Some(token_remote),
+        );
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -875,7 +897,12 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.add_remote("origin", "https://example.com/super.git");
 
-        let stdout = fill_credential(&repo, "ghp_secret", "protocol=https\nhost=example.com\n\n");
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=example.com\n\n",
+        );
 
         assert!(
             stdout.contains("username=git"),
@@ -902,7 +929,12 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.add_remote("origin", "https://example.com/super.git");
 
-        let stdout = fill_credential(&repo, "ghp_secret", "protocol=https\nhost=evil.test\n\n");
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=evil.test\n\n",
+        );
 
         assert!(
             !stdout.contains("ghp_secret"),
@@ -933,7 +965,12 @@ mod tests {
             ],
         );
 
-        let stdout = fill_credential(&repo, "ghp_secret", "protocol=https\nhost=example.com\n\n");
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=example.com\n\n",
+        );
 
         assert!(
             stdout.contains("password=ghp_secret"),
@@ -965,12 +1002,148 @@ mod tests {
             ],
         );
 
-        let stdout = fill_credential(&repo, "ghp_secret", "protocol=https\nhost=other.test\n\n");
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=other.test\n\n",
+        );
 
         assert!(
             stdout.contains("password=keychainpass"),
             "the injection disabled the user's own helper for an unrelated host: {}",
             stdout
+        );
+    }
+
+    /// The core of the host-mismatch fix. `getRepoToken` probes EVERY remote
+    /// and returns a token for the first one a provider claims, so the remote
+    /// it settles on is routinely not `origin`. Scoping to `origin` regardless
+    /// both offered that token to an unrelated host and withheld it from the
+    /// host it belongs to — so the operation this path exists to fix still
+    /// failed, while the token leaked to a third party.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_scopes_the_token_to_the_named_remote_not_origin() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://origin-host.test/super.git");
+        repo.add_remote("upstream", "https://token-host.test/super.git");
+
+        // The token was resolved against `upstream`, so it must reach that host
+        let for_token_host = fill_credential(
+            &repo,
+            "ghp_secret",
+            "upstream",
+            "protocol=https\nhost=token-host.test\n\n",
+        );
+        assert!(
+            for_token_host.contains("password=ghp_secret"),
+            "the token was withheld from the host it was resolved for: {}",
+            for_token_host
+        );
+
+        // ...and must NOT be offered to whichever remote happens to be `origin`
+        let for_origin_host = fill_credential(
+            &repo,
+            "ghp_secret",
+            "upstream",
+            "protocol=https\nhost=origin-host.test\n\n",
+        );
+        assert!(
+            !for_origin_host.contains("ghp_secret"),
+            "the token was offered to origin's host, which it does not belong to: {}",
+            for_origin_host
+        );
+    }
+
+    /// A token is a PROVIDER credential, not a transport one: the frontend's
+    /// detection returns one for an SSH remote too. A superproject cloned over
+    /// SSH commonly lists submodules whose .gitmodules url is https on that
+    /// same provider, and those children ask git for https credentials — so
+    /// the SSH spelling has to scope the token to the provider's https host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_submodule_command_scopes_an_ssh_remote_to_the_provider_https_host() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "git@github.com:owner/super.git");
+
+        let stdout = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=github.com\n\n",
+        );
+
+        assert!(
+            stdout.contains("password=ghp_secret"),
+            "an ssh superproject left its https submodules with no credential: {}",
+            stdout
+        );
+
+        let elsewhere = fill_credential(
+            &repo,
+            "ghp_secret",
+            "origin",
+            "protocol=https\nhost=evil.test\n\n",
+        );
+        assert!(
+            !elsewhere.contains("ghp_secret"),
+            "the ssh mapping widened the token beyond its own provider: {}",
+            elsewhere
+        );
+    }
+
+    /// When the caller cannot say which remote the token belongs to, the host
+    /// is unknown — and a token offered under a guessed scope is exactly the
+    /// disclosure this scoping exists to prevent. Inject nothing.
+    #[tokio::test]
+    async fn test_submodule_command_without_a_token_remote_injects_nothing() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let cmd = submodule_command(
+            &repo.path,
+            &["submodule", "update"],
+            Some("ghp_secret"),
+            None,
+        );
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !keys.iter().any(|k| k == "GIT_CONFIG_COUNT"),
+            "a token with no remote to scope it to must not be injected under a guessed host"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            "a token with no remote to scope it to must not be exported"
+        );
+    }
+
+    /// Same rule when the named remote no longer exists — it was renamed or
+    /// deleted between the frontend's lookup and the command. Falling back to
+    /// another remote would reintroduce the mismatch.
+    #[tokio::test]
+    async fn test_submodule_command_with_an_unknown_token_remote_injects_nothing() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://example.com/super.git");
+
+        let cmd = submodule_command(
+            &repo.path,
+            &["submodule", "update"],
+            Some("ghp_secret"),
+            Some("gone"),
+        );
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            "an unresolvable remote must not fall back to another remote's host"
         );
     }
 
@@ -981,7 +1154,7 @@ mod tests {
     async fn test_submodule_command_without_a_token_injects_nothing() {
         let repo = TestRepo::with_initial_commit();
 
-        let cmd = submodule_command(&repo.path, &["submodule", "update"], None);
+        let cmd = submodule_command(&repo.path, &["submodule", "update"], None, Some("origin"));
         let keys: Vec<String> = cmd
             .get_envs()
             .map(|(k, _)| k.to_string_lossy().to_string())
@@ -1010,6 +1183,7 @@ mod tests {
             None,
             None,
             Some("ghp_test_token".to_string()),
+            Some("origin".to_string()),
         )
         .await
         .expect_err("a flag-like path must never reach git as a positional");
@@ -1028,6 +1202,7 @@ mod tests {
                 None,
                 None,
                 Some("ghp_test_token".to_string()),
+                Some("origin".to_string()),
             )
             .await
             .is_err(),

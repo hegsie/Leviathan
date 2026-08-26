@@ -1187,13 +1187,29 @@ export async function syncAdoGitCredentials(org: string, token: string): Promise
 }
 
 /**
- * Helper to get authentication token for a repository
- * Tries the multi-account system first, then falls back to legacy single-token methods
+ * The token for a repository AND the remote it was resolved against.
+ *
+ * The remote matters to any caller that hands the token to the git CLI: the
+ * lookup below probes EVERY remote and returns a token for the first one a
+ * provider claims, so the remote it settles on is routinely not `origin`. A
+ * caller that assumed `origin` would scope the credential to the wrong host —
+ * offering the token to a host it does not belong to, and withholding it from
+ * the one it does.
  */
-async function getRepoToken(
+interface ResolvedRepoToken {
+  token?: string;
+  remoteName?: string;
+}
+
+/**
+ * Helper to get authentication token for a repository, with the remote it came
+ * from. Tries the multi-account system first, then falls back to legacy
+ * single-token methods.
+ */
+async function resolveRepoToken(
   repoPath: string,
   remoteName?: string,
-): Promise<string | undefined> {
+): Promise<ResolvedRepoToken> {
   try {
     // --- Multi-account system (preferred) ---
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
@@ -1206,15 +1222,16 @@ async function getRepoToken(
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = ghRepoResult.data.remoteName;
       const account = selectDefaultGlobalAccount("github");
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
-        if (token) return token;
+        if (token) return { token, remoteName: resolvedRemote };
       }
       // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
 
@@ -1225,6 +1242,7 @@ async function getRepoToken(
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = adoRepoResult.data.remoteName;
       const account = selectDefaultGlobalAccount("azure-devops");
       if (account) {
         // Refresh the Entra OAuth access token if it is expiring, so push/pull/
@@ -1242,13 +1260,13 @@ async function getRepoToken(
           if (accountOrg && accountOrg === adoRepoResult.data.organization) {
             await syncAdoGitCredentials(adoRepoResult.data.organization, token);
           }
-          return token;
+          return { token, remoteName: resolvedRemote };
         }
       }
       // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
 
@@ -1259,21 +1277,36 @@ async function getRepoToken(
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = gitlabRepoResult.data.remoteName;
       const account = selectDefaultGlobalAccount("gitlab");
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
-        if (token) return token;
+        if (token) return { token, remoteName: resolvedRemote };
       }
       // Legacy fallback for GitLab
       const tokenResult = await getGitLabToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
   } catch (err) {
     console.error("Failed to auto-detect repository token:", err);
   }
-  return undefined;
+  return {};
+}
+
+/**
+ * Helper to get authentication token for a repository.
+ *
+ * Callers that pass the token straight to a backend command which authenticates
+ * with git2 need only the token; callers that hand it to the git CLI want
+ * `resolveRepoToken`, so the credential can be scoped to the right host.
+ */
+async function getRepoToken(
+  repoPath: string,
+  remoteName?: string,
+): Promise<string | undefined> {
+  return (await resolveRepoToken(repoPath, remoteName)).token;
 }
 
 /**
@@ -2233,6 +2266,12 @@ export async function updateSubmodules(
     recursive?: boolean;
     remote?: boolean;
     token?: string;
+    /**
+     * The remote `token` belongs to. Required alongside an explicitly supplied
+     * `token`: the backend scopes the credential it hands the git CLI to this
+     * remote's host, and injects nothing when it cannot tell which host that is.
+     */
+    tokenRemote?: string;
   },
 ): Promise<CommandResult<void>> {
   // `git submodule update` fetches (and clones with --init), so it belongs
@@ -2241,10 +2280,18 @@ export async function updateSubmodules(
     return blockedResult();
   }
 
-  // Try to find a token if not provided
+  // Try to find a token if not provided. The remote it was resolved against
+  // travels with it: the backend feeds it to the git CLI as a host-scoped
+  // credential helper, and the lookup does NOT always settle on `origin` — a
+  // repo whose origin is GitLab and whose upstream is GitHub yields a GitHub
+  // token, which scoped to origin would leak to the GitLab host and never
+  // reach the one it authenticates.
   let token = options?.token;
+  let tokenRemote = options?.tokenRemote;
   if (!token) {
-    token = await getRepoToken(repoPath);
+    const resolved = await resolveRepoToken(repoPath);
+    token = resolved.token;
+    tokenRemote = resolved.remoteName;
   }
 
   return invokeCommand<void>("update_submodules", {
@@ -2254,6 +2301,7 @@ export async function updateSubmodules(
     recursive: options?.recursive,
     remote: options?.remote,
     token,
+    tokenRemote,
   });
 }
 
