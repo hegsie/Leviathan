@@ -57,6 +57,9 @@ export interface UnifiedProfileState {
   updateProfile: (profile: UnifiedProfile) => void;
   removeProfile: (profileId: string) => void;
 
+  // Actions - Repository assignments
+  setRepositoryAssignment: (repoPath: string, profileId: string) => void;
+
   // Actions - Global Accounts (v3)
   setAccounts: (accounts: IntegrationAccount[]) => void;
   addAccount: (account: IntegrationAccount) => void;
@@ -150,6 +153,25 @@ export const unifiedProfileStore = createStore<UnifiedProfileState>()((set) => (
       const activeProfile = state.activeProfile?.id === profileId ? null : state.activeProfile;
       return { profiles, config, activeProfile, error: null };
     }),
+
+  // Repository assignments
+  setRepositoryAssignment: (repoPath, profileId) =>
+    set((state) => ({
+      // V9: Consistent with the sibling mutators (addProfile, updateProfile,
+      // setAccounts, ...) — leave config null when none is loaded rather than
+      // fabricating one. The backend has already persisted the assignment, so
+      // the next full load carries it.
+      config: state.config
+        ? {
+            ...state.config,
+            repositoryAssignments: {
+              ...state.config.repositoryAssignments,
+              [repoPath]: profileId,
+            },
+          }
+        : null,
+      error: null,
+    })),
 
   // Global Accounts (v3)
   setAccounts: (accounts) =>

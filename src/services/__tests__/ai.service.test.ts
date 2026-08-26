@@ -6,6 +6,7 @@ import type {
   ConflictResolutionSuggestion,
 } from '../ai.service.ts';
 import {
+  getAiUnavailableReason,
   getProviderDisplayName,
   providerRequiresApiKey,
   suggestConflictResolution,
@@ -59,7 +60,13 @@ const mockResults: Record<string, unknown> = {
 };
 
 const mockInvoke = (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
-  return Promise.resolve(mockResults[command] ?? { success: false, error: 'Unknown command' });
+  if (Object.prototype.hasOwnProperty.call(mockResults, command)) {
+    const value = mockResults[command];
+    // An Error entry models a command that rejects, the way Tauri surfaces a
+    // Rust `Err` — distinct from a command that resolves with `null`.
+    return value instanceof Error ? Promise.reject(value) : Promise.resolve(value);
+  }
+  return Promise.resolve({ success: false, error: 'Unknown command' });
 };
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
@@ -389,5 +396,36 @@ describe('suggestConflictResolution', () => {
 
     expect(result.success).to.be.true;
     expect(result.data).to.not.be.undefined;
+  });
+});
+
+describe('getAiUnavailableReason', () => {
+  afterEach(() => {
+    delete mockResults.ai_unavailable_reason;
+  });
+
+  it('returns the reason and whether a provider is selected', async () => {
+    mockResults.ai_unavailable_reason = {
+      reason: 'Anthropic Claude is not available. Please check its API key in Settings.',
+      providerSelected: true,
+    };
+
+    const result = await getAiUnavailableReason();
+
+    expect(result).to.not.be.null;
+    expect(result!.reason).to.include('Anthropic Claude');
+    expect(result!.providerSelected).to.be.true;
+  });
+
+  it('returns null when AI is usable', async () => {
+    mockResults.ai_unavailable_reason = null;
+
+    expect(await getAiUnavailableReason()).to.be.null;
+  });
+
+  it('returns null when the command fails, so the UI keeps its generic message', async () => {
+    mockResults.ai_unavailable_reason = new Error('backend unreachable');
+
+    expect(await getAiUnavailableReason()).to.be.null;
   });
 });

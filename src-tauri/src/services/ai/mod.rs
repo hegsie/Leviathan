@@ -129,6 +129,19 @@ pub struct AiProviderInfo {
     pub selected_model: Option<String>,
 }
 
+/// Why AI is unavailable, for the surfaces that have to explain it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiUnavailable {
+    /// Human-readable reason, naming the provider when one is at fault.
+    pub reason: String,
+    /// True when a provider is chosen in Settings but unreachable, rather than
+    /// no provider being configured at all. A surface that hides its AI
+    /// affordances when AI was never set up still shows them, disabled, here —
+    /// they worked before and the user needs to know why they stopped.
+    pub provider_selected: bool,
+}
+
 /// Trait for AI providers
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -754,32 +767,93 @@ impl AiService {
             .any(|m| m.status == local::model_manager::ModelStatus::Downloaded)
     }
 
-    /// Whether an AI request would succeed right now.
+    /// True when local inference is the provider a request would be served by:
+    /// it is the choice made in Settings, or nothing has been chosen and the
+    /// scan below tries local inference first.
+    fn local_inference_would_serve(&self) -> bool {
+        matches!(
+            self.config.active_provider,
+            None | Some(AiProviderType::LocalInference)
+        )
+    }
+
+    /// Why an AI request would fail right now, or `None` if it would succeed.
     ///
     /// A downloaded-but-unloaded local model counts as available: the model is
     /// only ever loaded on demand (see [`AiService::ensure_local_model_loaded`]),
     /// never at startup, so reporting it as unavailable would hide AI features
-    /// that do in fact work after every restart.
-    pub async fn has_available_provider(&self) -> bool {
-        self.find_available_provider().await.is_some() || self.has_loadable_local_model().await
-    }
-
-    /// Find the first available provider, preferring the active one
-    pub async fn find_available_provider(&self) -> Option<(&dyn AiProvider, AiProviderType)> {
-        // Try the active provider first
-        if let Some(pt) = self.config.active_provider {
-            if let Some(provider) = self.providers.get(&pt) {
-                if provider.is_available().await {
-                    return Some((provider.as_ref(), pt));
+    /// that do in fact work after every restart. That only holds when local
+    /// inference is the provider a request would actually use — a provider
+    /// chosen in Settings is never substituted, so a downloaded model does not
+    /// make some other unavailable choice work.
+    pub async fn unavailable_reason(&self) -> Option<String> {
+        match self.resolve_provider().await {
+            Ok(_) => None,
+            Err(reason) => {
+                if self.local_inference_would_serve() && self.has_loadable_local_model().await {
+                    None
+                } else {
+                    Some(reason)
                 }
             }
         }
+    }
 
-        // Check local inference (only if already loaded — no lazy load here,
-        // as loading the model into GPU memory is expensive and should be deferred)
+    /// Whether an AI request would succeed right now.
+    pub async fn has_available_provider(&self) -> bool {
+        self.unavailable_reason().await.is_none()
+    }
+
+    /// Resolve the provider that will serve a request, loading the local model
+    /// only when it is the model that will actually answer.
+    ///
+    /// A choice made in Settings is honoured exactly: when the chosen provider
+    /// is unavailable the request fails naming it instead of quietly going
+    /// somewhere else, so a diff never reaches a provider the user did not
+    /// pick — and a downloaded-but-unloaded local model is never loaded on
+    /// behalf of a *different* chosen provider that happens to be down.
+    /// Loading a GGUF costs gigabytes of RAM/GPU, so the load is only
+    /// attempted when local inference is the provider that could actually
+    /// serve: it is the explicit choice, or nothing has been chosen and the
+    /// scan below tries local inference first. The scan across every other
+    /// provider applies only when nothing has been chosen.
+    pub async fn resolve_provider(&self) -> Result<(&dyn AiProvider, AiProviderType), String> {
+        if let Some(pt) = self.config.active_provider {
+            if pt == AiProviderType::LocalInference {
+                // Deferred from startup to avoid races; loaded here since the
+                // user chose this provider explicitly.
+                if let Err(e) = self.ensure_local_model_loaded().await {
+                    tracing::debug!("Lazy model load skipped: {}", e);
+                }
+            }
+
+            if let Some(provider) = self.providers.get(&pt) {
+                if provider.is_available().await {
+                    return Ok((provider.as_ref(), pt));
+                }
+            }
+
+            let hint = match pt {
+                AiProviderType::LocalInference => {
+                    "Please download and load a model in Settings > Local AI, or select a different provider."
+                }
+                _ if pt.requires_api_key() => {
+                    "Please check its API key in Settings, or select a different provider."
+                }
+                _ => "Please make sure it is running, or select a different provider in Settings.",
+            };
+            return Err(format!("{} is not available. {}", pt.display_name(), hint));
+        }
+
+        // Nothing chosen — use whatever is reachable. Local inference ranks
+        // above every other fallback, so it gets first refusal: load it now,
+        // deferred from startup to avoid races.
+        if let Err(e) = self.ensure_local_model_loaded().await {
+            tracing::debug!("Lazy model load skipped: {}", e);
+        }
         if let Some(provider) = self.providers.get(&AiProviderType::LocalInference) {
             if provider.is_available().await {
-                return Some((provider.as_ref(), AiProviderType::LocalInference));
+                return Ok((provider.as_ref(), AiProviderType::LocalInference));
             }
         }
 
@@ -792,51 +866,21 @@ impl AiService {
             }
             if let Some(provider) = self.providers.get(&pt) {
                 if provider.is_available().await {
-                    return Some((provider.as_ref(), pt));
+                    return Ok((provider.as_ref(), pt));
                 }
             }
         }
 
-        None
+        Err("No AI provider available. Please configure a provider in Settings.".to_string())
     }
 
-    /// Resolve the provider that will serve a generation request, loading the
-    /// local model only when it is the model that will actually answer.
+    /// Find the provider that will serve a request, if any.
     ///
-    /// Loading a GGUF costs gigabytes of RAM/GPU, so it must not happen on
-    /// behalf of a request that Anthropic, OpenAI or Ollama is about to serve.
-    /// Doing so would also silently undo an explicit "Unload" from Settings on
-    /// the very next AI action.
-    async fn resolve_provider(&self) -> Result<(&dyn AiProvider, AiProviderType), String> {
-        let active = self.config.active_provider;
-
-        // The provider the user chose is available and serves the request
-        // as-is — nothing has to be loaded. Only the active provider may
-        // short-circuit the load: `find_available_provider` ranks local
-        // inference above every other fallback, so returning a fallback here
-        // would send the request off-device on a request that would otherwise
-        // have stayed local.
-        if active != Some(AiProviderType::LocalInference) {
-            if let Some((provider, pt)) = self.find_available_provider().await {
-                if Some(pt) == active {
-                    return Ok((provider, pt));
-                }
-            }
-        }
-
-        // Local inference is either the provider the user chose or the
-        // highest-ranked remaining candidate. Load it now — deferred from
-        // startup to avoid races.
-        if let Err(e) = self.ensure_local_model_loaded().await {
-            tracing::debug!("Lazy model load skipped: {}", e);
-        }
-
-        // Resolve again now the local model has had its chance: this picks it
-        // up when it loaded, and falls back to any other available provider
-        // when it did not (or when nothing was downloaded).
-        self.find_available_provider().await.ok_or_else(|| {
-            "No AI provider available. Please configure a provider in Settings.".to_string()
-        })
+    /// Thin wrapper over [`AiService::resolve_provider`] for callers that only
+    /// need to know whether AI is usable: availability has to answer for the
+    /// same provider a request would actually use.
+    pub async fn find_available_provider(&self) -> Option<(&dyn AiProvider, AiProviderType)> {
+        self.resolve_provider().await.ok()
     }
 
     /// Save configuration to disk
@@ -1231,10 +1275,12 @@ mod tests {
         );
     }
 
-    /// When the user explicitly chose local inference, it is loaded even though
-    /// another provider is available — and a failed load still falls back.
+    /// When the user explicitly chose local inference, it is loaded even
+    /// though another provider is configured — but a failed load must not
+    /// silently substitute that other provider. Selecting a provider in
+    /// Settings is honoured exactly, in both directions.
     #[tokio::test]
-    async fn test_local_active_provider_is_loaded_and_falls_back_when_it_cannot_load() {
+    async fn test_local_active_provider_is_loaded_and_errors_when_it_cannot_load() {
         let (mut service, _config_dir, _models_dir) = service_fixture().await;
         service
             .set_active_provider(AiProviderType::LocalInference)
@@ -1243,24 +1289,27 @@ mod tests {
             .providers
             .insert(AiProviderType::Anthropic, Box::new(StubProvider));
 
-        let result = service
+        let err = service
             .generate_commit_message("diff --git a/a b/a".to_string())
-            .await;
+            .await
+            .unwrap_err();
 
         assert_ne!(
             service.get_local_model_status().await,
             providers::LocalModelStatus::Unloaded,
             "the user's chosen local model must still be loaded"
         );
-        assert_eq!(result.unwrap().summary, "feat: stub");
+        assert!(err.contains("Local AI"), "{err}");
     }
 
-    /// When the active provider is unreachable, the downloaded local model —
-    /// which `find_available_provider` ranks above every other fallback — must
-    /// still get first refusal. Short-circuiting on a stale cloud key would
-    /// send a request off-device that used to be answered locally.
+    /// When a *different* provider is explicitly chosen and unreachable, the
+    /// request must fail naming that provider — not silently substitute the
+    /// local model. Loading a GGUF on its behalf would also undo an explicit
+    /// Settings "Unload" the next time this provider comes back, and would
+    /// perform a needless multi-gigabyte load for a provider the user never
+    /// selected.
     #[tokio::test]
-    async fn test_unavailable_active_provider_gives_the_local_model_first_refusal() {
+    async fn test_unavailable_active_provider_does_not_fall_back_to_local_model() {
         let (mut service, _config_dir, _models_dir) = service_fixture().await;
         // Ollama is the chosen provider but its endpoint is a closed port.
         service.set_active_provider(AiProviderType::Ollama).unwrap();
@@ -1269,18 +1318,150 @@ mod tests {
             .providers
             .insert(AiProviderType::Anthropic, Box::new(StubProvider));
 
-        let result = service
+        let err = service
             .generate_commit_message("diff --git a/a b/a".to_string())
-            .await;
+            .await
+            .unwrap_err();
 
-        assert_ne!(
+        assert_eq!(
             service.get_local_model_status().await,
             providers::LocalModelStatus::Unloaded,
-            "the local model outranks a non-active fallback, so it must be loaded first"
+            "a non-active local model must not be loaded on behalf of a different chosen provider"
         );
-        // The GGUF is deliberately invalid, so the load fails and the
-        // configured cloud provider still serves the request.
-        assert_eq!(result.unwrap().summary, "feat: stub");
+        assert!(err.contains("Ollama"), "{err}");
+    }
+
+    // --- Provider resolution -------------------------------------------------
+    //
+    // A provider picked in Settings is a privacy decision, not a preference:
+    // falling through to a cloud provider whose key happens to be saved would
+    // ship the staged diff, conflict contents or commit log somewhere the user
+    // never chose. These tests pin that the choice is honoured exactly, and
+    // that the scan still runs when nothing has been chosen.
+
+    /// A service whose probing providers point at a closed port, so a real
+    /// Ollama/LM Studio on the machine running the tests cannot be picked up.
+    fn test_service(dir: &tempfile::TempDir) -> AiService {
+        let mut service = AiService::new(dir.path().to_path_buf());
+        for pt in [AiProviderType::Ollama, AiProviderType::LmStudio] {
+            service.config.providers.entry(pt).or_default().endpoint =
+                Some("http://127.0.0.1:1".to_string());
+        }
+        service.init_providers();
+        service
+    }
+
+    fn set_key(service: &mut AiService, pt: AiProviderType, key: &str) {
+        service.config.providers.entry(pt).or_default().api_key = Some(key.to_string());
+        service.init_providers();
+    }
+
+    /// Point a keyed cloud provider at a closed port so that, if resolution
+    /// ever did fall through to it, the failure stays on this machine.
+    fn dead_end(service: &mut AiService, pt: AiProviderType) {
+        service.config.providers.entry(pt).or_default().endpoint =
+            Some("http://127.0.0.1:1".to_string());
+        service.init_providers();
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_refuses_to_substitute_an_unchosen_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+        // Chosen provider has no key, so it is unavailable — while Gemini,
+        // configured at some point in the past, reports available.
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        let err = service
+            .resolve_provider()
+            .await
+            .map(|(_, pt)| pt)
+            .unwrap_err();
+        assert!(err.contains("Anthropic Claude"), "{err}");
+        assert!(err.contains("Settings"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn generate_commit_message_never_hands_the_diff_to_a_substitute_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+        dead_end(&mut service, AiProviderType::GoogleGemini);
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        let err = service
+            .generate_commit_message("diff --git a/a.rs b/a.rs\n+secret\n".to_string())
+            .await
+            .unwrap_err();
+        assert!(err.contains("Anthropic Claude"), "{err}");
+        assert!(!err.to_lowercase().contains("gemini"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn generate_text_never_hands_the_prompt_to_a_substitute_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+        dead_end(&mut service, AiProviderType::GoogleGemini);
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        let err = service
+            .generate_text(
+                CONFLICT_RESOLUTION_PROMPT,
+                "<<<<<<< ours\nsecret\n=======\ntheirs\n>>>>>>>",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Anthropic Claude"), "{err}");
+        assert!(!err.to_lowercase().contains("gemini"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_error_points_at_the_local_model_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+        // Local AI selected, no engine loaded.
+        service.config.active_provider = Some(AiProviderType::LocalInference);
+
+        let err = service
+            .resolve_provider()
+            .await
+            .map(|(_, pt)| pt)
+            .unwrap_err();
+        assert!(err.contains("Settings > Local AI"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_uses_the_provider_the_user_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::Anthropic, "test-key");
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        let (_, pt) = service
+            .resolve_provider()
+            .await
+            .expect("chosen provider is available");
+        assert_eq!(pt, AiProviderType::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn resolve_provider_still_scans_when_nothing_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        assert!(service.config.active_provider.is_none());
+        set_key(&mut service, AiProviderType::GoogleGemini, "test-key");
+
+        let (_, pt) = service
+            .resolve_provider()
+            .await
+            .expect("a configured provider should still be found");
+        assert_eq!(pt, AiProviderType::GoogleGemini);
+        assert!(service.find_available_provider().await.is_some());
     }
 
     // --- Local-model availability -------------------------------------------
@@ -1365,6 +1546,55 @@ mod tests {
         let (service, _cfg) = service_with_models(models.path().to_path_buf());
 
         assert!(!service.has_loadable_local_model().await);
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_local_model_does_not_cover_a_different_chosen_provider() {
+        // A local model is downloaded, but the user picked a cloud provider that
+        // is not reachable. A request would fail rather than quietly run on the
+        // local model, so availability must report false — otherwise the AI
+        // affordances light up and every click errors.
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "ready-model", true);
+        let (mut service, _cfg) = service_with_models(models.path().to_path_buf());
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        assert!(service.has_loadable_local_model().await);
+        assert!(!service.has_available_provider().await);
+        let reason = service.unavailable_reason().await.expect("unavailable");
+        assert!(reason.contains("Anthropic Claude"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_local_model_covers_local_inference_when_chosen() {
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "ready-model", true);
+        let (mut service, _cfg) = service_with_models(models.path().to_path_buf());
+        service.config.active_provider = Some(AiProviderType::LocalInference);
+
+        assert!(service.has_available_provider().await);
+        assert!(service.unavailable_reason().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_reason_is_generic_when_nothing_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(&dir);
+        assert!(service.config.active_provider.is_none());
+
+        let reason = service.unavailable_reason().await.expect("unavailable");
+        assert!(reason.contains("No AI provider available"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_reason_is_none_for_the_chosen_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = test_service(&dir);
+        set_key(&mut service, AiProviderType::Anthropic, "test-key");
+        service.config.active_provider = Some(AiProviderType::Anthropic);
+
+        assert!(service.unavailable_reason().await.is_none());
+        assert!(service.has_available_provider().await);
     }
 
     #[tokio::test]

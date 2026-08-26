@@ -304,6 +304,52 @@ describe('git.service - Submodule operations', () => {
       expect(args.remote).to.be.true;
     });
 
+    // The backend feeds this token to the git CLI as a credential helper scoped
+    // to ONE host. `getRepoToken` probes every remote and returns a token for
+    // the first one a provider claims, so that remote is routinely not
+    // `origin` — sending the token without naming its remote left the backend
+    // guessing, offering it to a host it does not belong to and withholding it
+    // from the one it authenticates.
+    it('names the remote the token was resolved against, not origin', async () => {
+      mockInvoke = (command, args) => {
+        if (command === 'detect_github_repo') {
+          // origin is some other provider; the GitHub remote is `upstream`.
+          return Promise.resolve({ owner: 'o', repo: 'r', remoteName: 'upstream' });
+        }
+        if (command === 'get_keyring_token') {
+          const key = (args as Record<string, unknown>).key;
+          return Promise.resolve(key === 'github_token' ? 'ghp_upstream' : null);
+        }
+        return Promise.resolve(null);
+      };
+
+      await updateSubmodules('/test/repo');
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.token).to.equal('ghp_upstream');
+      expect(args.tokenRemote).to.equal('upstream');
+    });
+
+    it('omits tokenRemote when no token could be resolved', async () => {
+      mockInvoke = () => Promise.resolve(null);
+
+      await updateSubmodules('/test/repo');
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.token).to.equal(undefined);
+      expect(args.tokenRemote).to.equal(undefined);
+    });
+
+    it('passes an explicitly supplied token and its remote straight through', async () => {
+      mockInvoke = () => Promise.resolve(null);
+
+      await updateSubmodules('/test/repo', {
+        token: 'explicit-token',
+        tokenRemote: 'fork',
+      });
+      const args = lastInvokedArgs as Record<string, unknown>;
+      expect(args.token).to.equal('explicit-token');
+      expect(args.tokenRemote).to.equal('fork');
+    });
+
     it('handles error when update fails', async () => {
       mockInvoke = () =>
         Promise.reject({ code: 'OPERATION_FAILED', message: 'Network error' });
