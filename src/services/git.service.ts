@@ -5615,11 +5615,23 @@ export async function addToGitignore(
   return invokeCommand<void>("add_to_gitignore", { path: repoPath, patterns });
 }
 
+/**
+ * Remove the rule on `lineNumber` (1-based, as reported by `getGitignore`).
+ *
+ * The line is required, not the pattern alone: a .gitignore can repeat a line,
+ * and the backend used to drop every line with matching text — removing one
+ * displayed row took its twins with it.
+ */
 export async function removeFromGitignore(
   repoPath: string,
   pattern: string,
+  lineNumber: number,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>("remove_from_gitignore", { path: repoPath, pattern });
+  return invokeCommand<void>("remove_from_gitignore", {
+    path: repoPath,
+    pattern,
+    lineNumber,
+  });
 }
 
 export async function isIgnored(
@@ -5676,11 +5688,19 @@ export async function checkIgnoreVerbose(
 /**
  * Gitattributes management
  */
+/**
+ * Mirrors the externally-tagged Rust `AttributeValue`. Serde emits the unit
+ * variants as the bare strings `"set"` / `"unset"` / `"unspecified"` and the
+ * valued variant as `{ value }` — never `{ type: "set" }`. The previous
+ * object-only union here never matched the wire, so anything rendered from it
+ * showed `undefined`; `attribute_value_unit_variants_serialize_as_bare_strings`
+ * in `src-tauri/src/commands/gitattributes.rs` pins the other side.
+ */
 export type AttributeValue =
-  | { type: "set" }
-  | { type: "unset" }
-  | { type: "value"; value: string }
-  | { type: "unspecified" };
+  | "set"
+  | "unset"
+  | "unspecified"
+  | { value: string };
 
 export interface AttributeEntry {
   name: string;
