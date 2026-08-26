@@ -17,6 +17,11 @@ export interface ErrorContext {
   /** Repo the failing operation ran against. Pinned into any suggested
    *  action, because a toast outlives a repository switch. */
   repoPath?: string;
+  /** Remote the failing operation was aimed at, when the caller chose one.
+   *  Pinned into the suggested action for the same reason `repoPath` is: a
+   *  retry that re-resolves the destination can land on a different remote
+   *  than the attempt the user is recovering from. */
+  remote?: string;
 }
 
 /**
@@ -74,8 +79,16 @@ export function getErrorSuggestion(
         message: 'The remote already has this tag at a different commit.',
         action: {
           label: 'Force Push Tag',
+          // The remote travels with the tag: the rejected push was aimed at a
+          // remote the user picked, and a force retry that re-resolved the
+          // destination would move the tag on a DIFFERENT remote and report
+          // success.
           callback: () => window.dispatchEvent(new CustomEvent('force-push-tag', {
-            detail: { tagName: context?.branchName, repoPath: context?.repoPath },
+            detail: {
+              tagName: context?.branchName,
+              repoPath: context?.repoPath,
+              remote: context?.remote,
+            },
           })),
         },
       };

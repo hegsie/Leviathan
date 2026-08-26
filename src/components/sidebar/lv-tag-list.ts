@@ -11,7 +11,7 @@ import { showConfirm } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
-import type { Tag } from '../../types/git.types.ts';
+import type { Tag, Remote } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
 import { confirmDeleteTag, offerRemoteTagDelete } from '../../utils/tag-delete.ts';
 import {
@@ -148,6 +148,11 @@ export class LvTagList extends LitElement {
 
       .context-menu-item.danger {
         color: var(--color-error);
+      }
+
+      .context-menu-item.push-remote-item {
+        padding-left: calc(var(--spacing-md) * 2);
+        color: var(--color-text-secondary);
       }
 
       .context-menu-item svg {
@@ -341,6 +346,22 @@ export class LvTagList extends LitElement {
   @state() private showSortMenu = false;
   @state() private collapsedGroups = new Set<string>();
   /**
+   * The bound repo's remotes, loaded when the context menu opens.
+   *
+   * null = not known yet, or the read failed: the menu then keeps the old
+   * behaviour and lets the backend resolve the push destination.
+   */
+  @state() private remotes: Remote[] | null = null;
+  /**
+   * The remote read for the open context menu, while it is still in flight.
+   *
+   * A Push click that lands before it resolves waits for it, rather than
+   * pushing to whatever the backend resolves.
+   */
+  private remotesLoad: Promise<void> | null = null;
+  /** The multi-remote push item's sub-list is open. */
+  @state() private pushRemotesExpanded = false;
+  /**
    * The working-tree lock, shared with app-shell and the other sidebar lists.
    *
    * This was a component-local boolean, so a hard reset started from the graph
@@ -478,6 +499,9 @@ export class LvTagList extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // Drop the previous repo's remotes before the reload: they must never
+      // label the new repo's menu.
+      this.remotes = null;
       await this.loadTags();
     }
   }
@@ -642,6 +666,33 @@ export class LvTagList extends LitElement {
       y: e.clientY,
       tag,
     };
+    this.pushRemotesExpanded = false;
+    // Re-read on every open, so a remote just added or renamed in the Remote
+    // dialog labels the menu correctly without a reload. Kept, not discarded:
+    // a Push click landing before it resolves awaits it.
+    this.remotesLoad = this.loadRemotes();
+  }
+
+  /**
+   * Load the bound repo's remotes so the Push item can name its destination.
+   *
+   * get_remotes reads local config only — no network — so this is safe to run
+   * on every context-menu open.
+   */
+  private async loadRemotes(): Promise<void> {
+    if (!this.repositoryPath) return;
+    // Pinned like loadTags: a mid-flight tab switch must not let repo A's
+    // remotes label repo B's menu.
+    const loadedPath = this.repositoryPath;
+    try {
+      const result = await gitService.getRemotes(loadedPath);
+      if (this.repositoryPath !== loadedPath) return;
+      this.remotes = result.success ? (result.data ?? []) : null;
+    } catch (err) {
+      console.error('Failed to load remotes:', err);
+      if (this.repositoryPath !== loadedPath) return;
+      this.remotes = null;
+    }
   }
 
   private async handleCheckoutTag(): Promise<void> {
@@ -795,9 +846,45 @@ export class LvTagList extends LitElement {
     }));
   }
 
-  private async handlePushTag(): Promise<void> {
+  /**
+   * Push the right-clicked tag.
+   *
+   * `remote` is the destination the user picked in the menu. When it is
+   * undefined the arg is left off the command entirely so the backend resolves
+   * the destination the same way `push` does.
+   */
+  private async handlePushTag(remote?: string): Promise<void> {
     const tag = this.contextMenu.tag;
     if (!tag) return;
+
+    let destination = remote;
+    // The menu opened and was clicked before its remote read landed. Pushing
+    // now would leave the destination to the backend resolver — on a fork
+    // checkout that is `origin`, and the picker the menu was about to render
+    // would never be offered. Wait for the answer instead.
+    // Captured as a boolean so the check below does not narrow the field: it
+    // is re-read after the await, and the narrowing would survive it.
+    const destinationUnknown = this.remotes === null;
+    if (destination === undefined && destinationUnknown && this.remotesLoad) {
+      await this.remotesLoad;
+      // Dismissed, or moved to another tag, while waiting.
+      if (!this.contextMenu.visible || this.contextMenu.tag !== tag) return;
+      if ((this.remotes?.length ?? 0) > 1) {
+        // Ask, exactly as a click landing after the read would have.
+        this.pushRemotesExpanded = true;
+        return;
+      }
+      if (this.remotes?.length === 1) destination = this.remotes[0].name;
+    }
+
+    // A repo with no remote cannot push a tag anywhere. The backend's answer —
+    // "Remote not found: origin" — names a remote the user never configured,
+    // which reads as a bug rather than as missing setup.
+    if (destination === undefined && this.remotes?.length === 0) {
+      this.contextMenu = { ...this.contextMenu, visible: false };
+      showToast('No remotes configured. Add a remote before pushing tags.', 'error');
+      return;
+    }
     const lockedRepo = this.repositoryPath;
     if (!this.claimOperation(lockedRepo)) return;
 
@@ -822,11 +909,19 @@ export class LvTagList extends LitElement {
       const result = await gitService.pushTag({
         path: repoPath,
         name: tag.name,
+        // Omitted, not undefined: the backend resolver only runs when the key
+        // is absent, and git.service's allowlist/token lookups key off it too.
+        ...(destination ? { remote: destination } : {}),
       });
 
       if (result.success) {
         await this.loadTags();
-        showToast(`Pushed tag ${tag.name} to remote`, 'success');
+        showToast(
+          destination
+            ? `Pushed tag ${tag.name} to ${destination}`
+            : `Pushed tag ${tag.name} to remote`,
+          'success',
+        );
         this.dispatchEvent(new CustomEvent('tags-changed', {
           detail: { repositoryPath: repoPath },
           bubbles: true,
@@ -842,6 +937,9 @@ export class LvTagList extends LitElement {
           // suggestion renders a button that dispatches an undefined target.
           branchName: tag.name,
           repoPath,
+          // And the destination: a force retry that re-resolved it would move
+          // the tag on a remote the user never aimed at.
+          remote: destination,
         });
       }
     } finally {
@@ -884,6 +982,55 @@ export class LvTagList extends LitElement {
     this.requestUpdate();
   }
 
+  private togglePushRemotes = (): void => {
+    this.pushRemotesExpanded = !this.pushRemotesExpanded;
+  };
+
+  /**
+   * The Push item, and the remote picker it expands into.
+   *
+   * One remote: name it, so the item says where the tag goes. Several: ask,
+   * because silently picking one is how a fork's tag ends up on the canonical
+   * repo. Unknown (not loaded yet, or the read failed): the backend resolves
+   * the destination, exactly as before.
+   */
+  private renderPushMenuItems() {
+    const remotes = this.remotes;
+    const busy = this.operationInProgress || this.tagPushInFlight;
+    const sole = remotes?.length === 1 ? remotes[0].name : undefined;
+    const many = (remotes?.length ?? 0) > 1;
+
+    return html`
+      <button
+        class="context-menu-item"
+        role="menuitem"
+        aria-expanded=${many ? String(this.pushRemotesExpanded) : nothing}
+        ?disabled=${busy}
+        @click=${many ? this.togglePushRemotes : (): void => void this.handlePushTag(sole)}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <line x1="12" y1="19" x2="12" y2="5"></line>
+          <polyline points="5 12 12 5 19 12"></polyline>
+        </svg>
+        ${sole ? `Push to ${sole}` : 'Push to Remote'}
+      </button>
+      ${many && this.pushRemotesExpanded
+        ? remotes!.map(
+            (r) => html`
+              <button
+                class="context-menu-item push-remote-item"
+                role="menuitem"
+                ?disabled=${busy}
+                @click=${(): void => void this.handlePushTag(r.name)}
+              >
+                ${r.name}
+              </button>
+            `
+          )
+        : nothing}
+    `;
+  }
+
   private renderContextMenu() {
     if (!this.contextMenu.visible || !this.contextMenu.tag) return nothing;
 
@@ -911,13 +1058,7 @@ export class LvTagList extends LitElement {
           </svg>
           Create Tag Here
         </button>
-        <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress || this.tagPushInFlight} @click=${this.handlePushTag}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <line x1="12" y1="19" x2="12" y2="5"></line>
-            <polyline points="5 12 12 5 19 12"></polyline>
-          </svg>
-          Push to Remote
-        </button>
+        ${this.renderPushMenuItems()}
         <div class="context-menu-divider" role="separator" style="height: 1px; background: var(--color-border); margin: var(--spacing-xs) 0;"></div>
         <button class="context-menu-item danger" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleDeleteTag}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

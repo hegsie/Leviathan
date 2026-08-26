@@ -242,10 +242,16 @@ pub async fn push_tag(
 ) -> Result<()> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
-    let remote_name = remote.as_deref().unwrap_or("origin");
+    // Resolved the way `push` resolves it (remote.rs, resolve_push_remote):
+    // the branch's push config, then its upstream, then the sole remote,
+    // and only then "origin". Hard-coding origin failed outright on
+    // `git clone -o upstream` and on any remote the app's own Remote dialog
+    // renamed — the tag push errored "Remote not found: origin", naming a
+    // remote the user never configured, with no way to make it succeed.
+    let remote_name = crate::commands::remote::resolve_push_remote(&repo, remote);
     let mut remote_obj = repo
-        .find_remote(remote_name)
-        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
+        .find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
 
     let mut push_opts = credentials_service::get_push_options(token);
 
@@ -257,7 +263,7 @@ pub async fn push_tag(
 
     // Run pre-push like canonical git — the git2 push path otherwise bypasses
     // it. A non-zero exit aborts the tag push.
-    crate::commands::hooks::run_pre_push_tag(&repo, remote_name, &name)?;
+    crate::commands::hooks::run_pre_push_tag(&repo, &remote_name, &name)?;
 
     remote_obj.push(&[&refspec], Some(&mut push_opts))?;
 
@@ -387,6 +393,88 @@ pub async fn edit_tag_message(path: String, name: String, message: String) -> Re
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    // ---- push destination resolution ----
+
+    /// The only remote is not named "origin" — e.g. `git clone -o upstream`,
+    /// or a remote the app's own Remote dialog renamed.
+    #[tokio::test]
+    async fn test_push_tag_uses_the_only_remote_when_it_is_not_origin() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("upstream", &bare.path().to_string_lossy());
+        repo.create_lightweight_tag("v1");
+
+        let result = push_tag(repo.path_str(), "v1".to_string(), None, None, None).await;
+
+        assert!(
+            result.is_ok(),
+            "the sole remote must be used, not a hard-coded origin: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+        let bare_repo = git2::Repository::open(bare.path()).unwrap();
+        assert!(bare_repo.refname_to_id("refs/tags/v1").is_ok());
+    }
+
+    /// origin + upstream, with remote.pushDefault pointing away from origin:
+    /// the configured push remote wins, as it does for branch pushes.
+    #[tokio::test]
+    async fn test_push_tag_honours_push_default_over_origin() {
+        let repo = TestRepo::with_initial_commit();
+        let bare_a = tempfile::tempdir().unwrap();
+        let bare_b = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare_a.path()).unwrap();
+        git2::Repository::init_bare(bare_b.path()).unwrap();
+        repo.add_remote("origin", &bare_a.path().to_string_lossy());
+        repo.add_remote("upstream", &bare_b.path().to_string_lossy());
+        {
+            let git_repo = repo.repo();
+            let mut cfg = git_repo.config().unwrap();
+            cfg.set_str("remote.pushDefault", "upstream").unwrap();
+        }
+        repo.create_lightweight_tag("v1");
+
+        let result = push_tag(repo.path_str(), "v1".to_string(), None, None, None).await;
+        assert!(result.is_ok(), "{:?}", result.err().map(|e| e.to_string()));
+
+        let pushed_to = git2::Repository::open(bare_b.path()).unwrap();
+        assert!(
+            pushed_to.refname_to_id("refs/tags/v1").is_ok(),
+            "the configured push remote must receive the tag"
+        );
+        let origin_repo = git2::Repository::open(bare_a.path()).unwrap();
+        assert!(
+            origin_repo.refname_to_id("refs/tags/v1").is_err(),
+            "origin must not receive a tag the config aimed elsewhere"
+        );
+    }
+
+    /// An explicitly named remote still short-circuits the resolver, and an
+    /// unknown one still reports the name the caller actually asked for.
+    #[tokio::test]
+    async fn test_push_tag_unknown_explicit_remote_still_errors() {
+        let repo = TestRepo::with_initial_commit();
+        let bare = tempfile::tempdir().unwrap();
+        git2::Repository::init_bare(bare.path()).unwrap();
+        repo.add_remote("origin", &bare.path().to_string_lossy());
+        repo.create_lightweight_tag("v1");
+
+        let result = push_tag(
+            repo.path_str(),
+            "v1".to_string(),
+            Some("nope".to_string()),
+            None,
+            None,
+        )
+        .await;
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nope"),
+            "error should name the asked-for remote: {err}"
+        );
+    }
 
     // ---- pre-push hook parity for tag pushes ----
 

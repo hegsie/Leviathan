@@ -3068,20 +3068,29 @@ export class AppShell extends LitElement {
    * suggestion said to delete the remote tag first, which Leviathan cannot do.
    */
   private handleForcePushTag = (e: Event): void => {
-    const detail = (e as CustomEvent<{ tagName?: string; repoPath?: string }>).detail;
+    const detail = (e as CustomEvent<{ tagName?: string; repoPath?: string; remote?: string }>)
+      .detail;
     const tagName = detail?.tagName;
     const repoPath = this.resolvePinnedRepo(detail?.repoPath);
+    // The remote the rejected push was aimed at. Re-resolving it here would
+    // force-move the tag on whatever the backend picks — for a fork checkout
+    // that is `origin`, not the `upstream` the user chose — and report success.
+    const remote = detail?.remote;
     if (!tagName || !repoPath) return;
     // The SHARED tag-push key, not a private one. This slot is held across the
     // "this moves the remote tag" confirm, and the sidebar's Push and the graph
     // ref menu's Push Tag claim the same key — so neither can push the tag out
     // from under the force push the user is authorising.
     void this.runTagPushExclusive(repoPath, tagName, () =>
-      this.forcePushTag(tagName, repoPath),
+      this.forcePushTag(tagName, repoPath, remote),
     );
   };
 
-  private async forcePushTag(tagName: string, repoPath: string): Promise<void> {
+  private async forcePushTag(
+    tagName: string,
+    repoPath: string,
+    remote?: string,
+  ): Promise<void> {
     const repo = repositoryStore
       .getState()
       .openRepositories.find((r) => r.repository.path === repoPath);
@@ -3089,9 +3098,9 @@ export class AppShell extends LitElement {
 
     const confirmed = await showConfirm(
       'Force Push Tag',
-      `This moves the remote tag "${tagName}" in ${repo.repository.name} to your ` +
-        `local commit. Anyone who already fetched the tag keeps the old one until ` +
-        `they delete it locally.`,
+      `This moves the tag "${tagName}" on ${remote ?? 'the remote'} in ` +
+        `${repo.repository.name} to your local commit. Anyone who already fetched ` +
+        `the tag keeps the old one until they delete it locally.`,
       'error'
     );
     if (!confirmed) return;
@@ -3100,9 +3109,15 @@ export class AppShell extends LitElement {
       path: repoPath,
       name: tagName,
       force: true,
+      // Omitted, not undefined: the backend resolver only runs when the key is
+      // absent, and git.service's allowlist/token lookups key off it too.
+      ...(remote ? { remote } : {}),
     });
     if (result.success) {
-      showToast(`Force pushed tag ${tagName}`, 'success');
+      showToast(
+        remote ? `Force pushed tag ${tagName} to ${remote}` : `Force pushed tag ${tagName}`,
+        'success',
+      );
       this.refreshConflictDialogRepo(repoPath);
     } else if (!gitService.isNetworkGateRefusal(result.error)) {
       // Plain toast, same reason as forcePush: routing through the suggestion
