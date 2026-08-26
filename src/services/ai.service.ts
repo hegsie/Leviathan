@@ -8,8 +8,13 @@ import type { CommandResult } from '../types/api.types.ts';
 
 /**
  * AI provider types
+ *
+ * These literals are the serde wire format of the Rust `AiProviderType` enum,
+ * which is annotated `#[serde(rename_all = "snake_case")]`. That means the
+ * `OpenAi` variant crosses the IPC boundary (and is persisted in the AI config
+ * file) as `open_ai` — not `openai`.
  */
-export type AiProviderType = 'ollama' | 'lm_studio' | 'openai' | 'anthropic' | 'github_copilot' | 'google_gemini' | 'local_inference';
+export type AiProviderType = 'ollama' | 'lm_studio' | 'open_ai' | 'anthropic' | 'github_copilot' | 'google_gemini' | 'local_inference';
 
 /**
  * AI provider information
@@ -287,6 +292,31 @@ export async function isAiAvailable(): Promise<boolean> {
   return result.success && result.data === true;
 }
 
+/** Why AI is unavailable, mirroring the Rust `AiUnavailable`. */
+export interface AiUnavailable {
+  /** Human-readable reason, naming the provider when one is at fault. */
+  reason: string;
+  /**
+   * True when a provider is chosen in Settings but unreachable, rather than no
+   * provider being configured at all. A surface that hides its AI affordances
+   * when AI was never set up still shows them, disabled, in this case — they
+   * worked before and the user needs to know why they stopped.
+   */
+  providerSelected: boolean;
+}
+
+/**
+ * Why AI is unavailable, or null when it is usable.
+ *
+ * `isAiAvailable()` only says yes/no. When it says no, the provider selected in
+ * Settings may simply be unreachable — and since a selected provider is never
+ * substituted, the UI has to name it rather than claim nothing is configured.
+ */
+export async function getAiUnavailableReason(): Promise<AiUnavailable | null> {
+  const result = await invokeCommand<AiUnavailable | null>('ai_unavailable_reason');
+  return result.success ? (result.data ?? null) : null;
+}
+
 /**
  * Get display name for a provider type
  */
@@ -296,7 +326,7 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
       return 'Ollama';
     case 'lm_studio':
       return 'LM Studio';
-    case 'openai':
+    case 'open_ai':
       return 'OpenAI';
     case 'anthropic':
       return 'Anthropic Claude';
@@ -313,5 +343,5 @@ export function getProviderDisplayName(providerType: AiProviderType): string {
  * Check if a provider requires an API key
  */
 export function providerRequiresApiKey(providerType: AiProviderType): boolean {
-  return providerType === 'openai' || providerType === 'anthropic' || providerType === 'github_copilot' || providerType === 'google_gemini';
+  return providerType === 'open_ai' || providerType === 'anthropic' || providerType === 'github_copilot' || providerType === 'google_gemini';
 }

@@ -113,6 +113,30 @@ async function renderPanel(repoPath: string | null = REPO_PATH): Promise<LvAnaly
   return el;
 }
 
+async function renderPanelWithActive(active: boolean): Promise<LvAnalyticsPanel> {
+  const el = await fixture<LvAnalyticsPanel>(
+    html`<lv-analytics-panel .repositoryPath=${REPO_PATH} .active=${active}></lv-analytics-panel>`,
+  );
+  await el.updateComplete;
+  await new Promise((r) => setTimeout(r, 50));
+  await el.updateComplete;
+  return el;
+}
+
+/** Statistics as they look AFTER a commit landed in the repository. */
+const UPDATED_STATS = { ...mockRepoStatistics, totalCommits: 143, totalContributors: 5 };
+
+/** Wait past the refresh debounce window plus the mocked fetch. */
+async function settleRefresh(el: LvAnalyticsPanel): Promise<void> {
+  await new Promise((r) => setTimeout(r, 400));
+  await el.updateComplete;
+}
+
+function firstStatValue(el: LvAnalyticsPanel): string {
+  const cards = el.shadowRoot!.querySelectorAll('.stat-card');
+  return cards[0].querySelector('.stat-value')!.textContent!.trim();
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('lv-analytics-panel', () => {
   beforeEach(() => {
@@ -452,6 +476,154 @@ describe('lv-analytics-panel', () => {
 
       const firstValue = cards[0].querySelector('.stat-value')!.textContent!.trim();
       expect(firstValue).to.equal('0');
+    });
+  });
+  // ── 11. Refresh (repository-refresh + manual button) ────────────────
+  describe('refresh', () => {
+    it('reloads statistics when repository-refresh fires while the Analytics tab is showing', async () => {
+      const el = await renderPanel();
+      expect(firstStatValue(el)).to.equal('142');
+
+      clearHistory();
+      setupDefaultMocks(UPDATED_STATS);
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+      expect(firstStatValue(el)).to.equal('143');
+    });
+
+    it('defers the reload while the tab is hidden and runs it when the tab is shown', async () => {
+      const el = await renderPanelWithActive(false);
+      expect(firstStatValue(el)).to.equal('142');
+
+      clearHistory();
+      setupDefaultMocks(UPDATED_STATS);
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      // Hidden tab: the expensive statistics walk must not run yet.
+      expect(findCommands('get_repo_statistics').length).to.equal(0);
+      expect(firstStatValue(el)).to.equal('142');
+
+      el.active = true;
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+      expect(firstStatValue(el)).to.equal('143');
+    });
+
+    it('defers the reload when the tab is hidden inside the debounce window', async () => {
+      const el = await renderPanel();
+      expect(firstStatValue(el)).to.equal('142');
+
+      clearHistory();
+      setupDefaultMocks(UPDATED_STATS);
+      // Refresh arrives while Analytics is up, then the user switches tab
+      // before the debounce elapses.
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      el.active = false;
+      await settleRefresh(el);
+
+      // The walk must not run behind a hidden tab.
+      expect(findCommands('get_repo_statistics').length).to.equal(0);
+      expect(firstStatValue(el)).to.equal('142');
+
+      // ...and it must not be forgotten either.
+      el.active = true;
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+      expect(firstStatValue(el)).to.equal('143');
+    });
+
+    it('re-fetches statistics when the Overview refresh button is clicked', async () => {
+      const el = await renderPanel();
+
+      clearHistory();
+      setupDefaultMocks(UPDATED_STATS);
+      const btn = el.shadowRoot!.querySelector('.refresh-btn') as HTMLButtonElement | null;
+      expect(btn).to.not.be.null;
+      btn!.click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+      expect(firstStatValue(el)).to.equal('143');
+    });
+
+    it('keeps the rendered statistics and surfaces an error when a refresh fails', async () => {
+      const el = await renderPanel();
+
+      clearHistory();
+      setupErrorMocks('Statistics walk failed');
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      const banner = el.shadowRoot!.querySelector('.refresh-error');
+      expect(banner).to.not.be.null;
+      expect(banner!.textContent).to.include('Statistics walk failed');
+      // The charts must survive a failed refresh.
+      expect(el.shadowRoot!.querySelectorAll('.stat-card').length).to.equal(9);
+      expect(el.shadowRoot!.querySelector('.error')).to.be.null;
+    });
+
+    it('still shows the full error screen with Retry when the first load fails', async () => {
+      setupErrorMocks('Repository not found');
+      const el = await renderPanel();
+
+      expect(el.shadowRoot!.querySelector('.error')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.retry-btn')).to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.refresh-error')).to.be.null;
+    });
+
+    it('coalesces a burst of repository-refresh events into a single statistics walk', async () => {
+      const el = await renderPanel();
+
+      clearHistory();
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(1);
+    });
+
+    it('ignores repository-refresh when no repository is open', async () => {
+      const el = await renderPanel(null);
+
+      clearHistory();
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      expect(findCommands('get_repo_statistics').length).to.equal(0);
+      const empty = el.shadowRoot!.querySelector('.empty-state');
+      expect(empty!.textContent).to.include('No repository open');
+    });
+
+    it('stops listening after the panel is disconnected', async () => {
+      const el = await renderPanel();
+      el.remove();
+
+      clearHistory();
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(findCommands('get_repo_statistics').length).to.equal(0);
+    });
+
+    it('keeps the charts up and marks the refresh control busy while a refresh is running', async () => {
+      const el = await renderPanel();
+
+      mockInvoke = () => new Promise(() => {});
+      window.dispatchEvent(new CustomEvent('repository-refresh'));
+      await settleRefresh(el);
+
+      const btn = el.shadowRoot!.querySelector('.refresh-btn') as HTMLButtonElement | null;
+      expect(btn).to.not.be.null;
+      expect(btn!.hasAttribute('disabled')).to.be.true;
+      expect(el.shadowRoot!.querySelectorAll('.stat-card').length).to.equal(9);
+      expect(el.shadowRoot!.querySelector('.loading')).to.be.null;
     });
   });
 });

@@ -6,6 +6,7 @@ import {
   injectCommandError,
   findCommand,
   waitForCommand,
+  emitBackendEvent,
 } from '../fixtures/test-helpers';
 import { RightPanelPage } from '../pages/panels.page';
 
@@ -114,6 +115,12 @@ function localAiMocks(overrides: Record<string, unknown> = {}) {
 async function openSettings(page: Page) {
   await page.keyboard.press('Meta+,');
   await expect(page.locator('lv-settings-dialog')).toBeVisible();
+}
+
+/** Close the settings dialog, which unmounts it along with its listeners */
+async function closeSettings(page: Page) {
+  await page.locator('lv-modal:has(lv-settings-dialog) .close-btn[aria-label="Close"]').click();
+  await expect(page.locator('lv-settings-dialog')).toHaveCount(0);
 }
 
 /** Force the commit panel to re-check AI availability */
@@ -362,6 +369,127 @@ test.describe('Settings Dialog — Local AI', () => {
     // Both should show Load buttons since model status is 'unloaded'
     const loadButtons = page.locator('lv-settings-dialog .setting-row button', { hasText: 'Load' });
     await expect(loadButtons).toHaveCount(2);
+  });
+
+  // A model download runs for minutes in a backend task and reports its outcome
+  // only over a Tauri event. Users routinely close Settings while it runs, and
+  // closing Settings unmounts the dialog along with its listeners — so the
+  // failure has to be reported by something that outlives the dialog.
+  test('a download that fails after Settings is closed still tells the user', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    await emitBackendEvent(page, 'model-download-error', {
+      modelId: 'gemma-3-1b-q4km',
+      error: 'Network unreachable',
+    });
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Network unreachable');
+  });
+
+  test('a model that downloads but fails to load is reported after Settings is closed', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    await emitBackendEvent(page, 'model-download-complete', {
+      modelId: 'gemma-3-1b-q4km',
+      loaded: false,
+      loadError: 'Out of memory',
+    });
+
+    const toastMessage = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toastMessage).toBeVisible();
+    await expect(toastMessage).toContainText('Out of memory');
+  });
+
+  test('cancelling a download after Settings is closed does not look like a failure', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, localAiMocks({ download_model: null }));
+    await openSettings(page);
+
+    const modelRow = page.locator('lv-settings-dialog .setting-row', { hasText: 'Ultra-Light' });
+    await modelRow.getByRole('button', { name: 'Download' }).click();
+    await waitForCommand(page, 'download_model');
+
+    await closeSettings(page);
+
+    // The backend reports a user-requested cancel on the failure event too.
+    await emitBackendEvent(page, 'model-download-error', {
+      modelId: 'gemma-3-1b-q4km',
+      error: 'Download cancelled',
+    });
+
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
+  });
+});
+
+// =========================================================================
+// Settings Dialog: Cloud provider connection test
+// =========================================================================
+
+/**
+ * `open_ai` is the serde wire value of the Rust `OpenAi` variant
+ * (`#[serde(rename_all = "snake_case")]`) — the same string the real backend
+ * puts in the get_ai_providers payload.
+ */
+const mockOpenAiProvider = {
+  providerType: 'open_ai',
+  name: 'OpenAI',
+  available: false,
+  requiresApiKey: true,
+  // The Test button is disabled until a key is stored.
+  hasApiKey: true,
+  endpoint: 'https://api.openai.com/v1',
+  models: [],
+  selectedModel: null,
+};
+
+test.describe('Settings Dialog — Cloud provider test', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('shows the provider name when an OpenAI test fails', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [...mockProvidersUnavailable, mockOpenAiProvider],
+      test_ai_provider: false,
+    }));
+    await openSettings(page);
+
+    const row = page.locator('lv-settings-dialog .setting-row', { hasText: 'OpenAI API Key' });
+    await row.getByRole('button', { name: 'Test' }).click();
+
+    await expect(page.locator('lv-settings-dialog .error-text')).toHaveText(
+      'OpenAI is not available. Check your API key and try again.'
+    );
+    await expect(row.locator('.status-indicator').last()).toContainText('Failed');
+  });
+
+  test('shows Working and no error when the OpenAI test succeeds', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [...mockProvidersUnavailable, mockOpenAiProvider],
+      test_ai_provider: true,
+    }));
+    await openSettings(page);
+
+    const row = page.locator('lv-settings-dialog .setting-row', { hasText: 'OpenAI API Key' });
+    await row.getByRole('button', { name: 'Test' }).click();
+
+    await expect(row.locator('.status-indicator').last()).toContainText('Working');
+    await expect(page.locator('lv-settings-dialog .error-text')).toHaveCount(0);
   });
 });
 

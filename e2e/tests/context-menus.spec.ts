@@ -8,6 +8,7 @@ import {
   injectCommandError,
   injectCommandMock,
   autoConfirmDialogs,
+  startCommandCaptureWithMocks,
 } from '../fixtures/test-helpers';
 
 /**
@@ -16,7 +17,11 @@ import {
  *
  * Uses Playwright's auto-piercing locator to find elements inside shadow DOM.
  */
-async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowIndex: number = 0) {
+async function rightClickOnCommitRow(
+  page: import('@playwright/test').Page,
+  rowIndex: number = 0,
+  button: 'left' | 'right' = 'right'
+) {
   const graphCanvas = page.locator('lv-graph-canvas');
   await expect(graphCanvas).toBeVisible();
 
@@ -43,7 +48,23 @@ async function rightClickOnCommitRow(page: import('@playwright/test').Page, rowI
   const commitX = box.x + 400; // Click in the commit message area
   const commitY = box.y + headerHeight + (rowIndex * rowHeight) + (rowHeight / 2);
 
-  await page.mouse.click(commitX, commitY, { button: 'right' });
+  await page.mouse.click(commitX, commitY, { button });
+}
+
+/**
+ * Read the oid of the commit laid out at a given graph row.
+ */
+async function oidAtRow(page: import('@playwright/test').Page, rowIndex: number): Promise<string> {
+  const graphHandle = await page.locator('lv-graph-canvas').elementHandle();
+  const oid = await page.evaluate(
+    ([el, row]) => {
+      const canvas = el as HTMLElement & { sortedNodesByRow?: Array<{ oid: string }> };
+      return canvas?.sortedNodesByRow?.[row as number]?.oid ?? null;
+    },
+    [graphHandle, rowIndex] as const
+  );
+  if (!oid) throw new Error(`No commit laid out at row ${rowIndex}`);
+  return oid;
 }
 
 test.describe('Commit Context Menu', () => {
@@ -76,6 +97,54 @@ test.describe('Commit Context Menu', () => {
     const menuItems = contextMenu.locator('.context-menu-item');
     const count = await menuItems.count();
     expect(count).toBeGreaterThan(0);
+  });
+
+  test('right-clicking a commit moves the highlight off the previously selected one', async ({ page }) => {
+    // Left-click the first commit so there is a previous selection to move off.
+    await rightClickOnCommitRow(page, 0, 'left');
+    const firstOid = await oidAtRow(page, 0);
+    const secondOid = await oidAtRow(page, 1);
+    expect(secondOid).not.toBe(firstOid);
+
+    const graphHandle = await page.locator('lv-graph-canvas').elementHandle();
+    await page.waitForFunction(
+      ([el, expectedOid]) => {
+        const canvas = el as HTMLElement & { selectedNode?: { oid: string } | null };
+        return canvas?.selectedNode?.oid === expectedOid;
+      },
+      [graphHandle, firstOid] as const
+    );
+
+    // Right-click a different commit: the menu targets it, so the graph must
+    // highlight it too rather than leaving the highlight on the first one.
+    await rightClickOnCommitRow(page, 1);
+    await expect(page.locator('.context-menu')).toBeVisible({ timeout: 3000 });
+
+    await page.waitForFunction(
+      ([el, expectedOid]) => {
+        const canvas = el as HTMLElement & { selectedNode?: { oid: string } | null };
+        return canvas?.selectedNode?.oid === expectedOid;
+      },
+      [graphHandle, secondOid] as const
+    );
+
+    const state = await page.evaluate(
+      (el) => {
+        const canvas = el as HTMLElement & {
+          selectedNode?: { oid: string } | null;
+          selectedNodes?: Set<string>;
+        };
+        return {
+          primary: canvas?.selectedNode?.oid ?? null,
+          selected: canvas?.selectedNodes ? Array.from(canvas.selectedNodes) : [],
+        };
+      },
+      graphHandle
+    );
+
+    expect(state.primary).toBe(secondOid);
+    expect(state.selected).toEqual([secondOid]);
+    expect(state.selected).not.toContain(firstOid);
   });
 
   test('should close context menu on Escape key', async ({ page }) => {
@@ -262,6 +331,133 @@ test.describe('Operation Banner', () => {
 
     await expect(page.locator('.operation-banner')).toBeVisible();
     expect(await findCommand(page, 'abort_cherry_pick')).toHaveLength(0);
+  });
+
+  // The backend's empty-pick error tells the user to "Skip or abort"; these pin
+  // the Skip half of that promise on the banner.
+  test('cherry-pick banner offers Skip and runs skip_cherry_pick without a confirm when nothing is conflicted', async ({ page }) => {
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'cherrypick',
+      },
+      status: { staged: [], unstaged: [] },
+    });
+    await startCommandCaptureWithMocks(page, { skip_cherry_pick: null });
+
+    const skipBtn = page.locator('.operation-skip-btn');
+    await expect(skipBtn).toBeVisible();
+    await expect(skipBtn).toBeEnabled();
+
+    // No autoConfirmDialogs: an empty stop has no resolution work to lose, so
+    // Skip must not be gated behind a confirm the user would have to decline.
+    await skipBtn.click();
+
+    const toast = page.locator('.toast').first();
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    // The repository state is git's own token, `cherrypick`. The banner right
+    // beside this toast says "Cherry-pick in progress", so the toast must not
+    // be the one place the app spells it differently.
+    await expect(toast).toContainText('Skipped cherry-pick');
+
+    const calls = await findCommand(page, 'skip_cherry_pick');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual({ path: defaultMockData.repository.path });
+  });
+
+  test('revert banner offers Skip and runs skip_revert', async ({ page }) => {
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'revert',
+      },
+      status: { staged: [], unstaged: [] },
+    });
+    await startCommandCaptureWithMocks(page, { skip_revert: null });
+
+    const skipBtn = page.locator('.operation-skip-btn');
+    await expect(skipBtn).toBeVisible();
+    await skipBtn.click();
+
+    await expect(page.locator('.toast').first()).toContainText(/Skipped/i);
+    expect(await findCommand(page, 'skip_revert')).toHaveLength(1);
+  });
+
+  test('no Skip button for states that have no skip command', async ({ page }) => {
+    // Only cherry-pick and revert have a skip wired to this control. Rendering
+    // it for merge/rebase/bisect would be a dead button.
+    app = new AppPage(page);
+
+    for (const state of ['merge', 'rebase', 'bisect']) {
+      await setupOpenRepository(page, {
+        repository: { ...defaultMockData.repository, state },
+      });
+      await expect(page.locator('.operation-banner')).toBeVisible();
+      await expect(page.locator('.operation-skip-btn')).toHaveCount(0);
+    }
+  });
+
+  test('a failed skip shows an error toast and leaves the banner up', async ({ page }) => {
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'cherrypick',
+      },
+      status: { staged: [], unstaged: [] },
+    });
+    await startCommandCapture(page);
+    await injectCommandError(page, 'skip_cherry_pick', 'Repository is busy');
+
+    await page.locator('.operation-skip-btn').click();
+
+    const errorToast = page.locator('.toast.error').first();
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+    await expect(errorToast).toContainText('Repository is busy');
+    await expect(page.locator('.operation-banner')).toBeVisible();
+  });
+
+  test('skipping with conflicted files asks for confirmation first', async ({ page }) => {
+    // With conflicts on disk there IS resolution work the skip discards, so it
+    // is gated exactly like Abort.
+    app = new AppPage(page);
+
+    await setupOpenRepository(page, {
+      repository: {
+        ...defaultMockData.repository,
+        state: 'cherrypick',
+      },
+      status: {
+        staged: [],
+        unstaged: [
+          { path: 'CONFLICT.md', status: 'conflicted', isStaged: false, isConflicted: true },
+        ],
+      },
+    });
+    await startCommandCapture(page);
+
+    // Decline: plugin-dialog treats any non-OK label as "cancel".
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+    await page.locator('.operation-skip-btn').click();
+    await expect(page.locator('.operation-banner')).toBeVisible();
+    expect(await findCommand(page, 'skip_cherry_pick')).toHaveLength(0);
+
+    // Accept: the skip runs.
+    await autoConfirmDialogs(page);
+    await page.locator('.operation-skip-btn').click();
+    await expect(page.locator('.toast').first()).toContainText('Skipped cherry-pick');
+    expect(await findCommand(page, 'skip_cherry_pick')).toHaveLength(1);
+
+    // The prompt itself reads as prose too, not as the raw state token.
+    const prompts = await findCommand(page, 'plugin:dialog|message');
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(JSON.stringify(prompts[0].args)).toContain('cherry-pick');
+    expect(JSON.stringify(prompts[0].args)).not.toContain('cherrypick');
   });
 
   test('should show Resolve Conflicts button for cherry-pick state', async ({ page }) => {

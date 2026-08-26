@@ -29,11 +29,33 @@ let cbId = 0;
 import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
+// Side-effect import so showPrompt finds the singleton already in the DOM.
+import '../components/dialogs/lv-prompt-dialog.ts';
+import type { LvPromptDialog } from '../components/dialogs/lv-prompt-dialog.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
-import type { Repository } from '../types/git.types.ts';
+import type { Repository, StatusEntry } from '../types/git.types.ts';
 import { tryAcquireRefOp, isRefOpRunning, resetRefOpLocks } from '../utils/ref-lock.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
+/**
+ * The stash shortcut/palette path asks for an optional stash message. '' is
+ * "OK with nothing typed", which keeps git's default naming; null is a
+ * dismissal.
+ */
+function setupMockPrompt(value: string | null): void {
+  let dialog = document.querySelector<LvPromptDialog>('lv-prompt-dialog');
+  if (!dialog) {
+    dialog = document.createElement('lv-prompt-dialog') as LvPromptDialog;
+    document.body.appendChild(dialog);
+  }
+  dialog.open = async () => value;
+}
+
+function cleanupMockPrompt(): void {
+  const dialog = document.querySelector('lv-prompt-dialog');
+  if (dialog) dialog.remove();
+}
 
 function mockRepo(path: string, name: string, state = 'clean'): Repository {
   return {
@@ -42,11 +64,27 @@ function mockRepo(path: string, name: string, state = 'clean'): Repository {
     isValid: true,
     isBare: false,
     headRef: 'main',
+    detachedHeadOid: null,
     state,
     isShallow: false,
     isPartialClone: false,
     cloneFilter: null,
   } as Repository;
+}
+
+/** The shape repositoryStore keeps per open repository. */
+function emptyRepoData(repo: Repository) {
+  return {
+    repository: repo,
+    branches: [],
+    currentBranch: null,
+    remotes: [],
+    tags: [],
+    stashes: [],
+    status: [] as StatusEntry[],
+    stagedFiles: [],
+    unstagedFiles: [],
+  };
 }
 
 function commit(oid: string) {
@@ -60,10 +98,12 @@ describe('app-shell destructive guards', () => {
     for (const k of Object.keys(mockResponses)) delete mockResponses[k];
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().reset();
+    setupMockPrompt('');
   });
 
   afterEach(() => {
     repositoryStore.getState().reset();
+    cleanupMockPrompt();
   });
 
   function shellOnRepo(state = 'clean'): AppShell {
@@ -328,6 +368,22 @@ describe('app-shell destructive guards', () => {
       expect((el as any).showBlame, 'and blame still opens').to.equal(true);
     });
 
+    it('opening file history from the commit panel warns the same way', async () => {
+      // Same swap as Blame: the History button in the commit panel replaces
+      // lv-diff-view in the center pane, so it drops the typed text with it.
+      const el = shellWithDirtyEditor('src/main.ts');
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/other.ts' } }),
+      );
+
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'the loss is reported').to.not.be.undefined;
+      expect(warning!.message).to.contain('src/main.ts');
+      expect((el as any).showFileHistory, 'and the history pane still opens').to.equal(true);
+    });
+
     it('closing with no diff open says nothing', async () => {
       const el = shellOnRepo();
       uiStore.setState({ toasts: [] });
@@ -504,6 +560,34 @@ describe('app-shell destructive guards', () => {
         uiStore.getState().toasts.some((t) => /already running/i.test(t.message)),
         'the refusal must be audible',
       ).to.equal(true);
+    });
+
+    // Without `-m` every stash falls back to git's "WIP on <branch>: <sha>
+    // <subject>" — the commit it was based on, not the stashed work. The panel
+    // button and this shortcut run the same operation and report the same
+    // "Stash created", so both must be nameable.
+    it('a stash started from the shortcut/palette can be named', async () => {
+      setupMockPrompt('hotfix wip');
+      const el = shellOnRepo();
+
+      await (el as any).handleCreateStash();
+
+      const calls = invokeCallArgs.filter((c) => c.command === 'create_stash');
+      expect(calls.length, 'the stash must still be created').to.equal(1);
+      expect(calls[0].args.message, 'the typed name must reach git').to.equal('hotfix wip');
+    });
+
+    it('cancelling the stash prompt creates no stash and frees the lock', async () => {
+      setupMockPrompt(null);
+      const el = shellOnRepo();
+
+      await (el as any).handleCreateStash();
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'create_stash'),
+        'a dismissed prompt must not reset the working tree',
+      ).to.equal(false);
+      expect(isRefOpRunning('/repo/one'), 'a stuck lock would wedge the repo').to.equal(false);
     });
 
     it('create stash holds and releases the lock', async () => {
@@ -1108,7 +1192,11 @@ describe('app-shell destructive guards', () => {
       // the lock held, the ONLY enabled items may be the read-only ones. A new
       // mutating button that forgets the binding fails here without anyone
       // having to remember to add it to a list.
-      const READ_ONLY = ['create tag', 'create branch'];
+      // "create patch" only opens the export/import dialog on its Patch tab.
+      // Writing .patch files touches a folder the user picks, never the
+      // working tree or a ref; the dialog's own Apply — which does — takes
+      // this same lock and is bound to it.
+      const READ_ONLY = ['create tag', 'create branch', 'create patch'];
       const el = shellOnRepo();
       document.body.appendChild(el);
       try {
@@ -1166,6 +1254,79 @@ describe('app-shell destructive guards', () => {
 
       expect(isRefOpRunning('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
+    });
+  });
+
+  // The banner's Skip confirms only when there IS resolution work to lose. That
+  // decision has to be made about the repository the skip will run against —
+  // handleSkipOperation resolves `state` and `path` from the pinned repo, but
+  // the confirm was reading the ACTIVE tab's conflicted files, so with a pinned
+  // path the two disagree in both directions.
+  describe('the banner Skip confirm follows the repo it is skipping', () => {
+    function conflicted(path: string): StatusEntry {
+      return { path, status: 'conflicted', isStaged: false, isConflicted: true };
+    }
+
+    function twoRepos(
+      oneStatus: StatusEntry[],
+      twoStatus: StatusEntry[]
+    ): AppShell {
+      const one = {
+        ...emptyRepoData(mockRepo('/repo/one', 'one', 'cherrypick')),
+        status: oneStatus,
+      };
+      const two = {
+        ...emptyRepoData(mockRepo('/repo/two', 'two', 'cherrypick')),
+        status: twoStatus,
+      };
+      repositoryStore.setState({ openRepositories: [one, two], activeIndex: 0 });
+      const el = document.createElement('lv-app-shell') as AppShell;
+      (el as any).activeRepository = one;
+      return el;
+    }
+
+    it('confirms when the PINNED repo has conflicts, even though the active tab has none', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([], [conflicted('CONFLICT.md')]);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'plugin:dialog|message'),
+        'the resolutions in /repo/two would have been discarded on one click',
+      ).to.equal(true);
+      const skips = invokeCallArgs.filter((c) => c.command === 'skip_cherry_pick');
+      expect(skips.length).to.equal(1);
+      expect(skips[0].args).to.deep.equal({ path: '/repo/two' });
+    });
+
+    it('does not confirm when only the ACTIVE tab has conflicts', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([conflicted('CONFLICT.md')], []);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'plugin:dialog|message'),
+        'an empty stop must not be gated behind another repo\u2019s conflicts',
+      ).to.equal(false);
+      expect(invokeCallArgs.filter((c) => c.command === 'skip_cherry_pick').length).to.equal(1);
+    });
+
+    it('spells the state the way the rest of the UI does', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([], [conflicted('CONFLICT.md')]);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      const confirm = invokeCallArgs.find((c) => c.command === 'plugin:dialog|message');
+      expect(
+        JSON.stringify(confirm?.args),
+        'the banner beside this says "Cherry-pick in progress"',
+      ).to.contain('cherry-pick');
+      expect(JSON.stringify(confirm?.args)).to.not.contain('cherrypick');
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal('Skipped cherry-pick');
     });
   });
 });
