@@ -622,6 +622,120 @@ describe('lv-remote-dialog actions', () => {
         push: false,
       });
     });
+
+    // Push URL editing — `upstream` has pushUrl 'git@github.com:upstream/repo.git'
+    async function startEditingUpstream(el: LvRemoteDialog): Promise<NodeListOf<HTMLInputElement>> {
+      const items = getRemoteItems(el);
+      const upstreamItem = Array.from(items).find(
+        (item) => item.querySelector('.remote-name')?.textContent?.trim() === 'upstream'
+      )!;
+      getActionButton(upstreamItem, 'Edit URL')!.click();
+      await el.updateComplete;
+      return el.shadowRoot!.querySelectorAll('.form-input') as NodeListOf<HTMLInputElement>;
+    }
+
+    async function setPushUrlAndSave(el: LvRemoteDialog, value: string): Promise<void> {
+      const formInputs = await startEditingUpstream(el);
+      const pushInput = formInputs[1];
+      pushInput.value = value;
+      pushInput.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      await el.updateComplete;
+
+      clearHistory();
+
+      const saveBtn = el.shadowRoot!.querySelector('.footer .btn-primary') as HTMLButtonElement;
+      saveBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+    }
+
+    it('clearing the push URL asks the backend to unset it', async () => {
+      const el = await renderDialog();
+
+      await setPushUrlAndSave(el, '');
+
+      const setCalls = findCommands('set_remote_url');
+      expect(setCalls.length).to.equal(2);
+      expect(setCalls[1].args).to.deep.include({
+        path: REPO_PATH,
+        name: 'upstream',
+        url: '',
+        push: true,
+      });
+    });
+
+    it('a push URL equal to the fetch URL clears it', async () => {
+      const el = await renderDialog();
+
+      await setPushUrlAndSave(el, 'https://github.com/upstream/repo.git');
+
+      const setCalls = findCommands('set_remote_url');
+      expect(setCalls.length).to.equal(2);
+      expect(setCalls[1].args).to.deep.include({
+        path: REPO_PATH,
+        name: 'upstream',
+        url: '',
+        push: true,
+      });
+    });
+
+    it('a failed push-URL clear keeps the dialog open and shows the error', async () => {
+      const el = await renderDialog();
+
+      let remotesChanged = false;
+      el.addEventListener('remotes-changed', () => { remotesChanged = true; });
+
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_remotes') return mockRemotes;
+        if (command === 'set_remote_url') {
+          if ((args as { push?: boolean }).push === true) {
+            throw new Error('cannot unset push url');
+          }
+          return { name: 'upstream', url: 'https://github.com/upstream/repo.git', pushUrl: null };
+        }
+        return null;
+      };
+
+      await setPushUrlAndSave(el, '');
+
+      const error = el.shadowRoot!.querySelector('.error');
+      expect(error).to.not.be.null;
+      expect(error!.textContent).to.contain('cannot unset push url');
+
+      // Still in edit mode, and no refresh was announced
+      const title = el.shadowRoot!.querySelector('.title');
+      expect(title!.textContent?.trim()).to.equal('Edit Remote URL');
+      expect(remotesChanged).to.be.false;
+    });
+
+    // Guard against over-reach: this passes with and without the fix — it exists
+    // so a future change cannot start issuing a clear for every fetch-URL edit.
+    it('leaves the push URL alone for a remote that never had one', async () => {
+      const el = await renderDialog();
+
+      const items = getRemoteItems(el);
+      const originItem = Array.from(items).find(
+        (item) => item.querySelector('.remote-name')?.textContent?.trim() === 'origin'
+      )!;
+      getActionButton(originItem, 'Edit URL')!.click();
+      await el.updateComplete;
+
+      const formInputs = el.shadowRoot!.querySelectorAll('.form-input') as NodeListOf<HTMLInputElement>;
+      formInputs[0].value = 'https://new-url.com/repo.git';
+      formInputs[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
+      await el.updateComplete;
+
+      clearHistory();
+
+      const saveBtn = el.shadowRoot!.querySelector('.footer .btn-primary') as HTMLButtonElement;
+      saveBtn.click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const setCalls = findCommands('set_remote_url');
+      expect(setCalls.length).to.equal(1);
+      expect(setCalls[0].args).to.deep.include({ push: false });
+    });
   });
 
   // ── 7. Rename remote ──────────────────────────────────────────────────

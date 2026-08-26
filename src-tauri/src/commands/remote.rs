@@ -1,7 +1,7 @@
 //! Remote command handlers
 
 use std::path::Path;
-use tauri::{command, AppHandle, Emitter};
+use tauri::{command, AppHandle, Emitter, State};
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{
@@ -10,6 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
+use crate::services::remote_ops::{self, RemoteOp, RemoteOpRegistry};
 use crate::utils::{apply_token_credentials, create_command, reject_flag_like};
 
 /// Add a new remote
@@ -87,6 +88,10 @@ pub async fn rename_remote(path: String, old_name: String, new_name: String) -> 
 }
 
 /// Set the URL of a remote
+///
+/// An empty `url` with `push` set clears the push URL so pushes fall back to
+/// the fetch URL — that is the only way to undo a divergent push destination.
+/// An empty fetch URL is refused: a remote without one is unusable.
 #[command]
 pub async fn set_remote_url(
     path: String,
@@ -100,10 +105,22 @@ pub async fn set_remote_url(
     repo.find_remote(&name)
         .map_err(|_| LeviathanError::RemoteNotFound(name.clone()))?;
 
+    let url = url.trim();
+
     if push.unwrap_or(false) {
-        repo.remote_set_pushurl(&name, Some(&url))?;
+        match repo.remote_set_pushurl(&name, if url.is_empty() { None } else { Some(url) }) {
+            // Deleting an absent pushurl reports NotFound; the remote is
+            // already in the state the caller asked for.
+            Err(e) if url.is_empty() && e.code() == git2::ErrorCode::NotFound => {}
+            other => other?,
+        }
     } else {
-        repo.remote_set_url(&name, &url)?;
+        if url.is_empty() {
+            return Err(LeviathanError::OperationFailed(
+                "Remote URL cannot be empty".to_string(),
+            ));
+        }
+        repo.remote_set_url(&name, url)?;
     }
 
     // Get updated remote info
@@ -142,6 +159,7 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 #[command]
 pub async fn fetch(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     prune: Option<bool>,
@@ -157,6 +175,25 @@ pub async fn fetch(
     // alt-tabbed back into the app. That is exactly the noise the background
     // fetch is documented to avoid.
     let quiet = quiet.unwrap_or(false);
+
+    // Claimed BEFORE the timeout wrapper, and handed to the blocking task
+    // below so it outlives a timed-out caller — see services/remote_ops.rs.
+    //
+    // A background fetch (window focus) YIELDS but never claims: it skips this
+    // round when the user has something running, and takes no slot of its own,
+    // so it can never refuse the user's next push. Its timer twin in
+    // services/autofetch_service.rs has always run alongside whatever the user
+    // is doing; making this one exclusive would break a working flow rather
+    // than fix the racing retry this guard is for.
+    let slot = if quiet {
+        if remote_ops_registry.running(Path::new(&path)).is_some() {
+            return Ok(());
+        }
+        None
+    } else {
+        Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
+    };
+
     let do_fetch = async move {
         let path_clone = path.clone();
         let prune_val = prune.unwrap_or(false);
@@ -164,8 +201,9 @@ pub async fn fetch(
         let remote_name_for_event = remote_name_owned.clone();
 
         // git2 fetch is blocking network I/O; offload to a blocking thread so
-        // it doesn't starve the Tokio runtime.
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        // it doesn't starve the Tokio runtime. run_holding carries the slot
+        // into that thread, so it is released when the fetch really ends.
+        remote_ops::run_holding(slot, RemoteOp::Fetch, move || -> Result<()> {
             let repo = git2::Repository::open(Path::new(&path_clone))?;
             let mut git_remote = repo
                 .find_remote(&remote_name_owned)
@@ -186,8 +224,7 @@ pub async fn fetch(
             git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
             Ok(())
         })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
+        .await?;
 
         // Emit success event, unless this fetch is a background one.
         if !quiet {
@@ -499,6 +536,7 @@ pub(crate) fn merge_fetched_commit(
 #[command]
 pub async fn pull(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -507,6 +545,12 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
+    // Claimed before the timeout wrapper and released by the blocking task,
+    // not by this future — see services/remote_ops.rs. ensure_pullable below
+    // only refuses a repository that is ALREADY mid-merge, so it cannot see a
+    // pull that timed out and is still running.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Pull)?;
+
     let do_pull = async move {
         let path_for_task = path.clone();
         // NOT defaulted to "origin" here. The branch's configured upstream is
@@ -516,8 +560,10 @@ pub async fn pull(
 
         // Whole pull is git2 / blocking network I/O. Run it on a blocking
         // thread so the Tokio runtime stays responsive.
-        let (remote_name_returned, message) =
-            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
+        let (remote_name_returned, message) = remote_ops::run_holding(
+            Some(slot),
+            RemoteOp::Pull,
+            move || -> Result<(String, String)> {
                 // Refuse before the network round trip if another operation is
                 // unresolved. merge() has always had this guard; pull never
                 // did, and its normal-merge branch calls repo.merge() a SECOND
@@ -640,9 +686,9 @@ pub async fn pull(
                 }
 
                 Ok((effective_remote, message))
-            })
-            .await
-            .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
+            },
+        )
+        .await?;
 
         // Emit success event
         let _ = app_handle.emit(
@@ -860,6 +906,7 @@ pub(crate) fn push_branch(
 #[command]
 pub async fn push(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -881,6 +928,13 @@ pub async fn push(
         reject_flag_like(r, "Remote name")?;
     }
 
+    // The claim this issue is about. Push has no abort point at all, so when
+    // the network timeout fires the git2/CLI push keeps running against the
+    // remote; the frontend push slot is released on that early return and the
+    // user's retry used to overlap the original. The slot travels into the
+    // blocking task below and is released only when the push really ends.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Push)?;
+
     let do_push = async move {
         let path_for_task = path.clone();
         let requested_remote = remote.clone();
@@ -892,20 +946,20 @@ pub async fn push(
 
         // git2/git-CLI push is blocking network I/O; offload so the runtime
         // stays responsive during slow remotes.
-        let (remote_name_returned, branch_name_returned) = tokio::task::spawn_blocking(move || {
-            push_branch(
-                &path_for_task,
-                requested_remote,
-                branch_for_task,
-                force_val,
-                use_force_with_lease,
-                use_push_tags,
-                set_upstream_val,
-                token,
-            )
-        })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
+        let (remote_name_returned, branch_name_returned) =
+            remote_ops::run_holding(Some(slot), RemoteOp::Push, move || {
+                push_branch(
+                    &path_for_task,
+                    requested_remote,
+                    branch_for_task,
+                    force_val,
+                    use_force_with_lease,
+                    use_push_tags,
+                    set_upstream_val,
+                    token,
+                )
+            })
+            .await?;
 
         // Emit success event
         let mut message = format!(
@@ -2718,6 +2772,109 @@ mod tests {
             remote.push_url,
             Some("git@github.com:test/repo.git".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_remote_push_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let remote = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "git@github.com:test/repo.git".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote.push_url,
+            Some("git@github.com:test/repo.git".to_string())
+        );
+
+        // Clearing the field must remove the push URL, not store an empty one
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(result.is_ok(), "clearing push URL failed: {result:?}");
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
+
+        // And it must actually be gone from the config, not just the response
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.push_url, None);
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_set_remote_url_rejects_an_empty_fetch_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "   ".to_string(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot be empty"),
+            "expected an empty-URL error"
+        );
+
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_clearing_a_push_url_that_was_never_set_is_a_no_op() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "clearing an unset push URL failed: {result:?}"
+        );
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
     }
 
     #[tokio::test]
