@@ -582,6 +582,13 @@ export class LvGraphCanvas extends LitElement {
   private commits: GraphCommit[] = [];
   private realCommits: Map<string, Commit> = new Map();
   private matchedCommitOids: Set<string> = new Set(); // For search highlighting
+  // Semantic search re-runs on every keystroke (the search bar has no
+  // debounce), so the "semantic search unavailable" notice is shown once per
+  // repo and re-armed only when a semantic search succeeds again.
+  private semanticFailureNotifiedFor: string | null = null;
+  // Same no-debounce reasoning for the direct commit search: a failing
+  // pathspec or branch name would otherwise toast once per keystroke.
+  private searchFailureNotifiedFor: string | null = null;
   private refsByCommit: RefsByCommit = {};
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1161,6 +1168,10 @@ export class LvGraphCanvas extends LitElement {
 
       // If search is active, also fetch matching commits for highlighting
       this.matchedCommitOids.clear();
+      // A semantic search that never RAN (model missing, embedding index not
+      // built, ONNX error) must not read as "no matches" — remember it so the
+      // keyword block below still runs.
+      let semanticFailed = false;
       if (hasSearch && this.searchFilter?.searchMode === 'semantic' && this.searchFilter?.query) {
         // Semantic search via embedding index
         try {
@@ -1176,13 +1187,36 @@ export class LvGraphCanvas extends LitElement {
           for (const result of semanticResults) {
             this.matchedCommitOids.add(result.oid);
           }
+          // Semantic search works again — re-arm the unavailable notice
+          this.semanticFailureNotifiedFor = null;
           log.debug(`Semantic search matched ${this.matchedCommitOids.size} commits`);
         } catch (err) {
           log.warn('Semantic search failed, falling back to keyword search:', err);
-          // Fall through to keyword search below
+          // A superseded load must not notify over the newest one
+          if (this.loadVersion !== currentVersion) return;
+          semanticFailed = true;
+          // The component can't toast itself — app-shell listens for
+          // graph-notice (same wiring as the jump-to-HEAD notice).
+          if (this.semanticFailureNotifiedFor !== repoPath) {
+            this.semanticFailureNotifiedFor = repoPath;
+            this.dispatchEvent(
+              new CustomEvent('graph-notice', {
+                detail: {
+                  message: 'Semantic search is unavailable — showing keyword results instead',
+                  type: 'info',
+                },
+                bubbles: true,
+                composed: true,
+              })
+            );
+          }
         }
       }
-      if (hasSearch && this.matchedCommitOids.size === 0 && this.searchFilter?.searchMode !== 'semantic') {
+      if (
+        hasSearch &&
+        this.matchedCommitOids.size === 0 &&
+        (this.searchFilter?.searchMode !== 'semantic' || semanticFailed)
+      ) {
         // Keyword search: try the search index first for faster results.
         // The index has no file or branch dimension, so a path/branch filter
         // must go straight to the direct search below — asking the index
@@ -1206,6 +1240,8 @@ export class LvGraphCanvas extends LitElement {
         if (this.loadVersion !== currentVersion) return;
 
         if (indexResults) {
+          // A search that answered re-arms the failure notice
+          this.searchFailureNotifiedFor = null;
           for (const commit of indexResults) {
             this.matchedCommitOids.add(commit.oid);
           }
@@ -1229,8 +1265,29 @@ export class LvGraphCanvas extends LitElement {
           if (this.loadVersion !== currentVersion) return;
 
           if (matchResult.success && matchResult.data) {
+            // A search that answered re-arms the failure notice
+            this.searchFailureNotifiedFor = null;
             for (const commit of matchResult.data) {
               this.matchedCommitOids.add(commit.oid);
+            }
+          } else {
+            // A failed search (bad pathspec, unknown branch, backend error)
+            // must not render as a legitimate zero-match search. The
+            // component can't toast itself — app-shell listens for
+            // graph-notice (same wiring as the semantic-unavailable notice).
+            log.warn('Commit search failed:', matchResult.error?.message);
+            if (this.searchFailureNotifiedFor !== repoPath) {
+              this.searchFailureNotifiedFor = repoPath;
+              this.dispatchEvent(
+                new CustomEvent('graph-notice', {
+                  detail: {
+                    message: `Search failed: ${matchResult.error?.message ?? 'unknown error'}`,
+                    type: 'error',
+                  },
+                  bubbles: true,
+                  composed: true,
+                })
+              );
             }
           }
         }
@@ -2278,8 +2335,20 @@ export class LvGraphCanvas extends LitElement {
     if (result.type === 'node' && result.node) {
       const commit = this.realCommits.get(result.node.oid);
       if (commit) {
-        // Select the commit on right-click
+        // A right-click is a selection too, so it has to move ALL of the
+        // selection state, not just the primary one. `selectedNodes` drives
+        // both the painted highlight and the `commits` array on
+        // `commit-selected`, and `lastClickedNode` is the Shift+click range
+        // anchor — leaving them behind highlighted one commit while the menu
+        // and the details panel named another. Right-clicking a commit that is
+        // already part of a multi-selection keeps that selection: acting on the
+        // whole set is exactly why the user built it.
         this.selectedNode = result.node;
+        if (!this.selectedNodes.has(result.node.oid)) {
+          this.selectedNodes.clear();
+          this.selectedNodes.add(result.node.oid);
+        }
+        this.lastClickedNode = result.node;
         this.dispatchSelectionEvent();
 
         // Dispatch context menu event

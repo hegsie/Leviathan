@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository } from '../fixtures/tauri-mock';
+import { setupOpenRepository, setupTauriMocks, initializeRepositoryStore, defaultMockData } from '../fixtures/tauri-mock';
 import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandMock, waitForCommand } from '../fixtures/test-helpers';
 
 /**
@@ -351,6 +351,50 @@ test.describe('Search Query Filtering', () => {
     await expect(filterButton).toHaveClass(/active/);
   });
 
+  /**
+   * Apply a graph search filter through the same `search-change` contract
+   * lv-toolbar emits when the user clicks Apply in the filter panel.
+   *
+   * NOTE: this does not type into the search bar because of a separate
+   * pre-existing defect — lv-search-bar's `search-change` is `composed`, so
+   * app-shell receives both the toolbar's `{ filter }` event and the search
+   * bar's own raw-filter event, and the raw one arrives last leaving
+   * app-shell's searchFilter `undefined`. Emitting the toolbar's contract
+   * still exercises the real components end to end.
+   */
+  async function applyGraphFilter(
+    page: import('@playwright/test').Page,
+    filter: Record<string, string>
+  ): Promise<void> {
+    await page.evaluate((f) => {
+      const findToolbar = (root: Document | ShadowRoot): Element | null => {
+        for (const el of Array.from(root.querySelectorAll('*'))) {
+          if (el.tagName.toLowerCase() === 'lv-toolbar') return el;
+          if (el.shadowRoot) {
+            const found = findToolbar(el.shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const toolbar = findToolbar(document);
+      if (!toolbar) throw new Error('lv-toolbar not found');
+      toolbar.dispatchEvent(
+        new CustomEvent('search-change', { detail: { filter: f }, bubbles: true, composed: true })
+      );
+    }, filter);
+  }
+
+  const pathFilter = {
+    query: '',
+    author: '',
+    dateFrom: '',
+    dateTo: '',
+    filePath: 'src/**/*.ts',
+    branch: '',
+    searchMode: 'keyword',
+  };
+
   test('a Path filter reaches git directly, bypassing the commit index', async ({ page }) => {
     // Opening the repo builds the commit index in the background, which is
     // the condition the graph's search path branches on. The index has no
@@ -373,33 +417,7 @@ test.describe('Search Query Filtering', () => {
       search_commits: [],
     });
 
-    // Apply the filter through the same `search-change` contract the toolbar
-    // emits when the user clicks Apply in the filter panel
-    await page.evaluate((filter) => {
-      const findToolbar = (root: Document | ShadowRoot): Element | null => {
-        for (const el of Array.from(root.querySelectorAll('*'))) {
-          if (el.tagName.toLowerCase() === 'lv-toolbar') return el;
-          if (el.shadowRoot) {
-            const found = findToolbar(el.shadowRoot);
-            if (found) return found;
-          }
-        }
-        return null;
-      };
-      const toolbar = findToolbar(document);
-      if (!toolbar) throw new Error('lv-toolbar not found');
-      toolbar.dispatchEvent(
-        new CustomEvent('search-change', { detail: { filter }, bubbles: true, composed: true })
-      );
-    }, {
-      query: '',
-      author: '',
-      dateFrom: '',
-      dateTo: '',
-      filePath: 'src/**/*.ts',
-      branch: '',
-      searchMode: 'keyword',
-    });
+    await applyGraphFilter(page, pathFilter);
 
     await waitForCommand(page, 'search_commits');
 
@@ -409,6 +427,20 @@ test.describe('Search Query Filtering', () => {
 
     const indexSearches = await findCommand(page, 'search_index');
     expect(indexSearches).toHaveLength(0);
+  });
+
+  test('a failed Path search is announced, not shown as zero matches', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      search_commits: { __error__: 'fatal: bad pathspec' },
+    });
+
+    await applyGraphFilter(page, pathFilter);
+
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Search failed',
+      })
+    ).toBeVisible();
   });
 });
 
@@ -649,5 +681,88 @@ test.describe('Search Bar - UI Outcome Verification', () => {
 
     // The graph canvas should still be visible (not crashed) even with zero results
     await expect(graphCanvas).toBeVisible();
+  });
+});
+
+
+test.describe('Semantic Search Fallback', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  /**
+   * Apply a semantic-mode filter to the graph canvas.
+   *
+   * NOTE: this deliberately sets the same `.searchFilter` property app-shell's
+   * template binds, instead of typing into the search bar. lv-search-bar's
+   * `search-change` event is `composed`, so app-shell's listener on
+   * <lv-toolbar> receives BOTH the toolbar's re-dispatched `{ filter }` event
+   * and the search bar's own raw-filter event; the raw one arrives last and
+   * leaves app-shell's searchFilter `undefined`. That plumbing defect is out
+   * of scope here — driving the canvas property directly still exercises the
+   * real component and the real graph-notice -> toast wiring.
+   */
+  async function applySemanticFilter(page: import('@playwright/test').Page, query: string): Promise<void> {
+    await page.evaluate((q) => {
+      const shell = document.querySelector('lv-app-shell');
+      const canvas = shell?.shadowRoot?.querySelector('lv-graph-canvas') as unknown as {
+        searchFilter: Record<string, string> | null;
+      } | null;
+      if (!canvas) throw new Error('lv-graph-canvas not found');
+      canvas.searchFilter = {
+        query: q,
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'semantic',
+      };
+    }, query);
+  }
+
+  test('semantic search failure shows keyword results and an unavailable toast', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+    await startCommandCaptureWithMocks(page, {
+      semantic_search: { __error__: 'Embedding model not downloaded' },
+      search_commits: [defaultMockData.commits[0]],
+    });
+
+    await applySemanticFilter(page, 'authentication rework');
+
+    // The failure must be announced, not silently read as "no matches"
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Semantic search is unavailable',
+      })
+    ).toBeVisible();
+
+    // ...and the promised keyword fallback must actually have run
+    const searches = await findCommand(page, 'search_commits');
+    expect(searches.length).toBeGreaterThan(0);
+    expect((searches[0].args as { query?: string }).query).toBe('authentication rework');
+  });
+
+  test('successful semantic search neither falls back nor toasts', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas')).toBeVisible();
+    await startCommandCaptureWithMocks(page, {
+      semantic_search: [
+        { oid: defaultMockData.commits[0].oid, distance: 0.1, summary: 'Initial commit' },
+      ],
+      search_commits: [],
+    });
+
+    await applySemanticFilter(page, 'authentication rework');
+    await waitForCommand(page, 'semantic_search');
+    // The load finishes with the commit refetch; wait for it so a late
+    // keyword fallback would still be captured before the assertions.
+    await waitForCommand(page, 'get_commit_total');
+
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Semantic search is unavailable',
+      })
+    ).toHaveCount(0);
+    expect(await findCommand(page, 'search_commits')).toHaveLength(0);
   });
 });
