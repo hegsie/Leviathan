@@ -395,6 +395,60 @@ describe('lv-bisect-dialog repository targeting', () => {
       ).to.equal(2);
     });
 
+    // A single-candidate range converges inside `git bisect start` itself, and
+    // git leaves the session active until reset. Reading only `active` here put
+    // the finished search on Good/Bad/Skip asking for a verdict git already had.
+    it('a start that converges immediately lands on the result', async () => {
+      statusByPath = { [REPO_A]: { active: false } };
+      const el = await openOn(REPO_A);
+
+      const inputs = el.shadowRoot!.querySelectorAll<HTMLInputElement>('.commit-input input');
+      inputs[0].value = 'HEAD';
+      inputs[0].dispatchEvent(new Event('input'));
+      inputs[1].value = 'HEAD~1';
+      inputs[1].dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      // What the backend reports back from the start: active, with the answer.
+      statusByPath[REPO_A] = status({ culprit: CULPRIT });
+      const startBtn = [...el.shadowRoot!.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Start Bisect')
+      );
+      expect(startBtn, 'Start Bisect button present').to.not.be.undefined;
+      startBtn!.click();
+      await settle(el);
+
+      expect(el.shadowRoot!.querySelector('.culprit-card'), 'the answer is shown').to.not.be.null;
+      expect(el.shadowRoot!.querySelector('.culprit-oid')!.textContent).to.contain(CULPRIT.oid);
+      expect(
+        el.shadowRoot!.querySelectorAll('.action-btn').length,
+        'and no further verdict is asked for',
+      ).to.equal(0);
+    });
+
+    // handleClose leaves component state alone, so the info banner captioning
+    // the last step outlived the session that produced it.
+    it('drops the previous step message when the dialog is reopened', async () => {
+      const el = await openOn(REPO_A);
+
+      clickAction(el, 'Good');
+      await settle(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.message.info').length,
+        'the step reports what it did',
+      ).to.equal(1);
+
+      el.open = false;
+      await settle(el);
+      el.open = true;
+      await settle(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.message.info').length,
+        'a recomputed status must not be captioned by the old step',
+      ).to.equal(0);
+    });
+
     it('uses the recorded culprit when the step output could not be parsed', async () => {
       const el = await openOn(REPO_A);
 

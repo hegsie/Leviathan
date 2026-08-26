@@ -514,6 +514,12 @@ export class LvBisectDialog extends LitElement {
     const loadedPath = this.repositoryPath;
     this.loading = true;
     this.error = '';
+    // The step messages ("Marked as good", "Bisect session started") describe
+    // the action that produced them, and handleClose leaves component state
+    // alone. Without clearing it here the previous session's last step is
+    // still on screen when the dialog is reopened — or when the repo switches
+    // — captioning a status that was just recomputed from scratch.
+    this.message = '';
 
     const result = await gitService.getBisectStatus(loadedPath);
 
@@ -598,7 +604,16 @@ export class LvBisectDialog extends LitElement {
         this.status = result.data.status;
         this.message = result.data.message;
 
-        if (result.data.status.active) {
+        // A range with a single candidate converges inside `git bisect start`
+        // itself, and the session stays active until reset — so the answer can
+        // already be recorded here. Reading only `active` put that result on a
+        // Good/Bad/Skip screen asking for a verdict git no longer needs.
+        // Same two sources as the step handlers — see handleBad.
+        const culprit = result.data.culprit ?? result.data.status.culprit;
+        if (culprit) {
+          this.culprit = culprit;
+          this.step = 'complete';
+        } else if (result.data.status.active) {
           this.step = 'in-progress';
           if (result.data.status.currentCommit) {
             await this.fetchCurrentCommitInfo(result.data.status.currentCommit);

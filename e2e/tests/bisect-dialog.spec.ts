@@ -580,6 +580,59 @@ test.describe('Bisect Dialog - Complete State', () => {
     ).toBeVisible();
     await expect(page.locator('lv-bisect-dialog .action-btn')).toHaveCount(0);
   });
+
+  // A range holding a single candidate converges inside `git bisect start`
+  // itself, and the session stays active until reset. The start used to read
+  // only `active`, so it asked for a Good/Bad verdict git no longer needed.
+  test('a start that converges immediately shows the result', async ({ page }) => {
+    await injectCommandMock(page, {
+      get_bisect_status: {
+        active: false,
+        currentCommit: null,
+        badCommit: null,
+        goodCommit: null,
+        remaining: null,
+        totalSteps: null,
+        currentStep: null,
+        log: [],
+        culprit: null,
+      },
+      bisect_start: {
+        status: {
+          active: true,
+          currentCommit: 'culprit_abc123def456',
+          badCommit: 'culprit_abc123def456',
+          goodCommit: 'good_ref',
+          remaining: 0,
+          currentStep: 1,
+          totalSteps: 0,
+          log: [],
+          culprit: {
+            oid: 'culprit_abc123def456',
+            summary: 'This commit introduced the bug',
+            author: 'Test User',
+            email: 'test@example.com',
+          },
+        },
+        // git converged in the start itself, so the step output carries no
+        // culprit of its own — only the refreshed status does.
+        culprit: null,
+        message: 'Bisect session started',
+      },
+    });
+
+    await openBisectDialog(page);
+
+    await page.locator('lv-bisect-dialog .commit-input input').first().fill('HEAD');
+    await page.locator('lv-bisect-dialog .commit-input input').nth(1).fill('HEAD~1');
+    await page.locator('lv-bisect-dialog .btn-primary', { hasText: 'Start Bisect' }).click();
+
+    await expect(page.locator('lv-bisect-dialog .culprit-card')).toBeVisible();
+    await expect(page.locator('lv-bisect-dialog .culprit-oid')).toContainText(
+      'culprit_abc123def456'
+    );
+    await expect(page.locator('lv-bisect-dialog .action-btn')).toHaveCount(0);
+  });
 });
 
 test.describe('Bisect Dialog - Error Handling', () => {

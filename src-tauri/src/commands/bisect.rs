@@ -1348,6 +1348,37 @@ Date:   Mon Jan 1 12:00:00 2024 +0000
         let _ = run_git_command(&repo.path, &["bisect", "reset"]);
     }
 
+    // `git bisect start` converges on the spot when the range holds a single
+    // candidate, and the session stays active until reset. The dialog builds
+    // its screen out of what this call returns, so the answer has to be on it
+    // — otherwise the start lands the user on Good/Bad/Skip for a search git
+    // has already finished.
+    #[tokio::test]
+    async fn test_bisect_start_carries_the_culprit_when_it_converges_immediately() {
+        let repo = TestRepo::with_initial_commit();
+        let good = repo.head_oid().to_string();
+        repo.create_commit("Bug introduced", &[("bug.txt", "bug")]);
+        let bad = repo.head_oid().to_string();
+
+        let result = bisect_start(repo.path_str(), Some(bad.clone()), Some(good))
+            .await
+            .unwrap();
+
+        assert!(
+            result.status.active,
+            "git holds the session open until reset"
+        );
+        let culprit = result
+            .status
+            .culprit
+            .as_ref()
+            .expect("a start that already converged must carry the answer");
+        assert_eq!(culprit.oid, bad);
+        assert_eq!(culprit.summary, "Bug introduced");
+
+        let _ = run_git_command(&repo.path, &["bisect", "reset"]);
+    }
+
     // The guard against reporting the range endpoint as the answer on step one.
     #[tokio::test]
     async fn test_get_bisect_status_has_no_culprit_mid_search() {
