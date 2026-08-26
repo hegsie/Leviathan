@@ -21,10 +21,30 @@ let notesRefs: string[] = ['refs/notes/commits'];
 let failingCommands: Set<string> = new Set();
 let confirmAnswer = 'Ok';
 let invoked: Array<{ command: string; args?: Record<string, unknown> }> = [];
+/** Commands parked mid-flight, so a response can be made to land late. */
+let gates: Map<string, Promise<void>> = new Map();
+
+/** Hold `command` open. Returns the release; never calling it strands it. */
+function gate(command: string): () => void {
+  let release!: () => void;
+  gates.set(
+    command,
+    new Promise<void>((r) => {
+      release = r;
+    }),
+  );
+  return () => {
+    gates.delete(command);
+    release();
+  };
+}
 
 const mockInvoke = async (command: string, args?: Record<string, unknown>): Promise<unknown> => {
   if (command === 'plugin:notification|is_permission_granted') return false;
   invoked.push({ command, args });
+
+  const held = gates.get(command);
+  if (held) await held;
 
   if (command === 'plugin:dialog|message') return confirmAnswer;
 
@@ -87,6 +107,15 @@ const mockCommit: Commit = {
   parentIds: [],
 };
 
+/** The commit the user clicks over to while a write is still in flight. */
+const otherCommit: Commit = {
+  ...mockCommit,
+  oid: 'fee9900112233445',
+  shortId: 'fee9900',
+  summary: 'Another commit',
+  message: 'Another commit',
+};
+
 async function settle(el: LvCommitDetails): Promise<void> {
   for (let i = 0; i < 6; i++) {
     await el.updateComplete;
@@ -129,6 +158,7 @@ describe('lv-commit-details notes section', () => {
     failingCommands = new Set();
     confirmAnswer = 'Ok';
     invoked = [];
+    gates = new Map();
   });
 
   it('renders the note attached to the selected commit', async () => {
@@ -363,6 +393,105 @@ describe('lv-commit-details notes section', () => {
     await settle(el);
 
     expect(q<HTMLTextAreaElement>(el, '.note-editor')!.value).to.equal('Half-written thought');
+  });
+
+  it('discards a finished save once the panel has moved to another commit', async () => {
+    const el = await mount();
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note for the first commit');
+
+    const seen: Array<Record<string, unknown>> = [];
+    el.addEventListener('notes-changed', (e) => seen.push((e as CustomEvent).detail));
+
+    // Park the write, then click another commit in the graph while it is in
+    // flight — nothing can intercept that click.
+    const releaseSave = gate('set_note');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+    // The second commit has finished its own read: it genuinely has no note.
+    expect(q(el, '.note-empty') !== null, 'the new commit has loaded').to.be.true;
+
+    // Stall the post-write refresh so what is sampled below is the state the
+    // save response left behind, not a later re-read that hides it. Sample
+    // first and release before asserting, so a failure cannot strand the gate.
+    const releaseRefs = gate('get_notes_refs');
+    releaseSave();
+    await settle(el);
+
+    const noteBodyWhileStale = q(el, '.note-body')?.textContent ?? null;
+    const emptyStateWhileStale = q(el, '.note-empty') !== null;
+
+    releaseRefs();
+    await settle(el);
+
+    expect(
+      noteBodyWhileStale,
+      'the first commit\u2019s note must not appear under the second',
+    ).to.be.null;
+    expect(emptyStateWhileStale, 'the second commit keeps its own empty state').to.be.true;
+    // The write did land, so it is still announced — against the commit it
+    // was actually written to.
+    expect(seen).to.deep.equal([
+      { action: 'added', commitOid: mockCommit.oid, notesRef: 'refs/notes/commits' },
+    ]);
+  });
+
+  it('does not show a failed save under the commit the user moved to', async () => {
+    const el = await mount();
+
+    buttonWithText(el, 'Add note').click();
+    await settle(el);
+    await typeNote(el, 'Note for the first commit');
+
+    failingCommands.add('set_note');
+    const releaseSave = gate('set_note');
+    buttonWithText(el, 'Save note').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+
+    releaseSave();
+    await settle(el);
+
+    // Sampled as plain values: handing chai a live DOM node makes a failure
+    // stringify the whole tree instead of reporting.
+    const errorText = q(el, '.note-error')?.textContent ?? null;
+    const showsEmptyState = q(el, '.note-empty') !== null;
+
+    // Nothing refreshes after a failed write, so an error adopted here would
+    // sit under the wrong commit until the user navigated away again.
+    expect(errorText, 'the first commit\u2019s save error must not follow the user').to.be.null;
+    expect(showsEmptyState, 'the second commit keeps its own empty state').to.be.true;
+  });
+
+  it('does not show a failed removal under the commit the user moved to', async () => {
+    notesByRef['refs/notes/commits'] = [
+      { commitOid: mockCommit.oid, message: 'Obsolete', notesRef: 'refs/notes/commits' },
+    ];
+    const el = await mount();
+
+    failingCommands.add('remove_note');
+    const releaseRemove = gate('remove_note');
+    buttonWithText(el, 'Remove').click();
+    await settle(el);
+
+    el.commit = otherCommit;
+    await settle(el);
+
+    releaseRemove();
+    await settle(el);
+
+    const errorText = q(el, '.note-error')?.textContent ?? null;
+    const showsEmptyState = q(el, '.note-empty') !== null;
+
+    expect(errorText, 'the first commit\u2019s removal error must not follow the user').to.be.null;
+    expect(showsEmptyState, 'the second commit keeps its own empty state').to.be.true;
   });
 
   it('surfaces a failure to list the notes in the ref', async () => {

@@ -167,6 +167,30 @@ test.describe('Commit notes', () => {
     await expect(details(page).locator('.note-body')).toContainText('Review-ref note');
   });
 
+  test('the default ref stays selectable when the repo only uses a custom ref', async ({
+    page,
+  }) => {
+    // A repo that keeps its notes in refs/notes/review must still be able to
+    // reach — and write to — the ref git itself uses by default.
+    await setupOpenRepository(page, {
+      commits,
+      notes: [{ commitOid: 'commit0', message: 'Review-ref note', notesRef: 'refs/notes/review' }],
+    });
+    await selectCommit(page, 'commit0');
+
+    const selector = details(page).getByLabel('Notes ref');
+    await expect(selector.locator('option', { hasText: 'refs/notes/commits' })).toHaveCount(1);
+
+    await selector.selectOption('refs/notes/commits');
+
+    await expect(details(page).locator('.note-empty')).toContainText('refs/notes/commits');
+    await details(page).getByRole('button', { name: 'Add note' }).click();
+    await details(page).locator('.note-editor').fill('Now in the default ref');
+    await details(page).getByRole('button', { name: 'Save note' }).click();
+
+    await expect(details(page).locator('.note-body')).toContainText('Now in the default ref');
+  });
+
   test('the overview lists every note in the ref and navigates to one', async ({ page }) => {
     await setupOpenRepository(page, {
       commits,

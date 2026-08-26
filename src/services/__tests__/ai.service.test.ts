@@ -27,7 +27,7 @@ const mockResults: Record<string, unknown> = {
         selectedModel: 'llama3.2',
       },
       {
-        providerType: 'openai',
+        providerType: 'open_ai',
         name: 'OpenAI',
         available: false,
         requiresApiKey: true,
@@ -71,7 +71,7 @@ describe('AI Service Types', () => {
     it('should have correct display names', () => {
       expect(getProviderDisplayName('ollama')).to.equal('Ollama');
       expect(getProviderDisplayName('lm_studio')).to.equal('LM Studio');
-      expect(getProviderDisplayName('openai')).to.equal('OpenAI');
+      expect(getProviderDisplayName('open_ai')).to.equal('OpenAI');
       expect(getProviderDisplayName('anthropic')).to.equal('Anthropic Claude');
       expect(getProviderDisplayName('github_copilot')).to.equal('GitHub Models');
       expect(getProviderDisplayName('google_gemini')).to.equal('Google Gemini');
@@ -81,11 +81,75 @@ describe('AI Service Types', () => {
     it('should correctly identify API key requirements', () => {
       expect(providerRequiresApiKey('ollama')).to.be.false;
       expect(providerRequiresApiKey('lm_studio')).to.be.false;
-      expect(providerRequiresApiKey('openai')).to.be.true;
+      expect(providerRequiresApiKey('open_ai')).to.be.true;
       expect(providerRequiresApiKey('anthropic')).to.be.true;
       expect(providerRequiresApiKey('github_copilot')).to.be.true;
       expect(providerRequiresApiKey('google_gemini')).to.be.true;
       expect(providerRequiresApiKey('local_inference')).to.be.false;
+    });
+  });
+
+  describe('AiProviderType wire contract', () => {
+    // The exact strings serde emits for the Rust AiProviderType enum
+    // (`#[serde(rename_all = "snake_case")]`). Keep in sync with the Rust
+    // guard test `test_ai_provider_type_serialization`.
+    const wireProviderTypes: AiProviderType[] = [
+      'ollama',
+      'lm_studio',
+      'open_ai',
+      'anthropic',
+      'github_copilot',
+      'google_gemini',
+      'local_inference',
+    ];
+
+    it('maps every providerType the backend emits to a display name', () => {
+      wireProviderTypes.forEach((type) => {
+        const displayName = getProviderDisplayName(type);
+        expect(displayName, `no display name for "${type}"`).to.be.a('string');
+        expect(displayName, `empty display name for "${type}"`).to.not.equal('');
+      });
+    });
+
+    it('agrees with the requiresApiKey flag the backend sends', () => {
+      // Shaped exactly as get_ai_providers serializes its payload.
+      const payload: AiProviderInfo[] = [
+        {
+          providerType: 'open_ai',
+          name: 'OpenAI',
+          available: false,
+          requiresApiKey: true,
+          hasApiKey: true,
+          endpoint: 'https://api.openai.com/v1',
+          models: [],
+          selectedModel: null,
+        },
+        {
+          providerType: 'local_inference',
+          name: 'Local AI (Embedded)',
+          available: false,
+          requiresApiKey: false,
+          hasApiKey: false,
+          endpoint: '',
+          models: [],
+          selectedModel: null,
+        },
+      ];
+
+      payload.forEach((provider) => {
+        expect(
+          providerRequiresApiKey(provider.providerType),
+          `requiresApiKey mismatch for "${provider.providerType}"`,
+        ).to.equal(provider.requiresApiKey);
+      });
+    });
+
+    it('does not recognise the legacy openai spelling', () => {
+      // 'openai' is not a value the backend can emit or deserialize, so the
+      // helpers must not treat it as a known provider.
+      const legacy = 'openai' as AiProviderType;
+      expect(getProviderDisplayName(legacy)).to.be.undefined;
+      expect(providerRequiresApiKey(legacy)).to.be.false;
     });
   });
 
@@ -110,7 +174,7 @@ describe('AI Service Types', () => {
 
     it('should have correct structure for cloud provider', () => {
       const provider: AiProviderInfo = {
-        providerType: 'openai',
+        providerType: 'open_ai',
         name: 'OpenAI',
         available: false,
         requiresApiKey: true,
@@ -120,7 +184,7 @@ describe('AI Service Types', () => {
         selectedModel: null,
       };
 
-      expect(provider.providerType).to.equal('openai');
+      expect(provider.providerType).to.equal('open_ai');
       expect(provider.available).to.be.false;
       expect(provider.requiresApiKey).to.be.true;
       expect(provider.hasApiKey).to.be.false;
@@ -235,7 +299,7 @@ describe('AI Service Behavior', () => {
 describe('AI Provider Workflow', () => {
   it('should check provider availability before generation', () => {
     const provider: AiProviderInfo = {
-      providerType: 'openai',
+      providerType: 'open_ai',
       name: 'OpenAI',
       available: false,
       requiresApiKey: true,
@@ -266,7 +330,7 @@ describe('AI Provider Workflow', () => {
   });
 
   it('should require API key for cloud providers', () => {
-    const cloudProviders: AiProviderType[] = ['openai', 'anthropic', 'github_copilot', 'google_gemini'];
+    const cloudProviders: AiProviderType[] = ['open_ai', 'anthropic', 'github_copilot', 'google_gemini'];
     const localProviders: AiProviderType[] = ['ollama', 'lm_studio'];
 
     cloudProviders.forEach((type) => {

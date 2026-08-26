@@ -1016,6 +1016,12 @@ export class LvCommitDetails extends LitElement {
     const commitOid = this.commit.oid;
     const notesRef = this.notesRef;
     const wasExisting = this.note !== null;
+    // A click in the graph swaps the panel's commit out from under a slow
+    // write, so the response may no longer describe what is on screen.
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath ||
+      commitOid !== this.commit?.oid ||
+      notesRef !== this.notesRef;
 
     this.noteBusy = true;
     this.noteError = null;
@@ -1026,23 +1032,32 @@ export class LvCommitDetails extends LitElement {
       const result = await gitService.setNote(repoPath, commitOid, message, notesRef, true);
 
       if (result.success && result.data) {
-        this.note = result.data;
-        this.noteLoadFailed = false;
-        this.editingNote = false;
-        this.noteDraft = '';
+        // The write landed on `commitOid`, so its parked draft is spent and
+        // the change is worth announcing whatever the panel shows now.
         this.clearNoteDraft(commitOid, notesRef);
         this.emitNotesChanged(wasExisting ? 'updated' : 'added', commitOid, notesRef);
+        // The view, though, is commit-scoped: adopting this note after the
+        // user moved on would show one commit's note under another and aim
+        // Remove at the wrong commit.
+        if (!isStale()) {
+          this.note = result.data;
+          this.noteLoadFailed = false;
+          this.editingNote = false;
+          this.noteDraft = '';
+        }
         // The first note in a ref creates that ref, so the selector list can
         // have grown; the overview count changed either way. Re-reading the
         // note as well keeps the panel showing what the repository actually
-        // holds rather than what we asked it to hold.
+        // holds rather than what we asked it to hold. It reads whatever is
+        // selected now, so it is correct on the stale path too.
         this.refreshNotes();
-      } else {
+      } else if (!isStale()) {
         // Keep the editor open so the typed note survives the failure.
         this.noteError = result.error?.message ?? 'Failed to save note';
       }
     } catch (err) {
       console.error('Failed to save note:', err);
+      if (isStale()) return;
       this.noteError = err instanceof Error ? err.message : 'Failed to save note';
     } finally {
       this.noteBusy = false;
@@ -1055,6 +1070,10 @@ export class LvCommitDetails extends LitElement {
     const repoPath = this.repositoryPath;
     const commitOid = this.commit.oid;
     const notesRef = this.notesRef;
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath ||
+      commitOid !== this.commit?.oid ||
+      notesRef !== this.notesRef;
 
     // Claimed before the confirm, not after: showConfirm is an IPC round trip,
     // so a claim taken afterwards would not serialize a double click.
@@ -1072,21 +1091,26 @@ export class LvCommitDetails extends LitElement {
       const result = await gitService.removeNote(repoPath, commitOid, notesRef);
 
       if (result.success) {
-        this.note = null;
-        this.noteLoadFailed = false;
-        this.editingNote = false;
-        this.noteDraft = '';
         this.clearNoteDraft(commitOid, notesRef);
         this.emitNotesChanged('removed', commitOid, notesRef);
+        // Same commit-scoped view as the save path: the removal happened on
+        // `commitOid`, so it may not clear the note of whatever is shown now.
+        if (!isStale()) {
+          this.note = null;
+          this.noteLoadFailed = false;
+          this.editingNote = false;
+          this.noteDraft = '';
+        }
         // Removing the last note in a ref removes the ref itself, so the
         // selection can land on a different ref — reload all of it, not just
         // the list, or the panel would describe the ref that just vanished.
         this.refreshNotes();
-      } else {
+      } else if (!isStale()) {
         this.noteError = result.error?.message ?? 'Failed to remove note';
       }
     } catch (err) {
       console.error('Failed to remove note:', err);
+      if (isStale()) return;
       this.noteError = err instanceof Error ? err.message : 'Failed to remove note';
     } finally {
       this.noteBusy = false;

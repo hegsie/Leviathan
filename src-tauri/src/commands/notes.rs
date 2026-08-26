@@ -132,7 +132,10 @@ pub async fn get_notes_refs(path: String) -> Result<Vec<String>> {
         }
     }
 
-    if refs.is_empty() {
+    // The default ref is always offered, not only when nothing else exists: a
+    // repository that holds refs/notes/review but no refs/notes/commits would
+    // otherwise leave the standard ref unselectable, and so uncreatable.
+    if !refs.iter().any(|r| r == "refs/notes/commits") {
         refs.push("refs/notes/commits".to_string());
     }
 
@@ -335,6 +338,56 @@ mod tests {
 
         let refs = get_notes_refs(repo.path_str()).await.unwrap();
         assert!(refs.contains(&"refs/notes/review".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_notes_refs_offers_default_alongside_custom() {
+        // A repository whose only notes live in a custom ref must still be
+        // able to select — and so create — a note in the default ref.
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        set_note(
+            repo.path_str(),
+            oid.to_string(),
+            "Review note".to_string(),
+            Some("refs/notes/review".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let refs = get_notes_refs(repo.path_str()).await.unwrap();
+        assert!(
+            refs.contains(&"refs/notes/commits".to_string()),
+            "default ref must be offered even when a custom ref exists: {refs:?}"
+        );
+        assert!(refs.contains(&"refs/notes/review".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_notes_refs_does_not_duplicate_default() {
+        // The default ref really exists here, so adding it again would show
+        // it twice in the selector.
+        let repo = TestRepo::with_initial_commit();
+        let oid = repo.head_oid();
+
+        set_note(
+            repo.path_str(),
+            oid.to_string(),
+            "Default ref note".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let refs = get_notes_refs(repo.path_str()).await.unwrap();
+        assert_eq!(
+            refs.iter().filter(|r| *r == "refs/notes/commits").count(),
+            1,
+            "default ref must appear exactly once: {refs:?}"
+        );
     }
 
     #[tokio::test]

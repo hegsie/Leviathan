@@ -303,8 +303,8 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
 
     await startCommandCaptureWithMocks(page, {
       save_unified_profile: {
-        ...testProfiles.personal,
-        defaultAccounts: { github: 'account-github-personal' },
+        profile: { ...testProfiles.personal, defaultAccounts: { github: 'account-github-personal' } },
+        failedRepositories: [],
       },
     });
 
@@ -327,7 +327,10 @@ test.describe('Profile Manager Dialog - Integration Accounts', () => {
     await expect(dialogs.profileManager.attachedAccountItems).toHaveCount(1);
 
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { ...testProfiles.work, defaultAccounts: {} },
+      save_unified_profile: {
+        profile: { ...testProfiles.work, defaultAccounts: {} },
+        failedRepositories: [],
+      },
     });
 
     // Click the detach (X) button on the attached account
@@ -558,8 +561,8 @@ test.describe('Profile Manager Dialog - Attach with no accounts', () => {
     // And saving persists it to the profile
     await startCommandCaptureWithMocks(page, {
       save_unified_profile: {
-        ...testProfiles.personal,
-        defaultAccounts: { github: 'account-new-gh' },
+        profile: { ...testProfiles.personal, defaultAccounts: { github: 'account-new-gh' } },
+        failedRepositories: [],
       },
     });
     await page.getByRole('button', { name: 'Save Profile' }).click();
@@ -1128,7 +1131,7 @@ test.describe('Profile CRUD Operations', () => {
     // Start capturing commands before clicking save
     // The actual Tauri command is save_unified_profile (not save_profile)
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { id: 'profile-cicd', name: 'CI/CD', gitName: 'CI Bot', gitEmail: 'ci@company.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} },
+      save_unified_profile: { profile: { id: 'profile-cicd', name: 'CI/CD', gitName: 'CI Bot', gitEmail: 'ci@company.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} }, failedRepositories: [] },
     });
 
     // Click the save button
@@ -1244,7 +1247,7 @@ test.describe('Profile CRUD Operations', () => {
 
     // The actual Tauri command is save_unified_profile
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: { id: 'profile-test', name: 'Test Profile', gitName: 'Test Author', gitEmail: 'author@test.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} },
+      save_unified_profile: { profile: { id: 'profile-test', name: 'Test Profile', gitName: 'Test Author', gitEmail: 'author@test.com', signingKey: null, urlPatterns: [], isDefault: false, color: '#3b82f6', defaultAccounts: {} }, failedRepositories: [] },
     });
 
     const saveButton = page.getByRole('button', { name: 'Save Profile' });
@@ -1320,8 +1323,16 @@ test.describe('Profile CRUD Operations', () => {
     const saveButton = page.getByRole('button', { name: 'Save Profile' });
     await saveButton.click();
 
-    // Error feedback should appear as a toast notification
-    await expect(page.locator('.toast, .error-banner, [class*="error"]').first()).toBeVisible({ timeout: 5000 });
+    // Error feedback should appear as a toast notification. Filtered to visible
+    // before .first(): `[class*="error"]` matches any element whose class merely
+    // CONTAINS "error" anywhere on the page, and .first() takes them in DOM
+    // order, so a hidden error element in an unrelated panel shadowed the toast.
+    await expect(
+      page
+        .locator('.toast, .error-banner, [class*="error"]')
+        .filter({ visible: true })
+        .first()
+    ).toBeVisible({ timeout: 5000 });
   });
 
   test('color picker should highlight selected color', async ({ page }) => {
@@ -1384,7 +1395,7 @@ test.describe('Profiles - UI Outcome Verification', () => {
     };
 
     await startCommandCaptureWithMocks(page, {
-      save_unified_profile: newProfile,
+      save_unified_profile: { profile: newProfile, failedRepositories: [] },
       get_unified_profiles_config: {
         version: 3,
         profiles: [newProfile],

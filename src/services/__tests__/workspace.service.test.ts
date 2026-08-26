@@ -160,6 +160,7 @@ describe('workspace.service', () => {
           isValidRepo: true,
           changedFilesCount: 3,
           currentBranch: 'main',
+          isDetached: false,
           ahead: 1,
           behind: 0,
         },
@@ -170,6 +171,18 @@ describe('workspace.service', () => {
           isValidRepo: false,
           changedFilesCount: 0,
           currentBranch: null,
+          isDetached: false,
+          ahead: 0,
+          behind: 0,
+        },
+        {
+          path: '/repo/three',
+          name: 'three',
+          exists: true,
+          isValidRepo: true,
+          changedFilesCount: 0,
+          currentBranch: null,
+          isDetached: true,
           ahead: 0,
           behind: 0,
         },
@@ -180,9 +193,13 @@ describe('workspace.service', () => {
       expect(lastInvokedCommand).to.equal('validate_workspace_repositories');
       expect((lastInvokedArgs as Record<string, unknown>).workspaceId).to.equal('ws-1');
       expect(result.success).to.be.true;
-      expect(result.data?.length).to.equal(2);
+      expect(result.data?.length).to.equal(3);
       expect(result.data?.[0].changedFilesCount).to.equal(3);
       expect(result.data?.[1].exists).to.be.false;
+      // isDetached crosses the IPC boundary in camelCase, as Tauri renames it
+      expect(result.data?.[0].isDetached).to.be.false;
+      expect(result.data?.[2].isDetached).to.be.true;
+      expect(result.data?.[2].currentBranch).to.be.null;
     });
   });
 });
