@@ -1944,4 +1944,124 @@ describe('lv-graph-canvas', () => {
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
   });
+
+  // ── Semantic search fallback ─────────────────────────────────────────
+  describe('semantic search fallback', () => {
+    beforeEach(() => {
+      clearGraphCacheForTests();
+    });
+
+    /** Layer semantic/keyword answers on top of the default mocks */
+    function setupSemanticMocks(opts: {
+      semantic: 'throw' | Array<{ oid: string; distance: number; summary: string }>;
+      keyword?: Commit[];
+    }): void {
+      setupDefaultMocks();
+      const base = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'semantic_search') {
+          if (opts.semantic === 'throw') throw new Error('Embedding model not downloaded');
+          return opts.semantic;
+        }
+        if (command === 'search_commits') return opts.keyword ?? [];
+        return base(command, args);
+      };
+    }
+
+    async function applySemanticQuery(el: LvGraphCanvas, query: string): Promise<void> {
+      el.searchFilter = {
+        query,
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'semantic',
+      };
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    function matchedOids(el: LvGraphCanvas): Set<string> {
+      return (el as unknown as { matchedCommitOids: Set<string> }).matchedCommitOids;
+    }
+
+    function collectNotices(el: LvGraphCanvas): Array<{ message: string; type?: string }> {
+      const notices: Array<{ message: string; type?: string }> = [];
+      el.addEventListener('graph-notice', (e) => {
+        notices.push((e as CustomEvent<{ message: string; type?: string }>).detail);
+      });
+      return notices;
+    }
+
+    it('falls back to keyword search when semantic search fails', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // The keyword block must actually run after the semantic failure
+      expect(findCommands('search_commits').length).to.equal(1);
+      expect(matchedOids(el).has(commit2.oid)).to.be.true;
+    });
+
+    it('notifies the user when semantic search is unavailable', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      expect(notices.length).to.equal(1);
+      expect(notices[0].type).to.equal('info');
+      expect(notices[0].message).to.contain('Semantic search is unavailable');
+    });
+
+    it('still notifies when the keyword fallback also finds nothing', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // A broken index must not look identical to "no commits matched"
+      expect(findCommands('search_commits').length).to.equal(1);
+      expect(matchedOids(el).size).to.equal(0);
+      expect(notices.length).to.equal(1);
+    });
+
+    it('shows the unavailable notice only once while the user keeps typing', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      // The search bar has no debounce: one search per keystroke
+      await applySemanticQuery(el, 'auth');
+      await applySemanticQuery(el, 'auth rework');
+
+      expect(notices.length).to.equal(1);
+      // ...but the keyword fallback still runs for every query
+      expect(findCommands('search_commits').length).to.equal(2);
+    });
+
+    it('does not fall back when semantic search returns no matches', async () => {
+      setupSemanticMocks({ semantic: [], keyword: [commit1] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // A semantic search that RAN and found nothing genuinely means
+      // "no matches" — no keyword fallback, no notice
+      expect(findCommands('search_commits').length).to.equal(0);
+      expect(matchedOids(el).size).to.equal(0);
+      expect(notices.length).to.equal(0);
+    });
+  });
 });

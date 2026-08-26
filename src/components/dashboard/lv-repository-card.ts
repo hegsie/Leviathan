@@ -108,6 +108,18 @@ export class LvRepositoryCard extends LitElement {
         border-radius: var(--radius-xs);
       }
 
+      /* A detached HEAD is a state, not a branch, so nothing was rendered here
+         for it and the card read as an ordinary checkout for as long as it
+         lasted. */
+      .branch-name.detached {
+        background: var(--color-warning-bg);
+        color: var(--color-warning);
+      }
+
+      .branch-icon.detached {
+        color: var(--color-warning);
+      }
+
       .remote-info {
         margin-left: auto;
         display: flex;
@@ -204,12 +216,22 @@ export class LvRepositoryCard extends LitElement {
     return '...' + (result.startsWith('/') ? '' : '/') + result;
   }
 
+  /**
+   * In detached HEAD no branch carries `isHead`, so `currentBranch` is null and
+   * the card rendered no ref at all. The backend reports the commit HEAD sits
+   * on separately, because `headRef` is just 'HEAD' in that state.
+   */
+  private get detachedHeadOid(): string | null {
+    return this.currentBranch ? null : (this.repository?.detachedHeadOid ?? null);
+  }
+
   render() {
     if (!this.repository) {
       return nothing;
     }
 
     const primaryRemote = this.remotes.find((r) => r.name === 'origin') || this.remotes[0];
+    const detachedHeadOid = this.detachedHeadOid;
 
     return html`
       <div class="card">
@@ -230,7 +252,7 @@ export class LvRepositoryCard extends LitElement {
           </div>
         </div>
 
-        ${this.currentBranch || primaryRemote
+        ${this.currentBranch || detachedHeadOid || primaryRemote
           ? html`
               <div class="branch-info">
                 ${this.currentBranch
@@ -240,7 +262,18 @@ export class LvRepositoryCard extends LitElement {
                       </svg>
                       <span class="branch-name">${this.currentBranch.name}</span>
                     `
-                  : nothing}
+                  : detachedHeadOid
+                    ? html`
+                        <svg class="branch-icon detached" viewBox="0 0 16 16" fill="currentColor">
+                          <path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/>
+                        </svg>
+                        <span
+                          class="branch-name detached"
+                          title="HEAD is detached at ${detachedHeadOid}. New commits won't belong to any branch."
+                          >Detached HEAD @ ${detachedHeadOid.slice(0, 7)}</span
+                        >
+                      `
+                    : nothing}
 
                 ${primaryRemote
                   ? html`

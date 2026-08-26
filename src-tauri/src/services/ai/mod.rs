@@ -709,12 +709,16 @@ impl AiService {
         let local = local_state.read().await;
         let downloaded = local.model_manager.list_downloaded().unwrap_or_default();
 
-        if downloaded.is_empty() {
-            return Ok(()); // No models downloaded — nothing to load
-        }
-
-        // Pick the first (best) downloaded model and look up its registry entry
-        let model = &downloaded[0];
+        // Pick the first model whose GGUF file is actually on disk and look up
+        // its registry entry. A directory left with only its metadata cannot be
+        // loaded, and trying would leave the provider stuck in the error state.
+        let model = match downloaded
+            .iter()
+            .find(|m| m.status == local::model_manager::ModelStatus::Downloaded)
+        {
+            Some(m) => m,
+            None => return Ok(()), // Nothing loadable — nothing to do
+        };
         let meta = local
             .registry
             .get_by_id(&model.id)
@@ -729,6 +733,35 @@ impl AiService {
 
         tracing::info!("Lazy-loading local model: {}", display_name);
         self.load_local_model(&model_path, display_name, meta).await
+    }
+
+    /// True if a downloaded local model is waiting to be lazy-loaded.
+    ///
+    /// The GGUF file must be present: a model directory left with only its
+    /// metadata is not loadable, so it does not count. `list_downloaded` also
+    /// ignores in-flight downloads, whose metadata is written last.
+    pub async fn has_loadable_local_model(&self) -> bool {
+        let local_state = match &self.local_ai_state {
+            Some(s) => s,
+            None => return false,
+        };
+        let local = local_state.read().await;
+        local
+            .model_manager
+            .list_downloaded()
+            .unwrap_or_default()
+            .iter()
+            .any(|m| m.status == local::model_manager::ModelStatus::Downloaded)
+    }
+
+    /// Whether an AI request would succeed right now.
+    ///
+    /// A downloaded-but-unloaded local model counts as available: the model is
+    /// only ever loaded on demand (see [`AiService::ensure_local_model_loaded`]),
+    /// never at startup, so reporting it as unavailable would hide AI features
+    /// that do in fact work after every restart.
+    pub async fn has_available_provider(&self) -> bool {
+        self.find_available_provider().await.is_some() || self.has_loadable_local_model().await
     }
 
     /// Find the first available provider, preferring the active one
@@ -1220,5 +1253,104 @@ mod tests {
             "the user's chosen local model must still be loaded"
         );
         assert_eq!(result.unwrap().summary, "feat: stub");
+    }
+
+    // --- Local-model availability -------------------------------------------
+    //
+    // A local GGUF model is never loaded at startup (see
+    // `ensure_local_model_loaded`): loading is deferred to the first inference
+    // request. These tests pin that a downloaded-but-unloaded model still
+    // reports as available, and that a half-deleted model directory does not.
+
+    /// Build an `AiService` with no configured cloud provider, wired to a
+    /// models directory under `models_dir`.
+    fn service_with_models(models_dir: std::path::PathBuf) -> (AiService, tempfile::TempDir) {
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut service = AiService::new(config_dir.path().to_path_buf());
+        service.set_local_ai_state(crate::commands::local_ai::create_local_ai_state(models_dir));
+        (service, config_dir)
+    }
+
+    /// Write a model directory the way `ModelManager` lays one out. Without the
+    /// GGUF file it is the half-downloaded/half-deleted shape that
+    /// `list_downloaded` reports as `ModelStatus::Error`.
+    fn write_model(models_dir: &std::path::Path, id: &str, with_gguf: bool) {
+        let model_dir = models_dir.join(id);
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let meta = format!(
+            r#"{{
+                "id": "{id}",
+                "displayName": "Test Model",
+                "sizeBytes": 9,
+                "sha256": "abc",
+                "architecture": "test",
+                "contextLength": 2048
+            }}"#
+        );
+        std::fs::write(model_dir.join("model_meta.json"), meta).unwrap();
+        if with_gguf {
+            std::fs::write(model_dir.join("model.gguf"), b"fake data").unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_but_unloaded_local_model_counts_as_available() {
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "ready-model", true);
+        let (service, _cfg) = service_with_models(models.path().to_path_buf());
+
+        // Nothing has been loaded: this is the state after every app restart.
+        assert!(!service
+            .test_provider(AiProviderType::LocalInference)
+            .await
+            .unwrap());
+        assert_eq!(
+            service.get_local_model_status().await,
+            providers::LocalModelStatus::Unloaded
+        );
+
+        // ...yet a generate request would lazily load it and succeed, so the
+        // `is_ai_available` command must not report AI as unconfigured.
+        assert!(service.has_loadable_local_model().await);
+        assert!(service.has_available_provider().await);
+    }
+
+    #[tokio::test]
+    async fn test_no_downloaded_model_is_not_loadable() {
+        // An empty models directory.
+        let models = tempfile::tempdir().unwrap();
+        let (service, _cfg) = service_with_models(models.path().to_path_buf());
+        assert!(!service.has_loadable_local_model().await);
+
+        // ...and the pre-wiring state, before `set_local_ai_state` is called.
+        let config_dir = tempfile::tempdir().unwrap();
+        let unwired = AiService::new(config_dir.path().to_path_buf());
+        assert!(!unwired.has_loadable_local_model().await);
+    }
+
+    #[tokio::test]
+    async fn test_model_directory_without_gguf_is_not_loadable() {
+        // Metadata left behind without the weights: nothing can be loaded from
+        // it, so it must not light up the AI affordances.
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "broken-model", false);
+        let (service, _cfg) = service_with_models(models.path().to_path_buf());
+
+        assert!(!service.has_loadable_local_model().await);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_local_model_loaded_skips_a_model_with_no_gguf() {
+        let models = tempfile::tempdir().unwrap();
+        write_model(models.path(), "broken-model", false);
+        let (service, _cfg) = service_with_models(models.path().to_path_buf());
+
+        // Attempting to load the missing GGUF would fail and leave the provider
+        // parked in `Error`; it must be skipped instead.
+        assert!(service.ensure_local_model_loaded().await.is_ok());
+        assert_eq!(
+            service.get_local_model_status().await,
+            providers::LocalModelStatus::Unloaded
+        );
     }
 }
