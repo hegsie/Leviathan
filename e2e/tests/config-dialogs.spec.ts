@@ -199,6 +199,8 @@ test.describe('Config Dialog - Settings Tab', () => {
     await input.dispatchEvent('change');
 
     await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
+    // Nothing was reloaded, so the blank the user typed must survive for a retry.
+    await expect(input).toHaveValue('');
   });
 
   test('should show error banner when setting save fails', async ({ page }) => {
@@ -209,6 +211,7 @@ test.describe('Config Dialog - Settings Tab', () => {
     await input.dispatchEvent('change');
 
     await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
+    await expect(input).toHaveValue('true');
   });
 });
 

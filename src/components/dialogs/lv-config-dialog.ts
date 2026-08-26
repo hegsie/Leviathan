@@ -1,6 +1,5 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { live } from 'lit/directives/live.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
@@ -675,12 +674,13 @@ export class LvConfigDialog extends LitElement {
                 <span class="scope-badge">${setting.scope}</span>
               </div>
               <div class="setting-value">
-                <!-- live(): the user can blank this input; after a reload the
-                     inherited value must be written back even though the value
-                     lit last rendered has not changed. -->
+                <!-- A plain binding, not live(): a failed save or clear must
+                     leave the text the user typed alone. After a successful one
+                     loadData() re-renders through the loading state, which
+                     rebuilds this input from the reloaded value. -->
                 <input
                   type="text"
-                  .value=${live(setting.value)}
+                  .value=${setting.value}
                   @change=${(e: Event) =>
                     this.handleSaveSetting(setting.key, (e.target as HTMLInputElement).value)}
                 />

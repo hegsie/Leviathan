@@ -260,6 +260,9 @@ describe('lv-config-dialog', () => {
     );
     await settleOpenLoad();
 
+    // The unset is a no-op: push.default is set globally, so the reload returns
+    // the very same value lit last rendered.
+    commonSettings = [{ key: 'push.default', value: 'current', scope: 'global' }];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (el as any).activeTab = 'settings';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -271,14 +274,67 @@ describe('lv-config-dialog', () => {
     expect(input!.value).to.equal('current');
 
     // The user blanks the field. The clear leaves the inherited value in place,
-    // so the next render must put it back even though the bound value is
-    // unchanged from lit's point of view.
+    // so the input must show it again even though the bound value is unchanged
+    // from lit's point of view.
     input!.value = '';
-    el.requestUpdate();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('push.default', '');
     await el.updateComplete;
 
     expect(el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input')!.value).to.equal(
       'current',
+    );
+  });
+
+  it('leaves the attempted value in the input when clearing fails', async () => {
+    failingCommands.add('unset_config_value');
+
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+    await settleOpenLoad();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).activeTab = 'settings';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).settings = [{ key: 'core.editor', value: 'vim', scope: 'local' }];
+    await el.updateComplete;
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input');
+    input!.value = '';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('core.editor', '');
+    await el.updateComplete;
+
+    // The clear failed, so the field must keep what the user typed for a retry
+    // rather than snapping back to the value still stored in git.
+    expect(el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input')!.value).to.equal(
+      '',
+    );
+  });
+
+  it('leaves the attempted value in the input when saving fails', async () => {
+    failingCommands.add('set_config_value');
+
+    const el = await fixture<LvConfigDialog>(
+      html`<lv-config-dialog ?open=${true} .repositoryPath=${'/test/repo'}></lv-config-dialog>`,
+    );
+    await settleOpenLoad();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).activeTab = 'settings';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).settings = [{ key: 'core.editor', value: 'vim', scope: 'local' }];
+    await el.updateComplete;
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input');
+    input!.value = 'nvim';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleSaveSetting('core.editor', 'nvim');
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector<HTMLInputElement>('.setting-value input')!.value).to.equal(
+      'nvim',
     );
   });
 
