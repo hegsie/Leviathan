@@ -542,7 +542,55 @@ describe('lv-commit-panel', () => {
       expect(internal.amend).to.be.false;
     });
 
-    it('shows error on failed commit', async () => {
+    it('names the unavailable provider in the generate tooltip', async () => {
+      // The chosen provider is unreachable, not missing. "Configure an AI
+      // provider in Settings" would be wrong — one is configured.
+      mockInvoke = async (command: string) => {
+        if (command === 'is_ai_available') return false;
+        if (command === 'ai_unavailable_reason') {
+          return {
+            reason:
+              'Anthropic Claude is not available. Please check its API key in Settings, or select a different provider.',
+            providerSelected: true,
+          };
+        }
+        if (command === 'list_templates') return [];
+        if (command === 'get_conventional_types') return [];
+        if (command === 'get_commit_template') return null;
+        if (command === 'get_user_identity') return null;
+        return null;
+      };
+
+      const el = await renderCommitPanel();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const btn = el.shadowRoot!.querySelector<HTMLButtonElement>('.generate-btn');
+      expect(btn, 'generate button rendered').to.not.be.null;
+      expect(btn!.title).to.include('Anthropic Claude');
+      expect(btn!.title).to.not.include('Configure an AI provider');
+    });
+
+    it('falls back to the generic generate tooltip when no reason is available', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'is_ai_available') return false;
+        if (command === 'ai_unavailable_reason') return null;
+        if (command === 'list_templates') return [];
+        if (command === 'get_conventional_types') return [];
+        if (command === 'get_commit_template') return null;
+        if (command === 'get_user_identity') return null;
+        return null;
+      };
+
+      const el = await renderCommitPanel();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const btn = el.shadowRoot!.querySelector<HTMLButtonElement>('.generate-btn');
+      expect(btn!.title).to.include('Configure an AI provider in Settings');
+    });
+
+      it('shows error on failed commit', async () => {
       mockInvoke = async (command: string) => {
         if (command === 'create_commit') {
           return { success: false, error: { message: 'Commit failed' } };

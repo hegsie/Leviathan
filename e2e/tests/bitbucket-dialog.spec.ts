@@ -6,6 +6,7 @@ import {
   startCommandCapture,
   findCommand,
   injectCommandError,
+  injectCommandHang,
   injectCommandMock,
   startCommandCaptureWithMocks,
   waitForCommand,
@@ -223,5 +224,51 @@ test.describe('Bitbucket Dialog - Extended Scenarios', () => {
 
     // Verify the error is shown within the dialog
     await expect(page.locator('lv-bitbucket-dialog .error, lv-bitbucket-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Bitbucket Dialog - Cancelling a pending OAuth sign-in', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await setupOpenRepository(page);
+  });
+
+  test('releases the loopback port and re-enables Sign in', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      oauth_get_authorize_url: {
+        authorizeUrl: 'https://bitbucket.org/site/oauth2/authorize',
+        state: 'st-1',
+        // Bitbucket's registered redirect pins the callback to this port.
+        loopbackPort: 8085,
+      },
+      // Don't actually open a browser window.
+      'plugin:shell|open': null,
+      oauth_cancel_flow: null,
+    });
+    // The callback never arrives — the user abandons the browser tab.
+    await injectCommandHang(page, 'oauth_wait_for_callback');
+
+    await app.executeCommand('Bitbucket');
+    await expect(dialogs.bitbucket.dialog).toBeVisible();
+    await dialogs.bitbucket.waitUntilReady();
+
+    await dialogs.bitbucket.oauthSignInButton.click();
+    await expect(dialogs.bitbucket.oauthCancelButton).toBeVisible();
+
+    await dialogs.bitbucket.oauthCancelButton.click();
+
+    // The backend loopback server is released, so the fixed port is free for a
+    // retry instead of staying bound until the flow times out.
+    await waitForCommand(page, 'oauth_cancel_flow');
+    const cancelCalls = await findCommand(page, 'oauth_cancel_flow');
+    expect(cancelCalls[0].args).toMatchObject({ port: 8085 });
+
+    // And the form is usable again.
+    await expect(dialogs.bitbucket.oauthCancelButton).toHaveCount(0);
+    await expect(dialogs.bitbucket.oauthSignInButton).toBeEnabled();
   });
 });

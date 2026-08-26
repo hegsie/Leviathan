@@ -265,6 +265,39 @@ describe('oauth.service - refreshToken', () => {
     expect(tokens.accessToken).to.equal('a3');
     expect(tokens.refreshToken).to.equal('r3');
   });
+
+  /** Capture the args of the next `oauth_refresh_token` invoke. */
+  function captureRefreshArgs(): { args?: Record<string, unknown> } {
+    const captured: { args?: Record<string, unknown> } = {};
+    mockInvoke = (command, args) => {
+      if (command === 'oauth_refresh_token') {
+        captured.args = args as Record<string, unknown>;
+        return Promise.resolve({ accessToken: 'a4', refreshToken: 'r4', expiresIn: 3600 });
+      }
+      return Promise.resolve(null);
+    };
+    return captured;
+  }
+
+  // Bitbucket's refresh_token grant is authenticated with the client secret,
+  // exactly like its code exchange — without it the grant 401s and the caller
+  // silently falls back to the expired access token.
+  it('sends the client secret for Bitbucket', async () => {
+    const captured = captureRefreshArgs();
+    const { refreshToken } = await import('../oauth.service.ts');
+    await refreshToken('bitbucket', 'r1');
+
+    expect(captured.args?.clientSecret).to.be.a('string');
+    expect((captured.args?.clientSecret as string).length).to.be.greaterThan(0);
+  });
+
+  it('sends no client secret for a PKCE-only provider', async () => {
+    const captured = captureRefreshArgs();
+    const { refreshToken } = await import('../oauth.service.ts');
+    await refreshToken('gitlab', 'r1');
+
+    expect(captured.args?.clientSecret, 'GitLab is a public PKCE client').to.equal(undefined);
+  });
 });
 
 describe('oauth.service - loopback cancel/restart guard', () => {
@@ -367,6 +400,112 @@ describe('oauth.service - loopback cancel/restart guard', () => {
     expect(errors, 'no spurious timeout error for the newer flow').to.have.length(0);
     expect(isPendingOAuth(), 'the newer flow is still pending').to.be.true;
     expect(getPendingProvider()).to.equal('azure');
+
+    unsub();
+  });
+});
+
+describe('oauth.service - cancel releases the backend loopback server', () => {
+  const defaultMock = mockInvoke;
+  let invoked: Array<{ command: string; args: unknown }> = [];
+
+  /** Installs a mock that logs every invoke, hands out `loopbackPort` per start,
+   *  and holds `oauth_wait_for_callback` open so the flow stays pending. */
+  function installMock(options: { ports?: (number | undefined)[]; cancelFails?: boolean } = {}) {
+    const ports = options.ports ?? [8085];
+    let n = 0;
+    mockInvoke = (command, args) => {
+      invoked.push({ command, args });
+      if (command === 'oauth_get_authorize_url') {
+        const port = ports[Math.min(n, ports.length - 1)];
+        n += 1;
+        return Promise.resolve({
+          authorizeUrl: 'https://bitbucket.org/site/oauth2/authorize',
+          state: `state-${n}`,
+          loopbackPort: port,
+        });
+      }
+      if (command === 'oauth_wait_for_callback') {
+        return new Promise(() => {});
+      }
+      if (command === 'oauth_cancel_flow' && options.cancelFails) {
+        return Promise.reject(new Error('no server found for port'));
+      }
+      return Promise.resolve(null);
+    };
+  }
+
+  const cancelCalls = () => invoked.filter((c) => c.command === 'oauth_cancel_flow');
+
+  beforeEach(() => {
+    invoked = [];
+  });
+
+  afterEach(() => {
+    cancelOAuth();
+    mockInvoke = defaultMock;
+  });
+
+  it("releases the cancelled flow's loopback server", async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+    installMock({ ports: [8085] });
+
+    await startOAuth('bitbucket', 'cid');
+    cancelOAuth('bitbucket');
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(cancelCalls(), 'the backend wait is aborted').to.have.length(1);
+    expect(cancelCalls()[0].args).to.deep.equal({ port: 8085 });
+    expect(isPendingOAuth()).to.be.false;
+  });
+
+  it("cancelOAuth() with no provider releases every pending flow's port", async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+    installMock({ ports: [8080, 8085] });
+
+    await startOAuth('github', 'cid');
+    await startOAuth('bitbucket', 'cid');
+    cancelOAuth();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const ports = cancelCalls().map((c) => (c.args as { port: number }).port).sort();
+    expect(ports).to.deep.equal([8080, 8085]);
+    expect(isPendingOAuth()).to.be.false;
+  });
+
+  it('does not call oauth_cancel_flow when there is nothing to release', async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+    installMock({ ports: [undefined] });
+
+    // (a) No pending flow at all.
+    cancelOAuth('bitbucket');
+    cancelOAuth();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelCalls(), 'nothing pending, nothing to release').to.have.length(0);
+
+    // (b) A pending flow with no loopback port (deep-link providers).
+    await startOAuth('bitbucket', 'cid');
+    cancelOAuth('bitbucket');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cancelCalls(), 'no loopback port to release').to.have.length(0);
+  });
+
+  it('still cancels locally, and surfaces no error, when the release fails', async () => {
+    const { startOAuth } = await import('../oauth.service.ts');
+    installMock({ ports: [8085], cancelFails: true });
+
+    const errors: string[] = [];
+    const unsub = onOAuthStateChange((s) => {
+      if (s.provider === 'bitbucket' && s.status === 'error') errors.push(s.error ?? '');
+    });
+
+    await startOAuth('bitbucket', 'cid');
+    cancelOAuth('bitbucket');
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(cancelCalls(), 'the release was attempted').to.have.length(1);
+    expect(isPendingOAuth(), 'the flow is cancelled locally regardless').to.be.false;
+    expect(errors, 'a failed release is not a user-facing failure').to.have.length(0);
 
     unsub();
   });

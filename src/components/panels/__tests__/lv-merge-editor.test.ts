@@ -78,11 +78,13 @@ interface EditorInternal {
 // ── Helpers ────────────────────────────────────────────────────────────────
 let workdirContent: string | (() => Promise<unknown>) = DEFAULT_WORKDIR_CONTENT;
 let aiAvailable = false;
+let aiUnavailable: { reason: string; providerSelected: boolean } | null = null;
 let aiSuggestion: (() => Promise<unknown>) | null = null;
 
 function setupDefaultMocks(): void {
   workdirContent = DEFAULT_WORKDIR_CONTENT;
   aiAvailable = false;
+  aiUnavailable = null;
   aiSuggestion = null;
   mockInvoke = async (command: string, args?: unknown) => {
     switch (command) {
@@ -100,6 +102,8 @@ function setupDefaultMocks(): void {
         return null;
       case 'is_ai_available':
         return aiAvailable;
+      case 'ai_unavailable_reason':
+        return aiUnavailable;
       case 'suggest_conflict_resolution':
         if (aiSuggestion) return aiSuggestion();
         return { resolvedContent: 'ai-resolved', explanation: 'merged by ai' };
@@ -2131,6 +2135,69 @@ describe('lv-merge-editor', () => {
 
   // ── AI resolution ────────────────────────────────────────────────────
   describe('AI resolution', () => {
+    const PROVIDER_DOWN =
+      'Anthropic Claude is not available. Please check its API key in Settings, or select a different provider.';
+
+    function findButton(el: LvMergeEditor, label: string): HTMLButtonElement | undefined {
+      return Array.from(el.shadowRoot!.querySelectorAll('button')).find(
+        (b) => b.textContent?.trim() === label
+      );
+    }
+
+    it('keeps the AI actions on screen, disabled and explained, when the chosen provider is down', async () => {
+      setupDefaultMocks();
+      // A provider IS selected in Settings, it just cannot be reached. The
+      // request is never redirected elsewhere, so the actions cannot run — but
+      // removing them would leave the user no way to learn why they stopped.
+      aiAvailable = false;
+      aiUnavailable = { reason: PROVIDER_DOWN, providerSelected: true };
+
+      const el = await renderLoadedEditor();
+
+      const suggest = findConflictButton(el, 'AI Suggest');
+      expect(suggest.disabled, 'AI Suggest is disabled').to.be.true;
+      expect(suggest.title).to.include('Anthropic Claude');
+
+      const resolveAll = findButton(el, 'AI Resolve All');
+      expect(resolveAll, 'AI Resolve All rendered').to.not.be.undefined;
+      expect(resolveAll!.disabled, 'AI Resolve All is disabled').to.be.true;
+      expect(resolveAll!.title).to.include('Anthropic Claude');
+    });
+
+    it('hides the AI actions when no provider has ever been configured', async () => {
+      setupDefaultMocks();
+      aiAvailable = false;
+      aiUnavailable = {
+        reason: 'No AI provider available. Please configure a provider in Settings.',
+        providerSelected: false,
+      };
+
+      const el = await renderLoadedEditor();
+
+      expect(findButton(el, 'AI Suggest'), 'no AI Suggest button').to.be.undefined;
+      expect(findButton(el, 'AI Resolve All'), 'no AI Resolve All button').to.be.undefined;
+    });
+
+    it('re-enables the AI actions when settings change makes the provider reachable', async () => {
+      setupDefaultMocks();
+      aiAvailable = false;
+      aiUnavailable = { reason: PROVIDER_DOWN, providerSelected: true };
+
+      const el = await renderLoadedEditor();
+      expect(findConflictButton(el, 'AI Suggest').disabled).to.be.true;
+
+      // The user fixes the API key in Settings.
+      aiAvailable = true;
+      aiUnavailable = null;
+      window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const suggest = findConflictButton(el, 'AI Suggest');
+      expect(suggest.disabled, 'AI Suggest is enabled again').to.be.false;
+      expect(suggest.title).to.not.include('Anthropic Claude');
+    });
+
     it('applies a per-block AI suggestion with origin "ai"', async () => {
       setupDefaultMocks();
       aiAvailable = true;

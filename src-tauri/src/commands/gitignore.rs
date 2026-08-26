@@ -74,9 +74,22 @@ pub async fn add_to_gitignore(path: String, patterns: Vec<String>) -> Result<()>
     Ok(())
 }
 
-/// Remove a pattern from .gitignore
+/// Remove one rule from .gitignore, identified by its line.
+///
+/// `line_number` is the 1-based line the caller is looking at, as reported by
+/// [`get_gitignore`]. Matching on the pattern text alone is not enough: a
+/// .gitignore may legitimately carry the same text twice — repeated section
+/// comments, or a pattern restated after a negation, where order changes what
+/// git does — and removing every identical line would delete rules the user
+/// never selected. The pattern is still passed and re-checked against that
+/// line so that a file edited behind the dialog's back fails loudly instead of
+/// deleting whichever rule has since moved into that slot.
 #[command]
-pub async fn remove_from_gitignore(path: String, pattern: String) -> Result<()> {
+pub async fn remove_from_gitignore(
+    path: String,
+    pattern: String,
+    line_number: usize,
+) -> Result<()> {
     let gitignore_path = Path::new(&path).join(".gitignore");
 
     if !gitignore_path.exists() {
@@ -86,9 +99,29 @@ pub async fn remove_from_gitignore(path: String, pattern: String) -> Result<()> 
     }
 
     let content = std::fs::read_to_string(&gitignore_path)?;
-    let new_content: Vec<&str> = content
-        .lines()
-        .filter(|line| line.trim() != pattern.trim())
+    let lines: Vec<&str> = content.lines().collect();
+
+    let index = line_number
+        .checked_sub(1)
+        .filter(|i| *i < lines.len())
+        .ok_or_else(|| {
+            LeviathanError::OperationFailed(format!(
+                ".gitignore has no line {line_number} — reload and try again"
+            ))
+        })?;
+
+    if lines[index].trim() != pattern.trim() {
+        return Err(LeviathanError::OperationFailed(format!(
+            ".gitignore line {line_number} no longer reads \"{}\" — reload and try again",
+            pattern.trim()
+        )));
+    }
+
+    let new_content: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(_, line)| *line)
         .collect();
 
     let mut result = new_content.join("\n");
@@ -434,7 +467,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_file(".gitignore", "node_modules/\n.env\ndist/\n");
 
-        let result = remove_from_gitignore(repo.path_str(), ".env".to_string()).await;
+        let result = remove_from_gitignore(repo.path_str(), ".env".to_string(), 2).await;
         assert!(result.is_ok());
 
         let content = std::fs::read_to_string(repo.path.join(".gitignore")).unwrap();
@@ -443,10 +476,60 @@ mod tests {
         assert!(content.contains("dist/"));
     }
 
+    /// Removing one displayed row must not take its twins with it: a .gitignore
+    /// can repeat a line (section comments, or a pattern restated around a
+    /// negation) and only the selected occurrence was asked for.
+    #[tokio::test]
+    async fn test_remove_from_gitignore_removes_only_the_selected_line() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitignore", "# generated\ndist/\n# generated\ncoverage/\n");
+
+        remove_from_gitignore(repo.path_str(), "# generated".to_string(), 1)
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(repo.path.join(".gitignore")).unwrap();
+        assert_eq!(content, "dist/\n# generated\ncoverage/\n");
+    }
+
+    /// A stale line number must fail loudly rather than delete whatever rule
+    /// has since moved into that slot.
+    #[tokio::test]
+    async fn test_remove_from_gitignore_rejects_a_stale_line() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitignore", "node_modules/\ndist/\n");
+
+        let result = remove_from_gitignore(repo.path_str(), ".env".to_string(), 2).await;
+        assert!(result.is_err());
+
+        let content = std::fs::read_to_string(repo.path.join(".gitignore")).unwrap();
+        assert_eq!(content, "node_modules/\ndist/\n");
+    }
+
+    #[tokio::test]
+    async fn test_remove_from_gitignore_rejects_a_line_past_the_end() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_file(".gitignore", "dist/\n");
+
+        assert!(
+            remove_from_gitignore(repo.path_str(), "dist/".to_string(), 9)
+                .await
+                .is_err()
+        );
+        assert!(
+            remove_from_gitignore(repo.path_str(), "dist/".to_string(), 0)
+                .await
+                .is_err()
+        );
+
+        let content = std::fs::read_to_string(repo.path.join(".gitignore")).unwrap();
+        assert_eq!(content, "dist/\n");
+    }
+
     #[tokio::test]
     async fn test_remove_from_nonexistent_gitignore() {
         let repo = TestRepo::with_initial_commit();
-        let result = remove_from_gitignore(repo.path_str(), "pattern".to_string()).await;
+        let result = remove_from_gitignore(repo.path_str(), "pattern".to_string(), 1).await;
         assert!(result.is_err());
     }
 

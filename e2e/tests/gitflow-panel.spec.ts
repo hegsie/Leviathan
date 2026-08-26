@@ -757,6 +757,7 @@ test.describe('GitFlow Panel - Config Load Failure', () => {
   });
 
   test('shows the load error instead of the initialize prompt', async ({ page }) => {
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .load-error')).toBeVisible();
     await expect(
       page.locator('lv-gitflow-panel#e2e-gitflow .load-error-message')
     ).toContainText('failed to open repository');
@@ -791,7 +792,9 @@ test.describe('GitFlow Panel - Config Load Failure', () => {
     await page.locator('lv-gitflow-panel#e2e-gitflow .load-error .btn').click();
 
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section').first()).toBeVisible();
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .section-header')).toHaveCount(3);
     await expect(page.locator('lv-gitflow-panel#e2e-gitflow .item-name')).toContainText('x');
+    await expect(page.locator('lv-gitflow-panel#e2e-gitflow .load-error')).toHaveCount(0);
   });
 });
 

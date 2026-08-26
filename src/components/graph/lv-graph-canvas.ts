@@ -557,6 +557,10 @@ export class LvGraphCanvas extends LitElement {
   // True total commit count across all refs (null until fetched)
   @state() private commitTotal: number | null = null;
   private totalLoadedCommits = 0;
+  // How many commits were loaded the last time the selection was validated
+  // against the layout — the high-water mark validateSelection() needs to
+  // tell "this commit is gone" apart from "this page isn't back yet"
+  private validatedCommitCount = 0;
 
   // Screen-reader mirror of the visible rows + selection announcements.
   // The canvas itself has no DOM semantics, so a hidden listbox mirrors the
@@ -879,6 +883,9 @@ export class LvGraphCanvas extends LitElement {
       // A reload queued for the PREVIOUS repo must not leak into this one
       this.reloadQueued = false;
       this.commitTotal = null;
+      // The new repo's first page must be free to prune its own selection —
+      // the previous repo's paging depth says nothing about this one
+      this.validatedCommitCount = 0;
       // Clear any stats spinner owned by the previous repo — the new repo's
       // fetch (if any) will set it again; a repo with no stats to fetch must
       // not inherit the old spinner
@@ -945,13 +952,19 @@ export class LvGraphCanvas extends LitElement {
         // The "Show Avatars" app setting controls whether author avatars
         // are fetched from Gravatar (off = colored initials only)
         fetchAvatars: settingsStore.getState().showAvatars,
+        // The "Show Commit Size" app setting scales node radius by how much
+        // each commit changed (off = uniform nodes)
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );
 
-    // Keep avatar fetching in sync with the settings toggle
+    // Keep avatar fetching and node scaling in sync with the settings toggles
     this.settingsUnsubscribe = settingsStore.subscribe((state) => {
-      this.renderer?.setConfig({ fetchAvatars: state.showAvatars });
+      this.renderer?.setConfig({
+        fetchAvatars: state.showAvatars,
+        scaleNodesByCommitSize: state.showCommitSize,
+      });
       this.renderer?.markDirty();
       this.scheduleRender();
     });
@@ -1622,6 +1635,9 @@ export class LvGraphCanvas extends LitElement {
     this.resizeMinimap();
     this.rebuildMinimapDots();
 
+    // Drop/rebind the selection against the new layout before painting
+    this.validateSelection();
+
     // Set highlighted commits for search results
     this.renderer?.setHighlightedCommits(this.matchedCommitOids);
 
@@ -1632,6 +1648,63 @@ export class LvGraphCanvas extends LitElement {
     // Fetch stats and signatures for the visible rows asynchronously
     // (don't block initial render). Debounced to let rapid changes settle.
     this.scheduleVisibleDataFetch();
+  }
+
+  /**
+   * Reconcile the selection with the layout that was just built. A reload
+   * after an amend, rebase, squash or branch delete (and a branch-filter
+   * change) rebuilds the graph around different OIDs and different rows:
+   * without this the details panel would keep showing a commit that is gone
+   * from the repository — and its actions would run against a dead OID —
+   * while survivors would keep pointing at their OLD nodes, so range-select
+   * and the screen-reader position would work off stale rows.
+   */
+  private validateSelection(): void {
+    if (!this.layout) return;
+
+    // A reload always restarts from the newest commitCount commits, so a
+    // graph that had already paged deeper is missing those rows only
+    // because they have not been fetched again yet — their absence is no
+    // proof the commits are gone. Wait for the catch-up pages (each append
+    // lands here too) to reach the depth the selection was last checked
+    // against before pruning anything.
+    if (this.hasMoreCommits && this.totalLoadedCommits < this.validatedCommitCount) return;
+    this.validatedCommitCount = this.totalLoadedCommits;
+
+    let selectionChanged = false;
+    for (const oid of [...this.selectedNodes]) {
+      if (!this.layout.nodes.has(oid)) {
+        this.selectedNodes.delete(oid);
+        selectionChanged = true;
+      }
+    }
+    if (this.selectedNode) {
+      // Rebind a survivor to its node in the NEW layout (same commit, new row)
+      let node = this.layout.nodes.get(this.selectedNode.oid) ?? null;
+      if (!node) {
+        // The primary commit is gone but the rest of a multi-selection can
+        // survive: promote one (as ctrl+click does when it removes the
+        // primary) so the details panel and keyboard navigation keep an
+        // anchor matching what stays highlighted
+        const remaining = [...this.selectedNodes];
+        node = remaining.length > 0
+          ? this.layout.nodes.get(remaining[remaining.length - 1]) ?? null
+          : null;
+        selectionChanged = true;
+      }
+      this.selectedNode = node;
+    }
+    if (this.lastClickedNode) {
+      this.lastClickedNode = this.layout.nodes.get(this.lastClickedNode.oid) ?? null;
+    }
+
+    // Only a real change is announced — an ordinary reload that keeps the
+    // selection must not churn the details panel. markDirty/scheduleRender
+    // are left to applyLayout(), which runs them on the very next lines.
+    if (selectionChanged) {
+      this.dispatchSelectionEvent();
+      this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
+    }
   }
 
   /**
@@ -2923,30 +2996,10 @@ export class LvGraphCanvas extends LitElement {
 
   private applyBranchFilter(): void {
     // processLayout() applies the branch-visibility filter via
-    // getVisibleCommits(), rebuilds the indices, and schedules a render
+    // getVisibleCommits(), rebuilds the indices, drops a selection the
+    // filter just hid (applyLayout -> validateSelection), and schedules a
+    // render
     this.processLayout();
-
-    // A commit hidden by the filter must not stay selected
-    if (this.layout) {
-      let selectionChanged = false;
-      for (const oid of [...this.selectedNodes]) {
-        if (!this.layout.nodes.has(oid)) {
-          this.selectedNodes.delete(oid);
-          selectionChanged = true;
-        }
-      }
-      if (this.selectedNode && !this.layout.nodes.has(this.selectedNode.oid)) {
-        this.selectedNode = null;
-        this.lastClickedNode = null;
-        selectionChanged = true;
-      }
-      if (selectionChanged) {
-        this.dispatchSelectionEvent();
-        this.renderer?.setMultiSelection(this.selectedNodes, this.hoveredNode?.oid ?? null);
-        this.renderer?.markDirty();
-        this.scheduleRender();
-      }
-    }
   }
 
   // Export methods
@@ -3024,6 +3077,7 @@ export class LvGraphCanvas extends LitElement {
         statsColumnWidth: this.statsColumnWidth,
         showAuthorColumn: this.showAuthorColumn,
         showDateColumn: this.showDateColumn,
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );
@@ -3105,11 +3159,14 @@ export class LvGraphCanvas extends LitElement {
       const color = theme.laneColors[node.colorIndex % theme.laneColors.length];
       const commit = this.realCommits.get(node.oid);
       const isMerge = commit && commit.parentIds.length > 1;
+      // Reuse the renderer's radius so the export matches what is on screen,
+      // including the "Show Commit Size" setting
+      const radius = this.renderer?.getNodeRadius(node.oid) ?? this.NODE_RADIUS;
 
       if (isMerge) {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
       } else {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${color}"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${color}"/>`);
       }
 
       // Add commit message text

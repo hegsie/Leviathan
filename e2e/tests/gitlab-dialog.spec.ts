@@ -1,5 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  setupOpenRepository,
+  setupProfilesAndAccounts,
+  type MockIntegrationAccount,
+  type MockUnifiedProfile,
+} from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import {
@@ -211,5 +216,82 @@ test.describe('GitLab Dialog - Extended Scenarios', () => {
     // Verify the error is shown within the dialog
     const errorText = page.locator('lv-gitlab-dialog .error');
     await expect(errorText).toBeVisible({ timeout: 5000 });
+  });
+});
+
+/**
+ * Regression: GitLab OAuth access tokens expire in ~2h. The dialog read the raw
+ * stored access token, so a signed-in account read as disconnected on the next
+ * open (and was marked disconnected app-wide) even though a valid refresh token
+ * was stored. Opening the dialog must refresh the expiring token first.
+ */
+test.describe('GitLab Dialog - OAuth token refresh', () => {
+  const oauthProfile: MockUnifiedProfile = {
+    id: 'profile-1',
+    name: 'Default',
+    gitName: 'Test User',
+    gitEmail: 'test@example.com',
+    signingKey: null,
+    urlPatterns: [],
+    isDefault: true,
+    color: '#4f46e5',
+    defaultAccounts: { gitlab: 'gl-oauth-1' },
+  };
+
+  const oauthAccount: MockIntegrationAccount = {
+    id: 'gl-oauth-1',
+    name: 'GitLab (gluser)',
+    integrationType: 'gitlab',
+    config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+    color: '#4f46e5',
+    cachedUser: { username: 'gluser', displayName: 'GL User', avatarUrl: null },
+    urlPatterns: [],
+    isDefault: true,
+  };
+
+  test('refreshes an expiring OAuth token when the dialog opens', async ({ page }) => {
+    await setupProfilesAndAccounts(page, {
+      profiles: [oauthProfile],
+      accounts: [oauthAccount],
+      connectedAccounts: ['gl-oauth-1'],
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      get_unified_profiles_config: {
+        version: 3,
+        profiles: [oauthProfile],
+        accounts: [oauthAccount],
+        repositoryAssignments: {},
+      },
+      // The stored credential is an OAuth bundle whose access token is inside
+      // the 5-minute refresh window.
+      get_keyring_token: JSON.stringify({
+        accessToken: 'stale-access',
+        refreshToken: 'r1',
+        expiresAt: Date.now() + 60000,
+      }),
+      store_keyring_token: null,
+      oauth_refresh_token: { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 },
+      check_gitlab_connection: {
+        connected: true,
+        user: { username: 'gluser', name: 'GL User', avatarUrl: '' },
+      },
+    });
+
+    const app2 = new AppPage(page);
+    const dialogs2 = new DialogsPage(page);
+    await app2.executeCommand('GitLab');
+    await expect(dialogs2.gitlab.dialog).toBeVisible();
+
+    // The expiring token is refreshed and the FRESH token is what gets verified.
+    await waitForCommand(page, 'oauth_refresh_token');
+    await waitForCommand(page, 'check_gitlab_connection');
+    const checks = await findCommand(page, 'check_gitlab_connection');
+    expect(checks.length).toBeGreaterThan(0);
+    expect((checks[0].args as { token: string }).token).toBe('fresh-access');
+
+    // The user sees the connected account, not the connect form.
+    await expect(dialogs2.gitlab.connectionStatus).toBeVisible({ timeout: 10000 });
+    await expect(dialogs2.gitlab.connectionStatus).toContainText('gluser');
   });
 });

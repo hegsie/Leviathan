@@ -916,6 +916,214 @@ describe('lv-diff-view', () => {
     });
   });
 
+  // ── Split view staging ────────────────────────────────────────────────
+  // Split view used to be read-only: no hunk Stage/Unstage buttons, no line
+  // checkboxes, no click-to-select and no selection actions bar — while the
+  // header still offered the line-selection toggle that did nothing there.
+  describe('split view staging', () => {
+    function headerBtn(el: LvDiffView, title: string): HTMLElement {
+      const btn = Array.from(el.shadowRoot!.querySelectorAll('.view-btn')).find(
+        (b) => b.getAttribute('title') === title
+      );
+      expect(btn, `header button "${title}"`).to.not.be.undefined;
+      return btn as HTMLElement;
+    }
+
+    async function switchToSplit(el: LvDiffView): Promise<void> {
+      headerBtn(el, 'Split view').click();
+      await el.updateComplete;
+    }
+
+    async function enterLineSelectionMode(el: LvDiffView): Promise<void> {
+      headerBtn(el, 'Toggle line selection mode for staging individual lines').click();
+      await el.updateComplete;
+    }
+
+    /** The Modified pane, which is where the hunk actions live. */
+    function modifiedPane(el: LvDiffView): Element {
+      const panes = el.shadowRoot!.querySelectorAll('.split-pane');
+      expect(panes.length, 'both split panes render').to.equal(2);
+      return panes[1];
+    }
+
+    function lastPatch(command: string): string {
+      const calls = findCommands(command);
+      expect(calls.length, `${command} should have been invoked once`).to.equal(1);
+      const args = calls[0].args as Record<string, unknown>;
+      const payload = (args?.args ?? args) as Record<string, unknown>;
+      return String(payload.patch ?? '');
+    }
+
+    it('shows Stage buttons on split-view hunk separators for an unstaged file', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      await switchToSplit(el);
+
+      const stageBtn = modifiedPane(el).querySelector('.stage-btn.stage');
+      expect(stageBtn, 'the split view offers hunk staging').to.not.be.null;
+      expect(stageBtn!.textContent).to.include('Stage');
+    });
+
+    it('shows Unstage buttons on split-view hunk separators for a staged file', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+      await switchToSplit(el);
+
+      const unstageBtn = modifiedPane(el).querySelector('.stage-btn.unstage');
+      expect(unstageBtn, 'the split view offers hunk unstaging').to.not.be.null;
+      expect(unstageBtn!.textContent).to.include('Unstage');
+    });
+
+    it('stages a hunk from split view', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      await switchToSplit(el);
+
+      clearHistory();
+      (modifiedPane(el).querySelector('.stage-btn.stage') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const patch = lastPatch('stage_hunk');
+      expect(patch).to.include('+new line');
+      expect(patch).to.include('-old line');
+    });
+
+    it('does not show stage buttons in split view for commit diffs', async () => {
+      const el = await renderDiffView({
+        file: null,
+        commitFile: { commitOid: 'abc123', filePath: 'src/main.ts' },
+      });
+      await switchToSplit(el);
+
+      expect(el.shadowRoot!.querySelector('.stage-btn'), 'commit diffs cannot be staged').to.be
+        .null;
+    });
+
+    it('renders checkboxes on split changed lines in line-selection mode', async () => {
+      const el = await renderDiffView();
+      await enterLineSelectionMode(el);
+      await switchToSplit(el);
+
+      const addCheckbox = el.shadowRoot!.querySelector(
+        '.split-line.code-addition .line-checkbox'
+      );
+      const delCheckbox = el.shadowRoot!.querySelector(
+        '.split-line.code-deletion .line-checkbox'
+      );
+      expect(addCheckbox, 'addition rows are selectable').to.not.be.null;
+      expect(delCheckbox, 'deletion rows are selectable').to.not.be.null;
+    });
+
+    it('clicking a changed line in split view selects it and shows the selection actions bar', async () => {
+      const el = await renderDiffView();
+      await enterLineSelectionMode(el);
+      await switchToSplit(el);
+
+      const addLine = el.shadowRoot!.querySelector('.split-line.code-addition') as HTMLElement;
+      expect(addLine).to.not.be.null;
+      addLine.click();
+      await el.updateComplete;
+
+      expect(
+        el.shadowRoot!.querySelector('.split-line.code-addition')!.classList.contains('selected'),
+        'the clicked row is marked selected'
+      ).to.be.true;
+
+      const actions = el.shadowRoot!.querySelector('.selection-actions');
+      expect(actions, 'the selection actions bar is reachable from split view').to.not.be.null;
+      expect(actions!.textContent).to.include('1 line selected');
+    });
+
+    it('Stage Selected stages only the lines picked in split view', async () => {
+      const el = await renderDiffView();
+      await enterLineSelectionMode(el);
+      await switchToSplit(el);
+
+      (el.shadowRoot!.querySelector('.split-line.code-addition') as HTMLElement).click();
+      await el.updateComplete;
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.selection-actions .selection-btn.primary') as HTMLElement)
+        .click();
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      const lines = lastPatch('stage_hunk').split('\n');
+      expect(lines).to.include('+new line');
+      // The deletion was not selected, so it stays in the index as context.
+      expect(lines.some((l) => l.startsWith('-old line'))).to.be.false;
+      expect(lines).to.include(' old line');
+    });
+
+    it('a whitespace-only split row selects both of its lines', async () => {
+      // One change shown on both sides — selecting it must select the
+      // deletion AND the addition, the same rule the unified view applies.
+      const diff = makeDiffFile({
+        hunks: [
+          makeDiffHunk({
+            header: '@@ -1,2 +1,2 @@',
+            oldStart: 1,
+            oldLines: 2,
+            newStart: 1,
+            newLines: 2,
+            lines: [
+              makeDiffLine({ content: 'ctx', origin: 'context', oldLineNo: 1, newLineNo: 1 }),
+              makeDiffLine({
+                content: '    indented',
+                origin: 'deletion',
+                oldLineNo: 2,
+                newLineNo: null,
+              }),
+              makeDiffLine({
+                content: '\tindented',
+                origin: 'addition',
+                oldLineNo: null,
+                newLineNo: 2,
+              }),
+            ],
+          }),
+        ],
+      });
+      setupDefaultMocks({ diff });
+      const el = await renderDiffView();
+      await enterLineSelectionMode(el);
+      await switchToSplit(el);
+
+      const panes = el.shadowRoot!.querySelectorAll('.split-pane');
+      const leftCell = panes[0].querySelector('.split-line.code-ws-change') as HTMLElement;
+      expect(leftCell, 'the whitespace-only row renders on the Original side').to.not.be.null;
+      leftCell.click();
+      await el.updateComplete;
+
+      const selected = (el as unknown as { selectedLines: Set<string> }).selectedLines;
+      expect(Array.from(selected).sort()).to.deep.equal(['0-1', '0-2']);
+      expect(
+        panes[0].querySelector('.split-line.code-ws-change')!.classList.contains('selected')
+      ).to.be.true;
+      expect(
+        panes[1].querySelector('.split-line.code-ws-change')!.classList.contains('selected')
+      ).to.be.true;
+    });
+
+    it('surfaces an error when staging a hunk from split view fails', async () => {
+      const diff = makeDiffFile();
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') throw new Error('index.lock exists');
+        if (command === 'get_file_diff') return diff;
+        return null;
+      };
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      await switchToSplit(el);
+      uiStore.setState({ toasts: [] });
+
+      (modifiedPane(el).querySelector('.stage-btn.stage') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the failure is not silent').to.equal(1);
+      expect(errors[0].message).to.include('Failed to stage hunk');
+    });
+  });
+
   // ── Hunk stage/unstage buttons ────────────────────────────────────────
   describe('hunk staging', () => {
     it('shows Stage button for unstaged file hunks', async () => {
@@ -1464,8 +1672,9 @@ describe('lv-diff-view', () => {
       checkbox!.click();
       await el.updateComplete;
 
-      const bar = el.shadowRoot!.querySelector('.selection-actions');
-      expect(bar, 'the bulk selection bar must be reachable in the virtualized view').to.not.be.null;
+      const bars = el.shadowRoot!.querySelectorAll('.selection-actions');
+      expect(bars.length, 'the bulk selection bar must be rendered exactly once in the virtualized view').to.equal(1);
+      const bar = bars[0];
       expect(bar!.querySelector('.selection-info')!.textContent).to.contain('1 line selected');
 
       clearHistory();
