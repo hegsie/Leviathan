@@ -46,7 +46,8 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let head_ref = repo.head().ok().map(|h| {
+    let head = repo.head().ok();
+    let head_ref = head.as_ref().map(|h| {
         h.shorthand()
             .ok()
             .map(|s| s.to_string())
@@ -56,6 +57,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
                     .unwrap_or_default()
             })
     });
+    let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
     // Detect shallow and partial clone status
     let is_shallow = repo.is_shallow();
@@ -67,6 +69,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref,
+        detached_head_oid,
         state: RepositoryState::from(repo.state()),
         is_shallow,
         is_partial_clone,
@@ -136,6 +139,91 @@ fn validate_clone_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the `git clone` invocation used by the CLI fallback path.
+///
+/// The token is deliberately NOT spliced into the URL. An argv is world
+/// readable in the process list for the whole life of the clone, and git
+/// echoes the URL back in its own error text, which the clone dialog renders.
+/// It is handed to git out of band instead, through a one-shot credential
+/// helper that reads it from the child's environment — the same mechanism the
+/// force-push path in remote.rs uses. As a side effect the token no longer has
+/// to survive URL syntax, so one containing `/`, `@` or `:` works.
+#[allow(clippy::too_many_arguments)]
+fn build_clone_command(
+    url: &str,
+    dest: &Path,
+    bare: bool,
+    branch: Option<&str>,
+    depth: Option<u32>,
+    filter: Option<&str>,
+    single_branch: bool,
+    token: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("clone");
+
+    if let Some(depth_val) = depth {
+        cmd.arg("--depth").arg(depth_val.to_string());
+    }
+
+    if let Some(filter_spec) = filter {
+        cmd.arg("--filter").arg(filter_spec);
+    }
+
+    if single_branch {
+        cmd.arg("--single-branch");
+    }
+
+    if bare {
+        cmd.arg("--bare");
+    }
+
+    if let Some(branch) = branch {
+        cmd.arg("--branch").arg(branch);
+    }
+
+    // `--` prevents URL/path from being parsed as a flag
+    // (defense against `--upload-pack=` style injection).
+    cmd.arg("--");
+    cmd.arg(url);
+    cmd.arg(dest);
+
+    // Only HTTPS can consume a token; the previous in-URL form was gated the
+    // same way, so an ssh:// or git:// clone keeps using the user's own
+    // credentials exactly as before.
+    if let (Some(token_value), true) = (token, url.starts_with("https://")) {
+        cmd.env("LEVIATHAN_CLONE_TOKEN", token_value);
+        // Two entries: the empty helper resets the list, so the token the
+        // caller gave us wins outright the way in-URL credentials did. Without
+        // the reset, a system helper holding a stale credential for the same
+        // host would answer first and the clone would fail where it used to
+        // succeed. Nothing is set when we have no token, so the user's own
+        // helper is untouched on every other clone.
+        cmd.env("GIT_CONFIG_COUNT", "2");
+        cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+        cmd.env("GIT_CONFIG_VALUE_0", "");
+        cmd.env("GIT_CONFIG_KEY_1", "credential.helper");
+        // `git` as the username matches the git2 path's fallback; every
+        // provider we support authenticates a token as the password and
+        // ignores the username.
+        cmd.env(
+            "GIT_CONFIG_VALUE_1",
+            "!f() { echo username=git; echo \"password=$LEVIATHAN_CLONE_TOKEN\"; }; f",
+        );
+    }
+
+    cmd
+}
+
+/// Wrap git's stderr in the error the clone dialog displays, with any
+/// credentials embedded in a URL stripped first.
+fn clone_failed(stderr: &str) -> LeviathanError {
+    LeviathanError::Custom(format!(
+        "git clone failed: {}",
+        crate::commands::credentials::redact_credentials_in_text(stderr.trim())
+    ))
+}
+
 /// Detect if a repository is a partial clone and extract the filter
 fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>) {
     let config = match repo.config() {
@@ -154,6 +242,20 @@ fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>
         (true, filter)
     } else {
         (false, None)
+    }
+}
+
+/// The commit a detached HEAD points at — a tag or commit checkout, or an
+/// interrupted rebase/bisect. Takes the already-resolved HEAD instead of
+/// re-reading it: an unborn HEAD does not resolve, so asking for it again would
+/// turn opening a freshly initialised repository into an error.
+fn detached_head_oid(
+    repo: &git2::Repository,
+    head: Option<&git2::Reference<'_>>,
+) -> Result<Option<String>> {
+    match head {
+        Some(head) if repo.head_detached()? => Ok(head.target().map(|oid| oid.to_string())),
+        _ => Ok(None),
     }
 }
 
@@ -227,49 +329,16 @@ pub async fn clone_repository(
         if needs_cli {
             // git2 doesn't support --depth, --filter, or --single-branch, so fall back to git CLI
             let result = tokio::task::spawn_blocking(move || {
-                let mut cmd = std::process::Command::new("git");
-                cmd.arg("clone");
-
-                if let Some(depth_val) = depth {
-                    cmd.arg("--depth").arg(depth_val.to_string());
-                }
-
-                if let Some(ref filter_spec) = filter {
-                    cmd.arg("--filter").arg(filter_spec);
-                }
-
-                if single_branch {
-                    cmd.arg("--single-branch");
-                }
-
-                if bare {
-                    cmd.arg("--bare");
-                }
-
-                if let Some(ref branch) = branch {
-                    cmd.arg("--branch").arg(branch);
-                }
-
-                // If a token is provided, inject it into the URL for HTTPS authentication
-                let effective_url = if let Some(ref token) = token_clone {
-                    if url_clone.starts_with("https://") {
-                        url_clone.replacen(
-                            "https://",
-                            &format!("https://x-access-token:{}@", token),
-                            1,
-                        )
-                    } else {
-                        url_clone.clone()
-                    }
-                } else {
-                    url_clone.clone()
-                };
-
-                // `--` prevents URL/path from being parsed as a flag
-                // (defense against `--upload-pack=` style injection).
-                cmd.arg("--");
-                cmd.arg(&effective_url);
-                cmd.arg(&dest_path);
+                let mut cmd = build_clone_command(
+                    &url_clone,
+                    &dest_path,
+                    bare,
+                    branch.as_deref(),
+                    depth,
+                    filter.as_deref(),
+                    single_branch,
+                    token_clone.as_deref(),
+                );
 
                 // Spawned rather than run to completion so a cancel can kill it.
                 // stderr is drained on its own thread: git clone writes progress
@@ -357,10 +426,7 @@ pub async fn clone_repository(
                 let stderr = stderr_reader.join().unwrap_or_default();
 
                 if !status.success() {
-                    return Err(LeviathanError::Custom(format!(
-                        "git clone failed: {}",
-                        stderr.trim()
-                    )));
+                    return Err(clone_failed(&stderr));
                 }
 
                 git2::Repository::open(&dest_path).map_err(|e| {
@@ -378,12 +444,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -407,6 +475,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow,
                 is_partial_clone,
@@ -555,12 +624,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -581,6 +652,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow: false, // Full clone via git2 is never shallow
                 is_partial_clone: false,
@@ -736,6 +808,8 @@ pub async fn init_repository(
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref: None,
+        // A fresh repository's HEAD is unborn, which is not detached.
+        detached_head_oid: None,
         state: RepositoryState::Clean,
         is_shallow: false,
         is_partial_clone: false,
@@ -800,6 +874,226 @@ mod tests {
         assert!(validate_clone_url("plainstring").is_err());
     }
 
+    // ========================================================================
+    // build_clone_command / clone_failed: the token must never reach argv
+    // ========================================================================
+
+    fn args_of(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    /// The command line of a running process is readable by every other
+    /// process on the machine, so a token spliced into the clone URL is a
+    /// plaintext credential leak for the whole life of the clone.
+    #[test]
+    fn test_build_clone_command_keeps_the_token_out_of_argv() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+
+        let args = args_of(&cmd);
+        assert!(
+            args.iter().all(|a| !a.contains("ghp_s3cret")),
+            "token must not appear in argv: {:?}",
+            args
+        );
+        assert!(
+            args.iter().all(|a| !a.contains("x-access-token")),
+            "userinfo must not appear in argv: {:?}",
+            args
+        );
+        assert!(
+            args.contains(&"https://github.com/o/r.git".to_string()),
+            "the plain URL must still be passed to git: {:?}",
+            args
+        );
+    }
+
+    /// Keeping the token out of argv is only a fix if the clone still
+    /// authenticates: git must receive it out of band, through a credential
+    /// helper reading it from the child's environment.
+    #[test]
+    fn test_build_clone_command_hands_the_token_to_git_through_a_credential_helper() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            Some("ghp_s3cret".to_string())
+        );
+        assert_eq!(env_of(&cmd, "GIT_CONFIG_COUNT"), Some("2".to_string()));
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0"),
+            Some("credential.helper".to_string())
+        );
+        // The empty helper resets the list so a stale system helper cannot
+        // answer ahead of the token the caller handed us.
+        assert_eq!(env_of(&cmd, "GIT_CONFIG_VALUE_0"), Some(String::new()));
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_1"),
+            Some("credential.helper".to_string())
+        );
+        let helper = env_of(&cmd, "GIT_CONFIG_VALUE_1").expect("helper must be configured");
+        assert!(
+            helper.contains("$LEVIATHAN_CLONE_TOKEN"),
+            "helper must read the token from the environment: {}",
+            helper
+        );
+        assert!(
+            helper.contains("username=git"),
+            "helper must supply a username: {}",
+            helper
+        );
+    }
+
+    /// A token containing URL syntax characters could not survive the splice
+    /// into the URL; handing it over out of band means it no longer has to.
+    #[test]
+    fn test_build_clone_command_handles_a_token_with_url_special_characters() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("to/ken@we:ird"),
+        );
+
+        let args = args_of(&cmd);
+        assert!(
+            args.contains(&"https://github.com/o/r.git".to_string()),
+            "URL must be passed byte-for-byte: {:?}",
+            args
+        );
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            Some("to/ken@we:ird".to_string())
+        );
+    }
+
+    /// Guard (passes before and after the fix): the credential.helper reset
+    /// must never be set on a clone we have no token for, or it would disable
+    /// the user's own helper on an ordinary clone.
+    #[test]
+    fn test_build_clone_command_sets_no_credential_env_without_a_token() {
+        let no_token = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            None,
+        );
+        assert_eq!(no_token.get_envs().count(), 0);
+        assert!(args_of(&no_token).contains(&"https://github.com/o/r.git".to_string()));
+
+        // ssh:// cannot consume an HTTPS token — same gate as the old in-URL form.
+        let ssh = build_clone_command(
+            "ssh://git@host/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+        assert_eq!(env_of(&ssh, "LEVIATHAN_CLONE_TOKEN"), None);
+        assert_eq!(env_of(&ssh, "GIT_CONFIG_COUNT"), None);
+        assert!(args_of(&ssh).contains(&"ssh://git@host/o/r.git".to_string()));
+    }
+
+    /// Guard for the extraction: the flags the CLI path exists for, and the
+    /// `--` that stops a URL from being read as a flag, must all survive.
+    #[test]
+    fn test_build_clone_command_still_passes_the_shallow_and_filter_flags() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            true,
+            Some("dev"),
+            Some(5),
+            Some("blob:none"),
+            true,
+            None,
+        );
+
+        assert_eq!(
+            args_of(&cmd),
+            vec![
+                "clone",
+                "--depth",
+                "5",
+                "--filter",
+                "blob:none",
+                "--single-branch",
+                "--bare",
+                "--branch",
+                "dev",
+                "--",
+                "https://github.com/o/r.git",
+                "/tmp/x",
+            ]
+        );
+    }
+
+    /// git's stderr is rendered verbatim by the clone dialog, so a URL
+    /// carrying credentials — one git did not anonymize, or one the user typed
+    /// with a password in it — would be displayed on screen.
+    #[test]
+    fn test_clone_failed_redacts_credentials_from_git_stderr() {
+        let err = clone_failed(
+            "fatal: unable to access 'https://x-access-token:ghp_s3cret@github.com/o/r.git/': The requested URL returned error: 404",
+        );
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("git clone failed:"),
+            "message must keep its prefix: {}",
+            msg
+        );
+        assert!(!msg.contains("ghp_s3cret"), "token leaked: {}", msg);
+        assert!(!msg.contains("x-access-token"), "userinfo leaked: {}", msg);
+        assert!(
+            msg.contains("github.com/o/r.git"),
+            "message must stay diagnostically useful: {}",
+            msg
+        );
+        assert!(
+            msg.contains("404"),
+            "git's own diagnosis must survive: {}",
+            msg
+        );
+    }
+
     #[tokio::test]
     async fn test_open_repository_valid() {
         let repo = TestRepo::with_initial_commit();
@@ -825,6 +1119,42 @@ mod tests {
         let result = open_repository(repo.path_str()).await.unwrap();
         // Should have a head ref after initial commit
         assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_reports_a_detached_head() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Second", &[("a.txt", "a")]);
+        repo.repo().set_head_detached(target).unwrap();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert_eq!(result.detached_head_oid, Some(target.to_string()));
+        // Why the OID has to be its own field: a detached HEAD's shorthand is
+        // the literal "HEAD", which names no commit the UI could show.
+        assert_eq!(result.head_ref.as_deref(), Some("HEAD"));
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_reports_no_detached_head_on_a_branch() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.detached_head_oid.is_none());
+        assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_unborn_head_is_not_detached() {
+        // An unborn HEAD still resolves as a symbolic ref, so it must not be
+        // reported as detached — an empty repository is not a tag checkout.
+        let repo = TestRepo::new();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.head_ref.is_none());
+        assert!(result.detached_head_oid.is_none());
     }
 
     #[tokio::test]

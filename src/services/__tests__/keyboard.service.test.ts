@@ -1,6 +1,7 @@
 import { expect } from '@open-wc/testing';
 import type { Shortcut } from '../keyboard.service.ts';
 import { keyboardService } from '../keyboard.service.ts';
+import { pushOverlay, removeOverlay, resetOverlayStack } from '../../utils/overlay-stack.ts';
 
 // Clear localStorage before tests
 const STORAGE_KEY = 'leviathan-keyboard-settings';
@@ -442,3 +443,242 @@ describe('keyboard shortcuts must not hijack a <select>', () => {
   });
 });
 
+
+describe('shortcut customization has a single source of truth', () => {
+  const STORAGE_KEY = 'leviathan-keyboard-settings';
+
+  function storedSettings(): { vimMode?: boolean; customBindings?: Record<string, unknown> } {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  }
+
+  beforeEach(() => {
+    localStorage.removeItem(STORAGE_KEY);
+  });
+
+  it('exposes no backend keyboard-shortcut IPC wrappers', async () => {
+    // Shortcut customization is owned entirely by keyboardService and its
+    // localStorage store. A second store reachable over IPC would carry its own
+    // table of action IDs, which drifts from what registerDefaultShortcuts
+    // registers with nothing able to reconcile the two.
+    const gitService = await import('../git.service.ts');
+    const shortcutIpc = Object.keys(gitService).filter((k) => /shortcut/i.test(k));
+    expect(
+      shortcutIpc,
+      'git.service.ts must not expose a parallel keyboard-shortcut store',
+    ).to.deep.equal([]);
+  });
+
+  it('persists a rebind into the keyboard settings store', async () => {
+    const { keyboardService } = await import('../keyboard.service.ts');
+    keyboardService.register('test-persist', {
+      key: 'a',
+      action: () => {},
+      description: 'Persist test',
+      category: 'Test',
+    });
+
+    try {
+      expect(keyboardService.rebind('test-persist', { key: 'q', ctrl: true })).to.be.true;
+
+      expect(storedSettings().customBindings?.['test-persist']).to.deep.equal({
+        key: 'q',
+        ctrl: true,
+      });
+      expect(keyboardService.isCustomized('test-persist')).to.be.true;
+    } finally {
+      keyboardService.unregister('test-persist');
+    }
+  });
+
+  it('refuses a rebind onto a combo another shortcut owns and stores nothing', async () => {
+    const { keyboardService } = await import('../keyboard.service.ts');
+    keyboardService.register('test-conflict-a', {
+      key: 'q',
+      ctrl: true,
+      action: () => {},
+      description: 'Conflict owner',
+      category: 'Test',
+    });
+    keyboardService.register('test-conflict-b', {
+      key: 'a',
+      action: () => {},
+      description: 'Conflict challenger',
+      category: 'Test',
+    });
+
+    try {
+      expect(keyboardService.rebind('test-conflict-b', { key: 'q', ctrl: true })).to.be.false;
+
+      expect(storedSettings().customBindings ?? {}).to.not.have.property('test-conflict-b');
+      expect(keyboardService.isCustomized('test-conflict-b')).to.be.false;
+      expect(keyboardService.getBinding('test-conflict-b')?.key).to.equal('a');
+    } finally {
+      keyboardService.unregister('test-conflict-a');
+      keyboardService.unregister('test-conflict-b');
+    }
+  });
+
+  it('removes the custom binding from the store on reset', async () => {
+    const { keyboardService } = await import('../keyboard.service.ts');
+    keyboardService.register('test-reset', {
+      key: 'a',
+      action: () => {},
+      description: 'Reset test',
+      category: 'Test',
+    });
+
+    try {
+      expect(keyboardService.rebind('test-reset', { key: 'q', ctrl: true })).to.be.true;
+      keyboardService.resetBinding('test-reset');
+
+      expect(storedSettings().customBindings ?? {}).to.not.have.property('test-reset');
+      expect(keyboardService.isCustomized('test-reset')).to.be.false;
+      expect(keyboardService.getBinding('test-reset')?.key).to.equal('a');
+    } finally {
+      keyboardService.unregister('test-reset');
+    }
+  });
+
+  it('clears every custom binding on reset-all while keeping other settings', async () => {
+    const { keyboardService } = await import('../keyboard.service.ts');
+    keyboardService.register('test-reset-all-a', {
+      key: 'a',
+      action: () => {},
+      description: 'Reset all A',
+      category: 'Test',
+    });
+    keyboardService.register('test-reset-all-b', {
+      key: 'b',
+      action: () => {},
+      description: 'Reset all B',
+      category: 'Test',
+    });
+    const previousVimMode = keyboardService.isVimMode();
+
+    try {
+      keyboardService.setVimMode(true);
+      expect(keyboardService.rebind('test-reset-all-a', { key: 'q', ctrl: true })).to.be.true;
+      expect(keyboardService.rebind('test-reset-all-b', { key: 'w', ctrl: true })).to.be.true;
+
+      keyboardService.resetAllBindings();
+
+      expect(storedSettings().customBindings).to.deep.equal({});
+      expect(storedSettings().vimMode).to.be.true;
+      expect(keyboardService.isCustomized('test-reset-all-a')).to.be.false;
+      expect(keyboardService.isCustomized('test-reset-all-b')).to.be.false;
+    } finally {
+      keyboardService.setVimMode(previousVimMode);
+      keyboardService.unregister('test-reset-all-a');
+      keyboardService.unregister('test-reset-all-b');
+    }
+  });
+});
+
+describe('modal overlays own the keyboard', () => {
+  // Every shortcut lives on `document`, so a plain `s` behind an open dialog
+  // staged the whole working tree and `u` unstaged it — with the file-status
+  // panel hidden behind the overlay, so nothing visibly happened.
+  afterEach(() => {
+    resetOverlayStack();
+    keyboardService.setEnabled(true);
+  });
+
+  it('does not run a plain-key shortcut while a dialog covers the app, and restores it on close', () => {
+    let fired = 0;
+    keyboardService.register('test-overlay-plain', {
+      key: 'y',
+      description: 'destructive probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    const dialog = {};
+    try {
+      pushOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'no shortcut may run behind an overlay').to.equal(0);
+
+      removeOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+      expect(fired, 'and it works again once the dialog closes').to.equal(1);
+    } finally {
+      keyboardService.unregister('test-overlay-plain');
+    }
+  });
+
+  it('keeps blocking while a dialog remains under the one that closed', () => {
+    let fired = 0;
+    keyboardService.register('test-overlay-nested', {
+      key: 'y',
+      description: 'destructive probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    const dialog = {};
+    const palette = {};
+    try {
+      pushOverlay(dialog);
+      pushOverlay(palette);
+      removeOverlay(palette);
+
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'y' }));
+
+      expect(fired, 'the dialog underneath still covers the app').to.equal(0);
+    } finally {
+      keyboardService.unregister('test-overlay-nested');
+    }
+  });
+
+  it('does not drive vim navigation behind a dialog', () => {
+    let down = 0;
+    keyboardService.setVimMode(true);
+    keyboardService.setVimActions({
+      navigateDown: () => {
+        down++;
+      },
+    });
+
+    const dialog = {};
+    try {
+      pushOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+      expect(down, 'j must not move the graph behind a modal').to.equal(0);
+
+      removeOverlay(dialog);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+      expect(down, 'and it moves again once the dialog closes').to.equal(1);
+    } finally {
+      keyboardService.setVimMode(false);
+      keyboardService.setVimActions({});
+    }
+  });
+
+  it('still runs Ctrl/Cmd combos while a dialog covers the app', () => {
+    // The guard must not kill Cmd+P, Cmd+, or Ctrl+Enter from inside a dialog:
+    // those are deliberate and unambiguous.
+    let fired = 0;
+    keyboardService.register('test-overlay-mod', {
+      key: 'r',
+      ctrl: true,
+      description: 'mod probe',
+      category: 'Test',
+      action: () => {
+        fired++;
+      },
+    });
+
+    try {
+      pushOverlay({});
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true }));
+      expect(fired, 'modifier combos stay live behind an overlay').to.equal(1);
+    } finally {
+      keyboardService.unregister('test-overlay-mod');
+    }
+  });
+});

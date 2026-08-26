@@ -24,6 +24,7 @@ use services::ai::AiState;
 use services::commit_index::SharedCommitIndex;
 use services::{
     create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
+    RemoteOpRegistry,
 };
 
 /// Initialize the application
@@ -122,6 +123,7 @@ pub fn run() {
         .manage(create_autofetch_state())
         .manage(create_update_state())
         .manage(CancellationRegistry::default())
+        .manage(RemoteOpRegistry::default())
         .manage(SharedCommitIndex::default())
         .setup(|app| {
             // Initialize AI state with config directory
@@ -787,11 +789,6 @@ pub fn run() {
             commands::clipboard::copy_to_clipboard,
             commands::clipboard::get_commit_info_for_copy,
             commands::clipboard::get_file_path_for_copy,
-            // Keyboard shortcuts
-            commands::shortcuts::get_keyboard_shortcuts,
-            commands::shortcuts::set_keyboard_shortcut,
-            commands::shortcuts::reset_keyboard_shortcuts,
-            commands::shortcuts::get_default_shortcuts,
             // Commit message validation
             commands::validation::validate_commit_message,
             commands::validation::get_commit_message_rules,
