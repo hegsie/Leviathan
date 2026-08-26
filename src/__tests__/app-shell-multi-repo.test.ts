@@ -1000,6 +1000,57 @@ describe('app-shell multi-repo behavior', () => {
     });
   });
 
+  describe('describe → create-tag handoff', () => {
+    it('creates the tag in the repo describe was pinned to, not the active tab', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+
+        const describeDialog = el.shadowRoot!.querySelector('lv-describe-dialog');
+        expect(describeDialog, 'describe dialog is rendered').to.exist;
+
+        // Describe was opened on a commit in repo A; the user then switched
+        // tabs, which repoints every live `.repositoryPath` binding at B.
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        // "Create a tag here" from describe's empty state.
+        describeDialog!.dispatchEvent(
+          new CustomEvent('describe-create-tag', {
+            detail: { target: 'abc123def456', repositoryPath: '/repo/a' },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        await el.updateComplete;
+
+        const tagDialog = el.shadowRoot!.querySelector('lv-create-tag-dialog') as HTMLElement & {
+          pinnedRepositoryPathIfOpen: string | null;
+          updateComplete: Promise<unknown>;
+        };
+        expect(tagDialog, 'create-tag dialog is rendered').to.exist;
+        await tagDialog.updateComplete;
+
+        // The oid only exists in repo A, so the tag must be created there —
+        // tagging it against the active tab would fail, or worse, hit a
+        // different commit that happens to share the prefix.
+        expect(tagDialog.pinnedRepositoryPathIfOpen).to.equal('/repo/a');
+
+        const input = tagDialog.shadowRoot!.querySelector('#target-input') as
+          | HTMLInputElement
+          | null;
+        expect(input, 'target field is rendered').to.exist;
+        expect(input!.value).to.equal('abc123def456');
+      } finally {
+        el.remove();
+      }
+    });
+  });
+
   describe('conflict dialog repo pinning', () => {
     it('keeps operating on the repo it was opened for after a tab switch', async () => {
       const el = createAppShell();

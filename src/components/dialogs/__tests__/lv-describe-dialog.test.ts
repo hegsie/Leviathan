@@ -19,11 +19,29 @@ let describeResponse: unknown = {
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
+/**
+ * When parking is on, `describe` never settles on its own — each call is
+ * captured so a test can settle the calls out of the order they were made,
+ * which is the whole point of the in-flight guard.
+ */
+type ParkedDescribe = {
+  args: Record<string, unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason: unknown) => void;
+};
+let parkDescribes = false;
+let parkedDescribes: ParkedDescribe[] = [];
+
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
 
   if (command === 'describe') {
     describeArgs = args as Record<string, unknown>;
+    if (parkDescribes) {
+      return new Promise<unknown>((resolve, reject) => {
+        parkedDescribes.push({ args: args as Record<string, unknown>, resolve, reject });
+      });
+    }
     if (describeFailure) throw describeFailure;
     return describeResponse;
   }
@@ -57,6 +75,8 @@ describe('lv-describe-dialog', () => {
   beforeEach(async () => {
     describeArgs = undefined;
     describeFailure = null;
+    parkDescribes = false;
+    parkedDescribes = [];
     describeResponse = {
       description: 'v1.0.0-3-gabc1234',
       tag: 'v1.0.0',
@@ -215,6 +235,147 @@ describe('lv-describe-dialog', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(describeArgs?.path).to.equal('/test/repo');
+  });
+
+  /** Let a settled describe reach the DOM. */
+  async function settle(el: LvDescribeDialog): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+  }
+
+  it('drops a slow describe for the commit the dialog was reopened away from', async () => {
+    parkDescribes = true;
+
+    el.open('aaaaaaa1111111', 'Old commit');
+    await el.updateComplete;
+    expect(parkedDescribes).to.have.length(1);
+    const slowFirst = parkedDescribes[0];
+
+    // Closed, then reopened on a different commit while the first is still out.
+    el.close();
+    el.open('bbbbbbb2222222', 'New commit');
+    await el.updateComplete;
+    expect(parkedDescribes).to.have.length(2);
+
+    // The second commit answers first...
+    parkedDescribes[1].resolve({
+      description: 'v2.0.0',
+      tag: 'v2.0.0',
+      commitsAhead: 0,
+      commitHash: null,
+      isDirty: false,
+    });
+    await settle(el);
+
+    // ...and only then does the abandoned first answer come back.
+    slowFirst.resolve({
+      description: 'v1.0.0-3-gabc1234',
+      tag: 'v1.0.0',
+      commitsAhead: 3,
+      commitHash: 'abc1234',
+      isDirty: false,
+    });
+    await settle(el);
+
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(el.shadowRoot!.querySelector('.description')!.textContent).to.contain('v2.0.0');
+    expect(text).to.contain('New commit');
+    // The stale answer must not repaint the commit now on screen.
+    expect(text).to.not.contain('v1.0.0-3-gabc1234');
+    expect(text).to.not.contain('Old commit');
+  });
+
+  it('drops a stale success so it cannot bury the current commit\'s error', async () => {
+    parkDescribes = true;
+
+    el.open('aaaaaaa1111111');
+    await el.updateComplete;
+    const slowFirst = parkedDescribes[0];
+
+    el.close();
+    el.open('bbbbbbb2222222');
+    await el.updateComplete;
+
+    // The commit now on screen genuinely fails.
+    parkedDescribes[1].reject({ code: 'OPERATION_FAILED', message: 'bad revision' });
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.error-message')!.textContent).to.contain('bad revision');
+
+    // The abandoned request then succeeds. It names a commit that is no longer
+    // on screen, so it must not replace the error with a confident wrong answer.
+    slowFirst.resolve({
+      description: 'v1.0.0-3-gabc1234',
+      tag: 'v1.0.0',
+      commitsAhead: 3,
+      commitHash: 'abc1234',
+      isDirty: false,
+    });
+    await settle(el);
+
+    expect(el.shadowRoot!.querySelector('.error-message')!.textContent).to.contain('bad revision');
+    expect(el.shadowRoot!.querySelector('.description')).to.be.null;
+  });
+
+  it('lets the last lightweight-tag toggle win when the re-runs answer out of order', async () => {
+    await openAndSettle(el, 'abc1234def5678');
+    parkDescribes = true;
+
+    const checkbox = el.shadowRoot!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+
+    expect(parkedDescribes).to.have.length(2);
+    expect(parkedDescribes[0].args.tags).to.equal(true);
+    expect(parkedDescribes[1].args.tags).to.equal(false);
+
+    // The final state (annotated only) answers, then the abandoned one does.
+    parkedDescribes[1].resolve({
+      description: 'v1.0.0-3-gabc1234',
+      tag: 'v1.0.0',
+      commitsAhead: 3,
+      commitHash: 'abc1234',
+      isDirty: false,
+    });
+    await settle(el);
+    parkedDescribes[0].resolve({
+      description: 'lightweight-9-gdef5678',
+      tag: 'lightweight',
+      commitsAhead: 9,
+      commitHash: 'def5678',
+      isDirty: false,
+    });
+    await settle(el);
+
+    expect(el.shadowRoot!.querySelector('.description')!.textContent).to.contain('v1.0.0-3-gabc1234');
+    expect(el.shadowRoot!.textContent).to.not.contain('lightweight-9-gdef5678');
+  });
+
+  it('hands the create-tag request the repository it pinned, not the active one', async () => {
+    describeFailure = { code: 'NO_TAGS_REACHABLE', message: 'No tags reachable' };
+    await openAndSettle(el, 'abc1234def5678');
+
+    // The host rebinds this when the user switches tabs behind the dialog.
+    el.repositoryPath = '/other/repo';
+    await el.updateComplete;
+
+    let detail: { target?: string; repositoryPath?: string } | undefined;
+    el.addEventListener('describe-create-tag', (e) => {
+      detail = (e as CustomEvent<{ target?: string; repositoryPath?: string }>).detail;
+    });
+
+    const button = Array.from(el.shadowRoot!.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Create a tag here'),
+    );
+    button!.click();
+
+    // The oid only exists in the repo describe ran against.
+    expect(detail?.target).to.equal('abc1234def5678');
+    expect(detail?.repositoryPath).to.equal('/test/repo');
   });
 
   it('never reports work in flight — describe only reads', async () => {

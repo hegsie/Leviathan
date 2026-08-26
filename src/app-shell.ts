@@ -5780,8 +5780,8 @@ export class AppShell extends LitElement {
         ></lv-create-branch-dialog>
         <lv-describe-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          @describe-create-tag=${(e: CustomEvent<{ target?: string }>) =>
-            this.createTagDialog?.open(e.detail?.target || undefined)}
+          @describe-create-tag=${(e: CustomEvent<{ target?: string; repositoryPath?: string }>) =>
+            this.createTagDialog?.open(e.detail?.target || undefined, e.detail?.repositoryPath || undefined)}
         ></lv-describe-dialog>
         <lv-cherry-pick-dialog
           .repositoryPath=${this.activeRepository.repository.path}

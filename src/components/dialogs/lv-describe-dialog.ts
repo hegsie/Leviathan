@@ -207,6 +207,16 @@ export class LvDescribeDialog extends LitElement {
   private pinnedRepoPath = '';
   private isOpen = false;
 
+  /**
+   * Bumped whenever the answer on screen stops being the one we are waiting
+   * for — a new run, and every close. `describeCommit` is a round trip, so
+   * without this a slow reply for the commit the dialog USED to show lands on
+   * top of the commit it shows now: close it on A, reopen it on B, and A's
+   * late reply repaints B's heading with A's tag. A reply whose generation has
+   * been superseded is dropped instead.
+   */
+  private requestGeneration = 0;
+
   /** The pinned repo while open, else null — the host's tab-close sweep. */
   public get pinnedRepositoryPathIfOpen(): string | null {
     return this.isOpen ? this.pinnedRepoPath : null;
@@ -254,8 +264,14 @@ export class LvDescribeDialog extends LitElement {
   }
 
   public close(): void {
-    this.isOpen = false;
+    this.markClosed();
     this.modal.open = false;
+  }
+
+  /** Closed by any route: drop whatever describe is still in flight for it. */
+  private markClosed(): void {
+    this.isOpen = false;
+    this.requestGeneration++;
   }
 
   private reset(): void {
@@ -270,6 +286,7 @@ export class LvDescribeDialog extends LitElement {
   }
 
   private async runDescribe(): Promise<void> {
+    const generation = ++this.requestGeneration;
     this.isLoading = true;
     this.error = '';
     this.noTags = false;
@@ -282,6 +299,10 @@ export class LvDescribeDialog extends LitElement {
       // question here is about the commit, not the working tree.
       dirty: false,
     });
+
+    // Superseded while we waited: this answer is about a commit, a tag mode or
+    // a dialog session that is no longer on screen. Leave the current one be.
+    if (generation !== this.requestGeneration) return;
 
     if (response.success && response.data) {
       this.result = response.data;
@@ -315,10 +336,15 @@ export class LvDescribeDialog extends LitElement {
    */
   private handleCreateTag(): void {
     const target = this.target;
+    // The pinned repo travels with the target. `target` is an oid in THIS
+    // repository, and the host's create-tag dialog is bound live to the active
+    // tab — so after a tab switch the host would otherwise tag a commit that
+    // only exists here onto whichever repository happens to be in front.
+    const repositoryPath = this.pinnedRepoPath;
     this.close();
     this.dispatchEvent(
       new CustomEvent('describe-create-tag', {
-        detail: { target },
+        detail: { target, repositoryPath },
         bubbles: true,
         composed: true,
       }),
@@ -430,7 +456,7 @@ export class LvDescribeDialog extends LitElement {
 
   render() {
     return html`
-      <lv-modal modalTitle="Describe Commit" @close=${() => { this.isOpen = false; }}>
+      <lv-modal modalTitle="Describe Commit" @close=${() => { this.markClosed(); }}>
         <div class="body">
           ${this.renderTargetHeader()}
 

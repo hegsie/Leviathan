@@ -38,6 +38,7 @@ const mockRepository: Repository = {
   isShallow: false,
   isPartialClone: false,
   cloneFilter: null,
+  detachedHeadOid: null,
 };
 
 const mockOpenRepository: OpenRepository = {

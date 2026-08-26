@@ -214,7 +214,14 @@ export class LvCreateTagDialog extends LitElement {
   @query('lv-modal') private modal!: LvModal;
   @query('#tag-name-input') private inputEl!: HTMLInputElement;
 
-  public open(targetRef?: string): void {
+  /**
+   * @param targetRef - Ref or oid to tag; omit for the current HEAD
+   * @param repositoryPath - Repository the target belongs to. Callers handing
+   *   over from a dialog that pins its own repo (describe) must pass it:
+   *   `repositoryPath` here is bound live to the ACTIVE tab, so pinning from
+   *   it would aim the tag at a repository the target does not exist in.
+   */
+  public open(targetRef?: string, repositoryPath?: string): void {
     // Tag creation already in flight owns this component; reset() would
     // clear `isCreating` and re-enable the button for a second concurrent run,
     // and the first run's close() would then yank shut the reopened session.
@@ -227,7 +234,10 @@ export class LvCreateTagDialog extends LitElement {
     // tag name and message the user had entered. Re-aim at the new target if one was
     // given, refocus, and keep their text.
     if (this.isOpen) {
-      if (targetRef) {
+      // Re-aiming only makes sense within the repository this session is
+      // already pinned to; a target from a different one would be tagged
+      // against the wrong repo, so keep the session the user is typing in.
+      if (targetRef && (!repositoryPath || repositoryPath === this.pinnedRepoPath)) {
         this.targetRef = targetRef;
       }
       this.inputEl?.focus();
@@ -235,7 +245,7 @@ export class LvCreateTagDialog extends LitElement {
     }
 
     this.reset();
-    this.pinnedRepoPath = this.repositoryPath;
+    this.pinnedRepoPath = repositoryPath || this.repositoryPath;
     this.isOpen = true;
     if (targetRef) {
       this.targetRef = targetRef;
