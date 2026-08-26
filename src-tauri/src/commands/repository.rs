@@ -766,14 +766,47 @@ pub async fn list_tracked_files(path: String) -> Result<Vec<String>> {
 
 /// Initialize a new repository
 #[command]
-pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Repository> {
+pub async fn init_repository(
+    path: String,
+    bare: Option<bool>,
+    initial_branch: Option<String>,
+) -> Result<Repository> {
     let path = Path::new(&path);
 
-    let repo = if bare.unwrap_or(false) {
-        git2::Repository::init_bare(path)?
-    } else {
-        git2::Repository::init(path)?
-    };
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.bare(bare.unwrap_or(false));
+
+    // libgit2 writes the initial_head into HEAD verbatim and validates nothing,
+    // so a bad name here would produce a repository git itself cannot use.
+    // Reject it before anything is created on disk. An absent or blank value
+    // leaves initial_head unset so libgit2 keeps honouring the user's
+    // `init.defaultBranch` git config.
+    if let Some(branch) = initial_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        // libgit2 only prefixes `refs/heads/` when the name does NOT already
+        // start with `refs/` — otherwise it uses it verbatim. Validating
+        // `refs/heads/{branch}` unconditionally would therefore check a
+        // different ref than the one written: `refs/tags/v1` would pass and
+        // then point HEAD outside the branch namespace. Build the exact ref
+        // libgit2 will use, require it to be a branch, and pass that.
+        let full_ref = if branch.starts_with("refs/") {
+            branch.to_string()
+        } else {
+            format!("refs/heads/{}", branch)
+        };
+        if !full_ref.starts_with("refs/heads/") || !git2::Reference::is_valid_name(&full_ref) {
+            return Err(LeviathanError::Custom(format!(
+                "Invalid initial branch name: {}",
+                branch
+            )));
+        }
+        opts.initial_head(&full_ref);
+    }
+
+    let repo = git2::Repository::init_opts(path, &opts)?;
 
     let name = path
         .file_name()
@@ -1154,7 +1187,7 @@ mod tests {
         let path = dir.path().join("new-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), None).await;
+        let result = init_repository(path.to_string_lossy().to_string(), None, None).await;
         assert!(result.is_ok());
         let repo_info = result.unwrap();
         assert!(repo_info.is_valid);
@@ -1171,7 +1204,7 @@ mod tests {
         let path = dir.path().join("bare-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), Some(true)).await;
+        let result = init_repository(path.to_string_lossy().to_string(), Some(true), None).await;
         assert!(result.is_ok());
         let repo_info = result.unwrap();
         assert!(repo_info.is_valid);
@@ -1181,13 +1214,156 @@ mod tests {
         assert!(path.join("HEAD").exists());
     }
 
+    /// Resolve the symbolic target of HEAD (`refs/heads/<name>`) for an
+    /// unborn-HEAD repository.
+    fn head_symbolic_target(path: &Path) -> String {
+        let repo = git2::Repository::open(path).expect("Failed to open repo");
+        let head = repo.find_reference("HEAD").expect("HEAD missing");
+        head.symbolic_target()
+            .expect("HEAD target is not valid UTF-8")
+            .expect("HEAD is not symbolic")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_uses_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("new-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("trunk".to_string()),
+        )
+        .await
+        .expect("init should succeed");
+
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_bare_uses_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("bare-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let repo_info = init_repository(
+            path.to_string_lossy().to_string(),
+            Some(true),
+            Some("trunk".to_string()),
+        )
+        .await
+        .expect("init should succeed");
+
+        assert!(repo_info.is_bare);
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_rejects_invalid_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("bad-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let result = init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("bad name".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("invalid branch name must be rejected");
+        assert!(
+            err.to_string().contains("Invalid initial branch name"),
+            "unexpected error: {}",
+            err
+        );
+        // Validation runs before anything is created on disk.
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_blank_initial_branch_falls_back_to_git_default() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("blank-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("   ".to_string()),
+        )
+        .await
+        .expect("blank branch name should fall back to git's default");
+
+        // A naive implementation would forward the blank string and write
+        // `ref: refs/heads/   ` into HEAD.
+        let target = head_symbolic_target(&path);
+        assert!(
+            target.starts_with("refs/heads/"),
+            "unexpected HEAD target: {}",
+            target
+        );
+        let name = &target["refs/heads/".len()..];
+        assert!(
+            !name.is_empty() && name.trim() == name,
+            "bad branch: {name:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_rejects_non_branch_ref_as_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("tag-ref-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // libgit2 uses a `refs/`-prefixed initial_head verbatim, so this would
+        // otherwise write `ref: refs/tags/v1` into HEAD and point the new
+        // repository at the tag namespace.
+        let result = init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/tags/v1".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a non-branch ref must be rejected");
+        assert!(
+            err.to_string().contains("Invalid initial branch name"),
+            "unexpected error: {}",
+            err
+        );
+        // Validation runs before anything is created on disk.
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_accepts_fully_qualified_branch_ref() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("qualified-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // A fully qualified branch ref must not be double-prefixed into
+        // `refs/heads/refs/heads/trunk`.
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/heads/trunk".to_string()),
+        )
+        .await
+        .expect("a fully qualified branch ref should be accepted");
+
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
     #[tokio::test]
     async fn test_init_repository_state_is_clean() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("clean-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), None)
+        let result = init_repository(path.to_string_lossy().to_string(), None, None)
             .await
             .unwrap();
         assert!(matches!(result.state, RepositoryState::Clean));

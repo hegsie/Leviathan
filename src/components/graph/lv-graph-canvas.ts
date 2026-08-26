@@ -952,13 +952,19 @@ export class LvGraphCanvas extends LitElement {
         // The "Show Avatars" app setting controls whether author avatars
         // are fetched from Gravatar (off = colored initials only)
         fetchAvatars: settingsStore.getState().showAvatars,
+        // The "Show Commit Size" app setting scales node radius by how much
+        // each commit changed (off = uniform nodes)
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );
 
-    // Keep avatar fetching in sync with the settings toggle
+    // Keep avatar fetching and node scaling in sync with the settings toggles
     this.settingsUnsubscribe = settingsStore.subscribe((state) => {
-      this.renderer?.setConfig({ fetchAvatars: state.showAvatars });
+      this.renderer?.setConfig({
+        fetchAvatars: state.showAvatars,
+        scaleNodesByCommitSize: state.showCommitSize,
+      });
       this.renderer?.markDirty();
       this.scheduleRender();
     });
@@ -3071,6 +3077,7 @@ export class LvGraphCanvas extends LitElement {
         statsColumnWidth: this.statsColumnWidth,
         showAuthorColumn: this.showAuthorColumn,
         showDateColumn: this.showDateColumn,
+        scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
       },
       getThemeFromCSS()
     );
@@ -3152,11 +3159,14 @@ export class LvGraphCanvas extends LitElement {
       const color = theme.laneColors[node.colorIndex % theme.laneColors.length];
       const commit = this.realCommits.get(node.oid);
       const isMerge = commit && commit.parentIds.length > 1;
+      // Reuse the renderer's radius so the export matches what is on screen,
+      // including the "Show Commit Size" setting
+      const radius = this.renderer?.getNodeRadius(node.oid) ?? this.NODE_RADIUS;
 
       if (isMerge) {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${theme.background}" stroke="${color}" stroke-width="2"/>`);
       } else {
-        svgParts.push(`<circle cx="${x}" cy="${y}" r="${this.NODE_RADIUS}" fill="${color}"/>`);
+        svgParts.push(`<circle cx="${x}" cy="${y}" r="${radius}" fill="${color}"/>`);
       }
 
       // Add commit message text

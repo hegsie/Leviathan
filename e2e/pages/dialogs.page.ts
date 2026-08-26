@@ -85,6 +85,7 @@ export class CloneDialogPage extends BaseDialog {
  */
 export class InitDialogPage extends BaseDialog {
   readonly pathInput: Locator;
+  readonly initialBranchInput: Locator;
   readonly browseButton: Locator;
   readonly initButton: Locator;
   readonly bareCheckbox: Locator;
@@ -96,6 +97,8 @@ export class InitDialogPage extends BaseDialog {
     this.closeButton = page.getByRole('button', { name: 'Close' });
     // Path input has label "Repository Location"
     this.pathInput = page.getByRole('textbox', { name: /Repository Location/i });
+    // Initial branch input has label "Initial Branch Name"
+    this.initialBranchInput = page.getByRole('textbox', { name: /Initial Branch/i });
     this.browseButton = page.getByRole('button', { name: /Browse/i });
     // Initialize button - may be disabled when no path
     this.initButton = page.getByRole('button', { name: /Initialize/i });
@@ -104,6 +107,10 @@ export class InitDialogPage extends BaseDialog {
 
   async fillPath(path: string): Promise<void> {
     await this.pathInput.fill(path);
+  }
+
+  async fillInitialBranch(branch: string): Promise<void> {
+    await this.initialBranchInput.fill(branch);
   }
 
   async init(): Promise<void> {

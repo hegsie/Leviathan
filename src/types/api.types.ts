@@ -39,6 +39,8 @@ export interface CloneRepositoryCommand {
 export interface InitRepositoryCommand {
   path: string;
   bare?: boolean;
+  /** Name for the repository's first branch. Omit to use git's own default. */
+  initialBranch?: string;
 }
 
 /**
