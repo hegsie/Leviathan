@@ -4203,12 +4203,14 @@ export async function createAzureDevOpsWorkItem(
 export async function listAdoPipelineRuns(
   organization: string,
   project: string,
+  repository: string,
   top?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPipelineRun[]>> {
   return invokeProviderCommand<AdoPipelineRun[]>("list_ado_pipeline_runs", {
     organization,
     project,
+    repository,
     top,
     token,
   });

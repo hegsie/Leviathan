@@ -970,6 +970,67 @@ describe('lv-azure-devops-dialog', () => {
       const statusDot = firstPipeline.querySelector('.pipeline-status');
       expect(statusDot).to.not.be.null;
     });
+
+    it('scopes the pipeline run listing to the detected repository', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      invokeHistory.length = 0;
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const pipelinesTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pipelines') as HTMLButtonElement;
+      pipelinesTab.click();
+      await waitForLoad(el);
+
+      const call = invokeHistory.find((c) => c.command === 'list_ado_pipeline_runs');
+      expect(call, 'pipeline runs requested').to.not.be.undefined;
+
+      const args = call!.args as Record<string, unknown>;
+      // Without a repository the backend lists builds for every repo in the project.
+      expect(args.repository).to.equal('test-repo');
+      expect(args.organization).to.equal('testorg');
+      expect(args.project).to.equal('test-project');
+      expect(args.top).to.equal(20);
+    });
+
+    it('surfaces a repository resolution failure in the pipelines tab', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      // The backend only resolves (and can only fail to resolve) the repository
+      // GUID when the dialog actually sends a repository, so the failure is
+      // modelled that way: no repository argument, no repository-scoped error.
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const repository = (args as Record<string, unknown> | undefined)?.repository;
+        if (command === 'list_ado_pipeline_runs' && repository) {
+          throw new Error(
+            `Failed to resolve repository '${String(repository)}': Azure DevOps API error 404: not found`
+          );
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const pipelinesTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pipelines') as HTMLButtonElement;
+      pipelinesTab.click();
+      await waitForLoad(el);
+
+      const errorBanner = el.shadowRoot!.querySelector('.error');
+      expect(errorBanner, 'error banner rendered').to.not.be.null;
+      expect(errorBanner!.textContent).to.include('test-repo');
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(0);
+    });
   });
 
   describe('Tab Navigation', () => {

@@ -503,3 +503,103 @@ test.describe('Azure DevOps Dialog - Extended Scenarios', () => {
     await expect(page.locator('lv-azure-devops-dialog .error, lv-azure-devops-dialog .error-message, .toast.error').first()).toBeVisible({ timeout: 5000 });
   });
 });
+
+test.describe('Azure DevOps Dialog - Pipelines scoping', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      {
+        profiles: [
+          {
+            id: 'default',
+            name: 'Default',
+            gitName: 'Test User',
+            gitEmail: 'test@example.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: '#3b82f6',
+            defaultAccounts: { 'azure-devops': 'ado-account-1' },
+          },
+        ],
+        accounts: [
+          {
+            id: 'ado-account-1',
+            name: 'My Azure DevOps',
+            integrationType: 'azure-devops',
+            config: { type: 'pat', organization: 'testorg' },
+            color: null,
+            cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+            urlPatterns: ['dev.azure.com/testorg'],
+            isDefault: false,
+          },
+        ],
+        connectedAccounts: ['ado-account-1'],
+      },
+      {
+        remotes: [
+          { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+        ],
+      },
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repository: 'testrepo',
+        remoteName: 'origin',
+      },
+      check_ado_connection: {
+        connected: true,
+        user: {
+          id: 'user-1',
+          displayName: 'Test User',
+          uniqueName: 'test@example.com',
+          imageUrl: null,
+        },
+        organization: 'testorg',
+      },
+      list_ado_pipeline_runs: [
+        {
+          id: 1,
+          name: 'CI Pipeline #1',
+          state: 'completed',
+          result: 'succeeded',
+          sourceBranch: 'main',
+          createdDate: new Date().toISOString(),
+          finishedDate: new Date().toISOString(),
+          url: 'https://dev.azure.com/testorg/testproject/_build/results?buildId=1',
+        },
+      ],
+    });
+  });
+
+  test('Pipelines tab requests runs for the detected repository', async ({ page }) => {
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await dialogs.azureDevOps.pipelinesTab.click();
+
+    // The listing must actually fire — loadPipelineRuns() returns early unless
+    // the connection check reported connected.
+    await waitForCommand(page, 'list_ado_pipeline_runs');
+    const calls = await findCommand(page, 'list_ado_pipeline_runs');
+    expect(calls.length).toBeGreaterThan(0);
+
+    // Without the repository the backend lists builds for every repo in the project.
+    const args = calls[0].args as Record<string, unknown>;
+    expect(args.repository).toBe('testrepo');
+    expect(args.organization).toBe('testorg');
+    expect(args.project).toBe('testproject');
+
+    await expect(page.locator('.pipeline-item')).toHaveCount(1);
+    await expect(page.locator('.pipeline-item').first()).toContainText('CI Pipeline');
+  });
+});
