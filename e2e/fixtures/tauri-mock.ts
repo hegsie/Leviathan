@@ -398,6 +398,8 @@ function createMockHandler(mocks: typeof defaultMockData) {
         const showIndex = (args?.index as number) ?? 0;
         return {
           index: showIndex,
+          // Echoed like the real command: the panel checks it before rendering.
+          oid: mocks.stashes[showIndex]?.oid ?? '',
           message: mocks.stashes[showIndex]?.message ?? '',
           files: [
             { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },
@@ -981,6 +983,8 @@ export async function setupTauriMocks(
             const showIndex = (args as { index?: number })?.index ?? 0;
             return {
               index: showIndex,
+              // Echoed like the real command: the panel checks it first.
+              oid: state.stashes[showIndex]?.oid ?? '',
               message: state.stashes[showIndex]?.message ?? '',
               files: [
                 { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },

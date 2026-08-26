@@ -470,6 +470,7 @@ test.describe('Stash Contents Preview', () => {
     await injectCommandMock(page, {
       stash_show: {
         index: 0,
+        oid: 'stash1',
         message: 'WIP on main',
         files: [{ path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' }],
         totalAdditions: 4,
@@ -574,7 +575,5 @@ test.describe('Stash creation', () => {
 
     expect(await findCommand(page, 'create_stash')).toHaveLength(0);
     expect(await leftPanel.getStashCount()).toBe(3);
-  });
-});
   });
 });

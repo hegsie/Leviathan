@@ -702,6 +702,25 @@ export class LvStashList extends LitElement {
       if (!isFresh()) return;
 
       if (result.success && result.data) {
+        // The index was live when resolveStashIndex read it, but stash_show is
+        // a SECOND round trip: a create or drop in between (this panel's own
+        // Stash button, another window, a terminal) renumbers the list, and the
+        // index we asked for can now name a different entry. Rendering that as
+        // this row's contents is the exact failure the preview exists to
+        // prevent — someone Dropping a stash after reading another one's diff.
+        if (result.data.oid !== stash.oid) {
+          // Toast, not this.detailsError: the usual cause of a renumber is a
+          // drop, and if the dropped entry was OURS the reload below collapses
+          // this preview — taking an inline error with it and leaving the row
+          // to just silently close. Same channel the other staleness paths use.
+          showToast(
+            `"${stash.message}" moved in the stash list while it was being read — open it again`,
+            'warning'
+          );
+          this.collapseDetails();
+          void this.loadStashes();
+          return;
+        }
         this.stashDetails = result.data;
       } else {
         this.detailsError = result.error?.message ?? 'Failed to read stash contents';
@@ -1057,13 +1076,17 @@ export class LvStashList extends LitElement {
           : html`
               <ul class="stash-list" role="list">
                 ${this.stashes.map((stash) => html`
+                  <!-- title is the full message: .stash-message is ellipsized,
+                       and since stashes can be named this is the only way to
+                       read a truncated one. The chevron and aria-expanded
+                       already say the row opens. -->
                   <li
                     class="stash-item"
                     role="listitem"
                     tabindex="0"
                     aria-label="Stash: ${stash.message}"
                     aria-expanded=${this.expandedOid === stash.oid ? 'true' : 'false'}
-                    title="Show what this stash contains"
+                    title=${stash.message}
                     @click=${() => this.handleToggleDetails(stash)}
                     @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, stash)}
                     @keydown=${(e: KeyboardEvent) => this.handleStashItemKeydown(e, stash)}

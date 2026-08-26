@@ -12,6 +12,14 @@ use crate::models::Stash;
 #[serde(rename_all = "camelCase")]
 pub struct StashShowResult {
     pub index: u32,
+    /// The stash commit this result describes.
+    ///
+    /// `index` is a POSITION: any create or drop shifts every entry below it,
+    /// so a caller that resolved an oid to an index and then asked for that
+    /// index can be handed a DIFFERENT stash. Echoing the oid back lets the
+    /// caller check it got the entry it asked about before showing a preview
+    /// someone is about to Drop on.
+    pub oid: String,
     pub message: String,
     pub files: Vec<StashFile>,
     pub total_additions: u32,
@@ -322,6 +330,7 @@ pub async fn stash_show(
 
     Ok(StashShowResult {
         index,
+        oid: stash_oid.to_string(),
         message,
         files,
         total_additions,
@@ -631,6 +640,47 @@ mod tests {
         assert_eq!(show.files[0].path, "file.txt");
         assert_eq!(show.files[0].status, "modified");
         assert!(show.patch.is_none());
+    }
+
+    /// `index` is a position; the frontend resolves a stash by oid and then
+    /// asks for that index, so the result has to say WHICH entry it describes
+    /// or a concurrent create/drop can hand back a different stash's diff.
+    #[tokio::test]
+    async fn test_stash_show_echoes_the_requested_entrys_oid() {
+        let repo = TestRepo::with_initial_commit();
+        setup_tracked_file(&repo, "file.txt", "original content");
+
+        // See test_stash_show_basic: the edit must change the file's SIZE.
+        repo.create_file("file.txt", "first stash content, a different length");
+        create_stash(repo.path_str(), Some("older".to_string()), None)
+            .await
+            .unwrap();
+
+        repo.create_file("file.txt", "second stash content, longer again for stat");
+        create_stash(repo.path_str(), Some("newer".to_string()), None)
+            .await
+            .unwrap();
+
+        // get_stashes is what the frontend matches oids against, so the oid
+        // stash_show reports must be the same one from the same listing.
+        let listed = get_stashes(repo.path_str()).await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        for entry in &listed {
+            let show = stash_show(repo.path_str(), entry.index as u32, Some(true), Some(false))
+                .await
+                .unwrap();
+            assert_eq!(
+                show.oid, entry.oid,
+                "stash@{{{}}} reported a foreign oid",
+                entry.index
+            );
+            assert_eq!(show.message, entry.message);
+        }
+
+        // And the two entries are genuinely distinct, so the check above is not
+        // trivially satisfied by both rows carrying the same oid.
+        assert_ne!(listed[0].oid, listed[1].oid);
     }
 
     #[tokio::test]

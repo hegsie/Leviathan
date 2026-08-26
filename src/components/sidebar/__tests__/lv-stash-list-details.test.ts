@@ -84,6 +84,11 @@ async function settle(el: LvStashList): Promise<void> {
   await el.updateComplete;
 }
 
+/** The oid whose preview is open. Private state, but see the drop test. */
+function expandedOid(el: LvStashList): string | null {
+  return (el as unknown as { expandedOid: string | null }).expandedOid;
+}
+
 function row(el: LvStashList): HTMLElement {
   return el.shadowRoot!.querySelector('li.stash-item') as HTMLElement;
 }
@@ -96,6 +101,7 @@ describe('lv-stash-list contents preview', () => {
     mockStashes = [makeStash({ index: 0, message: 'WIP', oid: 'abc123' })];
     stashShowResult = {
       index: 0,
+      oid: 'abc123',
       message: 'WIP',
       files: [{ path: 'src/a.ts', additions: 3, deletions: 1, status: 'modified' }],
       totalAdditions: 3,
@@ -150,6 +156,7 @@ describe('lv-stash-list contents preview', () => {
     const el = await createComponent();
     stashShowResult = {
       index: 0,
+      oid: 'abc123',
       message: 'WIP',
       files: [],
       totalAdditions: 0,
@@ -272,17 +279,93 @@ describe('lv-stash-list contents preview', () => {
   });
 
   it('closes the preview when its stash is dropped', async () => {
+    // A SURVIVING stash is the point: if the refresh emptied the list, the
+    // preview would vanish along with the rows that host it, and the assertion
+    // would still pass with the expandedOid guard deleted. Dropping only the
+    // expanded entry leaves a row rendered, so only the guard can satisfy it.
+    mockStashes = [
+      makeStash({ index: 0, message: 'WIP one', oid: 'abc123' }),
+      makeStash({ index: 1, message: 'WIP two', oid: 'def456' }),
+    ];
     const el = await createComponent();
 
     row(el).click();
     await settle(el);
     expect(el.shadowRoot!.querySelector('.stash-details')).to.not.be.null;
 
-    mockStashes = [];
+    mockStashes = [makeStash({ index: 0, message: 'WIP two', oid: 'def456' })];
     await (el as unknown as { refresh: () => Promise<void> }).refresh();
     await el.updateComplete;
 
+    expect(el.shadowRoot!.querySelectorAll('li.stash-item')).to.have.length(1);
     expect(el.shadowRoot!.querySelector('.stash-details')).to.be.null;
+    // The DOM assertion above cannot fail on its own: the preview is rendered
+    // inside the map over `stashes`, so it disappears with the dropped row
+    // whether or not anything reset the state. What the guard actually owns is
+    // that state — left set, it keeps a dropped stash's diff in `stashDetails`
+    // and its oid marked expanded. So assert the state.
+    expect(expandedOid(el)).to.be.null;
+  });
+
+  it('keeps the preview open when a DIFFERENT stash is dropped', async () => {
+    // The mirror of the case above: the guard must key on the expanded oid and
+    // not collapse on any list change at all.
+    mockStashes = [
+      makeStash({ index: 0, message: 'WIP one', oid: 'abc123' }),
+      makeStash({ index: 1, message: 'WIP two', oid: 'def456' }),
+    ];
+    const el = await createComponent();
+
+    row(el).click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.stash-details')).to.not.be.null;
+
+    mockStashes = [makeStash({ index: 0, message: 'WIP one', oid: 'abc123' })];
+    await (el as unknown as { refresh: () => Promise<void> }).refresh();
+    await el.updateComplete;
+
+    expect(expandedOid(el)).to.equal('abc123');
+    expect(el.shadowRoot!.querySelector('.stash-details')).to.not.be.null;
+  });
+
+  it('refuses a preview that came back for a different stash', async () => {
+    // resolveStashIndex reads a live index, but stash_show is a SECOND round
+    // trip. A create or drop in between renumbers the list, so that index can
+    // name another entry — and rendering its diff as this row's contents is how
+    // someone Drops the wrong stash. The echoed oid is the only proof.
+    const el = await createComponent();
+    stashShowResult = {
+      index: 0,
+      oid: 'someoneelse999',
+      message: 'WIP two',
+      files: [{ path: 'src/other.ts', additions: 9, deletions: 9, status: 'modified' }],
+      totalAdditions: 9,
+      totalDeletions: 9,
+      patch: null,
+    };
+
+    uiStore.setState({ toasts: [] });
+
+    row(el).click();
+    await settle(el);
+
+    // The other stash's diff must not be shown as this row's contents...
+    expect(el.shadowRoot!.textContent).to.not.include('src/other.ts');
+    expect(el.shadowRoot!.querySelector('.stash-details')).to.be.null;
+    // ...and the row must not just silently close.
+    expect(
+      uiStore.getState().toasts.some(t => /moved in the stash list/i.test(t.message))
+    ).to.be.true;
+  });
+
+  it('shows the full stash message on hover', async () => {
+    // .stash-message is ellipsized and stashes can be named, so the tooltip is
+    // the only way to read a truncated name before an irreversible Drop.
+    const long = 'WIP on main: a stash name far too long for the sidebar column';
+    mockStashes = [makeStash({ index: 0, message: long, oid: 'abc123' })];
+    const el = await createComponent();
+
+    expect(row(el).getAttribute('title')).to.equal(long);
   });
 
   it('does not add a phantom list entry when a stash is expanded', async () => {
@@ -295,6 +378,8 @@ describe('lv-stash-list contents preview', () => {
       makeStash({ index: 1, message: 'WIP two', oid: 'bbb222' }),
       makeStash({ index: 2, message: 'WIP three', oid: 'ccc333' }),
     ];
+    // stash_show echoes the entry it describes, and the panel checks it.
+    stashShowResult = { ...(stashShowResult as object), oid: 'aaa111' };
     const el = await createComponent();
 
     const listItems = () =>
