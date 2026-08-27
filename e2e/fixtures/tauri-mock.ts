@@ -65,6 +65,12 @@ export interface MockRemote {
   pushUrl: string | null;
 }
 
+export interface MockNote {
+  commitOid: string;
+  message: string;
+  notesRef: string;
+}
+
 /**
  * Default mock data for a typical repository state
  */
@@ -168,6 +174,8 @@ export const defaultMockData = {
   // Remotes
   remotes: [{ name: 'origin', url: 'https://github.com/test/repo.git', pushUrl: null }] as MockRemote[],
 
+  // Git notes (refs/notes/*) — empty by default, like a fresh clone
+  notes: [] as MockNote[],
   // Git Flow config — an UNINITIALIZED repo (a read that succeeded). Without
   // this case the command falls through to the unmocked default (null), which
   // the panel reports as a config READ FAILURE.
@@ -433,6 +441,9 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return null;
       }
       case 'push_tag':
+      // Deleting a tag offers to delete the remote copy too — the local
+      // delete leaves it behind and the tag fetch refspec restores it.
+      case 'delete_remote_tag':
         return null;
 
       // `git describe` names a commit after the nearest tag below it. The
@@ -554,6 +565,10 @@ function createMockHandler(mocks: typeof defaultMockData) {
       // AI availability
       case 'is_ai_available':
         return false;
+      // Null = "AI is usable"; a test wanting the unavailable-provider UI
+      // overrides this with { reason, providerSelected }.
+      case 'ai_unavailable_reason':
+        return null;
 
       // AI provider commands
       case 'get_ai_providers':
@@ -964,6 +979,8 @@ export async function setupTauriMocks(
             return null;
           }
           case 'push_tag':
+          // See the other builder's switch — tag delete offers the remote too.
+          case 'delete_remote_tag':
             return null;
 
           // `git describe` names a commit after the nearest tag below it. The
@@ -1055,6 +1072,8 @@ export async function setupTauriMocks(
           // === AI commands ===
           case 'is_ai_available':
             return false;
+          case 'ai_unavailable_reason':
+            return null;
           case 'generate_commit_message':
             return { summary: 'Auto-generated commit', body: null };
           case 'get_ai_providers':
@@ -1128,6 +1147,47 @@ export async function setupTauriMocks(
               totalLinesDeleted: 0,
             };
 
+          // === Git notes commands ===
+          case 'get_notes_refs': {
+            const refs = [...new Set(state.notes.map((n: MockNote) => n.notesRef))];
+            // Mirrors the backend: the default ref is always reported, even
+            // when the repo only keeps notes in custom refs, so the selector
+            // always has a valid write target.
+            if (!refs.includes('refs/notes/commits')) refs.push('refs/notes/commits');
+            return refs;
+          }
+          case 'get_note': {
+            const ref = (args?.notesRef as string) ?? 'refs/notes/commits';
+            return (
+              state.notes.find(
+                (n: MockNote) => n.notesRef === ref && n.commitOid === args?.commitOid,
+              ) ?? null
+            );
+          }
+          case 'get_notes': {
+            const ref = (args?.notesRef as string) ?? 'refs/notes/commits';
+            return state.notes.filter((n: MockNote) => n.notesRef === ref);
+          }
+          case 'set_note': {
+            const note: MockNote = {
+              commitOid: args?.commitOid as string,
+              message: args?.message as string,
+              notesRef: (args?.notesRef as string) ?? 'refs/notes/commits',
+            };
+            const existing = state.notes.findIndex(
+              (n: MockNote) => n.notesRef === note.notesRef && n.commitOid === note.commitOid,
+            );
+            if (existing >= 0) state.notes[existing] = note;
+            else state.notes.push(note);
+            return note;
+          }
+          case 'remove_note': {
+            const ref = (args?.notesRef as string) ?? 'refs/notes/commits';
+            state.notes = state.notes.filter(
+              (n: MockNote) => !(n.notesRef === ref && n.commitOid === args?.commitOid),
+            );
+            return null;
+          }
           // === Git Flow ===
           case 'get_gitflow_config':
             return state.gitflowConfig;

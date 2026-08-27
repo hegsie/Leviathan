@@ -85,7 +85,7 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
 /// NUL-terminated (`--null`) parsing where records and values are delimited
 /// explicitly, so trimming would corrupt values with leading/trailing
 /// whitespace or newlines (e.g. multi-line shell aliases).
-fn run_git_config_raw(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
+pub(crate) fn run_git_config_raw(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = create_command("git");
 
     if let Some(path) = repo_path {
@@ -124,7 +124,7 @@ fn run_git_config_raw(repo_path: Option<&Path>, args: &[&str]) -> Result<String>
 /// (multi-valued key, locked config, read-only file) is surfaced so the UI can
 /// show it, exactly as the git CLI refuses these operations instead of silently
 /// doing nothing.
-fn run_git_config_unset(repo_path: Option<&Path>, args: &[&str]) -> Result<()> {
+pub(crate) fn run_git_config_unset(repo_path: Option<&Path>, args: &[&str]) -> Result<()> {
     let mut cmd = create_command("git");
 
     if let Some(path) = repo_path {

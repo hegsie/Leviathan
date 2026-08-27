@@ -24,6 +24,7 @@ import {
   pull,
   push,
   pushTag,
+  deleteRemoteTag,
   lfsPull,
   lfsFetch,
   addSubmodule,
@@ -48,6 +49,11 @@ const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Prom
   { name: 'pull', command: 'pull', run: () => pull({ path: '/repo' }) },
   { name: 'push', command: 'push', run: () => push({ path: '/repo' }) },
   { name: 'pushTag', command: 'push_tag', run: () => pushTag({ path: '/repo', name: 'v1.0.0' }) },
+  {
+    name: 'deleteRemoteTag',
+    command: 'delete_remote_tag',
+    run: () => deleteRemoteTag({ path: '/repo', name: 'v1.0.0' }),
+  },
   { name: 'lfsPull', command: 'lfs_pull', run: () => lfsPull('/repo') },
   { name: 'lfsFetch', command: 'lfs_fetch', run: () => lfsFetch('/repo') },
   {

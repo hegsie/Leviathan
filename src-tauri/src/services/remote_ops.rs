@@ -169,14 +169,35 @@ where
     F: FnOnce() -> Result<T> + Send + 'static,
     T: Send + 'static,
 {
+    spawn_holding(slot, work)
+        .await
+        .map_err(|e| LeviathanError::Custom(format!("{} task failed: {}", op.task_label(), e)))?
+}
+
+/// The same claim-carrying spawn as `run_holding`, but handing back the
+/// `JoinHandle` instead of awaiting it.
+///
+/// The remote commands need the handle itself: they poll it under
+/// `tokio::time::timeout` and, when the timeout wins, hand the still-running
+/// handle to a detached reporter so a completion that lands late is still
+/// announced (`commands::remote::await_remote_task`). Awaiting it here, as
+/// `run_holding` does, throws that handle away — and a dropped handle is
+/// exactly how a late fetch/pull/push came to mutate the repository in
+/// silence.
+pub fn spawn_holding<T, F>(
+    slot: Option<RemoteOpGuard>,
+    work: F,
+) -> tokio::task::JoinHandle<Result<T>>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         // Named so it is unmistakably the claim being carried, and dropped
         // only when `work` has returned.
         let _slot = slot;
         work()
     })
-    .await
-    .map_err(|e| LeviathanError::Custom(format!("{} task failed: {}", op.task_label(), e)))?
 }
 
 #[cfg(test)]

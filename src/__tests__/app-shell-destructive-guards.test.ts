@@ -33,7 +33,7 @@ import '../app-shell.ts';
 import '../components/dialogs/lv-prompt-dialog.ts';
 import type { LvPromptDialog } from '../components/dialogs/lv-prompt-dialog.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
-import type { Repository } from '../types/git.types.ts';
+import type { Repository, StatusEntry } from '../types/git.types.ts';
 import { tryAcquireRefOp, isRefOpRunning, resetRefOpLocks } from '../utils/ref-lock.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -70,6 +70,21 @@ function mockRepo(path: string, name: string, state = 'clean'): Repository {
     isPartialClone: false,
     cloneFilter: null,
   } as Repository;
+}
+
+/** The shape repositoryStore keeps per open repository. */
+function emptyRepoData(repo: Repository) {
+  return {
+    repository: repo,
+    branches: [],
+    currentBranch: null,
+    remotes: [],
+    tags: [],
+    stashes: [],
+    status: [] as StatusEntry[],
+    stagedFiles: [],
+    unstagedFiles: [],
+  };
 }
 
 function commit(oid: string) {
@@ -351,6 +366,22 @@ describe('app-shell destructive guards', () => {
       expect(warning, 'the loss is reported').to.not.be.undefined;
       expect(warning!.message).to.contain('src/main.ts');
       expect((el as any).showBlame, 'and blame still opens').to.equal(true);
+    });
+
+    it('opening file history from the commit panel warns the same way', async () => {
+      // Same swap as Blame: the History button in the commit panel replaces
+      // lv-diff-view in the center pane, so it drops the typed text with it.
+      const el = shellWithDirtyEditor('src/main.ts');
+      uiStore.setState({ toasts: [] });
+
+      (el as any).handleShowFileHistory(
+        new CustomEvent('show-file-history', { detail: { filePath: 'src/other.ts' } }),
+      );
+
+      const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+      expect(warning, 'the loss is reported').to.not.be.undefined;
+      expect(warning!.message).to.contain('src/main.ts');
+      expect((el as any).showFileHistory, 'and the history pane still opens').to.equal(true);
     });
 
     it('closing with no diff open says nothing', async () => {
@@ -1162,7 +1193,11 @@ describe('app-shell destructive guards', () => {
       // mutating button that forgets the binding fails here without anyone
       // having to remember to add it to a list.
       // Describe only reads: it runs `git describe` and shows the answer.
-      const READ_ONLY = ['create tag', 'create branch', 'describe this commit'];
+      // "create patch" only opens the export/import dialog on its Patch tab.
+      // Writing .patch files touches a folder the user picks, never the
+      // working tree or a ref; the dialog's own Apply — which does — takes
+      // this same lock and is bound to it.
+      const READ_ONLY = ['create tag', 'create branch', 'describe this commit', 'create patch'];
       const el = shellOnRepo();
       document.body.appendChild(el);
       try {
@@ -1220,6 +1255,79 @@ describe('app-shell destructive guards', () => {
 
       expect(isRefOpRunning('/repo/one')).to.equal(false);
       expect(invokeCallArgs.some((c) => c.command === 'checkout_with_autostash')).to.equal(true);
+    });
+  });
+
+  // The banner's Skip confirms only when there IS resolution work to lose. That
+  // decision has to be made about the repository the skip will run against —
+  // handleSkipOperation resolves `state` and `path` from the pinned repo, but
+  // the confirm was reading the ACTIVE tab's conflicted files, so with a pinned
+  // path the two disagree in both directions.
+  describe('the banner Skip confirm follows the repo it is skipping', () => {
+    function conflicted(path: string): StatusEntry {
+      return { path, status: 'conflicted', isStaged: false, isConflicted: true };
+    }
+
+    function twoRepos(
+      oneStatus: StatusEntry[],
+      twoStatus: StatusEntry[]
+    ): AppShell {
+      const one = {
+        ...emptyRepoData(mockRepo('/repo/one', 'one', 'cherrypick')),
+        status: oneStatus,
+      };
+      const two = {
+        ...emptyRepoData(mockRepo('/repo/two', 'two', 'cherrypick')),
+        status: twoStatus,
+      };
+      repositoryStore.setState({ openRepositories: [one, two], activeIndex: 0 });
+      const el = document.createElement('lv-app-shell') as AppShell;
+      (el as any).activeRepository = one;
+      return el;
+    }
+
+    it('confirms when the PINNED repo has conflicts, even though the active tab has none', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([], [conflicted('CONFLICT.md')]);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'plugin:dialog|message'),
+        'the resolutions in /repo/two would have been discarded on one click',
+      ).to.equal(true);
+      const skips = invokeCallArgs.filter((c) => c.command === 'skip_cherry_pick');
+      expect(skips.length).to.equal(1);
+      expect(skips[0].args).to.deep.equal({ path: '/repo/two' });
+    });
+
+    it('does not confirm when only the ACTIVE tab has conflicts', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([conflicted('CONFLICT.md')], []);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      expect(
+        invokeCallArgs.some((c) => c.command === 'plugin:dialog|message'),
+        'an empty stop must not be gated behind another repo\u2019s conflicts',
+      ).to.equal(false);
+      expect(invokeCallArgs.filter((c) => c.command === 'skip_cherry_pick').length).to.equal(1);
+    });
+
+    it('spells the state the way the rest of the UI does', async () => {
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = twoRepos([], [conflicted('CONFLICT.md')]);
+
+      await (el as any).handleSkipOperation('/repo/two');
+
+      const confirm = invokeCallArgs.find((c) => c.command === 'plugin:dialog|message');
+      expect(
+        JSON.stringify(confirm?.args),
+        'the banner beside this says "Cherry-pick in progress"',
+      ).to.contain('cherry-pick');
+      expect(JSON.stringify(confirm?.args)).to.not.contain('cherrypick');
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal('Skipped cherry-pick');
     });
   });
 });

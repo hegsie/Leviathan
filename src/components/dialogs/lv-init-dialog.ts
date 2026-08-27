@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { initRepository } from '../../services/git.service.ts';
 import { openDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -180,6 +181,7 @@ export class LvInitDialog extends LitElement {
   ];
 
   @state() private path = '';
+  @state() private initialBranch = '';
   @state() private bare = false;
   @state() private isInitializing = false;
   @state() private error = '';
@@ -192,6 +194,9 @@ export class LvInitDialog extends LitElement {
     // and the first run's close() would then yank shut the reopened session.
     if (this.isInitializing) return;
     this.reset();
+    // Seed from the "Default Branch Name" setting on every open so the
+    // dialog always reflects the current preference.
+    this.initialBranch = settingsStore.getState().defaultBranchName;
     this.modal.open = true;
   }
 
@@ -201,6 +206,7 @@ export class LvInitDialog extends LitElement {
 
   private reset(): void {
     this.path = '';
+    this.initialBranch = '';
     this.bare = false;
     this.isInitializing = false;
     this.error = '';
@@ -209,6 +215,12 @@ export class LvInitDialog extends LitElement {
   private handlePathChange(e: Event): void {
     const input = e.target as HTMLInputElement;
     this.path = input.value;
+    this.error = '';
+  }
+
+  private handleInitialBranchChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    this.initialBranch = input.value;
     this.error = '';
   }
 
@@ -245,6 +257,8 @@ export class LvInitDialog extends LitElement {
       const result = await initRepository({
         path: this.path.trim(),
         bare: this.bare,
+        // Blank means "let git decide" — never send an empty branch name.
+        initialBranch: this.initialBranch.trim() || undefined,
       });
 
       if (result.success && result.data) {
@@ -326,6 +340,18 @@ export class LvInitDialog extends LitElement {
             >
               Browse...
             </button>
+          </div>
+
+          <div class="field">
+            <label for="initial-branch">Initial Branch Name</label>
+            <input
+              id="initial-branch"
+              type="text"
+              placeholder="Use git's default"
+              .value=${this.initialBranch}
+              @input=${this.handleInitialBranchChange}
+              ?disabled=${this.isInitializing}
+            />
           </div>
 
           <div class="checkbox-field">

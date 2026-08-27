@@ -85,6 +85,7 @@ export class CloneDialogPage extends BaseDialog {
  */
 export class InitDialogPage extends BaseDialog {
   readonly pathInput: Locator;
+  readonly initialBranchInput: Locator;
   readonly browseButton: Locator;
   readonly initButton: Locator;
   readonly bareCheckbox: Locator;
@@ -96,6 +97,8 @@ export class InitDialogPage extends BaseDialog {
     this.closeButton = page.getByRole('button', { name: 'Close' });
     // Path input has label "Repository Location"
     this.pathInput = page.getByRole('textbox', { name: /Repository Location/i });
+    // Initial branch input has label "Initial Branch Name"
+    this.initialBranchInput = page.getByRole('textbox', { name: /Initial Branch/i });
     this.browseButton = page.getByRole('button', { name: /Browse/i });
     // Initialize button - may be disabled when no path
     this.initButton = page.getByRole('button', { name: /Initialize/i });
@@ -104,6 +107,10 @@ export class InitDialogPage extends BaseDialog {
 
   async fillPath(path: string): Promise<void> {
     await this.pathInput.fill(path);
+  }
+
+  async fillInitialBranch(branch: string): Promise<void> {
+    await this.initialBranchInput.fill(branch);
   }
 
   async init(): Promise<void> {
@@ -614,6 +621,7 @@ export class BitbucketDialogPage extends BaseDialog {
   readonly oauthButton: Locator;
   readonly appPasswordButton: Locator;
   readonly oauthSignInButton: Locator;
+  readonly oauthCancelButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
 
@@ -639,6 +647,7 @@ export class BitbucketDialogPage extends BaseDialog {
     this.oauthButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("Sign in with Bitbucket")');
     this.appPasswordButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("App Password")');
     this.oauthSignInButton = page.locator('lv-bitbucket-dialog .btn-oauth');
+    this.oauthCancelButton = page.locator('lv-bitbucket-dialog .oauth-cancel');
     this.oauthSpinner = page.locator('lv-bitbucket-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-bitbucket-dialog .oauth-status');
   }
