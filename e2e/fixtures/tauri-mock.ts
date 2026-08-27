@@ -222,6 +222,32 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'get_current_branch':
         return mocks.branches.find((b) => b.isHead) || null;
 
+      case 'compare_branches':
+        return {
+          baseRef: (args?.base as string) ?? '',
+          compareRef: (args?.compare as string) ?? '',
+          ahead: 1,
+          behind: 0,
+          mergeBase: 'abc123def456',
+          commitsAhead: args?.includeCommits
+            ? [
+                {
+                  oid: 'def456abc789',
+                  shortOid: 'def456a',
+                  message: 'Add the feature',
+                  authorName: 'Test User',
+                  authorDate: Math.floor(Date.now() / 1000),
+                },
+              ]
+            : null,
+          commitsBehind: args?.includeCommits ? [] : null,
+          filesChanged: args?.includeFiles
+            ? [{ path: 'src/feature.ts', status: 'modified', additions: 12, deletions: 4, oldPath: null }]
+            : null,
+          totalAdditions: 12,
+          totalDeletions: 4,
+        };
+
       // === Branch mutations ===
       case 'checkout':
       case 'checkout_branch': {
@@ -415,6 +441,22 @@ function createMockHandler(mocks: typeof defaultMockData) {
         mocks.stashes = mocks.stashes.filter((s) => s.index !== dropIndex);
         mocks.stashes.forEach((s, i) => { s.index = i; });
         return null;
+      }
+      case 'stash_show': {
+        const showIndex = (args?.index as number) ?? 0;
+        return {
+          index: showIndex,
+          // Echoed like the real command: the panel checks it before rendering.
+          oid: mocks.stashes[showIndex]?.oid ?? '',
+          message: mocks.stashes[showIndex]?.message ?? '',
+          files: [
+            { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },
+            { path: 'src/new.ts', additions: 7, deletions: 0, status: 'added' },
+          ],
+          totalAdditions: 11,
+          totalDeletions: 2,
+          patch: null,
+        };
       }
 
       // Tag commands
@@ -731,6 +773,46 @@ export async function setupTauriMocks(
             return state.branches;
           case 'get_current_branch':
             return state.branches.find((b: MockBranch) => b.isHead) || null;
+          case 'compare_branches': {
+            const compareArgs = (args ?? {}) as {
+              base?: string;
+              compare?: string;
+              includeCommits?: boolean;
+              includeFiles?: boolean;
+            };
+            return {
+              baseRef: compareArgs.base ?? '',
+              compareRef: compareArgs.compare ?? '',
+              ahead: 1,
+              behind: 0,
+              mergeBase: 'abc123def456',
+              commitsAhead: compareArgs.includeCommits
+                ? [
+                    {
+                      oid: 'def456abc789',
+                      shortOid: 'def456a',
+                      message: 'Add the feature',
+                      authorName: 'Test User',
+                      authorDate: Math.floor(Date.now() / 1000),
+                    },
+                  ]
+                : null,
+              commitsBehind: compareArgs.includeCommits ? [] : null,
+              filesChanged: compareArgs.includeFiles
+                ? [
+                    {
+                      path: 'src/feature.ts',
+                      status: 'modified',
+                      additions: 12,
+                      deletions: 4,
+                      oldPath: null,
+                    },
+                  ]
+                : null,
+              totalAdditions: 12,
+              totalDeletions: 4,
+            };
+          }
           case 'get_remote_status': {
             const headBranch = state.branches.find((b: MockBranch) => b.isHead);
             if (headBranch?.aheadBehind) {
@@ -1023,6 +1105,22 @@ export async function setupTauriMocks(
             state.stashes = state.stashes.filter((s: MockStash) => s.index !== dropIndex);
             state.stashes.forEach((s: MockStash, i: number) => { s.index = i; });
             return null;
+          }
+          case 'stash_show': {
+            const showIndex = (args as { index?: number })?.index ?? 0;
+            return {
+              index: showIndex,
+              // Echoed like the real command: the panel checks it first.
+              oid: state.stashes[showIndex]?.oid ?? '',
+              message: state.stashes[showIndex]?.message ?? '',
+              files: [
+                { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },
+                { path: 'src/new.ts', additions: 7, deletions: 0, status: 'added' },
+              ],
+              totalAdditions: 11,
+              totalDeletions: 2,
+              patch: null,
+            };
           }
 
           // === Remote mutations ===

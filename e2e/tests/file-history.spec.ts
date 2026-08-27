@@ -645,3 +645,65 @@ test.describe('File History - Error Scenarios', () => {
     ).toBeVisible({ timeout: 5000 });
   });
 });
+
+// --------------------------------------------------------------------------
+// Restore this version
+// --------------------------------------------------------------------------
+test.describe('File History - Restore this version', () => {
+  const restoreItem = (page: import('@playwright/test').Page) =>
+    page.locator('lv-file-history .context-menu .context-menu-item', {
+      hasText: 'Restore this version',
+    });
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: MOCK_ENTRIES,
+      checkout_file_from_commit: {
+        filePath: 'src/main.ts',
+        commitOid: 'def789ghi012345',
+        content: 'restored',
+        isBinary: false,
+        size: 8,
+      },
+      'plugin:dialog|message': 'Ok',
+    });
+    await showFileHistory(page);
+  });
+
+  test('restores the panel file from the right-clicked history entry', async ({ page }) => {
+    // Second row: the file comes from the panel, the version from this commit.
+    await page.locator('lv-file-history .commit-item').nth(1).click({ button: 'right' });
+    await expect(restoreItem(page)).toBeVisible();
+    await restoreItem(page).click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'checkout_file_from_commit')).length)
+      .toBe(1);
+    const args = (await findCommand(page, 'checkout_file_from_commit'))[0].args as Record<
+      string,
+      unknown
+    >;
+    expect(args.filePath).toBe('src/main.ts');
+    expect(args.commit).toBe('def789ghi012345');
+
+    const toast = page.locator('lv-toast-container .toast.success .toast-message');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('src/main.ts');
+  });
+
+  test('reports a commit that does not contain the file', async ({ page }) => {
+    await injectCommandError(
+      page,
+      'checkout_file_from_commit',
+      "File 'src/main.ts' not found in commit def789g"
+    );
+
+    await page.locator('lv-file-history .commit-item').nth(1).click({ button: 'right' });
+    await restoreItem(page).click();
+
+    const toast = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('not found in commit');
+  });
+});

@@ -9,6 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import type { FileHistoryEntry } from '../../types/git.types.ts';
+import { restoreFileFromCommit } from '../../utils/restore-file.ts';
 
 interface HistoryContextMenuState {
   visible: boolean;
@@ -408,6 +409,32 @@ export class LvFileHistory extends LitElement {
     }));
   }
 
+  /**
+   * Restore this panel's file to its version in the right-clicked commit.
+   *
+   * No "can restore" guard, unlike the commit-details menu: with follow=true
+   * the history can include the commit that DELETED the file, and nothing in
+   * the row says which one that is. The backend's "File '<path>' not found in
+   * commit <oid>" comes back through the helper as an error toast, which is
+   * the honest outcome.
+   *
+   * `entry.pathAtCommit` — not `this.filePath` — is the path to restore: we
+   * load with follow=true, so every commit from before a rename holds the
+   * file under its OLD name and its tree does not contain the current one.
+   * Falls back to this.filePath for a backend that did not report a path.
+   */
+  private async handleContextRestoreFile(): Promise<void> {
+    const entry = this.contextMenu.entry;
+    if (!entry || !this.repositoryPath || !this.filePath) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    await restoreFileFromCommit(
+      this.repositoryPath,
+      entry.pathAtCommit ?? this.filePath,
+      entry.commit.oid,
+      entry.commit.shortId
+    );
+  }
+
   private async handleContextCopyHash(): Promise<void> {
     const entry = this.contextMenu.entry;
     if (!entry) return;
@@ -528,6 +555,13 @@ export class LvFileHistory extends LitElement {
             <line x1="16" y1="17" x2="8" y2="17"></line>
           </svg>
           View blame at this commit
+        </button>
+        <button class="context-menu-item" @click=${this.handleContextRestoreFile}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+            <polyline points="3 3 3 8 8 8"></polyline>
+          </svg>
+          Restore this version
         </button>
         <div class="context-menu-divider"></div>
         <button class="context-menu-item" @click=${this.handleContextCopyHash}>

@@ -81,8 +81,9 @@ function seedAccountToken(
   const key = `${integrationType}_token_${accountId}`;
   keyring.set(key, token);
   if (withOAuthBundle) {
-    // Far-future expiry → getFreshAccountToken returns the stored token
-    // without attempting a refresh grant.
+    // Expiry an hour out — well past the 5-minute refresh threshold, so
+    // getFreshAccountToken returns the stored token without attempting a
+    // refresh grant.
     keyring.set(
       `${key}_oauth`,
       JSON.stringify({ accessToken: token, refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }),

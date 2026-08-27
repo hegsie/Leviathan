@@ -67,6 +67,7 @@ import type { GitflowFinishContext } from './components/dialogs/lv-conflict-reso
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
 import './components/dialogs/lv-describe-dialog.ts';
+import './components/dialogs/lv-compare-branches-dialog.ts';
 import './components/dialogs/lv-search-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
 import './components/dialogs/lv-remote-dialog.ts';
@@ -111,6 +112,7 @@ import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interact
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { LvDescribeDialog } from './components/dialogs/lv-describe-dialog.ts';
+import type { LvCompareBranchesDialog } from './components/dialogs/lv-compare-branches-dialog.ts';
 import type { SearchDialogMode } from './components/dialogs/lv-search-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
 import type { LvExportImportDialog } from './components/dialogs/lv-export-import-dialog.ts';
@@ -801,6 +803,7 @@ export class AppShell extends LitElement {
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
   @query('lv-describe-dialog') private describeDialog?: LvDescribeDialog;
+  @query('lv-compare-branches-dialog') private compareBranchesDialog?: LvCompareBranchesDialog;
   @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
   @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
@@ -1524,6 +1527,10 @@ export class AppShell extends LitElement {
           'lv-describe-dialog': {
             dismissed: 'describe closed',
             running: 'describe',
+          },
+          'lv-compare-branches-dialog': {
+            dismissed: 'branch comparison closed',
+            running: 'branch comparison',
           },
           'lv-search-dialog': {
             dismissed: 'search closed',
@@ -4556,6 +4563,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.describeDialog?.open(); }),
       },
       {
+        id: 'compare-branches',
+        label: 'Compare branches',
+        category: 'action',
+        icon: 'branch',
+        action: this.requiresRepository(() => { this.compareBranchesDialog?.open(); }),
+      },
+      {
         id: 'workspaces',
         label: 'Manage workspaces',
         category: 'action',
@@ -5420,6 +5434,8 @@ export class AppShell extends LitElement {
                   const onto = e.detail?.onto;
                   if (onto) this.interactiveRebaseDialog?.open(onto);
                 }}
+                @compare-branch=${(e: CustomEvent<{ compareRef?: string }>) =>
+                  this.compareBranchesDialog?.open(e.detail?.compareRef)}
               >
                 <lv-left-panel></lv-left-panel>
               </aside>
@@ -6190,6 +6206,9 @@ export class AppShell extends LitElement {
           @describe-create-tag=${(e: CustomEvent<{ target?: string; repositoryPath?: string }>) =>
             this.createTagDialog?.open(e.detail?.target || undefined, e.detail?.repositoryPath || undefined)}
         ></lv-describe-dialog>
+        <lv-compare-branches-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+        ></lv-compare-branches-dialog>
         <lv-export-import-dialog
           .repositoryPath=${this.activeRepository.repository.path}
           .branches=${this.branches}

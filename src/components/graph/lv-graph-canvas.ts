@@ -590,6 +590,9 @@ export class LvGraphCanvas extends LitElement {
   // debounce), so the "semantic search unavailable" notice is shown once per
   // repo and re-armed only when a semantic search succeeds again.
   private semanticFailureNotifiedFor: string | null = null;
+  // Same no-debounce reasoning for the direct commit search: a failing
+  // pathspec or branch name would otherwise toast once per keystroke.
+  private searchFailureNotifiedFor: string | null = null;
   private refsByCommit: RefsByCommit = {};
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1227,23 +1230,31 @@ export class LvGraphCanvas extends LitElement {
         this.matchedCommitOids.size === 0 &&
         (this.searchFilter?.searchMode !== 'semantic' || semanticFailed)
       ) {
-        // Keyword search: try the search index first for faster results
-        const indexResults = await searchIndexService.search(repoPath, {
-          query: this.searchFilter?.query || undefined,
-          author: this.searchFilter?.author || undefined,
-          dateFrom: this.searchFilter?.dateFrom
-            ? new Date(this.searchFilter.dateFrom).getTime() / 1000
-            : undefined,
-          dateTo: this.searchFilter?.dateTo
-            ? new Date(this.searchFilter.dateTo).getTime() / 1000
-            : undefined,
-          limit: this.commitCount,
-        });
+        // Keyword search: try the search index first for faster results.
+        // The index has no file or branch dimension, so a path/branch filter
+        // must go straight to the direct search below — asking the index
+        // would silently drop that filter and highlight every loaded commit.
+        const indexCanAnswer = !this.searchFilter?.filePath && !this.searchFilter?.branch;
+        const indexResults = indexCanAnswer
+          ? await searchIndexService.search(repoPath, {
+              query: this.searchFilter?.query || undefined,
+              author: this.searchFilter?.author || undefined,
+              dateFrom: this.searchFilter?.dateFrom
+                ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+                : undefined,
+              dateTo: this.searchFilter?.dateTo
+                ? new Date(this.searchFilter.dateTo).getTime() / 1000
+                : undefined,
+              limit: this.commitCount,
+            })
+          : null;
 
         // Abort if a newer load has started
         if (this.loadVersion !== currentVersion) return;
 
         if (indexResults) {
+          // A search that answered re-arms the failure notice
+          this.searchFailureNotifiedFor = null;
           for (const commit of indexResults) {
             this.matchedCommitOids.add(commit.oid);
           }
@@ -1267,8 +1278,29 @@ export class LvGraphCanvas extends LitElement {
           if (this.loadVersion !== currentVersion) return;
 
           if (matchResult.success && matchResult.data) {
+            // A search that answered re-arms the failure notice
+            this.searchFailureNotifiedFor = null;
             for (const commit of matchResult.data) {
               this.matchedCommitOids.add(commit.oid);
+            }
+          } else {
+            // A failed search (bad pathspec, unknown branch, backend error)
+            // must not render as a legitimate zero-match search. The
+            // component can't toast itself — app-shell listens for
+            // graph-notice (same wiring as the semantic-unavailable notice).
+            log.warn('Commit search failed:', matchResult.error?.message);
+            if (this.searchFailureNotifiedFor !== repoPath) {
+              this.searchFailureNotifiedFor = repoPath;
+              this.dispatchEvent(
+                new CustomEvent('graph-notice', {
+                  detail: {
+                    message: `Search failed: ${matchResult.error?.message ?? 'unknown error'}`,
+                    type: 'error',
+                  },
+                  bubbles: true,
+                  composed: true,
+                })
+              );
             }
           }
         }
@@ -1306,6 +1338,12 @@ export class LvGraphCanvas extends LitElement {
       // would otherwise leave the error panel painted over a healthy graph
       this.loadError = null;
       this.processLayout();
+      // A reload replaces the loaded set with just the FIRST page while the
+      // scrollbar still spans the whole history, so a viewport that had been
+      // paginated deep now sits below the last loaded row with nothing
+      // painted in it — and checkLoadMore only ever runs from a scroll, so
+      // it would stay blank until the user nudged the wheel
+      this.recoverViewportAfterReload();
       const searchInfo = hasSearch ? ` (${this.matchedCommitOids.size} matches highlighted)` : '';
       log.debug(`Loaded ${this.commits.length} commits${searchInfo} in ${(performance.now() - startTime).toFixed(2)}ms`);
     } catch (err) {
@@ -1345,6 +1383,34 @@ export class LvGraphCanvas extends LitElement {
     return scrollTop + viewportHeight > loadedBottom;
   }
 
+  /**
+   * True when the WHOLE viewport sits past the loaded rows, so getVisibleRange
+   * returns an empty window and the canvas paints nothing at all.
+   */
+  private isViewportEntirelyBeyondLoaded(): boolean {
+    const scrollTop = this.scrollState?.getScroll().scrollTop ?? 0;
+    const loadedBottom = this.PADDING + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    return scrollTop >= loadedBottom;
+  }
+
+  /**
+   * Pull the scroll back onto the rows that are actually loaded. The content
+   * height can still span the FULL history (updateVirtualTotalRows pads the
+   * scroller out to commitTotal while hasMoreCommits), so the browser never
+   * clamps for us and a viewport parked past the last loaded row would paint
+   * nothing.
+   */
+  private clampScrollOntoLoadedRows(): void {
+    if (!this.scrollState || !this.virtualScroll) return;
+    const { scrollTop, scrollLeft } = this.scrollState.getScroll();
+    const loadedHeight = this.PADDING * 2 + (this.layout?.totalRows ?? 0) * this.ROW_HEIGHT;
+    // getContentSize() caps very long histories, so never scroll past it either
+    const height = Math.min(loadedHeight, this.virtualScroll.getContentSize().height);
+    const maxScrollY = Math.max(0, height - this.getViewport().height);
+    this.scrollState.setScroll(Math.min(scrollTop, maxScrollY), scrollLeft);
+    this.syncScrollbarPosition();
+  }
+
   private async loadMoreCommits(): Promise<void> {
     if (this.isLoadingMore || !this.hasMoreCommits || !this.repositoryPath) return;
     this.isLoadingMore = true;
@@ -1369,11 +1435,32 @@ export class LvGraphCanvas extends LitElement {
         // but stop the catch-up chain to avoid a hot retry loop
         failed = true;
         log.warn('loadMoreCommits: fetch failed:', result.error?.message);
+        // The chain stops here, so a viewport parked past the loaded rows
+        // would sit on a blank canvas with nothing on screen to explain it
+        if (this.isViewportEntirelyBeyondLoaded()) {
+          this.clampScrollOntoLoadedRows();
+        }
+        // A console warning is not feedback — the component has no toast of
+        // its own, so app-shell surfaces graph-notice for it
+        this.dispatchEvent(
+          new CustomEvent('graph-notice', {
+            detail: {
+              message: `Could not load more commits: ${result.error?.message ?? 'unknown error'}`,
+              type: 'error',
+            },
+            bubbles: true,
+            composed: true,
+          })
+        );
         return;
       }
       if (!result.data?.length) {
-        // Genuinely no more commits
+        // Genuinely no more commits: shrink the scroller back onto the loaded
+        // rows (a stale commitTotal had it spanning a longer history) and pull
+        // a viewport that was parked out there back onto real rows
         this.hasMoreCommits = false;
+        this.updateVirtualTotalRows();
+        this.clampScrollOntoLoadedRows();
         return;
       }
 
@@ -1429,6 +1516,31 @@ export class LvGraphCanvas extends LitElement {
     if (loadedBottom - (scrollTop + viewportHeight) < 500) {
       this.loadMoreCommits();
     }
+  }
+
+  /**
+   * Bring the viewport back onto real rows after a full reload. Restart the
+   * catch-up chain so the loaded rows reach the viewport again, or — when
+   * there is nothing left to load — pull the scroll back onto the rows that
+   * remain, so a reload can never leave a blank canvas behind.
+   */
+  private recoverViewportAfterReload(): void {
+    if (!this.scrollState || !this.virtualScroll) return;
+    // Only when the WHOLE viewport is past the loaded rows: a viewport that
+    // still shows rows recovers on the next scroll, which runs checkLoadMore
+    if (!this.isViewportEntirelyBeyondLoaded()) return;
+
+    // Only paginate while unfiltered — with a branch filter or an active
+    // search the scrollbar does not span the full history
+    // (updateVirtualTotalRows), so chaining pages there would pull in the
+    // whole repository; clamping is the right recovery instead
+    const unfiltered = this.hiddenBranches.size === 0 && !this.hasActiveSearch();
+    if (this.hasMoreCommits && unfiltered) {
+      this.checkLoadMore();
+      return;
+    }
+
+    this.clampScrollOntoLoadedRows();
   }
 
   /**

@@ -12,6 +12,7 @@ export { LvConflictResolutionDialog } from './lv-conflict-resolution-dialog.ts';
 export { LvCommandPalette, type PaletteCommand } from './lv-command-palette.ts';
 export { LvReflogDialog } from './lv-reflog-dialog.ts';
 export { LvDescribeDialog } from './lv-describe-dialog.ts';
+export { LvCompareBranchesDialog } from './lv-compare-branches-dialog.ts';
 export { LvSearchDialog, type SearchDialogMode } from './lv-search-dialog.ts';
 export { LvKeyboardShortcutsDialog } from './lv-keyboard-shortcuts-dialog.ts';
 export { LvRemoteDialog } from './lv-remote-dialog.ts';

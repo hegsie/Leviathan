@@ -33,6 +33,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
 import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
+import { searchIndexService } from '../../../services/search-index.service.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
@@ -2220,6 +2221,230 @@ describe('lv-graph-canvas', () => {
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
   });
+  // ── Refresh while scrolled past the loaded rows ─────────────────────
+  describe('reload while scrolled past the loaded rows', () => {
+    type PaginationInternals = {
+      scrollState: {
+        setScroll(top: number, left: number): void;
+        getScroll(): { scrollTop: number; scrollLeft: number };
+      };
+      virtualScroll: {
+        getRenderData(viewport: unknown): { nodes: unknown[] };
+        getContentSize(): { width: number; height: number };
+      };
+      getViewport(): { height: number };
+      sortedNodesByRow: unknown[];
+      hasMoreCommits: boolean;
+      isLoading: boolean;
+      loadError: string | null;
+      PADDING: number;
+      ROW_HEIGHT: number;
+    };
+
+    function internalsOf(el: LvGraphCanvas): PaginationInternals {
+      return el as unknown as PaginationInternals;
+    }
+
+    async function waitUntil(pred: () => boolean, what: string): Promise<void> {
+      for (let i = 0; i < 300; i++) {
+        if (pred()) return;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      throw new Error(`timed out waiting for ${what}`);
+    }
+
+    /**
+     * Backend mock that serves real pages of a `total`-commit history.
+     * `available` lets the pages run out EARLIER than the total the backend
+     * reports, i.e. the total the graph paginates against is stale.
+     */
+    function setupPaginatedMocks(total: number, pageSize: number, available = total): void {
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_commit_history': {
+            const a = args as { skip?: number; limit?: number } | undefined;
+            const skip = a?.skip ?? 0;
+            const limit = a?.limit ?? pageSize;
+            return makeMoreCommits(Math.max(0, Math.min(limit, available - skip)), skip);
+          }
+          case 'get_commit_total':
+            return total;
+          case 'get_refs_by_commit':
+            return {};
+          case 'get_commits_stats':
+          case 'get_commits_signatures':
+          case 'search_commits':
+            return [];
+          default:
+            return null;
+        }
+      };
+    }
+
+    /** Like renderCanvas, but with a real viewport height to paint into */
+    async function renderSizedCanvas(commitCount: number): Promise<LvGraphCanvas> {
+      const el = await fixture<LvGraphCanvas>(
+        html`<lv-graph-canvas
+          style="height: 400px"
+          .repositoryPath=${REPO_PATH}
+          .commitCount=${commitCount}
+        ></lv-graph-canvas>`
+      );
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+      return el;
+    }
+
+    /** Nodes the renderer would actually paint for the current viewport */
+    function visibleNodeCount(el: LvGraphCanvas): number {
+      const internals = internalsOf(el);
+      return internals.virtualScroll.getRenderData(internals.getViewport()).nodes.length;
+    }
+
+    function scrollToRow(el: LvGraphCanvas, row: number): void {
+      const internals = internalsOf(el);
+      internals.scrollState.setScroll(internals.PADDING + row * internals.ROW_HEIGHT, 0);
+    }
+
+    function catchUpPageCalls(): number {
+      return findCommands('get_commit_history').filter(
+        (c) => ((c.args as { skip?: number } | undefined)?.skip ?? 0) > 0
+      ).length;
+    }
+
+    it('repaints the viewport after a refresh while scrolled deep into the history', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      // Paginate deep: the catch-up chain fills in rows up to the viewport
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+
+      // A commit/pull/watcher refresh replaces the loaded set with page 1
+      clearHistory();
+      el.refresh();
+      // The reload has replaced the loaded set with page 1 by the time the
+      // foreground spinner clears — that is the moment the viewport goes blank
+      await waitUntil(() => !internals.isLoading, 'the reload to finish');
+
+      await waitUntil(
+        () => visibleNodeCount(el) > 0,
+        'the viewport to repaint after the refresh'
+      );
+      expect(internals.sortedNodesByRow.length).to.equal(500);
+      expect(catchUpPageCalls()).to.be.greaterThan(0);
+    });
+
+    it('pulls the viewport back onto the rows when the reloaded history is shorter', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+
+      // The history shrinks under the user (hard reset / branch switch)
+      setupPaginatedMocks(50, 100);
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => internals.sortedNodesByRow.length === 50, 'the shortened reload');
+      await el.updateComplete;
+
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+      const maxScrollY = Math.max(
+        0,
+        internals.virtualScroll.getContentSize().height - internals.getViewport().height
+      );
+      expect(internals.scrollState.getScroll().scrollTop).to.be.at.most(maxScrollY);
+      // Nothing left to load — recovery must not fetch a pointless page
+      expect(catchUpPageCalls()).to.equal(0);
+    });
+
+    it('recovers the viewport and reports it when the next page fails after a refresh', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.sortedNodesByRow.length === 500, 'the catch-up chain');
+
+      // The first page still loads, but the catch-up page fails
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        const a = args as { skip?: number } | undefined;
+        if (command === 'get_commit_history' && (a?.skip ?? 0) > 0) {
+          throw { code: 'GIT_ERROR', message: 'network blip' };
+        }
+        return previousMock(command, args);
+      };
+
+      const notices: Array<{ message: string; type?: string }> = [];
+      el.addEventListener('graph-notice', (e) => {
+        notices.push((e as CustomEvent<{ message: string; type?: string }>).detail);
+      });
+
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => catchUpPageCalls() > 0, 'the catch-up attempt');
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      // The failed page stops the chain instead of retrying in a hot loop
+      expect(catchUpPageCalls()).to.equal(1);
+      // A transient failure must not mark the history exhausted
+      expect(internals.hasMoreCommits).to.be.true;
+      // ...and must not paint the reload error banner
+      expect(internals.loadError).to.be.null;
+      expect(el.shadowRoot!.querySelector('.info-panel')).to.be.null;
+      // The viewport must not be left blank on the failure path either
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+      // ...and the failure must not be silent
+      expect(notices.map((n) => n.type)).to.include('error');
+      expect(notices.some((n) => n.message.includes('network blip'))).to.be.true;
+    });
+
+    it('shrinks the scroller onto the loaded rows when the reported total was stale', async () => {
+      // The backend reports 500 commits but only serves 200 — a hard reset
+      // shortened the history under a total the graph had already cached
+      setupPaginatedMocks(500, 100, 200);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      // Catch up towards a row the stale total says exists but the history
+      // does not, so the chain runs off the end into an empty page
+      scrollToRow(el, 300);
+      await waitUntil(() => internals.hasMoreCommits === false, 'the empty page');
+      await el.updateComplete;
+
+      expect(internals.sortedNodesByRow.length).to.equal(200);
+      // The scroller must no longer span the stale 500-row history...
+      const maxScrollY = Math.max(
+        0,
+        internals.virtualScroll.getContentSize().height - internals.getViewport().height
+      );
+      expect(internals.scrollState.getScroll().scrollTop).to.be.at.most(maxScrollY);
+      // ...and the viewport must be back on rows that actually paint
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+    });
+
+    it('does not paginate on a refresh while the graph is at the top', async () => {
+      setupPaginatedMocks(500, 100);
+      const el = await renderSizedCanvas(100);
+      const internals = internalsOf(el);
+
+      clearHistory();
+      el.refresh();
+      await waitUntil(() => !internals.isLoading, 'the reload to finish');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(internals.sortedNodesByRow.length).to.equal(100);
+
+      expect(catchUpPageCalls()).to.equal(0);
+      expect(visibleNodeCount(el)).to.be.greaterThan(0);
+    });
+  });
 
   // ── Semantic search fallback ─────────────────────────────────────────
   describe('semantic search fallback', () => {
@@ -2337,6 +2562,229 @@ describe('lv-graph-canvas', () => {
       // "no matches" — no keyword fallback, no notice
       expect(findCommands('search_commits').length).to.equal(0);
       expect(matchedOids(el).size).to.equal(0);
+      expect(notices.length).to.equal(0);
+    });
+  });
+
+  // ── Search filters the commit index cannot express ────────────────────
+  describe('search filters vs the commit index', () => {
+    type GraphSearchFilter = {
+      query: string;
+      author: string;
+      dateFrom: string;
+      dateTo: string;
+      filePath: string;
+      branch: string;
+      searchMode?: string;
+    };
+
+    // Flipped per test so one canvas can see a search fail and then recover
+    let searchCommitsFails = false;
+
+    function setupIndexedSearchMocks(): void {
+      mockInvoke = async (command: string) => {
+        switch (command) {
+          case 'get_commit_history':
+            return defaultCommits;
+          case 'get_commit_total':
+            return defaultCommits.length;
+          case 'get_refs_by_commit':
+            return defaultRefs;
+          case 'get_commits_stats':
+            return [];
+          case 'get_commits_signatures':
+            return [];
+          case 'build_search_index':
+            return defaultCommits.length;
+          case 'search_index':
+            // The index has no file/branch dimension, so it answers a
+            // path/branch filter with every commit it holds
+            return defaultCommits.map((c) => ({
+              oid: c.oid,
+              shortOid: c.shortId,
+              summary: c.summary,
+              messageLower: c.message.toLowerCase(),
+              authorName: c.author.name,
+              authorEmail: c.author.email,
+              authorDate: c.timestamp,
+              parentCount: c.parentIds.length,
+            }));
+          case 'search_commits':
+            if (searchCommitsFails) throw new Error('bad pathspec');
+            return [commit2];
+          default:
+            return null;
+        }
+      };
+    }
+
+    async function renderWithReadyIndex(): Promise<LvGraphCanvas> {
+      await searchIndexService.buildIndex(REPO_PATH);
+      const el = await renderCanvas();
+      clearHistory();
+      return el;
+    }
+
+    async function applyFilter(
+      el: LvGraphCanvas,
+      filter: Partial<GraphSearchFilter>
+    ): Promise<void> {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (el as any).searchFilter = {
+        query: '',
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'keyword',
+        ...filter,
+      };
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    function collectGraphNotices(
+      el: LvGraphCanvas
+    ): Array<{ message: string; type?: string }> {
+      const notices: Array<{ message: string; type?: string }> = [];
+      el.addEventListener('graph-notice', (e) => {
+        notices.push((e as CustomEvent<{ message: string; type?: string }>).detail);
+      });
+      return notices;
+    }
+
+    beforeEach(() => {
+      // Readiness and the shared search-result cache are module-level state
+      searchIndexService.invalidate();
+      clearGraphCacheForTests();
+      searchCommitsFails = false;
+      setupIndexedSearchMocks();
+      clearHistory();
+    });
+
+    afterEach(() => {
+      searchIndexService.invalidate();
+    });
+
+    it('a file-path filter searches git directly even when the index is ready', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      expect((direct[0].args as { filePath?: string }).filePath).to.equal('src/app.ts');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matched = (el as any).matchedCommitOids as Set<string>;
+      expect(matched.size).to.equal(1);
+      expect(matched.has(commit2.oid)).to.be.true;
+    });
+
+    it('a branch filter searches git directly even when the index is ready', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { branch: 'feature/x' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      expect((direct[0].args as { branch?: string }).branch).to.equal('feature/x');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(1);
+    });
+
+    it('a query combined with a file-path filter keeps the path restriction', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { query: 'Second', filePath: 'src/app.ts' });
+
+      expect(findCommands('search_index').length).to.equal(0);
+      const direct = findCommands('search_commits');
+      expect(direct.length).to.equal(1);
+      const args = direct[0].args as { query?: string; filePath?: string };
+      expect(args.query).to.equal('Second');
+      expect(args.filePath).to.equal('src/app.ts');
+    });
+
+    it('a query-only search still uses the fast index', async () => {
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { query: 'commit' });
+
+      expect(findCommands('search_index').length).to.equal(1);
+      expect(findCommands('search_commits').length).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(defaultCommits.length);
+    });
+
+    it('a failed direct search with a file-path filter highlights nothing', async () => {
+      searchCommitsFails = true;
+      const el = await renderWithReadyIndex();
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).matchedCommitOids.size).to.equal(0);
+      // A failed match must not blank the graph
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).loadError).to.be.null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).commits.length).to.equal(defaultCommits.length);
+    });
+
+    it('a failed direct search says why instead of reading as zero matches', async () => {
+      searchCommitsFails = true;
+      const el = await renderWithReadyIndex();
+      const notices = collectGraphNotices(el);
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      expect(notices.length).to.equal(1);
+      expect(notices[0].type).to.equal('error');
+      expect(notices[0].message).to.contain('bad pathspec');
+    });
+
+    it('shows the search-failure notice only once while the user keeps typing', async () => {
+      searchCommitsFails = true;
+      const el = await renderWithReadyIndex();
+      const notices = collectGraphNotices(el);
+
+      // The search bar has no debounce: one search per keystroke
+      await applyFilter(el, { branch: 'feat' });
+      await applyFilter(el, { branch: 'featu' });
+
+      expect(notices.length).to.equal(1);
+      // ...but the search itself still runs for every keystroke
+      expect(findCommands('search_commits').length).to.equal(2);
+    });
+
+    it('a search that works again re-arms the failure notice', async () => {
+      searchCommitsFails = true;
+      const el = await renderWithReadyIndex();
+      const notices = collectGraphNotices(el);
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+      expect(notices.length).to.equal(1);
+
+      searchCommitsFails = false;
+      await applyFilter(el, { filePath: 'src/ok.ts' });
+      expect(notices.length).to.equal(1);
+
+      searchCommitsFails = true;
+      await applyFilter(el, { filePath: 'src/bad.ts' });
+      expect(notices.length).to.equal(2);
+    });
+
+    it('a successful direct search raises no failure notice', async () => {
+      const el = await renderWithReadyIndex();
+      const notices = collectGraphNotices(el);
+
+      await applyFilter(el, { filePath: 'src/app.ts' });
+
+      expect(findCommands('search_commits').length).to.equal(1);
       expect(notices.length).to.equal(0);
     });
   });
