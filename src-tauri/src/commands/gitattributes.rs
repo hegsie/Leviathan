@@ -814,4 +814,43 @@ mod tests {
         assert!(attrs.iter().any(|a| a.name == "export-ignore"));
         assert!(attrs.iter().any(|a| a.name == "export-subst"));
     }
+
+    /// Pins the JSON `AttributeValue` actually puts on the wire.
+    ///
+    /// The enum carries no `tag`, so serde serialises it externally tagged:
+    /// the unit variants become the bare strings `"set"` / `"unset"` /
+    /// `"unspecified"`, never `{"type":"set"}`. The TypeScript `AttributeValue`
+    /// union in `src/services/git.service.ts` is written against exactly this
+    /// shape, and the .gitignore/.gitattributes dialog renders its chips from
+    /// it — changing the representation here silently blanks every chip, so
+    /// this test exists to make that change fail loudly instead.
+    #[test]
+    fn attribute_value_unit_variants_serialize_as_bare_strings() {
+        use serde_json::json;
+
+        assert_eq!(
+            serde_json::to_value(AttributeValue::Set).unwrap(),
+            json!("set")
+        );
+        assert_eq!(
+            serde_json::to_value(AttributeValue::Unset).unwrap(),
+            json!("unset")
+        );
+        assert_eq!(
+            serde_json::to_value(AttributeValue::Unspecified).unwrap(),
+            json!("unspecified")
+        );
+    }
+
+    /// Companion to the test above: the valued variant is an object keyed by
+    /// the camelCased variant name, i.e. `{"value": "union"}`.
+    #[test]
+    fn attribute_value_valued_variant_serializes_as_value_object() {
+        use serde_json::json;
+
+        assert_eq!(
+            serde_json::to_value(AttributeValue::Value("union".to_string())).unwrap(),
+            json!({ "value": "union" })
+        );
+    }
 }

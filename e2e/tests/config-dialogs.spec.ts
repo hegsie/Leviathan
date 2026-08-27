@@ -270,6 +270,57 @@ test.describe('Config Dialog - Settings Tab', () => {
     await expect(autocrlf.locator('.scope-badge')).toHaveText('local');
   });
 
+  test('clearing a local setting unsets it and removes the row', async ({ page }) => {
+    // After the clear, core.autocrlf is gone from the effective config.
+    await injectCommandMock(page, {
+      get_common_settings: [{ key: 'push.default', value: 'current', scope: 'global' }],
+    });
+
+    const autocrlf = page.locator('lv-config-dialog .setting-item').nth(0);
+    await autocrlf.locator('.setting-value select').selectOption({ value: '' });
+
+    const cleared = await findCommand(page, 'unset_config_value');
+    expect(cleared.length).toBeGreaterThan(0);
+    expect((cleared[0].args as { key: string }).key).toBe('core.autocrlf');
+
+    // Writing an empty string would leave an invalid value behind in .git/config.
+    expect((await findCommand(page, 'set_config_value')).length).toBe(0);
+
+    await expect(page.locator('lv-config-dialog .setting-item')).toHaveCount(1);
+    await expect(
+      page.locator('lv-toast-container .toast.success .toast-message').first()
+    ).toHaveText('Setting cleared');
+  });
+
+  test('clearing an inherited setting keeps the row on its inherited scope', async ({
+    page,
+  }) => {
+    // push.default is set globally, so unsetting the local scope changes nothing:
+    // the reload returns it again and the row must reflect the inherited value.
+    const pushDefault = page.locator('lv-config-dialog .setting-item').nth(1);
+    await pushDefault.locator('.setting-value select').selectOption({ value: '' });
+
+    await expect(
+      page.locator('lv-toast-container .toast.info .toast-message').first()
+    ).toContainText('global');
+    await expect(pushDefault.locator('.scope-badge')).toHaveText('global');
+    // Nothing was actually removed from the effective config, so the beforeEach's
+    // full four-item list is still exactly what the dialog reloads and shows.
+    await expect(page.locator('lv-config-dialog .setting-item')).toHaveCount(4);
+  });
+
+  test('shows an error banner when clearing a setting fails', async ({ page }) => {
+    await injectCommandError(page, 'unset_config_value', 'Failed to unset config');
+
+    const input = page.locator('lv-config-dialog .setting-value input').first();
+    await input.fill('');
+    await input.dispatchEvent('change');
+
+    await expect(page.locator('lv-config-dialog .error-banner')).toBeVisible();
+    // Nothing was reloaded, so the blank the user typed must survive for a retry.
+    await expect(input).toHaveValue('');
+  });
+
   test('should show error banner when setting save fails', async ({ page }) => {
     await injectCommandError(page, 'set_config_value', 'Failed to write config');
 
@@ -503,3 +554,7 @@ test.describe('Config Dialog - Loading State', () => {
     await expect(page.locator('lv-config-dialog .form-group input').nth(1)).toHaveValue('test@test.com');
   });
 });
+
+
+
+

@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'lit';
+import { live } from 'lit/directives/live.js';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -492,48 +493,34 @@ export class LvConfigDialog extends LitElement {
 
   private async handleSaveSetting(key: string, value: string): Promise<void> {
     this.error = null;
-    // An emptied value means "stop configuring this key", not "configure it to
-    // the empty string". git accepts `key =` on write but rejects it on every
-    // later read of an enumerated key — `git push` on a repo with an empty
-    // push.default dies with `fatal: bad config variable 'push.default'` — so
-    // writing it here would break the repository from inside the dialog whose
-    // job is to configure it. Clearing has to go through --unset.
-    const clearing = value === '';
+    // A blanked input means "remove this setting". Writing an empty string
+    // instead leaves `key = ` behind in .git/config, which git rejects on the
+    // next read ("bad boolean config value '' for 'pull.rebase'", or for an
+    // enumerated key like push.default, `fatal: bad config variable`). Clearing
+    // has to go through --unset instead, which clearSetting() owns.
+    if (value.trim() === '') {
+      await this.clearSetting(key);
+      return;
+    }
 
     try {
-      const result = clearing
-        ? await gitService.unsetConfigValue(this.pinnedRepoPath, key, false /* local */)
-        : await gitService.setConfigValue(this.pinnedRepoPath, key, value, false /* local */);
+      const result = await gitService.setConfigValue(this.pinnedRepoPath, key, value, false /* local */);
 
       if (result.success) {
-        showToast(clearing ? 'Setting cleared' : 'Setting saved', 'success');
-        if (clearing) {
-          // Dropping the repository-scoped key can uncover a value from a
-          // broader scope, and the tab only ever writes the local one, so the
-          // effective value and scope have to come back from git rather than
-          // be guessed as "unset" here.
-          await this.reloadSettings();
-        } else {
-          // Update the in-memory value so re-renders don't snap the input back
-          // to the stale value.
-          // The write always lands in this repository's config, so the scope
-          // badge has to follow it — a row that was "not set" a moment ago must
-          // not keep saying so next to the value the user just chose.
-          this.settings = this.settings.map((s) =>
-            s.key === key ? { ...s, value, scope: 'local' } : s
-          );
-        }
+        showToast('Setting saved', 'success');
+        // Update the in-memory value so re-renders don't snap the control back
+        // to the stale value. The write always lands in this repository's
+        // config, so the scope badge has to follow it — a row that was "not
+        // set" a moment ago must not keep saying so next to the value the user
+        // just chose.
+        this.settings = this.settings.map((s) =>
+          s.key === key ? { ...s, value, scope: 'local' } : s
+        );
       } else {
-        this.error =
-          result.error?.message || (clearing ? 'Failed to clear setting' : 'Failed to save setting');
+        this.error = result.error?.message || 'Failed to save setting';
       }
     } catch (e) {
-      this.error =
-        e instanceof Error
-          ? e.message
-          : clearing
-            ? 'Failed to clear setting'
-            : 'Failed to save setting';
+      this.error = e instanceof Error ? e.message : 'Failed to save setting';
     }
   }
 
@@ -546,6 +533,44 @@ export class LvConfigDialog extends LitElement {
     const settingsResult = await gitService.getCommonSettings(this.pinnedRepoPath);
     if (settingsResult.success && settingsResult.data) {
       this.settings = settingsResult.data;
+    }
+  }
+
+  /**
+   * Remove the repository-local value for `key`. A value inherited from the
+   * global or system scope is not this tab's to remove, so it survives the
+   * reload — say so instead of claiming the setting is gone.
+   */
+  private async clearSetting(key: string): Promise<void> {
+    try {
+      const result = await gitService.unsetConfigValue(
+        this.pinnedRepoPath,
+        key,
+        false // local
+      );
+
+      if (result.success) {
+        // Only the settings list is refreshed — a full loadData() would flip
+        // the dialog back to its loading state and blank the other tabs.
+        await this.reloadSettings();
+        // `get_common_settings` always reports an entry for a known key, even
+        // when nothing configures it — `scope: 'unset'` there means "gone
+        // everywhere", not "still covered by a broader scope", so only a real
+        // scope counts as inherited.
+        const inherited = this.settings.find((s) => s.key === key && s.scope !== 'unset');
+        if (inherited) {
+          showToast(
+            `Cleared ${key} for this repository — still set in ${inherited.scope} config`,
+            'info'
+          );
+        } else {
+          showToast('Setting cleared', 'success');
+        }
+      } else {
+        this.error = result.error?.message || 'Failed to clear setting';
+      }
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : 'Failed to clear setting';
     }
   }
 
@@ -692,16 +717,23 @@ export class LvConfigDialog extends LitElement {
 
     // Selectedness is bound per option rather than with `.value` on the select:
     // the property is committed before the options exist, so the configured
-    // value would not stick on first render.
+    // value would not stick on first render. Bound `live()`: a clear that
+    // turns out to be a no-op (the value is still covered by a broader scope)
+    // leaves `setting.value` unchanged from Lit's point of view, so a plain
+    // binding would skip re-committing `.selected` and leave the control
+    // showing "Not set" — the option the browser selected as a side effect of
+    // the user's own choice — instead of snapping back to the value that is
+    // actually still in effect.
     return html`
       <select
+        .value=${live(setting.value)}
         @change=${(e: Event) =>
           this.handleSaveSetting(setting.key, (e.target as HTMLSelectElement).value)}
       >
-        <option value="" .selected=${setting.value === ''}>Not set</option>
+        <option value="" .selected=${live(setting.value === '')}>Not set</option>
         ${options.map(
           (choice) => html`
-            <option value=${choice} .selected=${setting.value === choice}>${choice}</option>
+            <option value=${choice} .selected=${live(setting.value === choice)}>${choice}</option>
           `
         )}
       </select>

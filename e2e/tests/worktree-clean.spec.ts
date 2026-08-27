@@ -145,6 +145,47 @@ test.describe('Worktree Dialog - List View', () => {
     await expect(removeBtn).toBeDisabled();
   });
 
+  test('remove button is disabled for the worktree the app has open', async ({ page }) => {
+    // git prints its OWN resolved spelling of the directory the app was opened
+    // at (/private/tmp vs /tmp, C:/work vs C:\work), so the entry for the open
+    // worktree does not match the repository path as a string. The backend
+    // resolves it against the filesystem and flags it, and removing it would
+    // delete the working directory the app is running against.
+    await injectCommandMock(page, {
+      get_worktrees: [
+        {
+          path: '/tmp/test-repo',
+          branch: 'main',
+          isMain: true,
+          isLocked: false,
+          commit: 'abc123',
+          isBare: false,
+          isPrunable: false,
+          isCurrent: false,
+        },
+        {
+          path: '/private/tmp/test-repo',
+          branch: 'feature/new-feature',
+          isMain: false,
+          isLocked: false,
+          commit: 'def456',
+          isBare: false,
+          isPrunable: false,
+          isCurrent: true,
+        },
+      ],
+    });
+    await startCommandCapture(page);
+    await openWorktreeDialog(page);
+
+    const openWorktree = page.locator('lv-worktree-dialog .worktree-item').nth(1);
+    const removeBtn = openWorktree.locator('.action-btn.danger');
+    await expect(removeBtn).toBeDisabled();
+
+    await removeBtn.click({ force: true });
+    expect(await findCommand(page, 'remove_worktree')).toHaveLength(0);
+  });
+
   test('lock button calls lock_worktree', async ({ page }) => {
     await startCommandCapture(page);
     await openWorktreeDialog(page);

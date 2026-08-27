@@ -39,6 +39,8 @@ export interface CloneRepositoryCommand {
 export interface InitRepositoryCommand {
   path: string;
   bare?: boolean;
+  /** Name for the repository's first branch. Omit to use git's own default. */
+  initialBranch?: string;
 }
 
 /**
@@ -349,6 +351,10 @@ export interface AbortCherryPickCommand {
   path: string;
 }
 
+export interface SkipCherryPickCommand {
+  path: string;
+}
+
 export interface CherryPickFromBranchCommand {
   path: string;
   branch: string;
@@ -374,6 +380,10 @@ export interface ContinueRevertCommand {
 }
 
 export interface AbortRevertCommand {
+  path: string;
+}
+
+export interface SkipRevertCommand {
   path: string;
 }
 
@@ -463,6 +473,13 @@ export interface PushTagCommand {
   name: string;
   remote?: string;
   force?: boolean;
+  token?: string;
+}
+
+export interface DeleteRemoteTagCommand {
+  path: string;
+  name: string;
+  remote?: string;
   token?: string;
 }
 

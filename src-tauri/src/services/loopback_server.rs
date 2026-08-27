@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::error::LeviathanError;
 
@@ -32,6 +32,62 @@ pub struct LoopbackServer {
     shutdown_tx: Option<mpsc::Sender<()>>,
     /// Receiver for the authorization code + state
     code_rx: Option<mpsc::Receiver<Result<CallbackResult, String>>>,
+    /// Receiver acknowledging that the accept loop has released BOTH listeners.
+    /// Used by [`CancelHandle::cancel`] / [`LoopbackServer::shutdown`] to wait
+    /// until the port is actually free again.
+    closed_rx: Option<mpsc::Receiver<()>>,
+}
+
+/// How long a cancel waits for the accept loop to confirm it closed its
+/// listeners. Both the accept poll and the per-connection request read run on
+/// [`ACCEPT_POLL_INTERVAL`], so this is generous; on timeout we give up waiting
+/// rather than block a command indefinitely.
+const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The tick the accept loop polls on, and the slice each request read blocks
+/// for before re-checking the shutdown signal. Every blocking step in the
+/// server thread MUST be bounded by this, so a cancel is always observed well
+/// inside [`SHUTDOWN_ACK_TIMEOUT`].
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Overall budget for reading one request off an accepted connection. Spread
+/// across [`ACCEPT_POLL_INTERVAL`] slices rather than spent in a single
+/// blocking read, so cancellation stays observable throughout.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What the accept loop should do after servicing one connection.
+enum ConnectionOutcome {
+    /// A callback (or a failed parse of one): deliver it and stop.
+    Delivered(Result<CallbackResult, String>),
+    /// An incidental request (`/favicon.ico`, a bare `/`): keep listening.
+    Ignored,
+    /// Shutdown was signalled while the request was being read: stop WITHOUT a
+    /// result, so both listeners are released immediately.
+    Cancelled,
+}
+
+/// A detachable handle that can shut a [`LoopbackServer`] down AFTER the server
+/// itself has been moved into [`LoopbackServer::wait_for_callback`] (which
+/// consumes it).
+///
+/// Without this, an abandoned sign-in keeps its socket bound until the callback
+/// timeout fires — for a provider pinned to a fixed port (Bitbucket's registered
+/// redirect is `127.0.0.1:8085`) that makes an immediate retry impossible.
+pub struct CancelHandle {
+    shutdown_tx: mpsc::Sender<()>,
+    closed_rx: mpsc::Receiver<()>,
+}
+
+impl CancelHandle {
+    /// Signal the accept loop and BLOCK until it confirms both listeners are
+    /// closed, so the caller can re-bind the port as soon as this returns.
+    ///
+    /// A `Disconnected` result means the server thread is already gone, which
+    /// likewise means its sockets have been released.
+    pub fn cancel(self) {
+        let _ = self.shutdown_tx.send(());
+        let _ = self.closed_rx.recv_timeout(SHUTDOWN_ACK_TIMEOUT);
+    }
 }
 
 /// Preferred ports for OAuth callbacks (should match redirect URIs registered with providers)
@@ -90,9 +146,10 @@ impl LoopbackServer {
 
         let listener_v6 = Self::try_bind_ipv6_loopback(port);
 
-        // Set up channels for shutdown and code reception
+        // Set up channels for shutdown, close acknowledgement, and code reception
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
         let (code_tx, code_rx) = mpsc::channel::<Result<CallbackResult, String>>();
+        let (closed_tx, closed_rx) = mpsc::channel::<()>();
 
         // Set non-blocking mode so the accept loop can poll both listeners.
         listener
@@ -105,13 +162,14 @@ impl LoopbackServer {
 
         // Spawn server thread
         thread::spawn(move || {
-            Self::run_server(listener, listener_v6, shutdown_rx, code_tx);
+            Self::run_server(listener, listener_v6, shutdown_rx, code_tx, closed_tx);
         });
 
         Ok(Self {
             port,
             shutdown_tx: Some(shutdown_tx),
             code_rx: Some(code_rx),
+            closed_rx: Some(closed_rx),
         })
     }
 
@@ -185,19 +243,83 @@ impl LoopbackServer {
         }
     }
 
-    /// Run the server loop, polling the IPv4 listener and (when present) the IPv6
-    /// loopback listener so the callback is received on whichever family the
-    /// browser used to reach `localhost`.
+    /// Take a handle that can cancel this server later.
+    ///
+    /// MUST be taken BEFORE the server is moved into [`Self::wait_for_callback`],
+    /// which consumes it — after that there is no other way to stop the accept
+    /// loop before its timeout. The shutdown sender is cloned (not moved) so
+    /// `Drop` still signals shutdown for a server that is simply dropped.
+    /// Returns `None` if a handle was already taken.
+    pub fn take_cancel_handle(&mut self) -> Option<CancelHandle> {
+        let shutdown_tx = self.shutdown_tx.as_ref()?.clone();
+        let closed_rx = self.closed_rx.take()?;
+        Some(CancelHandle {
+            shutdown_tx,
+            closed_rx,
+        })
+    }
+
+    /// Shut the server down and wait until its listeners are actually closed,
+    /// so the caller can re-bind the port immediately afterwards.
+    ///
+    /// Plain `drop` only *signals* shutdown; the accept loop can take up to a
+    /// poll tick to notice, during which the port is still bound.
+    pub fn shutdown(mut self) {
+        match (self.shutdown_tx.take(), self.closed_rx.take()) {
+            (Some(shutdown_tx), Some(closed_rx)) => CancelHandle {
+                shutdown_tx,
+                closed_rx,
+            }
+            .cancel(),
+            // The close acknowledgement was already handed to a `CancelHandle`
+            // (or consumed): fall back to signalling shutdown without waiting,
+            // which is what `Drop` does.
+            (Some(shutdown_tx), None) => {
+                let _ = shutdown_tx.send(());
+            }
+            _ => {}
+        }
+    }
+
+    /// Run the server thread: accept until a callback arrives or shutdown is
+    /// signalled, then release BOTH listeners, announce the close, and only then
+    /// deliver any result.
+    ///
+    /// The order matters: a caller unblocked by the close acknowledgement (or by
+    /// the callback result) must be able to re-bind the port straight away, so
+    /// the sockets are dropped before either is sent.
     fn run_server(
         listener_v4: TcpListener,
-        mut listener_v6: Option<TcpListener>,
+        listener_v6: Option<TcpListener>,
         shutdown_rx: mpsc::Receiver<()>,
         code_tx: mpsc::Sender<Result<CallbackResult, String>>,
+        closed_tx: mpsc::Sender<()>,
     ) {
+        let result = Self::accept_loop(&listener_v4, listener_v6, &shutdown_rx);
+
+        drop(listener_v4);
+        let _ = closed_tx.send(());
+
+        if let Some(result) = result {
+            let _ = code_tx.send(result);
+        }
+    }
+
+    /// Poll the IPv4 listener and (when present) the IPv6 loopback listener so
+    /// the callback is received on whichever family the browser used to reach
+    /// `localhost`. Returns `None` when stopped by the shutdown signal.
+    ///
+    /// The IPv6 listener is owned here so it is dropped (releasing the port on
+    /// that family too) as soon as the loop ends.
+    fn accept_loop(
+        listener_v4: &TcpListener,
+        mut listener_v6: Option<TcpListener>,
+        shutdown_rx: &mpsc::Receiver<()>,
+    ) -> Option<Result<CallbackResult, String>> {
         loop {
             // Check for shutdown signal
             if shutdown_rx.try_recv().is_ok() {
-                break;
+                return None;
             }
 
             // Poll both loopback listeners (both non-blocking). `serviced` tracks
@@ -209,15 +331,15 @@ impl LoopbackServer {
             match listener_v4.accept() {
                 Ok((stream, _)) => {
                     serviced = true;
-                    if let Some(result) = Self::handle_connection(stream) {
-                        let _ = code_tx.send(result);
-                        return;
+                    match Self::handle_connection(stream, shutdown_rx) {
+                        ConnectionOutcome::Delivered(result) => return Some(result),
+                        ConnectionOutcome::Cancelled => return None,
+                        ConnectionOutcome::Ignored => {}
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(e) => {
-                    let _ = code_tx.send(Err(format!("Accept error: {}", e)));
-                    return;
+                    return Some(Err(format!("Accept error: {}", e)));
                 }
             }
 
@@ -228,9 +350,10 @@ impl LoopbackServer {
                 match v6.accept() {
                     Ok((stream, _)) => {
                         serviced = true;
-                        if let Some(result) = Self::handle_connection(stream) {
-                            let _ = code_tx.send(result);
-                            return;
+                        match Self::handle_connection(stream, shutdown_rx) {
+                            ConnectionOutcome::Delivered(result) => return Some(result),
+                            ConnectionOutcome::Cancelled => return None,
+                            ConnectionOutcome::Ignored => {}
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -243,22 +366,53 @@ impl LoopbackServer {
 
             if !serviced {
                 // No connection on either listener, sleep briefly.
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(ACCEPT_POLL_INTERVAL);
             }
         }
     }
 
-    /// Handle an incoming HTTP connection
-    fn handle_connection(mut stream: TcpStream) -> Option<Result<CallbackResult, String>> {
+    /// Handle an incoming HTTP connection.
+    ///
+    /// The request is read in [`ACCEPT_POLL_INTERVAL`] slices, re-checking the
+    /// shutdown signal between them, up to an overall
+    /// [`CONNECTION_READ_TIMEOUT`] budget. A single blocking read for the whole
+    /// budget would pin BOTH listeners here — a peer that connects and sends
+    /// nothing (a browser preconnect, a port scan) is enough — for longer than
+    /// [`SHUTDOWN_ACK_TIMEOUT`], so `cancel()` would give up waiting and report
+    /// the port released while it was in fact still bound, and the retry that
+    /// followed would fail to bind.
+    fn handle_connection(
+        mut stream: TcpStream,
+        shutdown_rx: &mpsc::Receiver<()>,
+    ) -> ConnectionOutcome {
         let mut buffer = [0; 4096];
 
-        // Set read timeout
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        // `accept()` hands back a stream that inherits the listener's
+        // non-blocking mode on some platforms (Windows), where a read timeout is
+        // then ignored; force blocking mode so the slice below is honoured
+        // everywhere.
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(ACCEPT_POLL_INTERVAL));
 
-        // Read the request
-        let n = match stream.read(&mut buffer) {
-            Ok(n) => n,
-            Err(_) => return Some(Err("Failed to read request".to_string())),
+        // Read the request, staying cancellable throughout.
+        let deadline = Instant::now() + CONNECTION_READ_TIMEOUT;
+        let n = loop {
+            if shutdown_rx.try_recv().is_ok() {
+                return ConnectionOutcome::Cancelled;
+            }
+            match stream.read(&mut buffer) {
+                Ok(n) => break n,
+                // This slice expired with nothing to read: keep polling until
+                // the overall budget is spent.
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) && Instant::now() < deadline => {}
+                Err(_) => {
+                    return ConnectionOutcome::Delivered(Err("Failed to read request".to_string()))
+                }
+            }
         };
 
         let request = String::from_utf8_lossy(&buffer[..n]);
@@ -270,7 +424,7 @@ impl LoopbackServer {
         let parts: Vec<&str> = first_line.split_whitespace().collect();
         if parts.len() < 2 {
             Self::send_error_response(&mut stream, "Invalid request");
-            return Some(Err("Invalid request".to_string()));
+            return ConnectionOutcome::Delivered(Err("Invalid request".to_string()));
         }
 
         let path = parts[1];
@@ -287,7 +441,7 @@ impl LoopbackServer {
         // ignored.
         if !query_is_callback(query) {
             Self::send_error_response(&mut stream, "Not found");
-            return None; // Continue listening
+            return ConnectionOutcome::Ignored; // Continue listening
         }
 
         // Parse + validate the callback query. State binding is enforced here
@@ -297,11 +451,11 @@ impl LoopbackServer {
         match parse_callback_query(query) {
             Ok(result) => {
                 Self::send_success_response(&mut stream);
-                Some(Ok(result))
+                ConnectionOutcome::Delivered(Ok(result))
             }
             Err(msg) => {
                 Self::send_error_response(&mut stream, &msg);
-                Some(Err(msg))
+                ConnectionOutcome::Delivered(Err(msg))
             }
         }
     }
@@ -571,6 +725,161 @@ mod tests {
         let result = handle.join().unwrap().unwrap();
         assert_eq!(result.code, "v6code");
         assert_eq!(result.state, "v6state");
+    }
+
+    /// `shutdown` must not return until the socket is actually closed: an
+    /// abandoned OAuth sign-in has to free its port for an immediate retry.
+    /// Plain `drop` only signals the accept loop, which can take a poll tick
+    /// (100 ms) to notice — long enough for the retry's bind to fail.
+    #[test]
+    fn test_shutdown_releases_the_port_before_returning() {
+        let server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+
+        server.shutdown();
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "shutdown must confirm the socket is closed before returning"
+        );
+    }
+
+    /// A cancel handle taken before the server is consumed by `wait_for_callback`
+    /// must be able to abort that wait and free the port — otherwise the listener
+    /// is held for the full callback timeout.
+    #[test]
+    fn test_cancel_handle_aborts_an_in_flight_wait_and_frees_the_port() {
+        let mut server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(300)));
+        thread::sleep(Duration::from_millis(150));
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "the in-flight wait should still own the port"
+        );
+
+        cancel.cancel();
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "cancelling must release the port immediately"
+        );
+        assert!(
+            handle.join().unwrap().is_err(),
+            "the aborted wait must not report a successful callback"
+        );
+    }
+
+    /// A peer can connect and then send nothing at all — a browser preconnect,
+    /// a port scan, a half-open socket. The accept loop is inside the request
+    /// read at that moment, and that read must stay cancellable: a single
+    /// blocking read for the whole request budget outlasts
+    /// `SHUTDOWN_ACK_TIMEOUT`, so `cancel()` would return claiming the port was
+    /// released while both listeners were still bound, and the user's retry
+    /// would fail with EADDRINUSE.
+    #[test]
+    fn test_cancel_releases_the_port_while_a_silent_connection_is_being_read() {
+        let mut server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(300)));
+        thread::sleep(Duration::from_millis(150));
+
+        // Connect and send nothing: the accept loop is now in the request read.
+        let _silent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        thread::sleep(Duration::from_millis(150));
+
+        cancel.cancel();
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "cancelling must release the port even while a connection is being read"
+        );
+        assert!(
+            handle.join().unwrap().is_err(),
+            "the aborted wait must not report a successful callback"
+        );
+    }
+
+    /// The slice-and-poll read must not shorten the request budget: a browser
+    /// that opens the connection before it writes the callback (or writes it a
+    /// few ticks later) must still be served.
+    #[test]
+    fn test_callback_is_received_when_the_request_arrives_several_ticks_late() {
+        let server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(10)));
+
+        thread::sleep(Duration::from_millis(150));
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+
+        // Several read slices pass with nothing on the socket.
+        thread::sleep(ACCEPT_POLL_INTERVAL * 5);
+        stream
+            .write_all(
+                b"GET /callback?code=late&state=latestate HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "late");
+        assert_eq!(result.state, "latestate");
+    }
+
+    /// Error path: a connection that never delivers a request must still give up
+    /// at the read deadline rather than pin the listener for the whole callback
+    /// timeout.
+    #[test]
+    fn test_a_silent_connection_gives_up_at_the_read_deadline() {
+        let server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(300)));
+        thread::sleep(Duration::from_millis(150));
+
+        let _silent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+
+        let started = Instant::now();
+        let result = handle.join().unwrap();
+        assert!(
+            result.is_err(),
+            "a request that never arrives is not a callback"
+        );
+        assert!(
+            started.elapsed() < CONNECTION_READ_TIMEOUT * 3,
+            "the read must give up at its deadline, not hold the listener for the callback timeout"
+        );
+    }
+
+    /// Taking a cancel handle (and never using it) must not disturb normal
+    /// callback delivery — guards the run_server/accept_loop split and the
+    /// close-ack-before-result ordering.
+    #[test]
+    fn test_taking_a_cancel_handle_does_not_break_callback_delivery() {
+        let mut server = LoopbackServer::new_with_port(0).unwrap();
+        let port = server.port();
+        let _cancel = server
+            .take_cancel_handle()
+            .expect("cancel handle available");
+
+        let handle = thread::spawn(move || server.wait_for_callback(Duration::from_secs(5)));
+        thread::sleep(Duration::from_millis(150));
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"GET /callback?code=abc&state=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.code, "abc");
+        assert_eq!(result.state, "xyz");
     }
 
     #[test]

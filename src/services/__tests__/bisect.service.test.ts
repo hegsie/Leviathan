@@ -46,6 +46,7 @@ describe('git.service - Bisect operations', () => {
         totalSteps: null,
         currentStep: null,
         log: [],
+        culprit: null,
       };
       mockInvoke = () => Promise.resolve(mockStatus);
 
@@ -118,6 +119,7 @@ describe('git.service - Bisect operations', () => {
           totalSteps: null,
           currentStep: null,
           log: [],
+          culprit: null,
         },
         culprit: null,
         message: 'Bisect started',

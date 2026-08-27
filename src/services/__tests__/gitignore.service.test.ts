@@ -102,10 +102,13 @@ describe('git.service - Gitignore management', () => {
     it('invokes remove_from_gitignore command', async () => {
       mockInvoke = () => Promise.resolve(null);
 
-      const result = await removeFromGitignore('/test/repo', 'node_modules/');
+      const result = await removeFromGitignore('/test/repo', 'node_modules/', 4);
       expect(lastInvokedCommand).to.equal('remove_from_gitignore');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.pattern).to.equal('node_modules/');
+      // The line identifies WHICH occurrence to drop — a .gitignore may carry
+      // the same text more than once.
+      expect(args.lineNumber).to.equal(4);
       expect(result.success).to.be.true;
     });
 
@@ -113,7 +116,7 @@ describe('git.service - Gitignore management', () => {
       mockInvoke = () =>
         Promise.reject({ code: 'OPERATION_FAILED', message: '.gitignore does not exist' });
 
-      const result = await removeFromGitignore('/test/repo', 'pattern');
+      const result = await removeFromGitignore('/test/repo', 'pattern', 1);
       expect(result.success).to.be.false;
     });
   });
