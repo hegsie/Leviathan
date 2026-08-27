@@ -161,6 +161,8 @@ export interface StashFile {
 
 export interface StashShowResult {
   index: number;
+  /** The stash commit this result describes — see the Rust field's note. */
+  oid: string;
   message: string;
   files: StashFile[];
   totalAdditions: number;

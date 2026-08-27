@@ -416,6 +416,22 @@ function createMockHandler(mocks: typeof defaultMockData) {
         mocks.stashes.forEach((s, i) => { s.index = i; });
         return null;
       }
+      case 'stash_show': {
+        const showIndex = (args?.index as number) ?? 0;
+        return {
+          index: showIndex,
+          // Echoed like the real command: the panel checks it before rendering.
+          oid: mocks.stashes[showIndex]?.oid ?? '',
+          message: mocks.stashes[showIndex]?.message ?? '',
+          files: [
+            { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },
+            { path: 'src/new.ts', additions: 7, deletions: 0, status: 'added' },
+          ],
+          totalAdditions: 11,
+          totalDeletions: 2,
+          patch: null,
+        };
+      }
 
       // Tag commands
       case 'get_tags':
@@ -993,6 +1009,22 @@ export async function setupTauriMocks(
             state.stashes = state.stashes.filter((s: MockStash) => s.index !== dropIndex);
             state.stashes.forEach((s: MockStash, i: number) => { s.index = i; });
             return null;
+          }
+          case 'stash_show': {
+            const showIndex = (args as { index?: number })?.index ?? 0;
+            return {
+              index: showIndex,
+              // Echoed like the real command: the panel checks it first.
+              oid: state.stashes[showIndex]?.oid ?? '',
+              message: state.stashes[showIndex]?.message ?? '',
+              files: [
+                { path: 'src/app.ts', additions: 4, deletions: 2, status: 'modified' },
+                { path: 'src/new.ts', additions: 7, deletions: 0, status: 'added' },
+              ],
+              totalAdditions: 11,
+              totalDeletions: 2,
+              patch: null,
+            };
           }
 
           // === Remote mutations ===

@@ -9,7 +9,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import type { Stash } from '../../types/git.types.ts';
+import type { Stash, StashShowResult } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
 import {
   tryAcquireRefOpOrWarn,
@@ -74,6 +74,87 @@ export class LvStashList extends LitElement {
       .stash-index {
         font-size: var(--font-size-xs);
         color: var(--color-text-muted);
+      }
+
+      .stash-chevron {
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+        color: var(--color-text-muted);
+        transition: transform 0.15s ease;
+      }
+
+      .stash-chevron.expanded {
+        transform: rotate(90deg);
+      }
+
+      .stash-details {
+        padding: 2px 12px 6px 32px;
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+      }
+
+      .stash-details-status {
+        color: var(--color-text-muted);
+      }
+
+      .stash-details-error {
+        color: var(--color-error);
+        overflow-wrap: anywhere;
+      }
+
+      .stash-details-total {
+        display: flex;
+        gap: var(--spacing-sm);
+        padding-bottom: 2px;
+        color: var(--color-text-muted);
+        font-family: var(--font-family-mono);
+      }
+
+      .stash-details-total .additions {
+        color: var(--color-success);
+      }
+
+      .stash-details-total .deletions {
+        color: var(--color-error);
+      }
+
+      .stash-file {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .stash-file-status {
+        width: 1em;
+        flex-shrink: 0;
+        text-align: center;
+        color: var(--color-text-muted);
+        font-family: var(--font-family-mono);
+      }
+
+      .stash-file-path {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: var(--font-family-mono);
+      }
+
+      .stash-file-stats {
+        display: flex;
+        flex-shrink: 0;
+        gap: 6px;
+        font-family: var(--font-family-mono);
+      }
+
+      .stash-file-stats .additions {
+        color: var(--color-success);
+      }
+
+      .stash-file-stats .deletions {
+        color: var(--color-error);
       }
 
       .empty {
@@ -311,7 +392,14 @@ export class LvStashList extends LitElement {
   }
 
   private handleStashItemKeydown(e: KeyboardEvent, stash: Stash): void {
+    // Enter/Space must do what a click does. The context menu keeps a keyboard
+    // route through the platform-standard keys rather than losing one.
     if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      void this.handleToggleDetails(stash);
+      return;
+    }
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
       e.preventDefault();
       this.handleContextMenu(
         new MouseEvent('contextmenu', { clientX: 0, clientY: 0 }),
@@ -322,6 +410,8 @@ export class LvStashList extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // A preview belongs to the repo it was opened in.
+      this.collapseDetails();
       await this.loadStashes();
     }
   }
@@ -348,6 +438,18 @@ export class LvStashList extends LitElement {
    */
   @state() private error: string | null = null;
 
+  /**
+   * The stash whose contents are expanded inline, keyed by OID.
+   *
+   * Not by index: `Stash.index` is a position that shifts whenever an entry is
+   * added or dropped (see resolveStashIndex), so an index key would follow the
+   * wrong row after any list change.
+   */
+  @state() private expandedOid: string | null = null;
+  @state() private stashDetails: StashShowResult | null = null;
+  @state() private detailsLoading = false;
+  @state() private detailsError: string | null = null;
+
   private async loadStashes(): Promise<void> {
     if (!this.repositoryPath) return;
 
@@ -371,6 +473,11 @@ export class LvStashList extends LitElement {
       if (result.success) {
         this.error = null;
         this.stashes = result.data!;
+        // The expanded row may have been dropped or popped (here or from a
+        // terminal); a preview with no row above it is orphaned UI.
+        if (this.expandedOid && !this.stashes.some(s => s.oid === this.expandedOid)) {
+          this.collapseDetails();
+        }
         // Emit count changed event
         this.dispatchEvent(new CustomEvent('stash-count-changed', {
           detail: { count: this.stashes.length },
@@ -380,6 +487,7 @@ export class LvStashList extends LitElement {
       } else {
         this.error = result.error?.message || 'Failed to load stashes';
         this.stashes = [];
+        this.collapseDetails();
         this.dispatchEvent(new CustomEvent('stash-count-changed', {
           detail: { count: 0 },
           bubbles: true,
@@ -392,6 +500,7 @@ export class LvStashList extends LitElement {
       if (isFresh()) {
         this.error = err instanceof Error ? err.message : 'Failed to load stashes';
         this.stashes = [];
+        this.collapseDetails();
         this.dispatchEvent(new CustomEvent('stash-count-changed', {
           detail: { count: 0 },
           bubbles: true,
@@ -515,7 +624,7 @@ export class LvStashList extends LitElement {
   private async resolveStashIndex(
     repoPath: string,
     stash: Stash,
-    action: 'applied' | 'popped' | 'dropped'
+    action: 'applied' | 'popped' | 'dropped' | 'shown'
   ): Promise<number | null> {
     const result = await gitService.getStashes(repoPath);
 
@@ -539,6 +648,128 @@ export class LvStashList extends LitElement {
     }
 
     return index;
+  }
+
+  /**
+   * Toggle the inline contents preview for a stash — `git stash show`'s
+   * diffstat, in the panel.
+   *
+   * Apply, Pop and Drop all act on content the user could not see: Drop
+   * irreversibly, Pop asking them to accept conflicts sight unseen. Applying a
+   * stash just to find out what was in it was the only way to look.
+   *
+   * Read-only, so it deliberately does NOT claim the working-tree lock — there
+   * is nothing to serialize, and inspecting a stash while another operation
+   * runs is exactly when it is most useful.
+   */
+  private async handleToggleDetails(stash: Stash): Promise<void> {
+    if (this.expandedOid === stash.oid) {
+      this.collapseDetails();
+      return;
+    }
+
+    this.expandedOid = stash.oid;
+    this.stashDetails = null;
+    this.detailsError = null;
+    this.detailsLoading = true;
+
+    // Captured before the await, like every handler here: the prop rebinds on a
+    // tab switch, and a result resolved against another repo would describe a
+    // different stash entirely.
+    const repoPath = this.repositoryPath;
+    /** Still the same repo AND still the row the user opened. */
+    const isFresh = (): boolean =>
+      this.repositoryPath === repoPath && this.expandedOid === stash.oid;
+
+    try {
+      // By oid, for the same reason the action handlers do it: the cached row
+      // can name a different stash by now, and previewing the WRONG entry
+      // before a Drop is worse than previewing nothing.
+      const index = await this.resolveStashIndex(repoPath, stash, 'shown');
+      if (!isFresh()) return;
+      if (index === null) {
+        // resolveStashIndex already toasted and reloaded the list.
+        this.collapseDetails();
+        return;
+      }
+
+      const result = await gitService.stashShow({
+        path: repoPath,
+        index,
+        stat: true,
+        patch: false,
+      });
+      if (!isFresh()) return;
+
+      if (result.success && result.data) {
+        // The index was live when resolveStashIndex read it, but stash_show is
+        // a SECOND round trip: a create or drop in between (this panel's own
+        // Stash button, another window, a terminal) renumbers the list, and the
+        // index we asked for can now name a different entry. Rendering that as
+        // this row's contents is the exact failure the preview exists to
+        // prevent — someone Dropping a stash after reading another one's diff.
+        if (result.data.oid !== stash.oid) {
+          // Toast, not this.detailsError: the usual cause of a renumber is a
+          // drop, and if the dropped entry was OURS the reload below collapses
+          // this preview — taking an inline error with it and leaving the row
+          // to just silently close. Same channel the other staleness paths use.
+          showToast(
+            `"${stash.message}" moved in the stash list while it was being read — open it again`,
+            'warning'
+          );
+          this.collapseDetails();
+          void this.loadStashes();
+          return;
+        }
+        this.stashDetails = result.data;
+      } else {
+        this.detailsError = result.error?.message ?? 'Failed to read stash contents';
+      }
+    } catch (err) {
+      console.error('Failed to read stash contents:', err);
+      if (isFresh()) {
+        this.detailsError = err instanceof Error ? err.message : 'Failed to read stash contents';
+      }
+    } finally {
+      if (isFresh()) {
+        this.detailsLoading = false;
+      }
+    }
+  }
+
+  private collapseDetails(): void {
+    this.expandedOid = null;
+    this.stashDetails = null;
+    this.detailsError = null;
+    this.detailsLoading = false;
+  }
+
+  /** Open (never toggle) the preview — the context-menu entry point. */
+  private handleShowContents(): void {
+    const stash = this.contextMenu.stash;
+    if (!stash) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    if (this.expandedOid !== stash.oid) {
+      void this.handleToggleDetails(stash);
+    }
+  }
+
+  /** `git status`-style single-letter label for a stash_show delta status. */
+  private stashFileStatusLabel(status: string): string {
+    switch (status) {
+      case 'added':
+        return 'A';
+      case 'deleted':
+        return 'D';
+      case 'renamed':
+        return 'R';
+      case 'copied':
+        return 'C';
+      case 'typechange':
+        return 'T';
+      default:
+        return 'M';
+    }
   }
 
   private async handleApplyStash(): Promise<void> {
@@ -752,6 +983,41 @@ export class LvStashList extends LitElement {
     }
   }
 
+  private renderStashDetails() {
+    if (this.detailsLoading) {
+      return html`<div class="stash-details stash-details-status">Loading contents...</div>`;
+    }
+    if (this.detailsError) {
+      return html`<div class="stash-details stash-details-error" role="alert">${this.detailsError}</div>`;
+    }
+    if (!this.stashDetails) return nothing;
+
+    const { files, totalAdditions, totalDeletions } = this.stashDetails;
+    if (files.length === 0) {
+      return html`<div class="stash-details stash-details-status">No file changes</div>`;
+    }
+
+    return html`
+      <div class="stash-details">
+        <div class="stash-details-total">
+          <span>${files.length} ${files.length === 1 ? 'file' : 'files'}</span>
+          <span class="additions">+${totalAdditions}</span>
+          <span class="deletions">-${totalDeletions}</span>
+        </div>
+        ${files.map(file => html`
+          <div class="stash-file" title="${file.path}">
+            <span class="stash-file-status">${this.stashFileStatusLabel(file.status)}</span>
+            <span class="stash-file-path">${file.path}</span>
+            <span class="stash-file-stats">
+              ${file.additions > 0 ? html`<span class="additions">+${file.additions}</span>` : nothing}
+              ${file.deletions > 0 ? html`<span class="deletions">-${file.deletions}</span>` : nothing}
+            </span>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
   private renderContextMenu() {
     if (!this.contextMenu.visible || !this.contextMenu.stash) return nothing;
 
@@ -764,6 +1030,16 @@ export class LvStashList extends LitElement {
         @click=${(e: Event) => e.stopPropagation()}
         @keydown=${(e: KeyboardEvent) => this.handleContextMenuKeydown(e)}
       >
+        <!-- Read-only, so no ?disabled on the shared working-tree lock: this is
+             exactly when the user most wants to look before acting. -->
+        <button class="context-menu-item" role="menuitem" @click=${this.handleShowContents}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
+          </svg>
+          Show Contents
+        </button>
+        <div class="context-menu-divider" role="separator"></div>
         <button class="context-menu-item" role="menuitem" ?disabled=${this.operationInProgress} @click=${this.handleApplyStash}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="20 6 9 17 4 12"></polyline>
@@ -800,14 +1076,24 @@ export class LvStashList extends LitElement {
           : html`
               <ul class="stash-list" role="list">
                 ${this.stashes.map((stash) => html`
+                  <!-- title is the full message: .stash-message is ellipsized,
+                       and since stashes can be named this is the only way to
+                       read a truncated one. The chevron and aria-expanded
+                       already say the row opens. -->
                   <li
                     class="stash-item"
                     role="listitem"
                     tabindex="0"
                     aria-label="Stash: ${stash.message}"
+                    aria-expanded=${this.expandedOid === stash.oid ? 'true' : 'false'}
+                    title=${stash.message}
+                    @click=${() => this.handleToggleDetails(stash)}
                     @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, stash)}
                     @keydown=${(e: KeyboardEvent) => this.handleStashItemKeydown(e, stash)}
                   >
+                    <svg class="stash-chevron ${this.expandedOid === stash.oid ? 'expanded' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
                     <svg class="stash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                       <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
                       <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"></path>
@@ -817,6 +1103,17 @@ export class LvStashList extends LitElement {
                       <div class="stash-index">stash@{${stash.index}}</div>
                     </div>
                   </li>
+                  <!-- A SIBLING row, not nested: nesting would bubble clicks
+                       inside the preview back to the row handler and collapse
+                       it, and would change .stash-item subtree matching.
+                       role="presentation" keeps it out of the list's a11y
+                       semantics so expanding a stash does not change the
+                       announced item count (and an empty transient row is not
+                       announced at all); its .stash-details children stay
+                       exposed. -->
+                  ${this.expandedOid === stash.oid
+                    ? html`<li class="stash-details-row" role="presentation">${this.renderStashDetails()}</li>`
+                    : nothing}
                 `)}
               </ul>
             `}
