@@ -1743,21 +1743,55 @@ export class LvGitHubDialog extends LitElement {
         throw new Error('GitHub App configuration was not accepted by the server');
       }
 
-      // Store the app config as the account token
-      const accountId = this.selectedAccountId || `github-app-${this.appId}`;
+      // The App connection always gets its OWN account record. Reusing
+      // whatever account happens to be selected would destroy it: the dialog
+      // auto-selects an existing PAT/OAuth account when it opens, and
+      // saveGlobalAccount() replaces the whole row, so that account's name,
+      // cached user, colour, URL patterns and Default flag would be wiped and
+      // its id rebound to the App. The PAT and OAuth paths only ever reuse
+      // selectedAccountId to store a token, never to rewrite the record.
+      const accountId = `github-app-${this.appId}`;
 
-      // Create account if needed
+      // Create the App account, or refresh an existing one in place without
+      // discarding the metadata the user set on it.
       const unifiedProfile = await import('../../services/unified-profile.service.ts');
-      await unifiedProfile.saveGlobalAccount({
+      const { createEmptyIntegrationAccount } = await import('../../types/unified-profile.types.ts');
+      const existingAppAccount = this.accounts.find((a) => a.id === accountId);
+      // The backend keeps a single GitHub App configuration (one keyring
+      // entry), so connecting a different App repoints the credential that
+      // every other App account resolves through — those accounts have no
+      // token of their own and fall back to that same config. Supersede them
+      // instead of leaving entries in the selector that silently authenticate
+      // as the App just connected.
+      const supersededAppAccounts = this.accounts.filter(
+        (a) => a.id !== accountId && a.id.startsWith('github-app-'),
+      );
+      const appAccount: IntegrationAccount = {
+        ...(existingAppAccount ?? createEmptyIntegrationAccount('github')),
         id: accountId,
-        name: `GitHub App ${this.appId}`,
-        integrationType: 'github',
-        config: { type: 'github' as const },
-        color: null,
-        cachedUser: null,
-        urlPatterns: [],
-        isDefault: !this.selectedAccountId,
-      } as import('../../types/unified-profile.types.ts').IntegrationAccount);
+        name: existingAppAccount?.name || `GitHub App ${this.appId}`,
+        isDefault: existingAppAccount
+          ? existingAppAccount.isDefault
+          : supersededAppAccounts.some((a) => a.isDefault) || this.accounts.length === 0,
+      };
+      await unifiedProfile.saveGlobalAccount(appAccount);
+      for (const superseded of supersededAppAccounts) {
+        try {
+          await unifiedProfileService.deleteGlobalAccount(superseded.id);
+        } catch (supersededErr) {
+          showToast(
+            supersededErr instanceof Error
+              ? `Connected, but the previous GitHub App account could not be removed: ${supersededErr.message}`
+              : 'Connected, but the previous GitHub App account could not be removed',
+            'warning',
+          );
+        }
+      }
+      // Keep the selector in sync so the new account is listed and a later
+      // store emit cannot reset the selection (the subscription clears
+      // selectedAccountId when it is not in this.accounts). Mirrors the
+      // create-new branches of the PAT and OAuth paths.
+      this.accounts = getAccountsByType('github');
 
       // Reflect the backend-reported status rather than a hardcoded value (M1).
       this.connectionStatus = {
