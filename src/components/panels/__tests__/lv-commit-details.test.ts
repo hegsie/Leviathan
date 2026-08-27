@@ -7,15 +7,24 @@
 import { expect, fixture, html } from '@open-wc/testing';
 import { uiStore } from '../../../stores/ui.store.ts';
 import type { Commit } from '../../../types/git.types.ts';
+import { resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 let failingCommands: Set<string> = new Set();
 let mockFiles: unknown[] = [];
 let cbId = 0;
+/** Every invoke made during a test, so restore can be asserted end to end. */
+const invokeHistory: Array<{ command: string; args?: unknown }> = [];
+/** Button label the mocked confirm resolves with. 'Ok' means accepted. */
+let confirmAnswer = 'Ok';
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
 const mockInvoke: MockInvoke = async (command: string) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
+
+  // plugin-dialog 2.x routes confirm() through `message` and reads true only
+  // from the OK button label.
+  if (command === 'plugin:dialog|message') return confirmAnswer;
 
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Failed to get files' };
@@ -29,7 +38,10 @@ const mockInvoke: MockInvoke = async (command: string) => {
 };
 
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
-  invoke: (command: string, args?: unknown) => mockInvoke(command, args),
+  invoke: (command: string, args?: unknown) => {
+    invokeHistory.push({ command, args });
+    return mockInvoke(command, args);
+  },
   transformCallback: () => cbId++,
 };
 
@@ -53,6 +65,14 @@ describe('lv-commit-details', () => {
   beforeEach(() => {
     failingCommands = new Set();
     mockFiles = [];
+    invokeHistory.length = 0;
+    confirmAnswer = 'Ok';
+    uiStore.setState({ toasts: [] });
+    resetRefOpLocks();
+  });
+
+  afterEach(() => {
+    resetRefOpLocks();
   });
 
   it('shows the previous path for a renamed file', async () => {
@@ -190,5 +210,105 @@ describe('lv-commit-details', () => {
 
     const toasts = uiStore.getState().toasts;
     expect(toasts.some((t) => t.type === 'error' && /copy sha/i.test(t.message))).to.be.true;
+  });
+  describe('restore a file from this commit', () => {
+    const RESTORE_LABEL = /restore this version/i;
+
+    async function renderWithFiles(files: unknown[]): Promise<LvCommitDetails> {
+      mockFiles = files;
+      const el = await fixture<LvCommitDetails>(
+        html`<lv-commit-details .repositoryPath=${'/test/repo'} .commit=${mockCommit}></lv-commit-details>`,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).loadFiles();
+      await el.updateComplete;
+      return el;
+    }
+
+    /** Right-click a file row and return the rendered context menu items. */
+    async function openMenuOn(el: LvCommitDetails, path: string): Promise<HTMLButtonElement[]> {
+      // The row shows only the basename; the full path is the title attribute.
+      const rows = Array.from(el.shadowRoot!.querySelectorAll('.file-item'));
+      const row = rows.find((r) => r.getAttribute('title') === path);
+      expect(row, `no file row for ${path}`).to.not.be.undefined;
+      row!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await el.updateComplete;
+      return Array.from(el.shadowRoot!.querySelectorAll('.context-menu .context-menu-item'));
+    }
+
+    function itemMatching(items: HTMLButtonElement[], re: RegExp): HTMLButtonElement | undefined {
+      return items.find((i) => re.test(i.textContent ?? ''));
+    }
+
+    function restoreCalls(): Array<{ command: string; args?: unknown }> {
+      return invokeHistory.filter((c) => c.command === 'checkout_file_from_commit');
+    }
+
+    it('offers Restore this version for a file the commit changed, and not for one it deleted', async () => {
+      const el = await renderWithFiles([
+        { path: 'src/main.ts', status: 'modified', additions: 2, deletions: 1 },
+        { path: 'src/gone.ts', status: 'deleted', additions: 0, deletions: 9 },
+      ]);
+
+      const modifiedItems = await openMenuOn(el, 'src/main.ts');
+      expect(itemMatching(modifiedItems, RESTORE_LABEL), 'modified file offers restore').to.not.be
+        .undefined;
+
+      const deletedItems = await openMenuOn(el, 'src/gone.ts');
+      // The blob is not in this commit's tree, so restoring it cannot work.
+      expect(itemMatching(deletedItems, RESTORE_LABEL), 'deleted file hides restore').to.be
+        .undefined;
+    });
+
+    it('restores the file from the displayed commit after the confirm', async () => {
+      const el = await renderWithFiles([
+        { path: 'src/main.ts', status: 'modified', additions: 2, deletions: 1 },
+      ]);
+
+      const items = await openMenuOn(el, 'src/main.ts');
+      const restore = itemMatching(items, RESTORE_LABEL);
+      expect(restore).to.not.be.undefined;
+      restore!.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+
+      const calls = restoreCalls();
+      expect(calls).to.have.lengthOf(1);
+      expect(calls[0].args).to.deep.equal({
+        path: '/test/repo',
+        filePath: 'src/main.ts',
+        commit: mockCommit.oid,
+      });
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && t.message.includes('src/main.ts'))).to.be
+        .true;
+    });
+
+    it('shows the backend error and refreshes nothing when the restore fails', async () => {
+      const el = await renderWithFiles([
+        { path: 'src/main.ts', status: 'modified', additions: 2, deletions: 1 },
+      ]);
+      failingCommands.add('checkout_file_from_commit');
+
+      let refreshed = false;
+      const onRefresh = (): void => {
+        refreshed = true;
+      };
+      window.addEventListener('repository-refresh', onRefresh);
+
+      try {
+        const items = await openMenuOn(el, 'src/main.ts');
+        itemMatching(items, RESTORE_LABEL)!.click();
+        await el.updateComplete;
+        await new Promise((r) => setTimeout(r, 0));
+
+        const toasts = uiStore.getState().toasts;
+        expect(toasts.some((t) => t.type === 'error')).to.be.true;
+        expect(refreshed, 'a failed restore must not claim the repo changed').to.be.false;
+      } finally {
+        window.removeEventListener('repository-refresh', onRefresh);
+      }
+    });
   });
 });

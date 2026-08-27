@@ -491,6 +491,78 @@ describe('lv-branch-list', () => {
       expect(menuTexts.some((t) => t?.includes('Track this branch'))).to.be.true;
     });
 
+    it('right-click non-HEAD branch offers Compare and dispatches compare-branch', async () => {
+      const el = await renderBranchList();
+
+      const branchItems = el.shadowRoot!.querySelectorAll('.branch-item');
+      const nonHeadItem = Array.from(branchItems).find(
+        (item) => !item.classList.contains('active') && item.textContent?.includes('feature-x')
+      );
+      nonHeadItem!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 })
+      );
+      await el.updateComplete;
+
+      const compareItem = Array.from(
+        el.shadowRoot!.querySelectorAll('.context-menu-item')
+      ).find((item) => item.textContent?.includes('Compare with current branch'));
+      expect(compareItem, 'the branch menu offers a comparison').to.not.be.undefined;
+
+      let detail: { compareRef?: string } | null = null;
+      el.addEventListener('compare-branch', (e) => {
+        detail = (e as CustomEvent<{ compareRef?: string }>).detail;
+      });
+      (compareItem as HTMLElement).click();
+      await el.updateComplete;
+
+      expect(detail, 'compare-branch reached the host').to.not.be.null;
+      expect(detail!.compareRef).to.equal('feature-x');
+      expect(
+        el.shadowRoot!.querySelector('.context-menu'),
+        'the menu closes behind the action'
+      ).to.be.null;
+    });
+
+    it('compare-branch carries the FULL remote name for a remote branch', async () => {
+      const el = await renderBranchList();
+
+      const remoteItem = Array.from(el.shadowRoot!.querySelectorAll('.branch-item')).find(
+        (item) => item.getAttribute('title')?.includes('origin/')
+      );
+      remoteItem!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 })
+      );
+      await el.updateComplete;
+
+      let detail: { compareRef?: string } | null = null;
+      el.addEventListener('compare-branch', (e) => {
+        detail = (e as CustomEvent<{ compareRef?: string }>).detail;
+      });
+      const compareItem = Array.from(
+        el.shadowRoot!.querySelectorAll('.context-menu-item')
+      ).find((item) => item.textContent?.includes('Compare with current branch'));
+      (compareItem as HTMLElement).click();
+      await el.updateComplete;
+
+      expect(detail!.compareRef, 'not the shorthand, which can collide with a local branch')
+        .to.match(/^origin\//);
+    });
+
+    it('right-click HEAD branch hides Compare — it would compare a ref with itself', async () => {
+      const el = await renderBranchList();
+
+      const activeItem = el.shadowRoot!.querySelector('.branch-item.active');
+      activeItem!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 })
+      );
+      await el.updateComplete;
+
+      const menuTexts = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+        (item) => item.textContent?.trim()
+      );
+      expect(menuTexts.some((t) => t?.includes('Compare with current branch'))).to.be.false;
+    });
+
     it('context menu closes on document click', async () => {
       const el = await renderBranchList();
 

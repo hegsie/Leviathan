@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'lit';
+import { live } from 'lit/directives/live.js';
 import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -8,6 +9,25 @@ import { showToast } from '../../services/notification.service.ts';
 import './lv-modal.ts';
 
 type TabId = 'identity' | 'settings' | 'aliases';
+
+/**
+ * The values git accepts for the common settings that take a fixed set. Keys
+ * absent from this map are free-form (an editor command, a branch name) and
+ * get a text input instead.
+ */
+const SETTING_CHOICES: Record<string, readonly string[]> = {
+  'core.autocrlf': ['true', 'false', 'input'],
+  'core.filemode': ['true', 'false'],
+  'core.ignorecase': ['true', 'false'],
+  'pull.rebase': ['true', 'false', 'merges', 'interactive'],
+  'push.default': ['nothing', 'current', 'upstream', 'simple', 'matching'],
+  'push.autoSetupRemote': ['true', 'false'],
+  'fetch.prune': ['true', 'false'],
+  'merge.ff': ['true', 'false', 'only'],
+  'merge.conflictstyle': ['merge', 'diff3', 'zdiff3'],
+  'rebase.autoStash': ['true', 'false'],
+  'diff.colorMoved': ['no', 'default', 'plain', 'blocks', 'zebra', 'dimmed-zebra'],
+};
 
 /**
  * Git Configuration Dialog
@@ -218,7 +238,8 @@ export class LvConfigDialog extends LitElement {
         gap: var(--spacing-sm);
       }
 
-      .setting-value input {
+      .setting-value input,
+      .setting-value select {
         width: 200px;
         padding: var(--spacing-xs) var(--spacing-sm);
         border: 1px solid var(--color-border);
@@ -472,35 +493,46 @@ export class LvConfigDialog extends LitElement {
 
   private async handleSaveSetting(key: string, value: string): Promise<void> {
     this.error = null;
-
     // A blanked input means "remove this setting". Writing an empty string
     // instead leaves `key = ` behind in .git/config, which git rejects on the
-    // next read ("bad boolean config value '' for 'pull.rebase'").
+    // next read ("bad boolean config value '' for 'pull.rebase'", or for an
+    // enumerated key like push.default, `fatal: bad config variable`). Clearing
+    // has to go through --unset instead, which clearSetting() owns.
     if (value.trim() === '') {
       await this.clearSetting(key);
       return;
     }
 
     try {
-      const result = await gitService.setConfigValue(
-        this.pinnedRepoPath,
-        key,
-        value,
-        false // local
-      );
+      const result = await gitService.setConfigValue(this.pinnedRepoPath, key, value, false /* local */);
 
       if (result.success) {
         showToast('Setting saved', 'success');
-        // Update the in-memory value so re-renders don't snap the input back
-        // to the stale value.
+        // Update the in-memory value so re-renders don't snap the control back
+        // to the stale value. The write always lands in this repository's
+        // config, so the scope badge has to follow it — a row that was "not
+        // set" a moment ago must not keep saying so next to the value the user
+        // just chose.
         this.settings = this.settings.map((s) =>
-          s.key === key ? { ...s, value } : s
+          s.key === key ? { ...s, value, scope: 'local' } : s
         );
       } else {
         this.error = result.error?.message || 'Failed to save setting';
       }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Failed to save setting';
+    }
+  }
+
+  /**
+   * Re-read the common settings after a change whose effective result cannot be
+   * derived locally. Only the settings list is refreshed — a full `loadData()`
+   * would flip the dialog back to its loading state and blank the other tabs.
+   */
+  private async reloadSettings(): Promise<void> {
+    const settingsResult = await gitService.getCommonSettings(this.pinnedRepoPath);
+    if (settingsResult.success && settingsResult.data) {
+      this.settings = settingsResult.data;
     }
   }
 
@@ -518,8 +550,14 @@ export class LvConfigDialog extends LitElement {
       );
 
       if (result.success) {
-        await this.loadData();
-        const inherited = this.settings.find((s) => s.key === key);
+        // Only the settings list is refreshed — a full loadData() would flip
+        // the dialog back to its loading state and blank the other tabs.
+        await this.reloadSettings();
+        // `get_common_settings` always reports an entry for a known key, even
+        // when nothing configures it — `scope: 'unset'` there means "gone
+        // everywhere", not "still covered by a broader scope", so only a real
+        // scope counts as inherited.
+        const inherited = this.settings.find((s) => s.key === key && s.scope !== 'unset');
         if (inherited) {
           showToast(
             `Cleared ${key} for this repository — still set in ${inherited.scope} config`,
@@ -651,6 +689,57 @@ export class LvConfigDialog extends LitElement {
     `;
   }
 
+  /**
+   * Editor for one common setting. Keys with a fixed set of accepted values get
+   * a dropdown — including a "Not set" entry, so the state of an unconfigured
+   * key is representable — and everything else a free-text input. A value that
+   * came from outside the known set (a legacy or hand-edited config) is added
+   * as an extra option, so the dropdown shows what is really configured instead
+   * of silently reading back as something else.
+   */
+  private renderSettingControl(setting: ConfigEntry) {
+    const choices = SETTING_CHOICES[setting.key];
+
+    if (!choices) {
+      return html`
+        <input
+          type="text"
+          placeholder="Not set"
+          .value=${setting.value}
+          @change=${(e: Event) =>
+            this.handleSaveSetting(setting.key, (e.target as HTMLInputElement).value)}
+        />
+      `;
+    }
+
+    const options =
+      setting.value && !choices.includes(setting.value) ? [...choices, setting.value] : choices;
+
+    // Selectedness is bound per option rather than with `.value` on the select:
+    // the property is committed before the options exist, so the configured
+    // value would not stick on first render. Bound `live()`: a clear that
+    // turns out to be a no-op (the value is still covered by a broader scope)
+    // leaves `setting.value` unchanged from Lit's point of view, so a plain
+    // binding would skip re-committing `.selected` and leave the control
+    // showing "Not set" — the option the browser selected as a side effect of
+    // the user's own choice — instead of snapping back to the value that is
+    // actually still in effect.
+    return html`
+      <select
+        .value=${live(setting.value)}
+        @change=${(e: Event) =>
+          this.handleSaveSetting(setting.key, (e.target as HTMLSelectElement).value)}
+      >
+        <option value="" .selected=${live(setting.value === '')}>Not set</option>
+        ${options.map(
+          (choice) => html`
+            <option value=${choice} .selected=${live(setting.value === choice)}>${choice}</option>
+          `
+        )}
+      </select>
+    `;
+  }
+
   private renderSettingsTab() {
     if (this.loading) {
       return html`<div class="loading-indicator">Loading...</div>`;
@@ -671,20 +760,11 @@ export class LvConfigDialog extends LitElement {
             <div class="setting-item">
               <div>
                 <span class="setting-key">${setting.key}</span>
-                <span class="scope-badge">${setting.scope}</span>
+                <span class="scope-badge"
+                  >${setting.scope === 'unset' ? 'not set' : setting.scope}</span
+                >
               </div>
-              <div class="setting-value">
-                <!-- A plain binding, not live(): a failed save or clear must
-                     leave the text the user typed alone. After a successful one
-                     loadData() re-renders through the loading state, which
-                     rebuilds this input from the reloaded value. -->
-                <input
-                  type="text"
-                  .value=${setting.value}
-                  @change=${(e: Event) =>
-                    this.handleSaveSetting(setting.key, (e.target as HTMLInputElement).value)}
-                />
-              </div>
+              <div class="setting-value">${this.renderSettingControl(setting)}</div>
             </div>
           `
         )}
@@ -693,8 +773,9 @@ export class LvConfigDialog extends LitElement {
       <div class="form-group" style="margin-top: var(--spacing-md)">
         <div class="hint">
           Changes are saved automatically when you modify a value.
-          Clear a value to remove it from this repository.
-          Configure additional settings via git config command.
+          A setting that is not configured yet shows as "Not set" — pick or type a
+          value to set it for this repository, or choose "Not set" again to clear
+          it from this repository.
         </div>
       </div>
     `;
