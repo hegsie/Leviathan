@@ -1811,20 +1811,17 @@ mod tests {
         let path_of = |summary: &str| {
             history
                 .iter()
-                .find(|c| c.summary == summary)
+                .find(|c| c.commit.summary == summary)
                 .unwrap_or_else(|| panic!("{} missing from history", summary))
-                .path
+                .path_at_commit
                 .clone()
         };
 
-        assert_eq!(
-            path_of("Edit after rename"),
-            Some("new-name.txt".to_string())
-        );
-        assert_eq!(path_of("Rename it"), Some("new-name.txt".to_string()));
+        assert_eq!(path_of("Edit after rename"), "new-name.txt".to_string());
+        assert_eq!(path_of("Rename it"), "new-name.txt".to_string());
         assert_eq!(
             path_of("Add original"),
-            Some("old-name.txt".to_string()),
+            "old-name.txt".to_string(),
             "a commit from before the rename holds the file under its OLD name"
         );
     }

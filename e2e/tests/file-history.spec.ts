@@ -658,7 +658,7 @@ test.describe('File History - Restore this version', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, {
-      get_file_history: MOCK_COMMITS,
+      get_file_history: MOCK_ENTRIES,
       checkout_file_from_commit: {
         filePath: 'src/main.ts',
         commitOid: 'def789ghi012345',
