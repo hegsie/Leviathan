@@ -208,6 +208,33 @@ describe('git.service - Tauri command invocations', () => {
     expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo' });
   });
 
+  it('describeCommit passes camelCase params to Tauri', async () => {
+    const { describeCommit } = await import('../git.service.ts');
+    await describeCommit('/test/repo', {
+      commitish: 'abc1234',
+      tags: true,
+      matchPattern: 'v*',
+      excludePattern: '*-rc*',
+      firstParent: true,
+      dirty: false,
+    });
+    expect(lastInvokedCommand).to.equal('describe');
+    // Tauri converts these to Rust's match_pattern/exclude_pattern/first_parent
+    // itself — a snake_case key here would arrive as an unknown argument.
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      commitish: 'abc1234',
+      tags: true,
+      all: undefined,
+      long: undefined,
+      abbrev: undefined,
+      matchPattern: 'v*',
+      excludePattern: '*-rc*',
+      firstParent: true,
+      dirty: false,
+    });
+  });
+
   it('getStashes calls get_stashes with path', async () => {
     const { getStashes } = await import('../git.service.ts');
     await getStashes('/test/repo');

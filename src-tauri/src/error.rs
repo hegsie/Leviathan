@@ -84,6 +84,14 @@ pub enum LeviathanError {
     #[error("Invalid reference")]
     InvalidReference,
 
+    /// `git describe` ran fine but found no tag reachable from the target.
+    ///
+    /// Distinct from OperationFailed: in a repository that has not been
+    /// tagged yet this is the ordinary answer for every commit in it, not a
+    /// fault, so the UI shows an empty state instead of an error.
+    #[error("No tags reachable from {0}")]
+    NoTagsReachable(String),
+
     #[error("{0}")]
     Custom(String),
 
@@ -154,6 +162,7 @@ impl From<LeviathanError> for ErrorResponse {
             LeviathanError::RevertConflict => "REVERT_CONFLICT",
             LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
             LeviathanError::InvalidReference => "INVALID_REFERENCE",
+            LeviathanError::NoTagsReachable(_) => "NO_TAGS_REACHABLE",
             LeviathanError::Custom(_) => "CUSTOM_ERROR",
             LeviathanError::OAuth(_) => "OAUTH_ERROR",
             LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
@@ -203,6 +212,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::RevertConflict => "REVERT_CONFLICT",
                 LeviathanError::RevertInProgress => "REVERT_IN_PROGRESS",
                 LeviathanError::InvalidReference => "INVALID_REFERENCE",
+                LeviathanError::NoTagsReachable(_) => "NO_TAGS_REACHABLE",
                 LeviathanError::Custom(_) => "CUSTOM_ERROR",
                 LeviathanError::OAuth(_) => "OAUTH_ERROR",
                 LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",

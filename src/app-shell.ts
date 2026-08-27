@@ -66,6 +66,7 @@ import './components/dialogs/lv-conflict-resolution-dialog.ts';
 import type { GitflowFinishContext } from './components/dialogs/lv-conflict-resolution-dialog.ts';
 import './components/dialogs/lv-command-palette.ts';
 import './components/dialogs/lv-reflog-dialog.ts';
+import './components/dialogs/lv-describe-dialog.ts';
 import './components/dialogs/lv-compare-branches-dialog.ts';
 import './components/dialogs/lv-search-dialog.ts';
 import './components/dialogs/lv-keyboard-shortcuts-dialog.ts';
@@ -110,6 +111,7 @@ import type { LvCherryPickDialog } from './components/dialogs/lv-cherry-pick-dia
 import type { LvInteractiveRebaseDialog } from './components/dialogs/lv-interactive-rebase-dialog.ts';
 import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-manager-dialog.ts';
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
+import type { LvDescribeDialog } from './components/dialogs/lv-describe-dialog.ts';
 import type { LvCompareBranchesDialog } from './components/dialogs/lv-compare-branches-dialog.ts';
 import type { SearchDialogMode } from './components/dialogs/lv-search-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
@@ -800,6 +802,7 @@ export class AppShell extends LitElement {
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
+  @query('lv-describe-dialog') private describeDialog?: LvDescribeDialog;
   @query('lv-compare-branches-dialog') private compareBranchesDialog?: LvCompareBranchesDialog;
   @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
@@ -1521,6 +1524,10 @@ export class AppShell extends LitElement {
           },
           // Read-only: it never reports work in flight, so the sweep always
           // takes the dismissal branch here.
+          'lv-describe-dialog': {
+            dismissed: 'describe closed',
+            running: 'describe',
+          },
           'lv-compare-branches-dialog': {
             dismissed: 'branch comparison closed',
             running: 'branch comparison',
@@ -3251,6 +3258,19 @@ export class AppShell extends LitElement {
     }
   }
 
+  /**
+   * Name the selected commit after the most recent tag reachable from it.
+   * Read-only, so it is not gated on the ref-operation lock the mutating
+   * items beside it take.
+   */
+  private handleDescribeFromContext(): void {
+    const commit = this.contextMenu.commit;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    if (commit) {
+      this.describeDialog?.open(commit.oid, commit.summary);
+    }
+  }
+
   private handleCreateBranchFromContext(): void {
     const commit = this.contextMenu.commit;
     this.contextMenu = { ...this.contextMenu, visible: false };
@@ -4536,6 +4556,13 @@ export class AppShell extends LitElement {
         action: this.requiresRepository(() => { this.showReflog = true; }),
       },
       {
+        id: 'describe',
+        label: 'Describe commit (git describe)',
+        category: 'action',
+        icon: 'tag',
+        action: this.requiresRepository(() => { this.describeDialog?.open(); }),
+      },
+      {
         id: 'compare-branches',
         label: 'Compare branches',
         category: 'action',
@@ -5722,6 +5749,14 @@ export class AppShell extends LitElement {
                 </svg>
                 Create branch
               </button>
+              <button class="context-menu-item" @click=${this.handleDescribeFromContext} title="Name this commit after the nearest tag (git describe)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="16" x2="12" y2="12"></line>
+                  <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                </svg>
+                Describe this commit
+              </button>
               <button class="context-menu-item" @click=${this.handleCreatePatchFromContext}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
@@ -6166,6 +6201,11 @@ export class AppShell extends LitElement {
           @branch-created=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-create-branch-dialog>
+        <lv-describe-dialog
+          .repositoryPath=${this.activeRepository.repository.path}
+          @describe-create-tag=${(e: CustomEvent<{ target?: string; repositoryPath?: string }>) =>
+            this.createTagDialog?.open(e.detail?.target || undefined, e.detail?.repositoryPath || undefined)}
+        ></lv-describe-dialog>
         <lv-compare-branches-dialog
           .repositoryPath=${this.activeRepository.repository.path}
         ></lv-compare-branches-dialog>

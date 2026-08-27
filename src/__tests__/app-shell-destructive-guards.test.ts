@@ -1192,11 +1192,12 @@ describe('app-shell destructive guards', () => {
       // the lock held, the ONLY enabled items may be the read-only ones. A new
       // mutating button that forgets the binding fails here without anyone
       // having to remember to add it to a list.
+      // Describe only reads: it runs `git describe` and shows the answer.
       // "create patch" only opens the export/import dialog on its Patch tab.
       // Writing .patch files touches a folder the user picks, never the
       // working tree or a ref; the dialog's own Apply — which does — takes
       // this same lock and is bound to it.
-      const READ_ONLY = ['create tag', 'create branch', 'create patch'];
+      const READ_ONLY = ['create tag', 'create branch', 'describe this commit', 'create patch'];
       const el = shellOnRepo();
       document.body.appendChild(el);
       try {

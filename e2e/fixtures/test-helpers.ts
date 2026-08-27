@@ -88,14 +88,19 @@ export async function waitForRepositoryChanged(
 /**
  * Override a specific Tauri command to throw an error.
  * Call this after setupOpenRepository to inject error behavior for specific commands.
+ *
+ * Pass `code` to reproduce a Rust error the frontend branches on: commands
+ * that fail in the backend reject with `{ code, message }`, not an Error, and
+ * a plain Error reaches the app as the generic COMMAND_ERROR code.
  */
 export async function injectCommandError(
   page: Page,
   command: string,
-  message: string
+  message: string,
+  code?: string
 ): Promise<void> {
   await page.evaluate(
-    ({ cmd, msg }) => {
+    ({ cmd, msg, errCode }) => {
       const originalInvoke = (window as unknown as {
         __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
       }).__TAURI_INTERNALS__.invoke;
@@ -110,12 +115,13 @@ export async function injectCommandError(
           if (captured) {
             captured.push({ command, args });
           }
+          if (errCode) throw { code: errCode, message: msg };
           throw new Error(msg);
         }
         return originalInvoke(command, args);
       };
     },
-    { cmd: command, msg: message }
+    { cmd: command, msg: message, errCode: code }
   );
 }
 
