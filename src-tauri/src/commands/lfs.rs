@@ -5,7 +5,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
+use crate::utils::{apply_token_credential_helper, create_command};
 
 /// LFS file tracking pattern
 #[derive(Debug, Clone, serde::Serialize)]
@@ -47,12 +47,69 @@ pub struct LfsStatus {
     pub total_size: u64,
 }
 
+/// URL of the remote `git lfs` will talk to: the current branch's upstream
+/// remote, else `origin`, matching how git-lfs itself picks one.
+///
+/// Used only to scope the injected credential helper. `None` — an unborn or
+/// detached HEAD with no `origin`, or an unreadable repository — installs no
+/// helper at all, which is the safe direction: the transfer fails to
+/// authenticate instead of offering the token to an unknown host.
+fn lfs_remote_url(repo_path: &Path) -> Option<String> {
+    let repo = git2::Repository::open(repo_path).ok()?;
+
+    let head = repo.head().ok();
+    let upstream_remote = head
+        .as_ref()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.name().ok())
+        .and_then(|ref_name| repo.branch_upstream_remote(ref_name).ok())
+        .and_then(|buf| buf.as_str().ok().map(|name| name.to_owned()));
+
+    let remote_name = upstream_remote.unwrap_or_else(|| "origin".to_owned());
+
+    let remote = repo.find_remote(&remote_name).ok()?;
+    remote.url().ok().map(|url| url.to_owned())
+}
+
+/// Build the `git lfs <args>` invocation, optionally authenticated.
+///
+/// `git lfs` resolves credentials by shelling out to `git credential`, which
+/// inherits this process's environment — so the helper installed here reaches
+/// the LFS API endpoint as well as the transfer itself.
+///
+/// That reach is exactly why the helper is scoped to the remote's host. The LFS
+/// endpoint is NOT necessarily the remote: git-lfs reads `lfs.url` from
+/// `.lfsconfig`, a file committed to the repository, so the host git asks about
+/// is attacker-controlled in any repo the user merely cloned.
+fn build_lfs_command(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(repo_path).arg("lfs").args(args);
+
+    if let Some(token_value) = token {
+        if let Some(remote_url) = lfs_remote_url(repo_path) {
+            apply_token_credential_helper(&mut cmd, token_value, &remote_url);
+        }
+    }
+
+    cmd
+}
+
 /// Helper to run git-lfs commands
 fn run_lfs_command(repo_path: &Path, args: &[&str]) -> Result<String> {
-    let output = create_command("git")
-        .current_dir(repo_path)
-        .arg("lfs")
-        .args(args)
+    run_lfs_command_with_token(repo_path, args, None)
+}
+
+/// Helper to run git-lfs commands against an authenticated remote
+fn run_lfs_command_with_token(
+    repo_path: &Path,
+    args: &[&str],
+    token: Option<&str>,
+) -> Result<String> {
+    let output = build_lfs_command(repo_path, args, token)
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git-lfs: {}", e)))?;
 
@@ -426,13 +483,7 @@ pub async fn get_lfs_files(path: String) -> Result<Vec<LfsFile>> {
 pub async fn lfs_pull(path: String, token: Option<String>) -> Result<String> {
     let repo_path = Path::new(&path);
 
-    // Similar to submodules, LFS commands shell out to `git lfs`.
-    // Passing the token directly is tricky without setting up a temporary credential helper.
-    if token.is_some() {
-        tracing::warn!("Token provided for lfs_pull but explicit token injection is not yet fully supported for LFS commands.");
-    }
-
-    run_lfs_command(repo_path, &["pull"])
+    run_lfs_command_with_token(repo_path, &["pull"], token.as_deref())
 }
 
 /// Fetch LFS files from remote
@@ -443,10 +494,7 @@ pub async fn lfs_fetch(
     token: Option<String>,
 ) -> Result<String> {
     let repo_path = Path::new(&path);
-
-    if token.is_some() {
-        tracing::warn!("Token provided for lfs_fetch but explicit token injection is not yet fully supported for LFS commands.");
-    }
+    let token = token.as_deref();
 
     let mut args = vec!["fetch"];
 
@@ -458,7 +506,7 @@ pub async fn lfs_fetch(
         }
     }
 
-    run_lfs_command(repo_path, &args)
+    run_lfs_command_with_token(repo_path, &args, token)
 }
 
 /// Prune old LFS files
@@ -938,5 +986,270 @@ mod tests {
         let json = serde_json::to_string(&pattern);
         assert!(json.is_ok());
         assert!(json.unwrap().contains("\"pattern\":\"*.psd\""));
+    }
+
+    /// A repo whose `origin` is an https remote — the host an injected
+    /// credential helper is allowed to answer for.
+    fn repo_with_https_origin() -> TestRepo {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://git.example.com/o/r.git");
+        repo
+    }
+
+    /// Value of `key` in the env `cmd` will spawn with, as a String.
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn test_lfs_pull_command_carries_the_token_credential_helper() {
+        // The frontend looks the repo's credential up and sends it, so a pull
+        // that drops it dead-ends on every private LFS remote: the child runs
+        // unauthenticated with GIT_TERMINAL_PROMPT=0 and the dialog shows a raw
+        // "could not read Username" in a repo the app can otherwise push.
+        let repo = repo_with_https_origin();
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_COUNT").as_deref(),
+            Some("2"),
+            "a token must install exactly two config overrides: an empty \
+             reset then the helper"
+        );
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.https://git.example.com.helper"),
+            "the override must be the credential helper git asks for auth, \
+             scoped to the remote's own host"
+        );
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            Some("s3cr3t"),
+            "the helper reads the token from this env var"
+        );
+
+        // The token must reach git ONLY through the env var: argv is readable
+        // by every other user on the machine.
+        let helper = env_of(&cmd, "GIT_CONFIG_VALUE_1").expect("helper must be set");
+        assert!(helper.contains("LEVIATHAN_GIT_TOKEN"));
+        assert!(!helper.contains("s3cr3t"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["lfs", "pull"]);
+    }
+
+    /// What real git answers when asked for a credential for `host`, given the
+    /// environment `build_lfs_command` prepared. Env vars being present proves
+    /// nothing if the helper string is not one git honours, and the scoping
+    /// lives in a config key only git knows how to match — so ask git itself.
+    ///
+    /// This is exactly what `git lfs` does to authenticate: it shells out to
+    /// `git credential fill` for its endpoint's host.
+    #[cfg(unix)]
+    fn credential_fill_for(repo: &TestRepo, host: &str) -> String {
+        let built = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        let mut probe = create_command("git");
+        probe.current_dir(&repo.path);
+        for (key, value) in built.get_envs() {
+            if let Some(value) = value {
+                probe.env(key, value);
+            }
+        }
+
+        let mut child = probe
+            .arg("credential")
+            .arg("fill")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git credential fill must start");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin is piped")
+                .write_all(format!("protocol=https\nhost={}\n\n", host).as_bytes())
+                .expect("the request must be writable");
+        }
+        let out = child.wait_with_output().expect("git must terminate");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_injected_helper_answers_git_with_the_token() {
+        let repo = repo_with_https_origin();
+        let stdout = credential_fill_for(&repo, "git.example.com");
+
+        assert!(
+            stdout.contains("password=s3cr3t"),
+            "git must resolve the token as the password, got: {}",
+            stdout
+        );
+        assert!(stdout.contains("username=git"), "got: {}", stdout);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_injected_helper_refuses_a_foreign_lfs_host() {
+        // The endpoint `git lfs` authenticates against is NOT necessarily the
+        // remote: it reads `lfs.url` from `.lfsconfig`, which is COMMITTED TO
+        // THE REPOSITORY. Clone a hostile repo, click Pull, and an unscoped
+        // `credential.helper` would hand that repo's own server the user's
+        // provider token — a token that is usually good for every repo they can
+        // reach. Committing the hostile `.lfsconfig` here as well, so the test
+        // fails the way a user would actually be attacked.
+        let repo = repo_with_https_origin();
+        repo.create_commit(
+            "add a hostile .lfsconfig",
+            &[(
+                ".lfsconfig",
+                "[lfs]\n\turl = https://evil.example.net/o/r.git/info/lfs\n",
+            )],
+        );
+
+        // A helper IS installed for this repo — otherwise the assertions below
+        // would pass simply because nothing answered, proving nothing.
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            Some("s3cr3t"),
+            "the token IS installed here; what follows is about who git offers it to"
+        );
+
+        let stdout = credential_fill_for(&repo, "evil.example.net");
+
+        assert!(
+            !stdout.contains("s3cr3t"),
+            "the token must never be offered to a host the repository chose: {}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("password="),
+            "git must supply no password at all for a foreign host: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_ssh_remote_scopes_the_helper_to_the_provider_https_host() {
+        // The LFS endpoint for a github.com repo is always https regardless of
+        // the git remote's own transport, and the token is a PROVIDER
+        // credential rather than a transport one — so an ssh origin must still
+        // get a helper, scoped to that same provider over https, or a private
+        // LFS repo cloned over ssh could never authenticate its LFS transfers.
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "git@github.com:o/r.git");
+
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.https://github.com.helper"),
+            "an ssh remote must map to its provider's https host"
+        );
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            Some("s3cr3t")
+        );
+    }
+
+    #[test]
+    fn test_repository_without_a_remote_installs_no_helper() {
+        // Nothing says which host the token belongs to, so it must go nowhere.
+        let repo = TestRepo::with_initial_commit();
+
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
+
+        assert_eq!(env_of(&cmd, "LEVIATHAN_GIT_TOKEN"), None);
+        assert_eq!(env_of(&cmd, "GIT_CONFIG_KEY_0"), None);
+    }
+
+    #[test]
+    fn test_lfs_fetch_with_refs_still_authenticates() {
+        let repo = repo_with_https_origin();
+        let cmd = build_lfs_command(&repo.path, &["fetch", "main"], Some("tok"));
+
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.https://git.example.com.helper"),
+            "fetch shares the runner, so it must authenticate too"
+        );
+
+        // Authenticating must not disturb ref assembly.
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["lfs", "fetch", "main"]);
+    }
+
+    #[test]
+    fn test_lfs_command_without_a_token_installs_no_helper() {
+        // Local-only commands (prune, track, ls-files) must never override the
+        // user's own credential helper.
+        let repo = repo_with_https_origin();
+        let cmd = build_lfs_command(&repo.path, &["prune"], None);
+
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "LEVIATHAN_GIT_TOKEN",
+        ] {
+            assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
+        }
+    }
+
+    #[test]
+    fn test_blank_token_installs_no_helper() {
+        // A helper answering with an empty password turns "no credentials" into
+        // "login rejected" — a wronger error than no token at all.
+        let repo = repo_with_https_origin();
+        let cmd = build_lfs_command(&repo.path, &["pull"], Some("   "));
+
+        for key in [
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "LEVIATHAN_GIT_TOKEN",
+        ] {
+            assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lfs_pull_error_does_not_leak_the_token() {
+        // No remote is configured, so this pull fails (with git's "not a git
+        // command" where LFS is absent). Either way the text goes straight to
+        // the dialog's error banner, so it must never carry the token.
+        //
+        // Deliberately not gated on is_lfs_installed(): the leak guard is worth
+        // more when it actually runs, and both failure modes exercise it.
+        let repo = TestRepo::with_initial_commit();
+
+        let result = lfs_pull(repo.path_str(), Some("s3cr3t".to_string())).await;
+
+        let text = match result {
+            Ok(output) => output,
+            Err(err) => {
+                let message = err.to_string();
+                assert!(!message.is_empty(), "the failure must say something");
+                message
+            }
+        };
+        assert!(
+            !text.contains("s3cr3t"),
+            "the token must not reach a user-visible message: {}",
+            text
+        );
     }
 }

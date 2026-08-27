@@ -164,7 +164,14 @@ fn credential_url_key(remote_url: &str) -> Option<String> {
 /// user's config; git stops at the first helper returning a complete
 /// credential, so a stale or wrong-account entry in the user's keychain would
 /// win and the app's token would never be tried.
+/// A blank token is ignored: installing a helper that answers with an empty
+/// password would shadow a real authentication failure with a rejected login,
+/// giving the user a wronger error than no token at all.
 pub fn apply_token_credential_helper(cmd: &mut Command, token: &str, remote_url: &str) {
+    if token.trim().is_empty() {
+        return;
+    }
+
     let Some(key) = credential_url_key(remote_url) else {
         return;
     };
@@ -352,5 +359,22 @@ mod tests {
             envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
             Some("ghp_secret")
         );
+    }
+
+    /// A blank token must install nothing, even for an otherwise valid host:
+    /// a helper that answers with an empty password would shadow a real
+    /// authentication failure with a rejected login rather than no token at
+    /// all.
+    #[test]
+    fn test_apply_token_credential_helper_ignores_a_blank_token() {
+        let mut cmd = Command::new("git");
+        apply_token_credential_helper(&mut cmd, "   ", "https://github.com/o/r.git");
+
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        assert!(!keys.iter().any(|k| k == "GIT_CONFIG_COUNT"));
+        assert!(!keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"));
     }
 }
