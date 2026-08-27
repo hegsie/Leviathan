@@ -17,6 +17,11 @@ export interface ErrorContext {
   /** Repo the failing operation ran against. Pinned into any suggested
    *  action, because a toast outlives a repository switch. */
   repoPath?: string;
+  /** Remote the failing operation was aimed at, when the caller chose one.
+   *  Pinned into the suggested action for the same reason `repoPath` is: a
+   *  retry that re-resolves the destination can land on a different remote
+   *  than the attempt the user is recovering from. */
+  remote?: string;
 }
 
 /**
@@ -67,16 +72,23 @@ export function getErrorSuggestion(
     // refspec-generic pre-check, and neither pulling nor "newer changes"
     // describes it.
     if (context?.operation === 'push-tag') {
-      // "Delete the remote tag first" named something Leviathan cannot do —
-      // there is no remote-tag deletion anywhere in the app. push_tag already
-      // implements the force refspec, so offer that instead of advice the user
-      // cannot follow.
+      // "Delete the remote tag first" is a two-step detour (the tag's Delete
+      // flow can now do it), and push_tag already implements the force
+      // refspec — so offer the one-click recovery instead.
       return {
         message: 'The remote already has this tag at a different commit.',
         action: {
           label: 'Force Push Tag',
+          // The remote travels with the tag: the rejected push was aimed at a
+          // remote the user picked, and a force retry that re-resolved the
+          // destination would move the tag on a DIFFERENT remote and report
+          // success.
           callback: () => window.dispatchEvent(new CustomEvent('force-push-tag', {
-            detail: { tagName: context?.branchName, repoPath: context?.repoPath },
+            detail: {
+              tagName: context?.branchName,
+              repoPath: context?.repoPath,
+              remote: context?.remote,
+            },
           })),
         },
       };

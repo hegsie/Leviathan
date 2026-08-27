@@ -292,6 +292,31 @@ export async function isAiAvailable(): Promise<boolean> {
   return result.success && result.data === true;
 }
 
+/** Why AI is unavailable, mirroring the Rust `AiUnavailable`. */
+export interface AiUnavailable {
+  /** Human-readable reason, naming the provider when one is at fault. */
+  reason: string;
+  /**
+   * True when a provider is chosen in Settings but unreachable, rather than no
+   * provider being configured at all. A surface that hides its AI affordances
+   * when AI was never set up still shows them, disabled, in this case — they
+   * worked before and the user needs to know why they stopped.
+   */
+  providerSelected: boolean;
+}
+
+/**
+ * Why AI is unavailable, or null when it is usable.
+ *
+ * `isAiAvailable()` only says yes/no. When it says no, the provider selected in
+ * Settings may simply be unreachable — and since a selected provider is never
+ * substituted, the UI has to name it rather than claim nothing is configured.
+ */
+export async function getAiUnavailableReason(): Promise<AiUnavailable | null> {
+  const result = await invokeCommand<AiUnavailable | null>('ai_unavailable_reason');
+  return result.success ? (result.data ?? null) : null;
+}
+
 /**
  * Get display name for a provider type
  */

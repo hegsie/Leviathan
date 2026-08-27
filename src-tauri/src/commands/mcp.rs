@@ -42,14 +42,24 @@ pub async fn get_mcp_config(state: State<'_, McpState>) -> Result<McpConfig> {
 #[command]
 pub async fn set_mcp_config(state: State<'_, McpState>, config: McpConfig) -> Result<()> {
     let mut server = state.write().await;
-    server.set_config(config);
-    Ok(())
+    server
+        .set_config(config)
+        .map_err(LeviathanError::OperationFailed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::ai::mcp::server::McpServer;
+    use tempfile::TempDir;
+
+    /// Build a server backed by a throwaway config directory.
+    /// The TempDir is returned so it outlives the server.
+    fn test_server() -> (TempDir, McpServer) {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let server = McpServer::new(dir.path().to_path_buf());
+        (dir, server)
+    }
 
     #[test]
     fn test_mcp_config_camel_case_serialization() {
@@ -70,16 +80,19 @@ mod tests {
             running: true,
             port: 3001,
             url: Some("http://127.0.0.1:3001".to_string()),
+            last_error: None,
         };
         let json = serde_json::to_string(&status).expect("Failed to serialize");
         assert!(json.contains("\"running\""));
         assert!(json.contains("\"port\""));
         assert!(json.contains("\"url\""));
+        // The frontend reads status.lastError to explain why the server is stopped
+        assert!(json.contains("\"lastError\""));
     }
 
     #[tokio::test]
     async fn test_server_lifecycle() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         let status = server.get_status();
         assert!(!status.running);
         assert_eq!(status.port, 3001);
@@ -103,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_open_repos() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         server
             .update_open_repos(vec!["/repo1".to_string(), "/repo2".to_string()])
             .await;

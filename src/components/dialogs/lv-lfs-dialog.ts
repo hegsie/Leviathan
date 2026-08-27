@@ -870,9 +870,9 @@ export class LvLfsDialog extends LitElement {
       </div>
 
       <!-- Tracked Patterns is gated on INSTALLED, not enabled.
-           "enabled" means .gitattributes exists and contains filter=lfs, and
-           the only thing that writes that file is git lfs track — which lived
-           in here. git lfs install (the Initialize button) sets config and
+           "enabled" means some .gitattributes in the repo enables the LFS
+           filter, and the only thing that writes that file is git lfs track —
+           which lived in here. git lfs install (the Initialize button) sets config and
            hooks but never touches .gitattributes, so Initialize reported
            success, the badge stayed "Not configured", and the one control that
            could have changed it was unreachable. The dialog was a dead end on

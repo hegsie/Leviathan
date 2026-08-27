@@ -82,6 +82,51 @@ test.describe('Merge Editor - Conflict Resolution Dialog', () => {
     await injectCommandMock(page, conflictMocks(twoConflictFiles));
   });
 
+  test('AI actions stay visible and explain themselves when the chosen provider is down', async ({
+    page,
+  }) => {
+    // A provider is selected in Settings but unreachable. Requests are never
+    // redirected to another provider, so the AI actions cannot run — but they
+    // must say why rather than vanish without explanation.
+    await injectCommandMock(page, {
+      is_ai_available: false,
+      ai_unavailable_reason: {
+        reason:
+          'Anthropic Claude is not available. Please check its API key in Settings, or select a different provider.',
+        providerSelected: true,
+      },
+    });
+
+    await openConflictResolutionDialog(page);
+
+    const suggest = page.locator('lv-merge-editor button', { hasText: 'AI Suggest' }).first();
+    await expect(suggest).toBeVisible();
+    await expect(suggest).toBeDisabled();
+    await expect(suggest).toHaveAttribute('title', /Anthropic Claude/);
+
+    const resolveAll = page.locator('lv-merge-editor button', { hasText: 'AI Resolve All' });
+    await expect(resolveAll).toBeVisible();
+    await expect(resolveAll).toBeDisabled();
+    await expect(resolveAll).toHaveAttribute('title', /Anthropic Claude/);
+  });
+
+  test('AI actions stay hidden when no provider has been configured', async ({ page }) => {
+    await injectCommandMock(page, {
+      is_ai_available: false,
+      ai_unavailable_reason: {
+        reason: 'No AI provider available. Please configure a provider in Settings.',
+        providerSelected: false,
+      },
+    });
+
+    await openConflictResolutionDialog(page);
+
+    await expect(page.locator('lv-merge-editor button', { hasText: 'AI Suggest' })).toHaveCount(0);
+    await expect(page.locator('lv-merge-editor button', { hasText: 'AI Resolve All' })).toHaveCount(
+      0,
+    );
+  });
+
   test('dialog opens and lists conflicted files', async ({ page }) => {
     await openConflictResolutionDialog(page);
 

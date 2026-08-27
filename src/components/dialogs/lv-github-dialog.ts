@@ -35,6 +35,15 @@ import './lv-account-selector.ts';
 
 const log = loggers.github;
 
+/**
+ * How many entries each list tab asks GitHub for per page. A full page back
+ * means there may be more, which is what puts the "Load more" button on screen.
+ */
+const PR_PAGE_SIZE = 30;
+const ISSUE_PAGE_SIZE = 30;
+const RELEASE_PAGE_SIZE = 20;
+const WORKFLOW_PAGE_SIZE = 20;
+
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'releases' | 'actions' | 'create-pr' | 'create-issue' | 'create-release';
 
 @customElement('lv-github-dialog')
@@ -603,6 +612,12 @@ export class LvGitHubDialog extends LitElement {
         text-decoration: underline;
       }
 
+      .load-more {
+        display: flex;
+        justify-content: center;
+        padding: var(--spacing-sm) 0;
+      }
+
       /* Empty/Error States */
       .empty-state {
         display: flex;
@@ -768,6 +783,28 @@ export class LvGitHubDialog extends LitElement {
   @state() private workflowRuns: WorkflowRun[] = [];
   @state() private issues: IssueSummary[] = [];
   @state() private repoLabels: Label[] = [];
+  // Pagination cursors for the four list tabs. `hasMore*` is set when the last
+  // page came back full; issues carry an explicit cursor from the backend
+  // because a filtered page's length cannot signal whether more exist.
+  @state() private prPage = 1;
+  @state() private hasMorePrs = false;
+  @state() private issuesNextPage: number | null = null;
+  @state() private releasesPage = 1;
+  @state() private hasMoreReleases = false;
+  @state() private runsPage = 1;
+  @state() private hasMoreRuns = false;
+  @state() private isLoadingMorePrs = false;
+  @state() private isLoadingMoreRuns = false;
+  @state() private isLoadingMoreIssues = false;
+  @state() private isLoadingMoreReleases = false;
+  // Request generations, one per paged list. A restart (a filter change, a
+  // reload after a create) supersedes an in-flight page load: the superseded
+  // result must neither append to the list that replaced it nor overwrite its
+  // cursor. Plain fields — they drive no rendering.
+  private prRequestId = 0;
+  private runsRequestId = 0;
+  private issuesRequestId = 0;
+  private releasesRequestId = 0;
   @state() private isLoading = false;
   @state() private error: string | null = null;
   @state() private tokenInput = '';
@@ -900,8 +937,45 @@ export class LvGitHubDialog extends LitElement {
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
-    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
-      await this.detectRepo();
+    if (changedProperties.has('repositoryPath')) {
+      // The dialog is repo-independent (it stays open across the last tab close),
+      // so an empty path must clear the previously detected repo. Otherwise the
+      // repo-backed tabs keep rendering and acting on the closed repository.
+      // The create-* drafts belong to the repository they were typed against,
+      // so they go too -- otherwise a draft left on screen is submitted into
+      // whichever repository the dialog is repointed at.
+      this.resetRepoScopedDrafts();
+      if (!this.repositoryPath) {
+        this.detectedRepo = null;
+      } else if (this.open) {
+        await this.detectRepo();
+      }
+    }
+  }
+
+  /**
+   * Drop every create-* draft and leave any create-* tab. Called when
+   * repositoryPath changes, because those drafts are scoped to the repository
+   * they were composed against while the create handlers guard only on
+   * detectedRepo, which is re-derived from whatever repository is now current.
+   */
+  private resetRepoScopedDrafts(): void {
+    this.createPrTitle = '';
+    this.createPrBody = '';
+    this.createPrHead = '';
+    this.createPrBase = '';
+    this.createPrDraft = false;
+    this.createIssueTitle = '';
+    this.createIssueBody = '';
+    this.createIssueLabels = [];
+    this.createReleaseTag = '';
+    this.createReleaseName = '';
+    this.createReleaseBody = '';
+    this.createReleasePrerelease = false;
+    this.createReleaseDraft = false;
+    this.createReleaseGenerateNotes = true;
+    if (this.activeTab.startsWith('create-')) {
+      this.activeTab = 'connection';
     }
   }
 
@@ -1067,7 +1141,14 @@ export class LvGitHubDialog extends LitElement {
   private async detectRepo(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    const result = await gitService.detectGitHubRepo(this.repositoryPath);
+    // The dialog outlives the repository -- it stays open when the last tab
+    // closes -- so a detect issued for one path can resolve after the path has
+    // changed. Dropping the stale result stops the closed (or previously
+    // selected) repository from being re-detected and re-loaded over the
+    // current one.
+    const requestedPath = this.repositoryPath;
+    const result = await gitService.detectGitHubRepo(requestedPath);
+    if (this.repositoryPath !== requestedPath) return;
     if (result.success && result.data) {
       this.detectedRepo = result.data;
       // SAFETY: IPC calls are batched with Promise.all to avoid N+1 sequential calls.
@@ -1087,10 +1168,24 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadPullRequests(providedToken?: string): Promise<void> {
+  /**
+   * Load pull requests. With `append` the next page is fetched and added to the
+   * list already on screen; without it the list restarts at page 1 (a filter
+   * change, or the initial load).
+   */
+  private async loadPullRequests(providedToken?: string, append = false): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
 
-    this.isLoading = true;
+    const requestedPage = append ? this.prPage + 1 : 1;
+    const requestId = ++this.prRequestId;
+    // Appending must not swap the rendered list for the "Loading…" placeholder,
+    // so it uses its own flag.
+    if (append) {
+      this.isLoadingMorePrs = true;
+    } else {
+      this.isLoadingMorePrs = false;
+      this.isLoading = true;
+    }
     this.error = null;
 
     try {
@@ -1099,24 +1194,45 @@ export class LvGitHubDialog extends LitElement {
         this.detectedRepo.owner,
         this.detectedRepo.repo,
         this.prFilter,
-        30,
+        PR_PAGE_SIZE,
+        requestedPage,
         token
       );
 
+      if (requestId !== this.prRequestId) return;
       if (result.success && result.data) {
-        this.pullRequests = result.data;
+        this.pullRequests = append ? [...this.pullRequests, ...result.data] : result.data;
+        this.prPage = requestedPage;
+        this.hasMorePrs = result.data.length === PR_PAGE_SIZE;
       } else {
+        // Leave the loaded pages, page cursor and hasMore flag alone so the
+        // button stays put for a retry.
         this.error = result.error?.message ?? 'Failed to load pull requests';
       }
     } catch (err) {
+      if (requestId !== this.prRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load pull requests';
     } finally {
-      this.isLoading = false;
+      if (requestId === this.prRequestId) {
+        if (append) {
+          this.isLoadingMorePrs = false;
+        } else {
+          this.isLoading = false;
+        }
+      }
     }
   }
 
-  private async loadWorkflowRuns(providedToken?: string): Promise<void> {
+  /** Load workflow runs; see `loadPullRequests` for what `append` means. */
+  private async loadWorkflowRuns(providedToken?: string, append = false): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    const requestedPage = append ? this.runsPage + 1 : 1;
+    const requestId = ++this.runsRequestId;
+    this.isLoadingMoreRuns = append;
+    // Same as loadPullRequests: a load that succeeds must not leave the
+    // previous attempt's banner standing.
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1124,12 +1240,16 @@ export class LvGitHubDialog extends LitElement {
         this.detectedRepo.owner,
         this.detectedRepo.repo,
         undefined,
-        20,
+        WORKFLOW_PAGE_SIZE,
+        requestedPage,
         token
       );
 
+      if (requestId !== this.runsRequestId) return;
       if (result.success && result.data) {
-        this.workflowRuns = result.data;
+        this.workflowRuns = append ? [...this.workflowRuns, ...result.data] : result.data;
+        this.runsPage = requestedPage;
+        this.hasMoreRuns = result.data.length === WORKFLOW_PAGE_SIZE;
       } else if (!result.success) {
         // Use the shared error banner (like loadPullRequests) rather than a
         // toast, so a shared failure across the batched loads doesn't stack
@@ -1137,12 +1257,25 @@ export class LvGitHubDialog extends LitElement {
         this.error = result.error?.message ?? 'Failed to load workflow runs';
       }
     } catch (err) {
+      if (requestId !== this.runsRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load workflow runs';
+    } finally {
+      if (append && requestId === this.runsRequestId) this.isLoadingMoreRuns = false;
     }
   }
 
-  private async loadIssues(providedToken?: string): Promise<void> {
+  /**
+   * Load issues; see `loadPullRequests` for what `append` means. The next page
+   * comes from the backend cursor rather than a counter, because `/issues`
+   * mixes in pull requests and a page of them yields no issues at all.
+   */
+  private async loadIssues(providedToken?: string, append = false): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    const requestedPage = append ? (this.issuesNextPage ?? 1) : 1;
+    const requestId = ++this.issuesRequestId;
+    this.isLoadingMoreIssues = append;
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
@@ -1151,17 +1284,23 @@ export class LvGitHubDialog extends LitElement {
         this.detectedRepo.repo,
         this.issueFilter,
         undefined,
-        30,
+        ISSUE_PAGE_SIZE,
+        requestedPage,
         token
       );
 
+      if (requestId !== this.issuesRequestId) return;
       if (result.success && result.data) {
-        this.issues = result.data;
+        this.issues = append ? [...this.issues, ...result.data.issues] : result.data.issues;
+        this.issuesNextPage = result.data.nextPage ?? null;
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to load issues';
       }
     } catch (err) {
+      if (requestId !== this.issuesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load issues';
+    } finally {
+      if (append && requestId === this.issuesRequestId) this.isLoadingMoreIssues = false;
     }
   }
 
@@ -1187,25 +1326,38 @@ export class LvGitHubDialog extends LitElement {
     }
   }
 
-  private async loadReleases(providedToken?: string): Promise<void> {
+  /** Load releases; see `loadPullRequests` for what `append` means. */
+  private async loadReleases(providedToken?: string, append = false): Promise<void> {
     if (!this.detectedRepo || !this.connectionStatus?.connected) return;
+
+    const requestedPage = append ? this.releasesPage + 1 : 1;
+    const requestId = ++this.releasesRequestId;
+    this.isLoadingMoreReleases = append;
+    this.error = null;
 
     try {
       const token = providedToken ?? await this.getSelectedAccountToken();
       const result = await gitService.listReleases(
         this.detectedRepo.owner,
         this.detectedRepo.repo,
-        20,
+        RELEASE_PAGE_SIZE,
+        requestedPage,
         token
       );
 
+      if (requestId !== this.releasesRequestId) return;
       if (result.success && result.data) {
-        this.releases = result.data;
+        this.releases = append ? [...this.releases, ...result.data] : result.data;
+        this.releasesPage = requestedPage;
+        this.hasMoreReleases = result.data.length === RELEASE_PAGE_SIZE;
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to load releases';
       }
     } catch (err) {
+      if (requestId !== this.releasesRequestId) return;
       this.error = err instanceof Error ? err.message : 'Failed to load releases';
+    } finally {
+      if (append && requestId === this.releasesRequestId) this.isLoadingMoreReleases = false;
     }
   }
 
@@ -2061,6 +2213,21 @@ export class LvGitHubDialog extends LitElement {
     `;
   }
 
+  /**
+   * The footer control every paged list tab shares: one button that fetches the
+   * next page and appends it. Rendered only when a further page exists, so its
+   * absence is itself the "that's the whole list" signal.
+   */
+  private renderLoadMore(onClick: () => void, isLoading: boolean) {
+    return html`
+      <div class="load-more">
+        <button class="btn" ?disabled=${isLoading} @click=${onClick}>
+          ${isLoading ? 'Loading...' : 'Load more'}
+        </button>
+      </div>
+    `;
+  }
+
   private renderPullRequestsTab() {
     if (!this.connectionStatus?.connected) {
       return html`
@@ -2133,6 +2300,10 @@ export class LvGitHubDialog extends LitElement {
           </div>
         `)}
       </div>
+
+      ${this.hasMorePrs
+        ? this.renderLoadMore(() => this.loadPullRequests(undefined, true), this.isLoadingMorePrs)
+        : ''}
     `;
   }
 
@@ -2161,18 +2332,16 @@ export class LvGitHubDialog extends LitElement {
       `;
     }
 
-    if (this.workflowRuns.length === 0) {
-      return html`
+    return html`
+      ${this.workflowRuns.length === 0 ? html`
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
           </svg>
           <p>No workflow runs found</p>
         </div>
-      `;
-    }
+      ` : ''}
 
-    return html`
       <div class="workflow-list">
         ${this.workflowRuns.map(run => html`
           <div class="workflow-item">
@@ -2196,6 +2365,10 @@ export class LvGitHubDialog extends LitElement {
           </div>
         `)}
       </div>
+
+      ${this.hasMoreRuns
+        ? this.renderLoadMore(() => this.loadWorkflowRuns(undefined, true), this.isLoadingMoreRuns)
+        : ''}
     `;
   }
 
@@ -2245,7 +2418,11 @@ export class LvGitHubDialog extends LitElement {
             <line x1="12" y1="8" x2="12" y2="12"></line>
             <line x1="12" y1="16" x2="12.01" y2="16"></line>
           </svg>
-          <p>No ${this.issueFilter} issues</p>
+          <p>
+            ${this.issuesNextPage === null
+              ? html`No ${this.issueFilter} issues`
+              : html`No ${this.issueFilter} issues in the pages searched so far`}
+          </p>
         </div>
       ` : ''}
 
@@ -2284,6 +2461,10 @@ export class LvGitHubDialog extends LitElement {
           </div>
         `)}
       </div>
+
+      ${this.issuesNextPage !== null
+        ? this.renderLoadMore(() => this.loadIssues(undefined, true), this.isLoadingMoreIssues)
+        : ''}
     `;
   }
 
@@ -2416,6 +2597,10 @@ export class LvGitHubDialog extends LitElement {
           </div>
         `)}
       </div>
+
+      ${this.hasMoreReleases
+        ? this.renderLoadMore(() => this.loadReleases(undefined, true), this.isLoadingMoreReleases)
+        : ''}
     `;
   }
 

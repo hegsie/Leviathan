@@ -10,12 +10,23 @@ import * as gitService from '../../services/git.service.ts';
 import { parseIssueReferences, isClosingKeyword } from '../../services/git.service.ts';
 import type { IssueReference } from '../../services/git.service.ts';
 import type { Commit, RefInfo, CommitFileEntry, FileStatus } from '../../types/git.types.ts';
+import type { GitNote } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import { showConfirm } from '../../services/dialog.service.ts';
 import { loggers, openExternalUrl } from '../../utils/index.ts';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { join } from '@tauri-apps/api/path';
 
 const log = loggers.ui;
+
+/**
+ * Ref git writes notes to unless told otherwise. `get_notes_refs` reports it
+ * even when the ref does not exist yet, so it is always a valid write target.
+ */
+const DEFAULT_NOTES_REF = 'refs/notes/commits';
+
+/** What a `notes-changed` event says happened to the commit's note. */
+export type NotesChangeAction = 'added' | 'updated' | 'removed';
 
 interface FileContextMenuState {
   visible: boolean;
@@ -402,6 +413,174 @@ export class LvCommitDetails extends LitElement {
         height: 12px;
       }
 
+      /* Git Notes */
+      .notes-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-sm);
+        margin-bottom: 4px;
+      }
+
+      .notes-header .section-title {
+        margin-bottom: 0;
+      }
+
+      .notes-ref-select {
+        max-width: 60%;
+        padding: 1px var(--spacing-xs);
+        background: var(--color-bg-primary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-secondary);
+        font-family: var(--font-family-mono);
+        font-size: 10px;
+        cursor: pointer;
+      }
+
+      .notes-ref-select:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .note-body {
+        margin: 0;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-tertiary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-secondary);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .note-empty,
+      .note-loading {
+        color: var(--color-text-muted);
+        font-size: var(--font-size-xs);
+        font-style: italic;
+      }
+
+      .note-error {
+        color: var(--color-error);
+        font-size: var(--font-size-xs);
+        margin-bottom: 4px;
+        word-break: break-word;
+      }
+
+      .note-editor {
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 72px;
+        resize: vertical;
+        padding: var(--spacing-xs) var(--spacing-sm);
+        background: var(--color-bg-primary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-primary);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-xs);
+      }
+
+      .note-editor:focus {
+        outline: none;
+        border-color: var(--color-primary);
+      }
+
+      .note-actions {
+        display: flex;
+        gap: var(--spacing-xs);
+        margin-top: 4px;
+      }
+
+      .note-btn {
+        padding: 2px var(--spacing-sm);
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .note-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
+
+      .note-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .note-btn.primary {
+        background: var(--color-primary);
+        border-color: var(--color-primary);
+        color: white;
+      }
+
+      .note-btn.primary:hover:not(:disabled) {
+        background: var(--color-primary-hover);
+      }
+
+      .note-btn.danger {
+        color: var(--color-error);
+      }
+
+      .notes-overview-toggle {
+        margin-top: 6px;
+        padding: 0;
+        border: none;
+        background: none;
+        color: var(--color-primary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+      }
+
+      .notes-overview-toggle:hover {
+        text-decoration: underline;
+      }
+
+      .notes-overview-list {
+        list-style: none;
+        margin: 4px 0 0;
+        padding: 0;
+        max-height: 160px;
+        overflow-y: auto;
+      }
+
+      .notes-overview-item {
+        display: flex;
+        gap: var(--spacing-sm);
+        align-items: baseline;
+        padding: 2px var(--spacing-xs);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        font-size: var(--font-size-xs);
+      }
+
+      .notes-overview-item:hover {
+        background: var(--color-bg-hover);
+      }
+
+      .notes-overview-item.current {
+        background: var(--color-bg-tertiary);
+      }
+
+      .notes-overview-oid {
+        font-family: var(--font-family-mono);
+        color: var(--color-primary);
+      }
+
+      .notes-overview-text {
+        color: var(--color-text-secondary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       /* Context menu */
       .context-menu {
         position: fixed;
@@ -459,7 +638,38 @@ export class LvCommitDetails extends LitElement {
   @state() private issueReferences: IssueReference[] = [];
   @state() private contextMenu: FileContextMenuState = { visible: false, x: 0, y: 0, file: null };
 
+  // --- Git notes ---
+  @state() private notesRefs: string[] = [DEFAULT_NOTES_REF];
+  @state() private notesRef: string = DEFAULT_NOTES_REF;
+  @state() private note: GitNote | null = null;
+  @state() private loadingNote = false;
+  /** Set when the note read itself failed, so we offer Retry instead of
+   *  claiming — wrongly — that the commit has no note. */
+  @state() private noteLoadFailed = false;
+  @state() private noteError: string | null = null;
+  @state() private editingNote = false;
+  @state() private noteDraft = '';
+  /**
+   * Commit+ref keys with a note write (save or remove) in flight. Keyed
+   * rather than a single flag: a write started against one commit must not
+   * leave the *next* commit's controls looking busy just because the user
+   * clicked away before it settled — only the write's own commit+ref is
+   * disabled, so a double click on it still cannot issue two writes.
+   */
+  @state() private busyNoteKeys: Set<string> = new Set();
+  @state() private allNotes: GitNote[] = [];
+  @state() private notesOverviewError: string | null = null;
+  @state() private showNotesOverview = false;
+
   private currentCommitOid: string | null = null;
+
+  /**
+   * Unsaved note text, keyed by ref + commit. Clicking another commit in the
+   * graph swaps this panel's commit out from under an open editor, and the
+   * click cannot be intercepted — so the draft is parked here and restored
+   * when the user comes back, instead of being silently thrown away.
+   */
+  private noteDrafts: Map<string, string> = new Map();
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -492,14 +702,31 @@ export class LvCommitDetails extends LitElement {
       currentCommitOid: this.currentCommitOid,
     });
 
+    // A different repository means a different set of notes refs, so the
+    // whole notes surface is rebuilt from scratch — otherwise the previous
+    // repo's ref selection and overview would linger over the new one.
+    const repositoryChanged =
+      changedProperties.has('repositoryPath') && this.repositoryPath !== '';
+    if (repositoryChanged) {
+      this.resetNotesState();
+      this.refreshNotes();
+    }
+
     // Load files when commit changes
     if (changedProperties.has('commit') && this.commit && this.repositoryPath) {
       if (this.commit.oid !== this.currentCommitOid) {
         log.debug('commit changed, loading files for:', this.commit.oid);
+        this.stashNoteDraft();
         this.currentCommitOid = this.commit.oid;
         this.selectedFilePath = null;
         this.loadFiles();
         this.parseIssueRefs();
+        // The refresh above already reloads the note for the new commit, so
+        // only load it here when the repository stayed the same.
+        if (!repositoryChanged) {
+          this.resetNoteEditorState();
+          this.loadNote();
+        }
       }
     }
   }
@@ -545,6 +772,399 @@ export class LvCommitDetails extends LitElement {
     } finally {
       this.loadingFiles = false;
     }
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Git notes
+  //
+  // Notes live in their own refs (refs/notes/*) and are invisible to the graph,
+  // so a note write never triggers a repository refresh — the section reloads
+  // only what it owns and reports the change with a `notes-changed` event.
+  // ---------------------------------------------------------------------------
+
+  private noteDraftKey(commitOid: string, notesRef: string): string {
+    return `${notesRef}\u0000${commitOid}`;
+  }
+
+  /** Park the open editor's text under the commit it was written for. */
+  private stashNoteDraft(): void {
+    if (!this.editingNote || !this.currentCommitOid) return;
+    const key = this.noteDraftKey(this.currentCommitOid, this.notesRef);
+    // Nothing typed, or nothing changed: there is no work to preserve.
+    if (this.noteDraft.trim() === '' || this.noteDraft === (this.note?.message ?? '')) {
+      this.noteDrafts.delete(key);
+    } else {
+      this.noteDrafts.set(key, this.noteDraft);
+    }
+  }
+
+  private clearNoteDraft(commitOid: string, notesRef: string): void {
+    this.noteDrafts.delete(this.noteDraftKey(commitOid, notesRef));
+  }
+
+  /** Whether the commit+ref currently on screen — not necessarily the one a
+   *  write was started against — has a write in flight. Every render and
+   *  guard checks this instead of a single flag, so switching commit or ref
+   *  while a write is still settling shows the new selection as idle. */
+  private get noteBusy(): boolean {
+    if (!this.commit) return false;
+    return this.busyNoteKeys.has(this.noteDraftKey(this.commit.oid, this.notesRef));
+  }
+
+  private setNoteBusy(commitOid: string, notesRef: string, busy: boolean): void {
+    const key = this.noteDraftKey(commitOid, notesRef);
+    if (this.busyNoteKeys.has(key) === busy) return;
+    const next = new Set(this.busyNoteKeys);
+    if (busy) {
+      next.add(key);
+    } else {
+      next.delete(key);
+    }
+    this.busyNoteKeys = next;
+  }
+
+  /** Drop every trace of the previous repository's notes. */
+  private resetNotesState(): void {
+    this.notesRefs = [DEFAULT_NOTES_REF];
+    this.notesRef = DEFAULT_NOTES_REF;
+    this.allNotes = [];
+    this.notesOverviewError = null;
+    this.showNotesOverview = false;
+    this.noteDrafts.clear();
+    // A commit+ref key is not unique across repositories, so a write left in
+    // flight in the previous repo could otherwise be mistaken for one on the
+    // new repo's identically-keyed commit.
+    this.busyNoteKeys = new Set();
+    this.resetNoteEditorState();
+  }
+
+  /** Clear the per-commit note view: a new commit starts with no editor open
+   *  and no stale error from the commit before it. */
+  private resetNoteEditorState(): void {
+    this.note = null;
+    this.noteError = null;
+    this.noteLoadFailed = false;
+    this.editingNote = false;
+    this.noteDraft = '';
+  }
+
+  /** Reload the ref list first — the note read depends on which ref is
+   *  selected, and a stale selection would read the wrong ref. */
+  private async refreshNotes(): Promise<void> {
+    await this.loadNotesRefs();
+    await Promise.all([this.loadNote(), this.loadNotesOverview()]);
+  }
+
+  private async loadNotesRefs(): Promise<void> {
+    if (!this.repositoryPath) return;
+    const repoPath = this.repositoryPath;
+
+    try {
+      const result = await gitService.getNotesRefs(repoPath);
+      if (repoPath !== this.repositoryPath) return;
+
+      if (result.success && result.data && result.data.length > 0) {
+        this.notesRefs = result.data;
+        // A ref can disappear when its last note is removed; fall back to the
+        // first one left rather than reading from a ref that no longer exists.
+        if (!this.notesRefs.includes(this.notesRef)) {
+          this.notesRef = this.notesRefs[0];
+        }
+      } else {
+        // Not fatal on its own — the default ref is always a valid write
+        // target, and a real backend failure surfaces on the note read.
+        this.notesRefs = [DEFAULT_NOTES_REF];
+        this.notesRef = DEFAULT_NOTES_REF;
+      }
+    } catch (err) {
+      console.error('Failed to load notes refs:', err);
+      this.notesRefs = [DEFAULT_NOTES_REF];
+      this.notesRef = DEFAULT_NOTES_REF;
+    }
+  }
+
+  private async loadNote(): Promise<void> {
+    if (!this.repositoryPath || !this.commit) return;
+
+    const repoPath = this.repositoryPath;
+    const commitOid = this.commit.oid;
+    const notesRef = this.notesRef;
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath ||
+      commitOid !== this.commit?.oid ||
+      notesRef !== this.notesRef;
+
+    this.loadingNote = true;
+    this.noteLoadFailed = false;
+    this.noteError = null;
+
+    try {
+      const result = await gitService.getNote(repoPath, commitOid, notesRef);
+      if (isStale()) return;
+
+      if (result.success) {
+        this.note = result.data ?? null;
+        this.restoreNoteDraft(commitOid, notesRef);
+      } else {
+        this.note = null;
+        this.noteLoadFailed = true;
+        this.noteError = result.error?.message ?? 'Failed to load note';
+      }
+    } catch (err) {
+      console.error('Failed to load note:', err);
+      if (isStale()) return;
+      this.note = null;
+      this.noteLoadFailed = true;
+      this.noteError = err instanceof Error ? err.message : 'Failed to load note';
+    } finally {
+      if (!isStale()) {
+        this.loadingNote = false;
+      }
+    }
+  }
+
+  /** Reopen the editor on the text the user left here earlier. */
+  private restoreNoteDraft(commitOid: string, notesRef: string): void {
+    const draft = this.noteDrafts.get(this.noteDraftKey(commitOid, notesRef));
+    if (draft === undefined) return;
+    this.noteDraft = draft;
+    this.editingNote = true;
+  }
+
+  /**
+   * Bulk-load every note in the selected ref. It backs the "show all notes"
+   * list — the only way to find annotated commits without visiting them one by
+   * one — and its length is the note count shown next to the toggle.
+   */
+  private async loadNotesOverview(): Promise<void> {
+    if (!this.repositoryPath) {
+      this.allNotes = [];
+      return;
+    }
+
+    const repoPath = this.repositoryPath;
+    const notesRef = this.notesRef;
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath || notesRef !== this.notesRef;
+
+    this.notesOverviewError = null;
+
+    try {
+      const result = await gitService.getNotes(repoPath, notesRef);
+      if (isStale()) return;
+
+      if (result.success) {
+        this.allNotes = result.data ?? [];
+      } else {
+        this.allNotes = [];
+        this.notesOverviewError = result.error?.message ?? 'Failed to load notes';
+      }
+    } catch (err) {
+      console.error('Failed to load notes:', err);
+      if (isStale()) return;
+      this.allNotes = [];
+      this.notesOverviewError = err instanceof Error ? err.message : 'Failed to load notes';
+    }
+  }
+
+  private emitNotesChanged(action: NotesChangeAction, commitOid: string, notesRef: string): void {
+    this.dispatchEvent(
+      new CustomEvent('notes-changed', {
+        detail: { action, commitOid, notesRef },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  private handleNotesRefChange(e: Event): void {
+    const notesRef = (e.target as HTMLSelectElement).value;
+    if (notesRef === this.notesRef) return;
+    this.stashNoteDraft();
+    this.notesRef = notesRef;
+    this.resetNoteEditorState();
+    this.showNotesOverview = false;
+    this.loadNote();
+    this.loadNotesOverview();
+  }
+
+  private async handleAddNote(): Promise<void> {
+    this.noteDraft = '';
+    this.noteError = null;
+    this.editingNote = true;
+    await this.focusNoteEditor();
+  }
+
+  private async handleEditNote(): Promise<void> {
+    this.noteDraft = this.note?.message ?? '';
+    this.noteError = null;
+    this.editingNote = true;
+    await this.focusNoteEditor();
+  }
+
+  private async focusNoteEditor(): Promise<void> {
+    await this.updateComplete;
+    const editor = this.shadowRoot?.querySelector<HTMLTextAreaElement>('.note-editor');
+    editor?.focus();
+  }
+
+  private handleNoteDraftInput(e: Event): void {
+    this.noteDraft = (e.target as HTMLTextAreaElement).value;
+  }
+
+  /** Escape closes the whole diff/details surface app-wide and gets pressed
+   *  reflexively, so unsaved note text is confirmed away, never dropped. */
+  private async handleCancelNoteEdit(): Promise<void> {
+    const original = this.note?.message ?? '';
+    if (this.noteDraft !== original) {
+      const confirmed = await showConfirm(
+        'Discard note edits?',
+        'The changes to this note have not been saved.',
+        'warning'
+      );
+      if (!confirmed) return;
+    }
+    this.editingNote = false;
+    this.noteDraft = '';
+    this.noteError = null;
+    if (this.commit) {
+      this.clearNoteDraft(this.commit.oid, this.notesRef);
+    }
+  }
+
+  private async handleSaveNote(): Promise<void> {
+    if (!this.repositoryPath || !this.commit || this.noteBusy) return;
+
+    const message = this.noteDraft.trim();
+    if (!message) {
+      this.noteError = 'A note cannot be empty';
+      return;
+    }
+
+    const repoPath = this.repositoryPath;
+    const commitOid = this.commit.oid;
+    const notesRef = this.notesRef;
+    const wasExisting = this.note !== null;
+    // A click in the graph swaps the panel's commit out from under a slow
+    // write, so the response may no longer describe what is on screen.
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath ||
+      commitOid !== this.commit?.oid ||
+      notesRef !== this.notesRef;
+
+    this.setNoteBusy(commitOid, notesRef, true);
+    this.noteError = null;
+
+    try {
+      // force: overwriting is the point of the Edit button, and git2 refuses
+      // to replace an existing note without it.
+      const result = await gitService.setNote(repoPath, commitOid, message, notesRef, true);
+
+      if (result.success && result.data) {
+        // The write landed on `commitOid`, so its parked draft is spent and
+        // the change is worth announcing whatever the panel shows now.
+        this.clearNoteDraft(commitOid, notesRef);
+        this.emitNotesChanged(wasExisting ? 'updated' : 'added', commitOid, notesRef);
+        // The view, though, is commit-scoped: adopting this note after the
+        // user moved on would show one commit's note under another and aim
+        // Remove at the wrong commit.
+        if (!isStale()) {
+          this.note = result.data;
+          this.noteLoadFailed = false;
+          this.editingNote = false;
+          this.noteDraft = '';
+        }
+        // The first note in a ref creates that ref, so the selector list can
+        // have grown; the overview count changed either way. Re-reading the
+        // note as well keeps the panel showing what the repository actually
+        // holds rather than what we asked it to hold. It reads whatever is
+        // selected now, so it is correct on the stale path too.
+        this.refreshNotes();
+      } else if (!isStale()) {
+        // Keep the editor open so the typed note survives the failure.
+        this.noteError = result.error?.message ?? 'Failed to save note';
+      }
+    } catch (err) {
+      console.error('Failed to save note:', err);
+      if (isStale()) return;
+      this.noteError = err instanceof Error ? err.message : 'Failed to save note';
+    } finally {
+      this.setNoteBusy(commitOid, notesRef, false);
+    }
+  }
+
+  private async handleRemoveNote(): Promise<void> {
+    if (!this.repositoryPath || !this.commit || !this.note || this.noteBusy) return;
+
+    const repoPath = this.repositoryPath;
+    const commitOid = this.commit.oid;
+    const notesRef = this.notesRef;
+    const isStale = (): boolean =>
+      repoPath !== this.repositoryPath ||
+      commitOid !== this.commit?.oid ||
+      notesRef !== this.notesRef;
+
+    // Claimed before the confirm, not after: showConfirm is an IPC round trip,
+    // so a claim taken afterwards would not serialize a double click.
+    this.setNoteBusy(commitOid, notesRef, true);
+    this.noteError = null;
+
+    try {
+      const confirmed = await showConfirm(
+        'Remove note?',
+        `The note on ${commitOid.substring(0, 7)} will be deleted from ${notesRef}.`,
+        'warning'
+      );
+      if (!confirmed) return;
+
+      const result = await gitService.removeNote(repoPath, commitOid, notesRef);
+
+      if (result.success) {
+        this.clearNoteDraft(commitOid, notesRef);
+        this.emitNotesChanged('removed', commitOid, notesRef);
+        // Same commit-scoped view as the save path: the removal happened on
+        // `commitOid`, so it may not clear the note of whatever is shown now.
+        if (!isStale()) {
+          this.note = null;
+          this.noteLoadFailed = false;
+          this.editingNote = false;
+          this.noteDraft = '';
+        }
+        // Removing the last note in a ref removes the ref itself, so the
+        // selection can land on a different ref — reload all of it, not just
+        // the list, or the panel would describe the ref that just vanished.
+        this.refreshNotes();
+      } else if (!isStale()) {
+        this.noteError = result.error?.message ?? 'Failed to remove note';
+      }
+    } catch (err) {
+      console.error('Failed to remove note:', err);
+      if (isStale()) return;
+      this.noteError = err instanceof Error ? err.message : 'Failed to remove note';
+    } finally {
+      this.setNoteBusy(commitOid, notesRef, false);
+    }
+  }
+
+  private handleRetryLoadNote(): void {
+    this.loadNote();
+    this.loadNotesOverview();
+  }
+
+  private toggleNotesOverview(): void {
+    this.showNotesOverview = !this.showNotesOverview;
+  }
+
+  private handleNotesOverviewSelect(commitOid: string): void {
+    if (commitOid === this.commit?.oid) return;
+    this.dispatchEvent(
+      new CustomEvent('show-commit', {
+        detail: { oid: commitOid },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private formatDate(timestamp: number): string {
@@ -837,6 +1457,130 @@ export class LvCommitDetails extends LitElement {
     `;
   }
 
+  private renderNoteBody() {
+    if (this.editingNote) {
+      const original = this.note?.message ?? '';
+      return html`
+        <textarea
+          class="note-editor"
+          .value=${this.noteDraft}
+          ?disabled=${this.noteBusy}
+          placeholder="Write a note for this commit…"
+          aria-label="Commit note"
+          @input=${this.handleNoteDraftInput}
+        ></textarea>
+        <div class="note-actions">
+          <button
+            class="note-btn primary"
+            ?disabled=${this.noteBusy || this.noteDraft.trim() === '' || this.noteDraft === original}
+            @click=${this.handleSaveNote}
+          >
+            ${this.noteBusy ? 'Saving…' : 'Save note'}
+          </button>
+          <button class="note-btn" ?disabled=${this.noteBusy} @click=${this.handleCancelNoteEdit}>
+            Cancel
+          </button>
+        </div>
+      `;
+    }
+
+    if (this.loadingNote) {
+      return html`<div class="note-loading">Loading note…</div>`;
+    }
+
+    if (this.noteLoadFailed) {
+      return html`
+        <div class="note-actions">
+          <button class="note-btn" @click=${this.handleRetryLoadNote}>Retry</button>
+        </div>
+      `;
+    }
+
+    if (this.note) {
+      return html`
+        <pre class="note-body">${this.note.message}</pre>
+        <div class="note-actions">
+          <button class="note-btn" ?disabled=${this.noteBusy} @click=${this.handleEditNote}>
+            Edit
+          </button>
+          <button class="note-btn danger" ?disabled=${this.noteBusy} @click=${this.handleRemoveNote}>
+            ${this.noteBusy ? 'Removing…' : 'Remove'}
+          </button>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="note-empty">No note on this commit in ${this.notesRef}</div>
+      <div class="note-actions">
+        <button class="note-btn primary" ?disabled=${this.noteBusy} @click=${this.handleAddNote}>
+          Add note
+        </button>
+      </div>
+    `;
+  }
+
+  private renderNotesOverview() {
+    if (this.notesOverviewError) {
+      return html`<div class="note-error" role="alert">${this.notesOverviewError}</div>`;
+    }
+
+    const count = this.allNotes.length;
+    if (count === 0) return nothing;
+
+    return html`
+      <button
+        class="notes-overview-toggle"
+        aria-expanded=${this.showNotesOverview ? 'true' : 'false'}
+        @click=${this.toggleNotesOverview}
+      >
+        ${this.showNotesOverview ? 'Hide' : 'Show'} all ${count} note${count === 1 ? '' : 's'} in this ref
+      </button>
+      ${this.showNotesOverview
+        ? html`
+            <ul class="notes-overview-list">
+              ${this.allNotes.map(
+                (n) => html`
+                  <li
+                    class="notes-overview-item ${n.commitOid === this.commit?.oid ? 'current' : ''}"
+                    title=${n.message}
+                    @click=${() => this.handleNotesOverviewSelect(n.commitOid)}
+                  >
+                    <span class="notes-overview-oid">${n.commitOid.substring(0, 7)}</span>
+                    <span class="notes-overview-text">${n.message.split('\n')[0]}</span>
+                  </li>
+                `
+              )}
+            </ul>
+          `
+        : nothing}
+    `;
+  }
+
+  private renderNotesSection() {
+    return html`
+      <div class="section notes-section">
+        <div class="notes-header">
+          <div class="section-title">Notes</div>
+          <select
+            class="notes-ref-select"
+            aria-label="Notes ref"
+            title="Notes ref"
+            ?disabled=${this.noteBusy || this.editingNote}
+            @change=${this.handleNotesRefChange}
+          >
+            ${this.notesRefs.map(
+              (ref) => html`<option value=${ref} ?selected=${ref === this.notesRef}>${ref}</option>`
+            )}
+          </select>
+        </div>
+        ${this.noteError ? html`<div class="note-error" role="alert">${this.noteError}</div>` : nothing}
+        ${this.renderNoteBody()}
+        ${this.renderNotesOverview()}
+      </div>
+    `;
+  }
+
   private renderContextMenu() {
     if (!this.contextMenu.visible || !this.contextMenu.file) return nothing;
 
@@ -957,6 +1701,8 @@ export class LvCommitDetails extends LitElement {
                   `
                 : html`<div class="loading-files">No files changed</div>`}
         </div>
+
+        ${this.renderNotesSection()}
 
         <div class="section">
           <div class="section-title">SHA</div>

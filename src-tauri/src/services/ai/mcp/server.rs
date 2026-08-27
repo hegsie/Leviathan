@@ -3,6 +3,7 @@
 //! Lightweight HTTP server using `tokio::net::TcpListener` that implements
 //! the MCP JSON-RPC protocol for external tool integration.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -13,6 +14,8 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use super::tools;
+
+const MCP_CONFIG_FILE: &str = "mcp_config.json";
 
 /// MCP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,36 @@ impl Default for McpConfig {
     }
 }
 
+impl McpConfig {
+    /// Load configuration from disk
+    pub fn load(config_dir: &Path) -> Result<Self, String> {
+        let config_path = config_dir.join(MCP_CONFIG_FILE);
+
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read MCP config: {}", e))?;
+
+        serde_json::from_str(&contents).map_err(|e| format!("Failed to parse MCP config: {}", e))
+    }
+
+    /// Save configuration to disk
+    pub fn save(&self, config_dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(config_dir)
+            .map_err(|e| format!("Failed to create config dir: {}", e))?;
+
+        let config_path = config_dir.join(MCP_CONFIG_FILE);
+
+        let contents = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize MCP config: {}", e))?;
+
+        std::fs::write(&config_path, contents)
+            .map_err(|e| format!("Failed to write MCP config: {}", e))
+    }
+}
+
 /// MCP server status information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +75,8 @@ pub struct McpStatus {
     pub running: bool,
     pub port: u16,
     pub url: Option<String>,
+    /// Why the server is not running, when the last start attempt failed
+    pub last_error: Option<String>,
 }
 
 /// JSON-RPC request structure
@@ -95,28 +130,42 @@ impl JsonRpcResponse {
 /// MCP server instance
 pub struct McpServer {
     config: McpConfig,
+    /// Directory the MCP configuration is persisted in
+    config_dir: PathBuf,
     running: Arc<AtomicBool>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Paths of repositories currently open in Leviathan
     open_repos: Arc<RwLock<Vec<String>>>,
+    /// Error from the last failed start attempt, surfaced in the status
+    last_error: Option<String>,
 }
 
 /// Shared MCP server state
 pub type McpState = Arc<RwLock<McpServer>>;
 
-/// Create a new MCP server state instance
-pub fn create_mcp_state() -> McpState {
-    Arc::new(RwLock::new(McpServer::new()))
+/// Create a new MCP server state instance backed by the saved configuration
+pub fn create_mcp_state(config_dir: PathBuf) -> McpState {
+    Arc::new(RwLock::new(McpServer::new(config_dir)))
 }
 
 impl McpServer {
-    /// Create a new MCP server with default configuration
-    pub fn new() -> Self {
+    /// Create a new MCP server, restoring the configuration saved on disk
+    pub fn new(config_dir: PathBuf) -> Self {
+        let config = McpConfig::load(&config_dir).unwrap_or_default();
         Self {
-            config: McpConfig::default(),
+            config,
+            config_dir,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             open_repos: Arc::new(RwLock::new(Vec::new())),
+            last_error: None,
+        }
+    }
+
+    /// Persist the current configuration, logging (but not failing on) write errors
+    fn persist_config(&self) {
+        if let Err(e) = self.config.save(&self.config_dir) {
+            tracing::warn!("Failed to persist MCP config: {}", e);
         }
     }
 
@@ -127,9 +176,14 @@ impl McpServer {
         }
 
         let addr = format!("127.0.0.1:{}", self.config.port);
-        let listener = TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+        let listener = match TcpListener::bind(&addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                let message = format!("Failed to bind to {}: {}", addr, e);
+                self.last_error = Some(message.clone());
+                return Err(message);
+            }
+        };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
@@ -142,6 +196,11 @@ impl McpServer {
         tokio::spawn(async move {
             Self::run_server(listener, running, shutdown_rx, open_repos).await;
         });
+
+        // Remember that the server should come back up on the next launch
+        self.last_error = None;
+        self.config.enabled = true;
+        self.persist_config();
 
         tracing::info!("MCP server started on {}", addr);
         Ok(())
@@ -158,6 +217,12 @@ impl McpServer {
         }
 
         self.running.store(false, Ordering::SeqCst);
+
+        // Remember that the server should stay down on the next launch
+        self.last_error = None;
+        self.config.enabled = false;
+        self.persist_config();
+
         tracing::info!("MCP server stopped");
         Ok(())
     }
@@ -173,6 +238,7 @@ impl McpServer {
             } else {
                 None
             },
+            last_error: self.last_error.clone(),
         }
     }
 
@@ -181,9 +247,10 @@ impl McpServer {
         &self.config
     }
 
-    /// Set the server configuration
-    pub fn set_config(&mut self, config: McpConfig) {
+    /// Set the server configuration and persist it to disk
+    pub fn set_config(&mut self, config: McpConfig) -> Result<(), String> {
         self.config = config;
+        self.config.save(&self.config_dir)
     }
 
     /// Update the list of open repositories
@@ -505,12 +572,6 @@ impl McpServer {
     }
 }
 
-impl Default for McpServer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Parse the Content-Length header from an HTTP request string
 fn parse_content_length(request: &str) -> Option<usize> {
     for line in request.lines() {
@@ -529,24 +590,27 @@ fn parse_content_length(request: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    /// Build a server backed by a throwaway config directory.
+    /// The TempDir is returned so it outlives the server.
+    fn test_server() -> (TempDir, McpServer) {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let server = McpServer::new(dir.path().to_path_buf());
+        (dir, server)
+    }
 
     #[test]
     fn test_mcp_server_new() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         assert!(!server.running.load(Ordering::SeqCst));
         assert_eq!(server.config.port, 3001);
         assert!(!server.config.enabled);
     }
 
     #[test]
-    fn test_mcp_server_default() {
-        let server = McpServer::default();
-        assert!(!server.running.load(Ordering::SeqCst));
-    }
-
-    #[test]
     fn test_get_status_not_running() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         let status = server.get_status();
         assert!(!status.running);
         assert_eq!(status.port, 3001);
@@ -555,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_get_status_running() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         server.running.store(true, Ordering::SeqCst);
         let status = server.get_status();
         assert!(status.running);
@@ -564,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_get_config() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         let config = server.get_config();
         assert!(!config.enabled);
         assert_eq!(config.port, 3001);
@@ -572,13 +636,13 @@ mod tests {
 
     #[test]
     fn test_set_config() {
-        let mut server = McpServer::new();
+        let (_dir, mut server) = test_server();
         let config = McpConfig {
             enabled: true,
             port: 8080,
             allowed_origins: Vec::new(),
         };
-        server.set_config(config);
+        server.set_config(config).expect("Failed to set config");
         assert!(server.config.enabled);
         assert_eq!(server.config.port, 8080);
     }
@@ -616,6 +680,7 @@ mod tests {
             running: true,
             port: 3001,
             url: Some("http://127.0.0.1:3001".to_string()),
+            last_error: None,
         };
         let json = serde_json::to_string(&status).expect("Failed to serialize");
         assert!(json.contains("\"running\":true"));
@@ -735,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_open_repos() {
-        let server = McpServer::new();
+        let (_dir, server) = test_server();
         server
             .update_open_repos(vec![
                 "/path/to/repo1".to_string(),
@@ -750,13 +815,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_stop_server() {
-        let mut server = McpServer::new();
+        let (_dir, mut server) = test_server();
         // Use a high port to avoid conflicts
-        server.set_config(McpConfig {
-            enabled: true,
-            port: 19876,
-            allowed_origins: Vec::new(),
-        });
+        server
+            .set_config(McpConfig {
+                enabled: true,
+                port: 19876,
+                allowed_origins: Vec::new(),
+            })
+            .expect("Failed to set config");
 
         let result = server.start().await;
         assert!(result.is_ok());
@@ -789,8 +856,153 @@ mod tests {
 
     #[test]
     fn test_create_mcp_state() {
-        let state = create_mcp_state();
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let state = create_mcp_state(dir.path().to_path_buf());
         // Just verify it creates without panic
         assert!(Arc::strong_count(&state) >= 1);
+    }
+
+    // =====================================================
+    // Configuration persistence
+    // =====================================================
+
+    #[test]
+    fn test_mcp_config_save_and_load_round_trip() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let config = McpConfig {
+            enabled: true,
+            port: 4321,
+            allowed_origins: Vec::new(),
+        };
+
+        config.save(dir.path()).expect("Failed to save config");
+
+        let loaded = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert!(loaded.enabled);
+        assert_eq!(loaded.port, 4321);
+    }
+
+    #[test]
+    fn test_load_missing_config_returns_default() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let config = McpConfig::load(dir.path()).expect("Missing config should not be an error");
+        assert!(!config.enabled);
+        assert_eq!(config.port, 3001);
+    }
+
+    #[test]
+    fn test_new_restores_saved_config() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        McpConfig {
+            enabled: true,
+            port: 4321,
+            allowed_origins: Vec::new(),
+        }
+        .save(dir.path())
+        .expect("Failed to save config");
+
+        let server = McpServer::new(dir.path().to_path_buf());
+        assert_eq!(server.get_config().port, 4321);
+        assert!(server.get_config().enabled);
+    }
+
+    #[test]
+    fn test_set_config_persists_across_instances() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+
+        {
+            let mut server = McpServer::new(dir.path().to_path_buf());
+            server
+                .set_config(McpConfig {
+                    enabled: true,
+                    port: 4321,
+                    allowed_origins: Vec::new(),
+                })
+                .expect("Failed to set config");
+        }
+
+        let restarted = McpServer::new(dir.path().to_path_buf());
+        assert_eq!(restarted.get_config().port, 4321);
+        assert!(restarted.get_config().enabled);
+    }
+
+    #[test]
+    fn test_new_falls_back_to_default_on_corrupt_config() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        std::fs::write(dir.path().join(MCP_CONFIG_FILE), "not json").expect("Failed to write");
+
+        let server = McpServer::new(dir.path().to_path_buf());
+        assert_eq!(server.get_config().port, 3001);
+        assert!(!server.get_config().enabled);
+    }
+
+    /// Ask the OS for a currently unused localhost port
+    async fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to reserve a port");
+        listener
+            .local_addr()
+            .expect("Failed to read reserved address")
+            .port()
+    }
+
+    #[tokio::test]
+    async fn test_start_enables_and_stop_disables_persisted_config() {
+        let port = free_port().await;
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        server
+            .set_config(McpConfig {
+                enabled: false,
+                port,
+                allowed_origins: Vec::new(),
+            })
+            .expect("Failed to set config");
+
+        server.start().await.expect("Failed to start server");
+        let saved = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert!(saved.enabled, "start() should persist enabled = true");
+        assert_eq!(saved.port, port);
+
+        server.stop().await.expect("Failed to stop server");
+        let saved = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert!(!saved.enabled, "stop() should persist enabled = false");
+    }
+
+    #[tokio::test]
+    async fn test_start_records_bind_error_in_status() {
+        // Occupy a port so the server cannot bind to it
+        let blocker = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to occupy port");
+        let port = blocker
+            .local_addr()
+            .expect("Failed to read occupied address")
+            .port();
+
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        server
+            .set_config(McpConfig {
+                enabled: true,
+                port,
+                allowed_origins: Vec::new(),
+            })
+            .expect("Failed to set config");
+
+        let result = server.start().await;
+        assert!(result.is_err());
+
+        let status = server.get_status();
+        assert!(!status.running);
+        let last_error = status.last_error.expect("Bind failure should be recorded");
+        assert!(
+            last_error.contains("Failed to bind"),
+            "unexpected error: {}",
+            last_error
+        );
+
+        drop(blocker);
     }
 }
