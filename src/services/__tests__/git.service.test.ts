@@ -215,6 +215,34 @@ describe('git.service - Tauri command invocations', () => {
     expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo' });
   });
 
+  it('compareBranches passes camelCase option flags to Tauri', async () => {
+    const { compareBranches } = await import('../git.service.ts');
+    await compareBranches('/test/repo', 'main', 'feature', {
+      includeCommits: true,
+      includeFiles: true,
+    });
+    expect(lastInvokedCommand).to.equal('compare_branches');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      base: 'main',
+      compare: 'feature',
+      includeCommits: true,
+      includeFiles: true,
+    });
+  });
+
+  it('compareBranches defaults both option flags to false', async () => {
+    const { compareBranches } = await import('../git.service.ts');
+    await compareBranches('/test/repo', 'main', 'feature');
+    expect(lastInvokedArgs).to.deep.equal({
+      path: '/test/repo',
+      base: 'main',
+      compare: 'feature',
+      includeCommits: false,
+      includeFiles: false,
+    });
+  });
+
   it('getRemotes calls get_remotes with path', async () => {
     const { getRemotes } = await import('../git.service.ts');
     await getRemotes('/test/repo');
