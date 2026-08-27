@@ -590,6 +590,9 @@ export class LvGraphCanvas extends LitElement {
   // debounce), so the "semantic search unavailable" notice is shown once per
   // repo and re-armed only when a semantic search succeeds again.
   private semanticFailureNotifiedFor: string | null = null;
+  // Same no-debounce reasoning for the direct commit search: a failing
+  // pathspec or branch name would otherwise toast once per keystroke.
+  private searchFailureNotifiedFor: string | null = null;
   private refsByCommit: RefsByCommit = {};
   private loadVersion = 0; // Incremented on each load to cancel stale requests
   private statsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1227,23 +1230,31 @@ export class LvGraphCanvas extends LitElement {
         this.matchedCommitOids.size === 0 &&
         (this.searchFilter?.searchMode !== 'semantic' || semanticFailed)
       ) {
-        // Keyword search: try the search index first for faster results
-        const indexResults = await searchIndexService.search(repoPath, {
-          query: this.searchFilter?.query || undefined,
-          author: this.searchFilter?.author || undefined,
-          dateFrom: this.searchFilter?.dateFrom
-            ? new Date(this.searchFilter.dateFrom).getTime() / 1000
-            : undefined,
-          dateTo: this.searchFilter?.dateTo
-            ? new Date(this.searchFilter.dateTo).getTime() / 1000
-            : undefined,
-          limit: this.commitCount,
-        });
+        // Keyword search: try the search index first for faster results.
+        // The index has no file or branch dimension, so a path/branch filter
+        // must go straight to the direct search below — asking the index
+        // would silently drop that filter and highlight every loaded commit.
+        const indexCanAnswer = !this.searchFilter?.filePath && !this.searchFilter?.branch;
+        const indexResults = indexCanAnswer
+          ? await searchIndexService.search(repoPath, {
+              query: this.searchFilter?.query || undefined,
+              author: this.searchFilter?.author || undefined,
+              dateFrom: this.searchFilter?.dateFrom
+                ? new Date(this.searchFilter.dateFrom).getTime() / 1000
+                : undefined,
+              dateTo: this.searchFilter?.dateTo
+                ? new Date(this.searchFilter.dateTo).getTime() / 1000
+                : undefined,
+              limit: this.commitCount,
+            })
+          : null;
 
         // Abort if a newer load has started
         if (this.loadVersion !== currentVersion) return;
 
         if (indexResults) {
+          // A search that answered re-arms the failure notice
+          this.searchFailureNotifiedFor = null;
           for (const commit of indexResults) {
             this.matchedCommitOids.add(commit.oid);
           }
@@ -1267,8 +1278,29 @@ export class LvGraphCanvas extends LitElement {
           if (this.loadVersion !== currentVersion) return;
 
           if (matchResult.success && matchResult.data) {
+            // A search that answered re-arms the failure notice
+            this.searchFailureNotifiedFor = null;
             for (const commit of matchResult.data) {
               this.matchedCommitOids.add(commit.oid);
+            }
+          } else {
+            // A failed search (bad pathspec, unknown branch, backend error)
+            // must not render as a legitimate zero-match search. The
+            // component can't toast itself — app-shell listens for
+            // graph-notice (same wiring as the semantic-unavailable notice).
+            log.warn('Commit search failed:', matchResult.error?.message);
+            if (this.searchFailureNotifiedFor !== repoPath) {
+              this.searchFailureNotifiedFor = repoPath;
+              this.dispatchEvent(
+                new CustomEvent('graph-notice', {
+                  detail: {
+                    message: `Search failed: ${matchResult.error?.message ?? 'unknown error'}`,
+                    type: 'error',
+                  },
+                  bubbles: true,
+                  composed: true,
+                })
+              );
             }
           }
         }
