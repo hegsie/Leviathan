@@ -387,6 +387,12 @@ export class LvSettingsDialog extends LitElement {
   @state() private availableDiffTools: AvailableDiffTool[] = [];
   @state() private loadingTools = false;
 
+  // Monotonic write tokens. Only the newest write for a tool owns its controls,
+  // so a slow failure can no longer roll the UI back over a newer save that
+  // already landed.
+  private mergeToolWriteToken = 0;
+  private diffToolWriteToken = 0;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
@@ -625,6 +631,7 @@ export class LvSettingsDialog extends LitElement {
   private async handleMergeToolChange(e: Event): Promise<void> {
     const select = e.target as HTMLSelectElement;
     const value = select.value;
+    const token = ++this.mergeToolWriteToken;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo) return;
 
@@ -634,16 +641,23 @@ export class LvSettingsDialog extends LitElement {
       // next loadExternalToolsConfig() reads it back, undoing the user's choice.
       const result = await gitService.unsetGitConfig(repo.repository.path, 'merge.tool');
       if (!result.success) {
+        // A newer change already owns the control and reports its own outcome,
+        // so this stale failure must not roll it back.
+        if (token !== this.mergeToolWriteToken) return;
         // Keep the select showing the tool that is still configured.
         select.value = this.mergeToolName ?? '';
         showToast(result.error?.message ?? 'Failed to clear merge tool', 'error');
         return;
       }
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale response must not overwrite it.
+      if (token !== this.mergeToolWriteToken) return;
       // The unset only touches this repository's config, but the dialog shows —
       // and launch_merge_tool uses — the effective value. A merge.tool inherited
       // from the global/system config survives, so re-read before claiming it is
       // gone; otherwise the UI says "None" while git still launches the tool.
       const remaining = await gitService.getMergeToolConfig(repo.repository.path);
+      if (token !== this.mergeToolWriteToken) return;
       if (remaining.success && remaining.data?.toolName) {
         this.mergeToolName = remaining.data.toolName;
         this.mergeToolCmd = remaining.data.toolCmd;
@@ -667,25 +681,63 @@ export class LvSettingsDialog extends LitElement {
       return;
     }
 
+    const previousName = this.mergeToolName;
+    const previousCmd = this.mergeToolCmd;
     this.mergeToolName = value;
     this.mergeToolCmd = null;
-    await gitService.setMergeToolConfig(repo.repository.path, value);
+    const result = await gitService.setMergeToolConfig(repo.repository.path, value);
+    if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.mergeToolWriteToken) return;
+      // The write never landed, so put the control back on what git still holds
+      // instead of letting the choice silently snap back on the next open.
+      this.mergeToolName = previousName;
+      this.mergeToolCmd = previousCmd;
+      select.value = previousName ?? '';
+      showToast(
+        `Failed to save merge tool: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleMergeToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const token = ++this.mergeToolWriteToken;
+    const previousCmd = this.mergeToolCmd;
     this.mergeToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo || !this.mergeToolCmd) return;
 
-    await gitService.setMergeToolConfig(repo.repository.path, 'custom', this.mergeToolCmd);
+    const result = await gitService.setMergeToolConfig(
+      repo.repository.path,
+      'custom',
+      this.mergeToolCmd,
+    );
+    if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.mergeToolWriteToken) return;
+      // Keep mergeToolName on '__custom__' so the command row stays on screen
+      // and the user can retry rather than hitting a dead end.
+      this.mergeToolCmd = previousCmd;
+      input.value = previousCmd ?? '';
+      showToast(
+        `Failed to save merge tool command: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleDiffToolChange(e: Event): Promise<void> {
     const select = e.target as HTMLSelectElement;
     const value = select.value;
+    const token = ++this.diffToolWriteToken;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo) return;
 
@@ -695,15 +747,22 @@ export class LvSettingsDialog extends LitElement {
       // reloads it, silently reverting the user's choice.
       const result = await gitService.unsetGitConfig(repo.repository.path, 'diff.tool');
       if (!result.success) {
+        // A newer change already owns the control and reports its own outcome,
+        // so this stale failure must not roll it back.
+        if (token !== this.diffToolWriteToken) return;
         // Keep the select showing the tool that is still configured.
         select.value = this.diffToolName ?? '';
         showToast(result.error?.message ?? 'Failed to clear diff tool', 'error');
         return;
       }
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale response must not overwrite it.
+      if (token !== this.diffToolWriteToken) return;
       // As above: the unset is repository-local while the dialog and
       // launch_diff_tool read the effective value, so a diff.tool inherited from
       // a wider scope survives and must be reported rather than shown as "None".
       const remaining = await gitService.getDiffToolConfig(repo.repository.path);
+      if (token !== this.diffToolWriteToken) return;
       if (remaining.success && remaining.data?.tool) {
         this.diffToolName = remaining.data.tool;
         this.diffToolCmd = remaining.data.cmd;
@@ -727,19 +786,56 @@ export class LvSettingsDialog extends LitElement {
       return;
     }
 
+    const previousName = this.diffToolName;
+    const previousCmd = this.diffToolCmd;
     this.diffToolName = value;
     this.diffToolCmd = null;
-    await gitService.setDiffTool(repo.repository.path, value);
+    const result = await gitService.setDiffTool(repo.repository.path, value);
+    if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.diffToolWriteToken) return;
+      // The write never landed, so put the control back on what git still holds
+      // instead of letting the choice silently snap back on the next open.
+      this.diffToolName = previousName;
+      this.diffToolCmd = previousCmd;
+      select.value = previousName ?? '';
+      showToast(
+        `Failed to save diff tool: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private async handleDiffToolCmdChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
+    const token = ++this.diffToolWriteToken;
+    const previousCmd = this.diffToolCmd;
     this.diffToolCmd = input.value;
     const repo = repositoryStore.getState().getActiveRepository();
     if (!repo || !this.diffToolCmd) return;
 
-    await gitService.setDiffTool(repo.repository.path, 'custom', this.diffToolCmd);
+    const result = await gitService.setDiffTool(
+      repo.repository.path,
+      'custom',
+      this.diffToolCmd,
+    );
+    if (!result.success) {
+      // A newer change already owns the control and reports its own outcome,
+      // so this stale failure must not roll it back.
+      if (token !== this.diffToolWriteToken) return;
+      // Keep diffToolName on '__custom__' so the command row stays on screen
+      // and the user can retry rather than hitting a dead end.
+      this.diffToolCmd = previousCmd;
+      input.value = previousCmd ?? '';
+      showToast(
+        `Failed to save diff tool command: ${result.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
