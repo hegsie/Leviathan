@@ -85,6 +85,7 @@ export class CloneDialogPage extends BaseDialog {
  */
 export class InitDialogPage extends BaseDialog {
   readonly pathInput: Locator;
+  readonly initialBranchInput: Locator;
   readonly browseButton: Locator;
   readonly initButton: Locator;
   readonly bareCheckbox: Locator;
@@ -96,6 +97,8 @@ export class InitDialogPage extends BaseDialog {
     this.closeButton = page.getByRole('button', { name: 'Close' });
     // Path input has label "Repository Location"
     this.pathInput = page.getByRole('textbox', { name: /Repository Location/i });
+    // Initial branch input has label "Initial Branch Name"
+    this.initialBranchInput = page.getByRole('textbox', { name: /Initial Branch/i });
     this.browseButton = page.getByRole('button', { name: /Browse/i });
     // Initialize button - may be disabled when no path
     this.initButton = page.getByRole('button', { name: /Initialize/i });
@@ -104,6 +107,10 @@ export class InitDialogPage extends BaseDialog {
 
   async fillPath(path: string): Promise<void> {
     await this.pathInput.fill(path);
+  }
+
+  async fillInitialBranch(branch: string): Promise<void> {
+    await this.initialBranchInput.fill(branch);
   }
 
   async init(): Promise<void> {
@@ -160,6 +167,7 @@ export class SettingsDialogPage extends BaseDialog {
   readonly themeSelect: Locator;
   readonly vimModeToggle: Locator;
   readonly doneButton: Locator;
+  readonly resetButton: Locator;
 
   constructor(page: Page) {
     // Settings dialog uses lv-modal which adds role="dialog" with aria-labelledby
@@ -172,6 +180,7 @@ export class SettingsDialogPage extends BaseDialog {
     // Note: vim mode toggle is in keyboard shortcuts dialog, not settings
     this.vimModeToggle = page.locator('lv-settings-dialog .toggle-switch').first();
     this.doneButton = page.locator('lv-settings-dialog button:has-text("Done")');
+    this.resetButton = page.locator('lv-settings-dialog button:has-text("Reset to Defaults")');
   }
 
   async setTheme(theme: 'light' | 'dark' | 'system'): Promise<void> {
@@ -337,6 +346,10 @@ export class GitHubDialogPage extends BaseDialog {
   readonly authMethodToggle: Locator;
   readonly oauthButton: Locator;
   readonly patButton: Locator;
+  readonly appButton: Locator;
+  readonly appIdInput: Locator;
+  readonly appPrivateKeyInput: Locator;
+  readonly connectViaAppButton: Locator;
   readonly oauthSignInButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
@@ -371,6 +384,10 @@ export class GitHubDialogPage extends BaseDialog {
     this.authMethodToggle = page.locator('lv-github-dialog .auth-method-toggle');
     this.oauthButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Sign in with GitHub")');
     this.patButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("Personal Access Token")');
+    this.appButton = page.locator('lv-github-dialog .auth-method-toggle button:has-text("GitHub App")');
+    this.appIdInput = page.locator('lv-github-dialog input[placeholder="123456"]');
+    this.appPrivateKeyInput = page.locator('lv-github-dialog textarea');
+    this.connectViaAppButton = page.locator('lv-github-dialog button:has-text("Connect via GitHub App")');
     this.oauthSignInButton = page.locator('lv-github-dialog .btn-oauth');
     this.oauthSpinner = page.locator('lv-github-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-github-dialog .oauth-status');
@@ -422,6 +439,10 @@ export class GitHubDialogPage extends BaseDialog {
     await this.patButton.click();
   }
 
+  async selectAppMethod(): Promise<void> {
+    await this.appButton.click();
+  }
+
   async isOAuthConfigured(): Promise<boolean> {
     // OAuth is configured if the toggle is visible and the OAuth button is enabled
     const toggleVisible = await this.authMethodToggle.isVisible();
@@ -449,6 +470,9 @@ export class GitLabDialogPage extends BaseDialog {
   readonly issuesTab: Locator;
   readonly pipelinesTab: Locator;
 
+  // Create-issue tab
+  readonly labelChips: Locator;
+
   // Connection tab
   readonly instanceUrlInput: Locator;
   readonly tokenInput: Locator;
@@ -473,6 +497,9 @@ export class GitLabDialogPage extends BaseDialog {
     this.mergeRequestsTab = page.locator('lv-gitlab-dialog .tab:has-text("Merge Requests")');
     this.issuesTab = page.locator('lv-gitlab-dialog .tab:has-text("Issues")');
     this.pipelinesTab = page.locator('lv-gitlab-dialog .tab:has-text("Pipelines")');
+
+    // Create-issue label picker
+    this.labelChips = page.locator('lv-gitlab-dialog .label-chip');
 
     // Connection
     this.instanceUrlInput = page.locator('lv-gitlab-dialog input[type="text"]').first();
@@ -594,6 +621,7 @@ export class BitbucketDialogPage extends BaseDialog {
   readonly oauthButton: Locator;
   readonly appPasswordButton: Locator;
   readonly oauthSignInButton: Locator;
+  readonly oauthCancelButton: Locator;
   readonly oauthSpinner: Locator;
   readonly oauthStatus: Locator;
 
@@ -619,6 +647,7 @@ export class BitbucketDialogPage extends BaseDialog {
     this.oauthButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("Sign in with Bitbucket")');
     this.appPasswordButton = page.locator('lv-bitbucket-dialog .auth-method-toggle button:has-text("App Password")');
     this.oauthSignInButton = page.locator('lv-bitbucket-dialog .btn-oauth');
+    this.oauthCancelButton = page.locator('lv-bitbucket-dialog .oauth-cancel');
     this.oauthSpinner = page.locator('lv-bitbucket-dialog .oauth-spinner');
     this.oauthStatus = page.locator('lv-bitbucket-dialog .oauth-status');
   }

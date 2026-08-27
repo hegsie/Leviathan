@@ -110,7 +110,7 @@ function setupDefaultMocks(): void {
       case 'get_migration_backup_info':
         return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
       case 'save_unified_profile':
-        return testProfiles[0];
+        return { profile: testProfiles[0], failedRepositories: [] };
       case 'delete_unified_profile':
         return null;
       case 'save_global_account':
@@ -156,7 +156,10 @@ function useConfig(profiles: UnifiedProfile[], accounts: IntegrationAccount[]): 
         return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
       case 'save_unified_profile':
         // Echo back the submitted profile so the store reflects what was saved.
-        return (args as { profile?: UnifiedProfile } | undefined)?.profile ?? profiles[0] ?? null;
+        return {
+          profile: (args as { profile?: UnifiedProfile } | undefined)?.profile ?? profiles[0] ?? null,
+          failedRepositories: [],
+        };
       case 'delete_global_account':
         return null;
       case 'plugin:dialog|message':
@@ -358,7 +361,7 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'save_unified_profile': {
             const typedArgs = args as { profile: UnifiedProfile };
-            return typedArgs.profile;
+            return { profile: typedArgs.profile, failedRepositories: [] };
           }
           default:
             return null;
@@ -464,7 +467,7 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'save_unified_profile': {
             const typedArgs = args as { profile: UnifiedProfile };
-            return typedArgs.profile;
+            return { profile: typedArgs.profile, failedRepositories: [] };
           }
           default:
             return null;
@@ -671,7 +674,7 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'save_unified_profile': {
             const typedArgs = args as { profile: UnifiedProfile };
-            return typedArgs.profile;
+            return { profile: typedArgs.profile, failedRepositories: [] };
           }
           default:
             return null;
@@ -732,7 +735,7 @@ describe('lv-profile-manager-dialog', () => {
             return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
           case 'save_unified_profile': {
             const typedArgs = args as { profile: UnifiedProfile };
-            return typedArgs.profile;
+            return { profile: typedArgs.profile, failedRepositories: [] };
           }
           default:
             return null;
@@ -2209,6 +2212,120 @@ describe('lv-profile-manager-dialog', () => {
       expect(shell.viewMode).to.equal('edit');
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+  });
+
+  // Saving a profile re-applies its identity to every repository assigned to it
+  // (the backend rewrites their .git/config). The dialog must report the ones
+  // that kept the old identity, and refresh the open repo when it was rewritten.
+  describe('save re-applies the identity to assigned repositories', () => {
+    function mocksWithSaveResult(
+      failedRepositories: string[],
+      repositoryAssignments: Record<string, string>
+    ): void {
+      mockInvoke = async (command: string, args?: unknown) => {
+        switch (command) {
+          case 'get_unified_profiles_config':
+            return { version: 3, profiles: testProfiles, accounts: testAccounts, repositoryAssignments };
+          case 'get_migration_backup_info':
+            return { hasBackup: false, backupDate: null, profilesCount: null, accountsCount: null };
+          case 'save_unified_profile':
+            return {
+              profile: (args as { profile: UnifiedProfile }).profile,
+              failedRepositories,
+            };
+          default:
+            return null;
+        }
+      };
+    }
+
+    it('names the repositories that kept the old identity', async () => {
+      mocksWithSaveResult(['/repo/personal'], { '/repo/personal': 'profile-1' });
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1', gitEmail: 'new@work.com' });
+      shell.viewMode = 'edit';
+      await shell.handleSave();
+      await el.updateComplete;
+
+      const toasts = uiStore.getState().toasts;
+      const warn = toasts.find((t) => t.type === 'warning');
+      expect(warn, 'a warning toast was shown').to.not.be.undefined;
+      expect(warn!.message).to.match(/personal/);
+      expect(toasts.some((t) => t.type === 'success')).to.be.false;
+    });
+
+    it('refreshes the open repository when the saved profile is the one assigned to it', async () => {
+      mocksWithSaveResult([], { '/repo/work': 'profile-1' });
+
+      const el = await renderDialog({ repoPath: '/repo/work' });
+      let refreshed = false;
+      const onRefresh = (): void => {
+        refreshed = true;
+      };
+      window.addEventListener('repository-refresh', onRefresh);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const shell = el as any;
+        shell.editingProfile = makeProfile({ id: 'profile-1', gitEmail: 'new@work.com' });
+        shell.viewMode = 'edit';
+        await shell.handleSave();
+        await el.updateComplete;
+      } finally {
+        window.removeEventListener('repository-refresh', onRefresh);
+      }
+
+      expect(refreshed, 'repository-refresh was dispatched').to.be.true;
+    });
+
+    it('does not refresh when the open repository is assigned to a different profile', async () => {
+      mocksWithSaveResult([], { '/repo/work': 'profile-2' });
+
+      const el = await renderDialog({ repoPath: '/repo/work' });
+      uiStore.getState().toasts.length = 0;
+      let refreshed = false;
+      const onRefresh = (): void => {
+        refreshed = true;
+      };
+      window.addEventListener('repository-refresh', onRefresh);
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const shell = el as any;
+        shell.editingProfile = makeProfile({ id: 'profile-1', gitEmail: 'new@work.com' });
+        shell.viewMode = 'edit';
+        await shell.handleSave();
+        await el.updateComplete;
+      } finally {
+        window.removeEventListener('repository-refresh', onRefresh);
+      }
+
+      expect(refreshed, 'no refresh for an unrelated profile').to.be.false;
+      expect(uiStore.getState().toasts.some((t) => t.type === 'success')).to.be.true;
+    });
+
+    it('shows the plain success toast when every assigned repository was updated', async () => {
+      mocksWithSaveResult([], { '/repo/personal': 'profile-1' });
+
+      const el = await renderDialog();
+      uiStore.getState().toasts.length = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shell = el as any;
+      shell.editingProfile = makeProfile({ id: 'profile-1', gitEmail: 'new@work.com' });
+      shell.viewMode = 'edit';
+      await shell.handleSave();
+      await el.updateComplete;
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.filter((t) => t.type === 'success').map((t) => t.message)).to.deep.equal([
+        'Profile saved',
+      ]);
+      expect(toasts.some((t) => t.type === 'warning')).to.be.false;
     });
   });
 

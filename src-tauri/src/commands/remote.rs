@@ -1,7 +1,7 @@
 //! Remote command handlers
 
 use std::path::Path;
-use tauri::{command, AppHandle, Emitter};
+use tauri::{command, AppHandle, Emitter, State};
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{
@@ -10,6 +10,7 @@ use crate::models::{
 };
 use crate::services::cancellation::CancellationRegistry;
 use crate::services::credentials_service;
+use crate::services::remote_ops::{self, RemoteOp, RemoteOpRegistry};
 use crate::utils::{create_command, reject_flag_like};
 
 /// Add a new remote
@@ -87,6 +88,10 @@ pub async fn rename_remote(path: String, old_name: String, new_name: String) -> 
 }
 
 /// Set the URL of a remote
+///
+/// An empty `url` with `push` set clears the push URL so pushes fall back to
+/// the fetch URL — that is the only way to undo a divergent push destination.
+/// An empty fetch URL is refused: a remote without one is unusable.
 #[command]
 pub async fn set_remote_url(
     path: String,
@@ -100,10 +105,22 @@ pub async fn set_remote_url(
     repo.find_remote(&name)
         .map_err(|_| LeviathanError::RemoteNotFound(name.clone()))?;
 
+    let url = url.trim();
+
     if push.unwrap_or(false) {
-        repo.remote_set_pushurl(&name, Some(&url))?;
+        match repo.remote_set_pushurl(&name, if url.is_empty() { None } else { Some(url) }) {
+            // Deleting an absent pushurl reports NotFound; the remote is
+            // already in the state the caller asked for.
+            Err(e) if url.is_empty() && e.code() == git2::ErrorCode::NotFound => {}
+            other => other?,
+        }
     } else {
-        repo.remote_set_url(&name, &url)?;
+        if url.is_empty() {
+            return Err(LeviathanError::OperationFailed(
+                "Remote URL cannot be empty".to_string(),
+            ));
+        }
+        repo.remote_set_url(&name, url)?;
     }
 
     // Get updated remote info
@@ -142,6 +159,7 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 #[command]
 pub async fn fetch(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     prune: Option<bool>,
@@ -157,68 +175,157 @@ pub async fn fetch(
     // alt-tabbed back into the app. That is exactly the noise the background
     // fetch is documented to avoid.
     let quiet = quiet.unwrap_or(false);
-    let do_fetch = async move {
-        let path_clone = path.clone();
-        let prune_val = prune.unwrap_or(false);
-        let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
-        let remote_name_for_event = remote_name_owned.clone();
-
-        // git2 fetch is blocking network I/O; offload to a blocking thread so
-        // it doesn't starve the Tokio runtime.
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let repo = git2::Repository::open(Path::new(&path_clone))?;
-            let mut git_remote = repo
-                .find_remote(&remote_name_owned)
-                .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
-
-            let mut fetch_opts = credentials_service::get_fetch_options(token);
-            if prune_val {
-                fetch_opts.prune(git2::FetchPrune::On);
-            }
-
-            let refspecs: Vec<String> = git_remote
-                .fetch_refspecs()?
-                .iter()
-                .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
-                .collect();
-            let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
-
-            git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Fetch task failed: {}", e)))??;
-
-        // Emit success event, unless this fetch is a background one.
-        if !quiet {
-            let _ = app_handle.emit(
-                "remote-operation-completed",
-                RemoteOperationResult {
-                    operation: "fetch".to_string(),
-                    remote: remote_name_for_event,
-                    success: true,
-                    message: "Fetch completed successfully".to_string(),
-                },
-            );
+    // Claimed BEFORE the timeout wrapper, and handed to the blocking task
+    // below so it outlives a timed-out caller — see services/remote_ops.rs.
+    //
+    // A background fetch (window focus) YIELDS but never claims: it skips this
+    // round when the user has something running, and takes no slot of its own,
+    // so it can never refuse the user's next push. Its timer twin in
+    // services/autofetch_service.rs has always run alongside whatever the user
+    // is doing; making this one exclusive would break a working flow rather
+    // than fix the racing retry this guard is for.
+    let slot = if quiet {
+        if remote_ops_registry.running(Path::new(&path)).is_some() {
+            return Ok(());
         }
-
-        Ok(())
+        None
+    } else {
+        Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
     };
 
-    if let Some(secs) = timeout_secs {
-        if secs > 0 {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_fetch).await {
-                Ok(result) => result,
-                Err(_) => Err(LeviathanError::OperationTimeout(
-                    "Fetch operation timed out".to_string(),
-                )),
-            }
-        } else {
-            do_fetch.await
+    let repo_path = path.clone();
+    let deadline = network_deadline(timeout_secs);
+    let path_clone = path.clone();
+    let prune_val = prune.unwrap_or(false);
+    let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
+    let remote_name_for_event = remote_name_owned.clone();
+
+    // git2 fetch is blocking network I/O; offload to a blocking thread so
+    // it doesn't starve the Tokio runtime. spawn_holding carries the slot into
+    // that thread, so the claim is released when the fetch really ends rather
+    // than when a timed-out caller drops this future.
+    let handle = remote_ops::spawn_holding(slot, move || -> Result<()> {
+        let repo = git2::Repository::open(Path::new(&path_clone))?;
+        let mut git_remote = repo
+            .find_remote(&remote_name_owned)
+            .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
+
+        let (mut fetch_opts, aborted) =
+            credentials_service::get_fetch_options_with_deadline(token, deadline);
+        if prune_val {
+            fetch_opts.prune(git2::FetchPrune::On);
         }
-    } else {
-        do_fetch.await
+
+        let refspecs: Vec<String> = git_remote
+            .fetch_refspecs()?
+            .iter()
+            .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
+            .collect();
+        let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
+
+        git_remote
+            .fetch(&refspec_strs, Some(&mut fetch_opts), None)
+            .map_err(|e| {
+                // libgit2 reports a deadline abort as a generic error; name it.
+                // ONLY a transfer the deadline callback actually aborted, though
+                // — asking `deadline_passed` here relabelled every failure that
+                // happened to surface after the deadline (a wrong credential, a
+                // protocol error, a full disk) as "timed out", and on the pull
+                // path such an error is then dropped as an already-reported
+                // timeout, so the real cause never reached the user.
+                if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                    LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
+                } else {
+                    e.into()
+                }
+            })?;
+        Ok(())
+    });
+
+    let app_late = app_handle.clone();
+    let remote_late = remote_name_for_event.clone();
+    let repo_late = repo_path.clone();
+    await_remote_task(
+        network_timeout(timeout_secs),
+        "Fetch",
+        handle,
+        move |late| {
+            // A background fetch stays silent, but one the user asked for that
+            // lands after its timeout error must say so: the caller already
+            // returned an error and will never refresh.
+            if let Some(event) = fetch_late_event(quiet, late, remote_late, repo_late) {
+                let _ = app_late.emit("remote-operation-completed", event);
+            }
+        },
+    )
+    .await?;
+
+    // Emit success event, unless this fetch is a background one.
+    if !quiet {
+        let _ = app_handle.emit(
+            "remote-operation-completed",
+            RemoteOperationResult {
+                operation: "fetch".to_string(),
+                remote: remote_name_for_event,
+                repo_path,
+                success: true,
+                message: "Fetch completed successfully".to_string(),
+                error_code: None,
+                late: false,
+            },
+        );
     }
+
+    Ok(())
+}
+
+/// The message and IPC error code for a failure reported through an EVENT
+/// rather than as a command result.
+///
+/// The code is what the frontend already switches on (MERGE_CONFLICT,
+/// REBASE_CONFLICT, ...); a late completion that carried only prose lost it.
+fn late_failure(prefix: &str, error: LeviathanError) -> (String, Option<String>) {
+    let message = format!("{}: {}", prefix, error);
+    (message, Some(crate::error::ErrorResponse::from(error).code))
+}
+
+/// The event a fetch that landed after its reported timeout should emit, if
+/// any.
+///
+/// A free function rather than a closure body so both branches are testable:
+/// whether a background fetch stays silent, and what a user-initiated one says
+/// when it lands late, are user-visible decisions.
+fn fetch_late_event(
+    quiet: bool,
+    late: Result<()>,
+    remote: String,
+    repo_path: String,
+) -> Option<RemoteOperationResult> {
+    // A fetch the user did not ask for must not announce itself, late or not.
+    if quiet {
+        return None;
+    }
+    let (success, message, error_code) = match late {
+        Ok(()) => (
+            true,
+            "Fetch finished after it was reported as timed out".to_string(),
+            None,
+        ),
+        Err(e) => {
+            let (message, code) =
+                late_failure("Fetch failed after it was reported as timed out", e);
+            (false, message, code)
+        }
+    };
+    Some(RemoteOperationResult {
+        operation: "fetch".to_string(),
+        remote,
+        repo_path,
+        success,
+        message,
+        error_code,
+        late: true,
+    })
 }
 
 /// Refuse a pull while another operation is unresolved, the way merge() does.
@@ -236,6 +343,82 @@ fn ensure_pullable(repo_path: &Path) -> Result<()> {
              Complete or abort it first.",
             state
         ))),
+    }
+}
+
+/// The timeout a `timeout_secs` argument asks for. `None`/`0` means none.
+fn network_timeout(timeout_secs: Option<u64>) -> Option<std::time::Duration> {
+    timeout_secs
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
+}
+
+/// The wall-clock deadline that timeout implies, for enforcement INSIDE the
+/// blocking task — the same thing `clone_repository` computes for its own.
+fn network_deadline(timeout_secs: Option<u64>) -> Option<std::time::Instant> {
+    network_timeout(timeout_secs).map(|d| std::time::Instant::now() + d)
+}
+
+/// Await a spawned remote operation under `timeout`, without abandoning it.
+///
+/// `tokio::time::timeout` drops the future it wraps; it does NOT cancel a
+/// `tokio::task::spawn_blocking` task. The merge, the rebase, the push kept
+/// running on its thread and landed minutes after the user was told the
+/// operation had timed out: refs and the working tree changed with no event,
+/// no refresh and no toast, and the retry hit `ensure_pullable`'s "another
+/// operation is in progress" or produced a second merge nobody asked for. The
+/// in-task deadline usually stops the transfer first, but work already past
+/// the network phase cannot be stopped — so the still-running handle is handed
+/// to a detached reporter that announces the real outcome when it lands.
+///
+/// `on_late` is skipped when the abandoned task ends in `OperationTimeout`:
+/// that is the in-task deadline stopping the work cleanly, before anything was
+/// written — the very outcome the caller was already told about — so there is
+/// nothing new to report. `OperationTimeoutAfterChange` is deliberately NOT
+/// suppressed: it means the work had already changed the repository.
+async fn await_remote_task<T: Send + 'static>(
+    timeout: Option<std::time::Duration>,
+    label: &str,
+    mut handle: tokio::task::JoinHandle<Result<T>>,
+    on_late: impl FnOnce(Result<T>) + Send + 'static,
+) -> Result<T> {
+    let label_owned = label.to_string();
+    let late_label = label.to_string();
+    let join_failed = move |e: tokio::task::JoinError| {
+        LeviathanError::Custom(format!("{} task failed: {}", label_owned, e))
+    };
+
+    let Some(timeout) = timeout else {
+        return handle.await.map_err(join_failed)?;
+    };
+
+    // `&mut JoinHandle` is itself a Future (JoinHandle is Unpin), so the task
+    // survives the timeout and can still be moved into the reporter below.
+    match tokio::time::timeout(timeout, &mut handle).await {
+        Ok(joined) => joined.map_err(join_failed)?,
+        Err(_) => {
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok(Err(LeviathanError::OperationTimeout(_))) => {}
+                    Ok(result) => on_late(result),
+                    // A panic AFTER the task moved refs or rewrote the working
+                    // tree is exactly the silent mutation this reporter exists
+                    // to prevent, so a log line is not enough: report it like
+                    // any other late failure so the frontend refreshes.
+                    Err(e) => {
+                        tracing::warn!("abandoned remote task failed to join: {}", e);
+                        on_late(Err(LeviathanError::Custom(format!(
+                            "{} task failed: {}",
+                            late_label, e
+                        ))));
+                    }
+                }
+            });
+            Err(LeviathanError::OperationTimeout(format!(
+                "{} operation timed out",
+                label
+            )))
+        }
     }
 }
 
@@ -494,11 +677,172 @@ pub(crate) fn merge_fetched_commit(
     Ok(())
 }
 
+/// Run one pull: fetch, then merge or rebase the fetched commit.
+///
+/// Extracted from `pull` so it can be TESTED — the same reason `push_branch`
+/// was: `pull` takes a Tauri `AppHandle`, so this whole body was unreachable
+/// from a unit test.
+///
+/// Returns the remote actually pulled from and a user-facing message.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pull_branch(
+    path_for_task: &str,
+    requested_remote: Option<String>,
+    branch_for_task: Option<String>,
+    rebase: Option<bool>,
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> Result<(String, String)> {
+    // Refuse before the network round trip if another operation is
+    // unresolved. merge() has always had this guard; pull never
+    // did, and its normal-merge branch calls repo.merge() a SECOND
+    // time on top of the first. libgit2 errors out — but as a side
+    // effect it deletes MERGE_HEAD and flips state() back to Clean
+    // while the index still holds the conflicted entries. abort_merge
+    // then refuses ("no merge to abort"), so the app's only recovery
+    // action for a stuck merge is gone and the conflicted index still
+    // blocks a commit. The keyboard shortcut fires through an open
+    // conflict dialog, so this is one keystroke away.
+    ensure_pullable(Path::new(path_for_task))?;
+
+    let repo = git2::Repository::open(Path::new(path_for_task))?;
+
+    // On a detached HEAD, shorthand() is the literal "HEAD" — so
+    // this used to resolve origin/HEAD (a symref that DOES exist in
+    // a normal clone), fast-forward-check-out its tree, and only
+    // then fail looking up "refs/heads/HEAD". The tree ended up
+    // holding origin/main's content while HEAD still pointed at the
+    // tag, so every diverging file showed as an uncommitted change.
+    // git refuses to pull with no upstream; so do we. merge() gets
+    // this right by using head.name() rather than rebuilding it.
+    let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
+        (b.clone(), format!("refs/heads/{}", b))
+    } else {
+        let head = repo.head()?;
+        if !head.is_branch() {
+            return Err(LeviathanError::OperationFailed(
+                "You are not currently on a branch. Check out a branch before \
+                 pulling, or say which branch to pull."
+                    .to_string(),
+            ));
+        }
+        let refname = head
+            .name()
+            .map_err(|_| LeviathanError::InvalidReference)?
+            .to_string();
+        (head.shorthand().unwrap_or("main").to_string(), refname)
+    };
+
+    // Honour the repository's own pull strategy when the caller
+    // did not force one. Defaulting to merge meant a user with
+    // pull.rebase=true — a very common setting — silently got a
+    // merge commit from every diverged pull, the opposite of what
+    // `git pull` does in their terminal.
+    let rebase_val = match rebase {
+        Some(explicit) => explicit,
+        None => pull_should_rebase(&repo, &branch_name),
+    };
+
+    let (effective_remote, remote_ref) =
+        resolve_pull_target(&repo, requested_remote.clone(), &branch_name, &head_refname);
+
+    // Fetch (network I/O) the remote we actually resolved. A transfer the
+    // deadline aborted is this pull's timeout, and must read as one.
+    fetch_internal(path_for_task, &effective_remote, false, token, deadline).map_err(
+        |e| match e {
+            LeviathanError::OperationTimeout(_) => {
+                LeviathanError::OperationTimeout("Pull operation timed out".to_string())
+            }
+            other => other,
+        },
+    )?;
+    let repo = git2::Repository::open(Path::new(path_for_task))?;
+
+    // Do NOT start the merge or rebase once the caller has already been told
+    // the pull timed out. The outer timeout only drops the future, so this
+    // thread would otherwise rewrite refs and the working tree minutes later,
+    // with the user looking at a "Pull operation timed out" error and the
+    // retry hitting ensure_pullable's "another operation is in progress".
+    //
+    // Reported as OperationTimeoutAfterChange, NOT OperationTimeout: the fetch
+    // above already wrote the remote-tracking refs and FETCH_HEAD, so this
+    // repository DID change. await_remote_task suppresses a plain
+    // OperationTimeout as an outcome the caller was already told about, which
+    // would leave those writes with no late event and no refresh anywhere.
+    if crate::utils::deadline_passed(deadline) {
+        return Err(LeviathanError::OperationTimeoutAfterChange(
+            "Pull operation timed out".to_string(),
+        ));
+    }
+
+    let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
+    let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
+
+    let message: String;
+
+    if rebase_val {
+        let head = repo.head()?;
+        let head_commit = repo.reference_to_annotated_commit(&head)?;
+
+        let mut rebase_obj = repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
+
+        // `git2::Rebase` does NOT call abort() on Drop. Without
+        // an explicit abort, errors other than the expected
+        // RebaseConflict (e.g. missing user.name signature,
+        // mid-loop git2 errors) would leave the working tree
+        // permanently stuck in REBASE state. We do NOT abort on
+        // RebaseConflict because the UI surfaces a "resolve
+        // conflicts" flow that needs the rebase state intact.
+        let mut commit_count = 0;
+        let rebase_result = (|| -> Result<()> {
+            while let Some(op) = rebase_obj.next() {
+                let _op = op?;
+                if repo.index()?.has_conflicts() {
+                    return Err(LeviathanError::RebaseConflict);
+                }
+                let signature = repo.signature()?;
+                rebase_obj.commit(None, &signature, None)?;
+                commit_count += 1;
+            }
+            rebase_obj.finish(Some(&repo.signature()?))?;
+            Ok(())
+        })();
+        match rebase_result {
+            Err(LeviathanError::RebaseConflict) => {
+                return Err(LeviathanError::RebaseConflict);
+            }
+            Err(e) => {
+                let _ = rebase_obj.abort();
+                return Err(e);
+            }
+            Ok(()) => {}
+        }
+        message = format!("Rebased {} commit(s)", commit_count);
+    } else {
+        let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
+
+        if analysis.is_up_to_date() {
+            message = "Already up to date".to_string();
+        } else if analysis.is_fast_forward() {
+            fast_forward_to(&repo, &head_refname, fetch_commit.id())?;
+            message = "Fast-forward merge completed".to_string();
+        } else {
+            // Normal merge. Body extracted to merge_fetched_commit
+            // so it can be tested — see the doc comment there.
+            merge_fetched_commit(&repo, &fetch_commit, &remote_ref, &branch_name)?;
+            message = "Merge completed".to_string();
+        }
+    }
+
+    Ok((effective_remote, message))
+}
+
 /// Pull from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn pull(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -507,182 +851,110 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
-    let do_pull = async move {
-        let path_for_task = path.clone();
-        // NOT defaulted to "origin" here. The branch's configured upstream is
-        // the right answer when the caller did not name a remote — see below.
-        let requested_remote = remote.clone();
-        let branch_for_task = branch.clone();
+    // Claimed before the timeout wrapper and released by the blocking task,
+    // not by this future — see services/remote_ops.rs. The ensure_pullable
+    // guard inside pull_branch only refuses a repository that is ALREADY
+    // mid-merge, so it cannot see a pull that timed out and is still running.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Pull)?;
 
-        // Whole pull is git2 / blocking network I/O. Run it on a blocking
-        // thread so the Tokio runtime stays responsive.
-        let (remote_name_returned, message) =
-            tokio::task::spawn_blocking(move || -> Result<(String, String)> {
-                // Refuse before the network round trip if another operation is
-                // unresolved. merge() has always had this guard; pull never
-                // did, and its normal-merge branch calls repo.merge() a SECOND
-                // time on top of the first. libgit2 errors out — but as a side
-                // effect it deletes MERGE_HEAD and flips state() back to Clean
-                // while the index still holds the conflicted entries. abort_merge
-                // then refuses ("no merge to abort"), so the app's only recovery
-                // action for a stuck merge is gone and the conflicted index still
-                // blocks a commit. The keyboard shortcut fires through an open
-                // conflict dialog, so this is one keystroke away.
-                ensure_pullable(Path::new(&path_for_task))?;
+    let repo_path = path.clone();
+    let deadline = network_deadline(timeout_secs);
+    let path_for_task = path.clone();
+    // NOT defaulted to "origin" here. The branch's configured upstream is
+    // the right answer when the caller did not name a remote.
+    let requested_remote = remote.clone();
+    let branch_for_task = branch.clone();
 
-                let repo = git2::Repository::open(Path::new(&path_for_task))?;
+    // Whole pull is git2 / blocking network I/O. Run it on a blocking
+    // thread so the Tokio runtime stays responsive; the slot rides into that
+    // thread so it is released when the pull really ends.
+    let handle = remote_ops::spawn_holding(Some(slot), move || {
+        pull_branch(
+            &path_for_task,
+            requested_remote,
+            branch_for_task,
+            rebase,
+            token,
+            deadline,
+        )
+    });
 
-                // On a detached HEAD, shorthand() is the literal "HEAD" — so
-                // this used to resolve origin/HEAD (a symref that DOES exist in
-                // a normal clone), fast-forward-check-out its tree, and only
-                // then fail looking up "refs/heads/HEAD". The tree ended up
-                // holding origin/main's content while HEAD still pointed at the
-                // tag, so every diverging file showed as an uncommitted change.
-                // git refuses to pull with no upstream; so do we. merge() gets
-                // this right by using head.name() rather than rebuilding it.
-                let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
-                    (b.clone(), format!("refs/heads/{}", b))
-                } else {
-                    let head = repo.head()?;
-                    if !head.is_branch() {
-                        return Err(LeviathanError::OperationFailed(
-                            "You are not currently on a branch. Check out a branch before \
-                             pulling, or say which branch to pull."
-                                .to_string(),
-                        ));
-                    }
-                    let refname = head
-                        .name()
-                        .map_err(|_| LeviathanError::InvalidReference)?
-                        .to_string();
-                    (head.shorthand().unwrap_or("main").to_string(), refname)
-                };
-
-                // Honour the repository's own pull strategy when the caller
-                // did not force one. Defaulting to merge meant a user with
-                // pull.rebase=true — a very common setting — silently got a
-                // merge commit from every diverged pull, the opposite of what
-                // `git pull` does in their terminal.
-                let rebase_val = match rebase {
-                    Some(explicit) => explicit,
-                    None => pull_should_rebase(&repo, &branch_name),
-                };
-
-                let (effective_remote, remote_ref) = resolve_pull_target(
-                    &repo,
-                    requested_remote.clone(),
-                    &branch_name,
-                    &head_refname,
-                );
-
-                // Fetch (network I/O) the remote we actually resolved.
-                fetch_internal(&path_for_task, &effective_remote, false, token)?;
-                let repo = git2::Repository::open(Path::new(&path_for_task))?;
-
-                let fetch_head = repo.find_reference(&format!("refs/remotes/{}", remote_ref))?;
-                let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
-
-                let message: String;
-
-                if rebase_val {
-                    let head = repo.head()?;
-                    let head_commit = repo.reference_to_annotated_commit(&head)?;
-
-                    let mut rebase_obj =
-                        repo.rebase(Some(&head_commit), Some(&fetch_commit), None, None)?;
-
-                    // `git2::Rebase` does NOT call abort() on Drop. Without
-                    // an explicit abort, errors other than the expected
-                    // RebaseConflict (e.g. missing user.name signature,
-                    // mid-loop git2 errors) would leave the working tree
-                    // permanently stuck in REBASE state. We do NOT abort on
-                    // RebaseConflict because the UI surfaces a "resolve
-                    // conflicts" flow that needs the rebase state intact.
-                    let mut commit_count = 0;
-                    let rebase_result = (|| -> Result<()> {
-                        while let Some(op) = rebase_obj.next() {
-                            let _op = op?;
-                            if repo.index()?.has_conflicts() {
-                                return Err(LeviathanError::RebaseConflict);
-                            }
-                            let signature = repo.signature()?;
-                            rebase_obj.commit(None, &signature, None)?;
-                            commit_count += 1;
-                        }
-                        rebase_obj.finish(Some(&repo.signature()?))?;
-                        Ok(())
-                    })();
-                    match rebase_result {
-                        Err(LeviathanError::RebaseConflict) => {
-                            return Err(LeviathanError::RebaseConflict);
-                        }
-                        Err(e) => {
-                            let _ = rebase_obj.abort();
-                            return Err(e);
-                        }
-                        Ok(()) => {}
-                    }
-                    message = format!("Rebased {} commit(s)", commit_count);
-                } else {
-                    let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
-
-                    if analysis.is_up_to_date() {
-                        message = "Already up to date".to_string();
-                    } else if analysis.is_fast_forward() {
-                        fast_forward_to(&repo, &head_refname, fetch_commit.id())?;
-                        message = "Fast-forward merge completed".to_string();
-                    } else {
-                        // Normal merge. Body extracted to merge_fetched_commit
-                        // so it can be tested — see the doc comment there.
-                        merge_fetched_commit(&repo, &fetch_commit, &remote_ref, &branch_name)?;
-                        message = "Merge completed".to_string();
-                    }
+    let app_late = app_handle.clone();
+    let repo_late = repo_path.clone();
+    let (remote_name_returned, message) =
+        await_remote_task(network_timeout(timeout_secs), "Pull", handle, move |late| {
+            // The merge or rebase landed after the caller was told the pull
+            // timed out: refs and the working tree changed with nothing on the
+            // frontend waiting to refresh. Announce the real outcome.
+            let (remote, success, message, error_code) = match late {
+                Ok((remote, message)) => (
+                    remote,
+                    true,
+                    format!(
+                        "Pull finished after it was reported as timed out: {}",
+                        message
+                    ),
+                    None,
+                ),
+                // With the code, not just the text: a late pull that ends in
+                // MergeConflict/RebaseConflict leaves MERGE_HEAD (or the rebase
+                // state) on disk, and the frontend needs the code to open the
+                // conflict dialog for it — the same thing the normal pull path
+                // does with the command's own error.
+                Err(e) => {
+                    let (message, code) =
+                        late_failure("Pull failed after it was reported as timed out", e);
+                    ("unknown".to_string(), false, message, code)
                 }
+            };
+            let _ = app_late.emit(
+                "remote-operation-completed",
+                RemoteOperationResult {
+                    operation: "pull".to_string(),
+                    remote,
+                    repo_path: repo_late,
+                    success,
+                    message,
+                    error_code,
+                    late: true,
+                },
+            );
+        })
+        .await?;
 
-                Ok((effective_remote, message))
-            })
-            .await
-            .map_err(|e| LeviathanError::Custom(format!("Pull task failed: {}", e)))??;
+    // Emit success event
+    let _ = app_handle.emit(
+        "remote-operation-completed",
+        RemoteOperationResult {
+            operation: "pull".to_string(),
+            remote: remote_name_returned,
+            repo_path,
+            success: true,
+            message,
+            error_code: None,
+            late: false,
+        },
+    );
 
-        // Emit success event
-        let _ = app_handle.emit(
-            "remote-operation-completed",
-            RemoteOperationResult {
-                operation: "pull".to_string(),
-                remote: remote_name_returned,
-                success: true,
-                message,
-            },
-        );
-
-        Ok(())
-    };
-
-    if let Some(secs) = timeout_secs {
-        if secs > 0 {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_pull).await {
-                Ok(result) => result,
-                Err(_) => Err(LeviathanError::OperationTimeout(
-                    "Pull operation timed out".to_string(),
-                )),
-            }
-        } else {
-            do_pull.await
-        }
-    } else {
-        do_pull.await
-    }
+    Ok(())
 }
 
 /// Internal fetch without event emission (used by pull)
-fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<String>) -> Result<()> {
+fn fetch_internal(
+    path: &str,
+    remote_name: &str,
+    prune: bool,
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> Result<()> {
     let repo = git2::Repository::open(Path::new(path))?;
 
     let mut git_remote = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let mut fetch_opts = credentials_service::get_fetch_options(token);
+    let (mut fetch_opts, aborted) =
+        credentials_service::get_fetch_options_with_deadline(token, deadline);
 
     if prune {
         fetch_opts.prune(git2::FetchPrune::On);
@@ -696,7 +968,18 @@ fn fetch_internal(path: &str, remote_name: &str, prune: bool, token: Option<Stri
 
     let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
 
-    git_remote.fetch(&refspec_strs, Some(&mut fetch_opts), None)?;
+    git_remote
+        .fetch(&refspec_strs, Some(&mut fetch_opts), None)
+        .map_err(|e| {
+            // libgit2 reports a deadline abort as a generic indexer error;
+            // name it for what it is — but only when the deadline callback is
+            // what aborted this transfer. See the same guard in `fetch`.
+            if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
+            } else {
+                e.into()
+            }
+        })?;
 
     Ok(())
 }
@@ -855,11 +1138,35 @@ pub(crate) fn push_branch(
 
     Ok((remote_for_task, branch_name))
 }
+
+/// The message a completed push reports. Shared by the normal and the late
+/// path so the two cannot drift.
+fn push_message(
+    remote: &str,
+    branch: &str,
+    force: bool,
+    force_with_lease: bool,
+    push_tags: bool,
+) -> String {
+    let mut message = if force_with_lease {
+        format!("Force-pushed (with lease) to {}/{}", remote, branch)
+    } else if force {
+        format!("Force-pushed to {}/{}", remote, branch)
+    } else {
+        format!("Pushed to {}/{}", remote, branch)
+    };
+    if push_tags {
+        message.push_str(" (including tags)");
+    }
+    message
+}
+
 /// Push to remote
 #[allow(clippy::too_many_arguments)]
 #[command]
 pub async fn push(
     app_handle: AppHandle,
+    remote_ops_registry: State<'_, RemoteOpRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -881,79 +1188,122 @@ pub async fn push(
         reject_flag_like(r, "Remote name")?;
     }
 
-    let do_push = async move {
-        let path_for_task = path.clone();
-        let requested_remote = remote.clone();
-        let branch_for_task = branch.clone();
-        let force_val = force.unwrap_or(false);
-        let use_force_with_lease = force_with_lease.unwrap_or(false);
-        let use_push_tags = push_tags.unwrap_or(false);
-        let set_upstream_val = set_upstream.unwrap_or(false);
+    // The claim the racing retry is about. Push has no abort point at all, so
+    // when the network timeout fires the git2/CLI push keeps running against
+    // the remote; the frontend push slot is released on that early return and
+    // the user's retry used to overlap the original. The slot travels into the
+    // blocking task below and is released only when the push really ends.
+    let slot = remote_ops_registry.acquire(Path::new(&path), RemoteOp::Push)?;
 
-        // git2/git-CLI push is blocking network I/O; offload so the runtime
-        // stays responsive during slow remotes.
-        let (remote_name_returned, branch_name_returned) = tokio::task::spawn_blocking(move || {
-            push_branch(
-                &path_for_task,
-                requested_remote,
-                branch_for_task,
-                force_val,
-                use_force_with_lease,
-                use_push_tags,
-                set_upstream_val,
-                token,
-            )
+    let repo_path = path.clone();
+    let path_for_task = path.clone();
+    let requested_remote = remote.clone();
+    let branch_for_task = branch.clone();
+    let force_val = force.unwrap_or(false);
+    let use_force_with_lease = force_with_lease.unwrap_or(false);
+    let use_push_tags = push_tags.unwrap_or(false);
+    let set_upstream_val = set_upstream.unwrap_or(false);
+
+    // git2/git-CLI push is blocking network I/O; offload so the runtime
+    // stays responsive during slow remotes.
+    let handle = remote_ops::spawn_holding(Some(slot), move || {
+        push_branch(
+            &path_for_task,
+            requested_remote,
+            branch_for_task,
+            force_val,
+            use_force_with_lease,
+            use_push_tags,
+            set_upstream_val,
+            token,
+        )
+    });
+
+    let app_late = app_handle.clone();
+    let repo_late = repo_path.clone();
+    let (remote_name_returned, branch_name_returned) =
+        await_remote_task(network_timeout(timeout_secs), "Push", handle, move |late| {
+            // git2 offers no way to abort a push in flight, so a slow push can
+            // land — force push included — after the caller was told it timed
+            // out. Say what actually happened to the remote branch.
+            let (remote, success, message, error_code) = match late {
+                Ok((remote, branch)) => {
+                    let done = push_message(
+                        &remote,
+                        &branch,
+                        force_val,
+                        use_force_with_lease,
+                        use_push_tags,
+                    );
+                    (
+                        remote,
+                        true,
+                        format!("Push finished after it was reported as timed out: {}", done),
+                        None,
+                    )
+                }
+                Err(e) => {
+                    let (message, code) =
+                        late_failure("Push failed after it was reported as timed out", e);
+                    ("unknown".to_string(), false, message, code)
+                }
+            };
+            let _ = app_late.emit(
+                "remote-operation-completed",
+                RemoteOperationResult {
+                    operation: "push".to_string(),
+                    remote,
+                    repo_path: repo_late,
+                    success,
+                    message,
+                    error_code,
+                    late: true,
+                },
+            );
         })
-        .await
-        .map_err(|e| LeviathanError::Custom(format!("Push task failed: {}", e)))??;
+        .await?;
 
-        // Emit success event
-        let mut message = format!(
-            "Pushed to {}/{}",
-            remote_name_returned, branch_name_returned
-        );
-        if use_force_with_lease {
-            message = format!(
-                "Force-pushed (with lease) to {}/{}",
-                remote_name_returned, branch_name_returned
-            );
-        } else if force_val {
-            message = format!(
-                "Force-pushed to {}/{}",
-                remote_name_returned, branch_name_returned
-            );
-        }
-        if use_push_tags {
-            message.push_str(" (including tags)");
-        }
+    // Emit success event
+    let message = push_message(
+        &remote_name_returned,
+        &branch_name_returned,
+        force_val,
+        use_force_with_lease,
+        use_push_tags,
+    );
 
-        let _ = app_handle.emit(
-            "remote-operation-completed",
-            RemoteOperationResult {
-                operation: "push".to_string(),
-                remote: remote_name_returned,
-                success: true,
-                message,
-            },
-        );
+    let _ = app_handle.emit(
+        "remote-operation-completed",
+        RemoteOperationResult {
+            operation: "push".to_string(),
+            remote: remote_name_returned,
+            repo_path,
+            success: true,
+            message,
+            error_code: None,
+            late: false,
+        },
+    );
 
-        Ok(())
-    };
+    Ok(())
+}
 
-    if let Some(secs) = timeout_secs {
-        if secs > 0 {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), do_push).await {
-                Ok(result) => result,
-                Err(_) => Err(LeviathanError::OperationTimeout(
-                    "Push operation timed out".to_string(),
-                )),
-            }
-        } else {
-            do_push.await
-        }
-    } else {
-        do_push.await
-    }
+/// The URL a push to `remote_name` will actually contact, and therefore the one
+/// whose host a token has to be scoped to.
+///
+/// `pushurl` wins when the remote configures one: git contacts THAT host on a
+/// push, so scoping the credential to the fetch url would leave the push
+/// authenticating with nothing. `None` when the remote is unknown or has no
+/// url, in which case no host can be named and nothing is injected.
+fn push_remote_url(path: &str, remote_name: &str) -> Option<String> {
+    let repo = git2::Repository::open(path).ok()?;
+    let remote = repo.find_remote(remote_name).ok()?;
+    remote
+        .pushurl()
+        .ok()
+        .flatten()
+        .or_else(|| remote.url().ok())
+        .map(|u| u.to_string())
 }
 
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
@@ -1017,17 +1367,13 @@ fn push_via_cli(
     // The net effect was that Force Push — the only route through this
     // function — failed to authenticate on HTTPS precisely BECAUSE a token was
     // found, while pushing with no token stored worked.
+    //
+    // Scoped to the remote's own host, so the token is offered to the host it
+    // belongs to and nowhere else.
     if let Some(ref token_value) = token {
-        cmd.env("LEVIATHAN_PUSH_TOKEN", token_value);
-        cmd.env("GIT_CONFIG_COUNT", "1");
-        cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
-        // `git` as the username matches the git2 path's fallback; every
-        // provider we support authenticates a token as the password and
-        // ignores the username.
-        cmd.env(
-            "GIT_CONFIG_VALUE_0",
-            "!f() { echo username=git; echo \"password=$LEVIATHAN_PUSH_TOKEN\"; }; f",
-        );
+        if let Some(remote_url) = push_remote_url(path, remote_name) {
+            crate::utils::apply_token_credential_helper(&mut cmd, token_value, &remote_url);
+        }
     }
 
     let output = cmd.output().map_err(|e| {
@@ -1227,11 +1573,14 @@ pub async fn push_to_multiple_remotes(
         RemoteOperationResult {
             operation: "push_multiple".to_string(),
             remote: "multiple".to_string(),
+            repo_path: path.clone(),
             success: overall_success,
             message: format!(
                 "Pushed to {} remote(s) ({} failed)",
                 total_success, total_failed
             ),
+            error_code: None,
+            late: false,
         },
     );
 
@@ -1309,11 +1658,14 @@ pub async fn fetch_all_remotes(
         RemoteOperationResult {
             operation: "fetch_all".to_string(),
             remote: "all".to_string(),
+            repo_path: path.clone(),
             success: overall_success,
             message: format!(
                 "Fetched from {} remotes ({} failed)",
                 total_fetched, total_failed
             ),
+            error_code: None,
+            late: false,
         },
     );
 
@@ -1447,6 +1799,464 @@ pub async fn cancel_operation(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // ---- a timed-out remote operation is never abandoned silently ----
+
+    /// Collects whatever the late reporter is handed, so a test can assert on
+    /// a completion that arrives after `await_remote_task` already returned.
+    type LateSlot<T> = Arc<Mutex<Option<Result<T>>>>;
+
+    fn late_slot<T>() -> (LateSlot<T>, impl FnOnce(Result<T>) + Send + 'static)
+    where
+        T: Send + 'static,
+    {
+        let seen: LateSlot<T> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&seen);
+        (seen, move |result| {
+            *sink.lock().unwrap() = Some(result);
+        })
+    }
+
+    /// Wait for the detached reporter to hand something over, rather than
+    /// pinning the test to a fixed sleep the machine may not honour.
+    async fn late_outcome<T: Send + 'static>(seen: &LateSlot<T>) -> Option<Result<T>> {
+        for _ in 0..250 {
+            if seen.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        seen.lock().unwrap().take()
+    }
+
+    /// `tokio::time::timeout` only DROPS the future it wraps — a
+    /// `spawn_blocking` task keeps running. The merge landed minutes after the
+    /// user was told the pull timed out, with no event and no refresh.
+    #[tokio::test]
+    async fn test_timed_out_task_still_reports_its_completion() {
+        let (seen, on_late) = late_slot::<String>();
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(120));
+            Ok("Merge completed".to_string())
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+
+        match result {
+            Err(LeviathanError::OperationTimeout(m)) => {
+                assert_eq!(m, "Pull operation timed out");
+            }
+            other => panic!("expected a Pull timeout, got {:?}", other.map(|_| ())),
+        }
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let late = seen.lock().unwrap();
+        match late.as_ref() {
+            Some(Ok(message)) => assert_eq!(message, "Merge completed"),
+            Some(Err(e)) => panic!("the abandoned task reported a failure: {}", e),
+            None => panic!("the abandoned task's completion was never reported at all"),
+        }
+    }
+
+    /// The two halves of the timeout story have to hold together.
+    ///
+    /// `services/remote_ops.rs` keeps the repository claimed until the
+    /// abandoned task really ends, so the user's retry cannot race it; this
+    /// module reports what that task finally did, so the change it made is not
+    /// silent. Each is easy to break while the other still passes — awaiting
+    /// the JoinHandle inside `run_holding` throws away the handle the late
+    /// reporter needs, and holding the guard outside the closure frees the
+    /// repository the instant the timeout fires.
+    #[tokio::test]
+    async fn test_a_timed_out_operation_keeps_its_slot_and_still_reports_late() {
+        let repo = TestRepo::new();
+        let registry = RemoteOpRegistry::default();
+        let (seen, on_late) = late_slot::<String>();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+
+        // Exactly what `push` does: claim, then hand the claim to the task.
+        let slot = registry.acquire(&repo.path, RemoteOp::Push).unwrap();
+        let handle = remote_ops::spawn_holding(Some(slot), move || {
+            // Stands in for a git2 push against an unreachable remote:
+            // blocking, and with no abort point.
+            let _ = finish_rx.recv();
+            Ok("Pushed to origin/main".to_string())
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Push", handle, on_late).await;
+        match result {
+            Err(LeviathanError::OperationTimeout(m)) => assert_eq!(m, "Push operation timed out"),
+            other => panic!("expected a Push timeout, got {:?}", other.map(|_| ())),
+        }
+
+        // The retry the user is about to attempt has to be refused while the
+        // abandoned push is still talking to the remote.
+        assert_eq!(
+            registry.running(&repo.path),
+            Some(RemoteOp::Push),
+            "the timed-out push must still hold the repository"
+        );
+        assert!(
+            registry.acquire(&repo.path, RemoteOp::Push).is_err(),
+            "a retry must not overlap the push that is still running"
+        );
+
+        finish_tx.send(()).unwrap();
+        match late_outcome(&seen).await {
+            Some(Ok(message)) => assert_eq!(message, "Pushed to origin/main"),
+            Some(Err(e)) => panic!("the abandoned push reported a failure: {}", e),
+            None => panic!("the abandoned push's completion was never reported at all"),
+        }
+
+        // ...and once it really ended, the repository is usable again.
+        for _ in 0..250 {
+            if registry.running(&repo.path).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            registry.acquire(&repo.path, RemoteOp::Push).is_ok(),
+            "the slot must be released once the work really finished"
+        );
+    }
+
+    /// The late reporter must stay quiet for an operation that made its
+    /// deadline — otherwise every normal pull would toast twice.
+    #[tokio::test]
+    async fn test_task_that_finishes_in_time_is_never_reported_late() {
+        let (seen, on_late) = late_slot::<u32>();
+        let handle = tokio::task::spawn_blocking(|| Ok(7u32));
+
+        let result = await_remote_task(Some(Duration::from_secs(5)), "Pull", handle, on_late).await;
+
+        assert_eq!(result.unwrap(), 7);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(seen.lock().unwrap().is_none());
+    }
+
+    /// timeoutSecs absent or 0 (the setting can be disabled) waits it out.
+    #[tokio::test]
+    async fn test_no_timeout_awaits_the_task_to_completion() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+
+        await_remote_task(None, "Fetch", handle, on_late)
+            .await
+            .unwrap();
+
+        assert!(seen.lock().unwrap().is_none());
+        assert_eq!(network_timeout(Some(0)), None);
+        assert_eq!(network_timeout(None), None);
+    }
+
+    /// The in-task deadline stopping the work cleanly is the outcome the
+    /// caller was already told about — reporting it again is noise.
+    #[tokio::test]
+    async fn test_a_late_deadline_abort_is_not_reported_twice() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(120));
+            Err(LeviathanError::OperationTimeout(
+                "Pull operation timed out".to_string(),
+            ))
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+        assert!(matches!(result, Err(LeviathanError::OperationTimeout(_))));
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(seen.lock().unwrap().is_none());
+    }
+
+    /// A timeout raised AFTER the fetch already wrote refs and FETCH_HEAD is
+    /// not the "nothing happened" outcome the caller was told about: the
+    /// repository changed, so the late reporter must still fire and the
+    /// frontend must still refresh it.
+    #[tokio::test]
+    async fn test_a_timeout_after_the_repository_changed_is_still_reported() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(120));
+            Err(LeviathanError::OperationTimeoutAfterChange(
+                "Pull operation timed out".to_string(),
+            ))
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+        assert!(matches!(result, Err(LeviathanError::OperationTimeout(_))));
+
+        match late_outcome(&seen).await {
+            Some(Err(LeviathanError::OperationTimeoutAfterChange(_))) => {}
+            Some(other) => panic!("unexpected late outcome: {:?}", other.err()),
+            None => panic!("a timeout that had already changed the repo went unreported"),
+        }
+    }
+
+    /// ...and it still reads as an ordinary timeout to the frontend, so the
+    /// distinction stays internal to `await_remote_task`.
+    #[test]
+    fn test_a_post_fetch_timeout_reports_the_ordinary_timeout_code() {
+        let response = crate::error::ErrorResponse::from(
+            LeviathanError::OperationTimeoutAfterChange("Pull operation timed out".to_string()),
+        );
+        assert_eq!(response.code, "OPERATION_TIMEOUT");
+    }
+
+    /// A panic inside an abandoned task can land after it moved refs or
+    /// rewrote the working tree. A log line reaches nobody; the frontend needs
+    /// the event to refresh.
+    #[tokio::test]
+    async fn test_a_panicking_abandoned_task_is_reported_not_just_logged() {
+        let (seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| -> Result<()> {
+            std::thread::sleep(Duration::from_millis(120));
+            panic!("boom")
+        });
+
+        let result =
+            await_remote_task(Some(Duration::from_millis(10)), "Pull", handle, on_late).await;
+        assert!(matches!(result, Err(LeviathanError::OperationTimeout(_))));
+
+        match late_outcome(&seen).await {
+            Some(Err(LeviathanError::Custom(m))) => assert!(
+                m.starts_with("Pull task failed:"),
+                "unexpected late join failure: {}",
+                m
+            ),
+            Some(other) => panic!("unexpected late outcome: {:?}", other.err()),
+            None => panic!("the abandoned task's panic was never reported"),
+        }
+    }
+
+    // ---- what a fetch says when it lands after its timeout ----
+
+    /// A fetch the user never asked for stays silent, late or not — the
+    /// window-focus refresh runs this same command.
+    #[test]
+    fn test_a_background_fetch_says_nothing_when_it_lands_late() {
+        assert!(
+            fetch_late_event(true, Ok(()), "origin".to_string(), "/repos/a".to_string()).is_none()
+        );
+        assert!(fetch_late_event(
+            true,
+            Err(LeviathanError::OperationFailed("boom".to_string())),
+            "origin".to_string(),
+            "/repos/a".to_string(),
+        )
+        .is_none());
+    }
+
+    /// A fetch the user asked for that lands after its timeout error must say
+    /// so: the caller already returned an error and will never refresh.
+    #[test]
+    fn test_a_user_fetch_reports_the_outcome_it_actually_had() {
+        let done = fetch_late_event(false, Ok(()), "origin".to_string(), "/repos/a".to_string())
+            .expect("a user-initiated fetch must report its late completion");
+        assert_eq!(done.operation, "fetch");
+        assert_eq!(done.remote, "origin");
+        assert_eq!(done.repo_path, "/repos/a");
+        assert!(done.success);
+        assert!(done.late);
+        assert_eq!(done.error_code, None);
+
+        let failed = fetch_late_event(
+            false,
+            Err(LeviathanError::OperationFailed("boom".to_string())),
+            "origin".to_string(),
+            "/repos/a".to_string(),
+        )
+        .expect("a late failure must be reported too");
+        assert!(!failed.success);
+        assert!(failed.late);
+        assert!(failed.message.contains("boom"), "{}", failed.message);
+        assert_eq!(failed.error_code.as_deref(), Some("OPERATION_FAILED"));
+    }
+
+    /// Only a transfer the deadline callback aborted is a timeout. Anything
+    /// else that fails while the deadline happens to be in the past keeps its
+    /// own error — relabelling it hid auth and protocol failures behind
+    /// "timed out", and on the pull path suppressed them entirely.
+    #[test]
+    fn test_a_fetch_failure_that_is_not_a_deadline_abort_keeps_its_error() {
+        let local = TestRepo::new();
+        local.add_remote("origin", "/does/not/exist/upstream.git");
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("a deadline in the past");
+
+        let err = fetch_internal(&local.path_str(), "origin", false, None, Some(past))
+            .expect_err("fetching a remote that does not exist must fail");
+
+        assert!(
+            !matches!(err, LeviathanError::OperationTimeout(_)),
+            "a connection failure must not be relabelled as a timeout: {}",
+            err
+        );
+    }
+
+    /// A panicking task keeps today's message, so the restructure is not a
+    /// silent regression for callers matching on it.
+    #[tokio::test]
+    async fn test_join_failure_keeps_the_operation_label() {
+        let (_seen, on_late) = late_slot::<()>();
+        let handle = tokio::task::spawn_blocking(|| -> Result<()> { panic!("boom") });
+
+        let result = await_remote_task(Some(Duration::from_secs(5)), "Push", handle, on_late).await;
+
+        match result {
+            Err(LeviathanError::Custom(m)) => assert!(
+                m.starts_with("Push task failed:"),
+                "unexpected join error: {}",
+                m
+            ),
+            other => panic!("expected a join failure, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// The shape a real clone has, built without a network: `local` sits on
+    /// `origin/<branch>` with `origin` pointing at `upstream`.
+    fn pull_fixture() -> (TestRepo, TestRepo, String) {
+        let upstream = TestRepo::with_initial_commit();
+        let local = TestRepo::new();
+        local.add_remote("origin", &upstream.path_str());
+        fetch_internal(&local.path_str(), "origin", false, None, None).expect("fixture fetch");
+
+        let branch = upstream.current_branch();
+        let repo = local.repo();
+        let commit = repo
+            .find_reference(&format!("refs/remotes/origin/{}", branch))
+            .expect("fixture remote ref")
+            .peel_to_commit()
+            .expect("fixture commit");
+        repo.branch(&branch, &commit, true).expect("fixture branch");
+        repo.set_head(&format!("refs/heads/{}", branch))
+            .expect("fixture head");
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .expect("fixture checkout");
+
+        (upstream, local, branch)
+    }
+
+    fn pull_with_deadline(
+        local: &TestRepo,
+        branch: &str,
+        deadline: Option<Instant>,
+    ) -> Result<(String, String)> {
+        pull_branch(
+            &local.path_str(),
+            Some("origin".to_string()),
+            Some(branch.to_string()),
+            Some(false),
+            None,
+            deadline,
+        )
+    }
+
+    /// The payload: past its deadline the pull must not rewrite refs or the
+    /// working tree. It used to fast-forward anyway, minutes after the user
+    /// was shown "Pull operation timed out". Here the transfer itself is what
+    /// the deadline stops — and it reports as the pull's own timeout, not as
+    /// libgit2's "indexer progress callback returned -1".
+    #[test]
+    fn test_pull_past_its_deadline_does_not_touch_the_working_tree() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("second", &[("b.txt", "b")]);
+        let before = local.head_oid();
+
+        let result = pull_with_deadline(
+            &local,
+            &branch,
+            Some(Instant::now() - Duration::from_secs(1)),
+        );
+
+        match result {
+            Err(LeviathanError::OperationTimeout(m)) => {
+                assert_eq!(m, "Pull operation timed out");
+            }
+            other => panic!("expected a Pull timeout, got {:?}", other.map(|_| ())),
+        }
+        assert_eq!(local.head_oid(), before, "the pull mutated the repository");
+    }
+
+    /// The half the aborted transfer cannot cover: a fetch that finished just
+    /// inside the deadline leaves the merge to start just outside it. Nothing
+    /// is left to download here, so the transfer callback never runs and the
+    /// deadline check before merge_analysis is the only thing standing between
+    /// the user's timeout error and a working tree rewritten behind it.
+    #[test]
+    fn test_pull_past_its_deadline_does_not_merge_an_already_fetched_commit() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("second", &[("b.txt", "b")]);
+        // Bring the remote-tracking ref (and its objects) over first, so the
+        // pull's own fetch has nothing to transfer and runs to completion.
+        fetch_internal(&local.path_str(), "origin", false, None, None).expect("pre-fetch");
+        let before = local.head_oid();
+        assert_ne!(before, upstream.head_oid(), "fixture must be behind");
+
+        let result = pull_with_deadline(
+            &local,
+            &branch,
+            Some(Instant::now() - Duration::from_secs(1)),
+        );
+
+        // AfterChange, not a plain timeout: the fetch above already wrote the
+        // remote-tracking refs, so this outcome must still reach the late
+        // reporter (await_remote_task suppresses a plain OperationTimeout).
+        match result {
+            Err(LeviathanError::OperationTimeoutAfterChange(m)) => {
+                assert_eq!(m, "Pull operation timed out");
+            }
+            other => panic!("expected a Pull timeout, got {:?}", other.map(|_| ())),
+        }
+        assert_eq!(
+            local.head_oid(),
+            before,
+            "the merge ran after the caller was told the pull timed out"
+        );
+        assert!(!local.path.join("b.txt").exists());
+    }
+
+    /// Guard against overreach: a deadline still ahead of us must not stop a
+    /// healthy pull.
+    #[test]
+    fn test_pull_within_its_deadline_still_fast_forwards() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("second", &[("b.txt", "b")]);
+
+        let (remote, message) = pull_with_deadline(
+            &local,
+            &branch,
+            Some(Instant::now() + Duration::from_secs(60)),
+        )
+        .expect("pull within its deadline must succeed");
+
+        assert_eq!(remote, "origin");
+        assert_eq!(message, "Fast-forward merge completed");
+        assert_eq!(local.head_oid(), upstream.head_oid());
+    }
+
+    /// Timeout disabled: no deadline at all is not a passed deadline.
+    #[test]
+    fn test_pull_with_no_deadline_fast_forwards() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("second", &[("b.txt", "b")]);
+
+        let (_, message) =
+            pull_with_deadline(&local, &branch, None).expect("pull with no deadline must succeed");
+
+        assert_eq!(message, "Fast-forward merge completed");
+        assert_eq!(local.head_oid(), upstream.head_oid());
+    }
 
     // ---- pull strategy comes from git config ----
 
@@ -2267,6 +3077,77 @@ mod tests {
         );
     }
 
+    /// Force push is the ONLY route through `push_via_cli`, and it is the one
+    /// path that hands a token to the git CLI. Every other test here pushes
+    /// with `None`, so the token's host scoping — the part that decides whether
+    /// a token-authenticated force push works at all — went uncovered.
+    #[test]
+    fn test_push_remote_url_prefers_the_push_url() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://fetch-host.test/r.git");
+        git_in(
+            &repo.path,
+            &[
+                "config",
+                "remote.origin.pushurl",
+                "https://push-host.test/r.git",
+            ],
+        );
+
+        assert_eq!(
+            push_remote_url(&repo.path_str(), "origin").as_deref(),
+            Some("https://push-host.test/r.git"),
+            "a push contacts the pushurl's host, so the token must be scoped there"
+        );
+
+        // ...and that is the host the credential actually lands under.
+        let mut cmd = crate::utils::create_command("git");
+        crate::utils::apply_token_credential_helper(
+            &mut cmd,
+            "ghp_secret",
+            &push_remote_url(&repo.path_str(), "origin").unwrap(),
+        );
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("credential.https://push-host.test.helper")
+        );
+        assert_eq!(
+            envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+            Some("ghp_secret")
+        );
+    }
+
+    /// With no pushurl configured the fetch url is the one git contacts.
+    #[test]
+    fn test_push_remote_url_falls_back_to_the_fetch_url() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://only-host.test/r.git");
+
+        assert_eq!(
+            push_remote_url(&repo.path_str(), "origin").as_deref(),
+            Some("https://only-host.test/r.git")
+        );
+    }
+
+    /// An unknown remote names no host, so nothing may be injected — a guessed
+    /// scope would offer the token to a host it does not belong to.
+    #[test]
+    fn test_push_remote_url_is_none_for_an_unknown_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://only-host.test/r.git");
+
+        assert!(push_remote_url(&repo.path_str(), "nope").is_none());
+    }
+
     // ---- first push sets upstream tracking ----
 
     /// A repo with a local bare "origin" it can really push to.
@@ -2727,6 +3608,109 @@ mod tests {
             remote.push_url,
             Some("git@github.com:test/repo.git".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_remote_push_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let remote = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "git@github.com:test/repo.git".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote.push_url,
+            Some("git@github.com:test/repo.git".to_string())
+        );
+
+        // Clearing the field must remove the push URL, not store an empty one
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(result.is_ok(), "clearing push URL failed: {result:?}");
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
+
+        // And it must actually be gone from the config, not just the response
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.push_url, None);
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_set_remote_url_rejects_an_empty_fetch_url() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            "   ".to_string(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot be empty"),
+            "expected an empty-URL error"
+        );
+
+        let remotes = get_remotes(repo.path_str()).await.unwrap();
+        let origin = remotes.iter().find(|r| r.name == "origin").unwrap();
+        assert_eq!(origin.url, "https://github.com/test/repo.git");
+    }
+
+    #[tokio::test]
+    async fn test_clearing_a_push_url_that_was_never_set_is_a_no_op() {
+        let repo = TestRepo::with_initial_commit();
+        add_remote(
+            repo.path_str(),
+            "origin".to_string(),
+            "https://github.com/test/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = set_remote_url(
+            repo.path_str(),
+            "origin".to_string(),
+            String::new(),
+            Some(true),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "clearing an unset push URL failed: {result:?}"
+        );
+        let remote = result.unwrap();
+        assert_eq!(remote.push_url, None);
+        assert_eq!(remote.url, "https://github.com/test/repo.git");
     }
 
     #[tokio::test]

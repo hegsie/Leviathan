@@ -317,6 +317,45 @@ describe('unified-profile.store', () => {
     });
   });
 
+  describe('setRepositoryAssignment', () => {
+    it('records the assignment in config', () => {
+      const profile = createMockProfile('p1', 'Work');
+      unifiedProfileStore.getState().setConfig(createMockConfig([profile]));
+
+      unifiedProfileStore.getState().setRepositoryAssignment('/repo/a', 'p1');
+
+      expect(unifiedProfileStore.getState().config!.repositoryAssignments['/repo/a']).to.equal(
+        'p1'
+      );
+    });
+
+    it('overwrites an existing assignment and preserves the other repositories', () => {
+      const profile1 = createMockProfile('p1', 'Work');
+      const profile2 = createMockProfile('p2', 'Personal');
+      unifiedProfileStore.getState().setConfig({
+        ...createMockConfig([profile1, profile2]),
+        repositoryAssignments: { '/repo/a': 'p1', '/repo/b': 'p2' },
+      });
+      const before = unifiedProfileStore.getState().config!.repositoryAssignments;
+
+      unifiedProfileStore.getState().setRepositoryAssignment('/repo/a', 'p2');
+
+      const after = unifiedProfileStore.getState().config!.repositoryAssignments;
+      expect(after['/repo/a']).to.equal('p2');
+      expect(after['/repo/b']).to.equal('p2');
+      // A new object reference is required so subscribers see a changed value
+      // and Lit re-renders; the previous map must not be mutated in place.
+      expect(after).to.not.equal(before);
+      expect(before['/repo/a']).to.equal('p1');
+    });
+
+    it('is a no-op when no config is loaded', () => {
+      unifiedProfileStore.getState().setRepositoryAssignment('/repo/a', 'p1');
+
+      expect(unifiedProfileStore.getState().config).to.be.null;
+    });
+  });
+
   // Global accounts tests (v3)
   describe('setAccounts', () => {
     it('sets global accounts', () => {

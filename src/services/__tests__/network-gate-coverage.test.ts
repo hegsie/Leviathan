@@ -41,7 +41,7 @@ import { settingsStore } from '../../stores/settings.store.ts';
  */
 const NETWORK_COMMANDS = new Set([
   // git operations
-  'clone_repository', 'fetch', 'pull', 'push', 'push_tag',
+  'clone_repository', 'fetch', 'pull', 'push', 'push_tag', 'delete_remote_tag',
   'push_to_multiple_remotes', 'fetch_all_remotes', 'add_submodule',
   'update_submodules', 'lfs_pull', 'lfs_fetch',
   'prune_remote_tracking_branches', 'start_auto_fetch',

@@ -3,7 +3,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
-import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
+import { openCloneDestinationDialog, showConfirm } from '../../services/dialog.service.ts';
 import * as aiService from '../../services/ai.service.ts';
 import * as localAiService from '../../services/local-ai.service.ts';
 import * as mcpService from '../../services/mcp.service.ts';
@@ -317,6 +317,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private theme: Theme = 'dark';
   @state() private appVersion = '';
   @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
+  @state() private resetting = false;
   @state() private latestVersion = '';
   @state() private fontSize: FontSize = 'medium';
   @state() private density: Density = 'comfortable';
@@ -361,9 +362,16 @@ export class LvSettingsDialog extends LitElement {
   @state() private recommendedModel: ModelEntry | null = null;
 
   // MCP settings
-  @state() private mcpStatus: McpStatus = { running: false, port: 3001, url: null };
+  @state() private mcpStatus: McpStatus = {
+    running: false,
+    port: 3001,
+    url: null,
+    lastError: null,
+  };
   @state() private mcpPort = 3001;
+  @state() private mcpEnabled = false;
   @state() private mcpToggling = false;
+  @state() private mcpError: string | null = null;
 
   // Event listener cleanup
   private downloadProgressUnlisten: UnlistenFn | null = null;
@@ -395,6 +403,22 @@ export class LvSettingsDialog extends LitElement {
     this.downloadProgressUnlisten?.();
     this.downloadCompleteUnlisten?.();
     this.downloadErrorUnlisten?.();
+  }
+
+  protected updated(): void {
+    // A <select>'s `.value` binding commits before the <option>s rendered inside
+    // it in the same Lit update, so a value whose option only appears in that
+    // update is dropped and the select falls back to "None". Re-apply both tool
+    // selects once their options exist.
+    this.syncSelectValue('#merge-tool-select', this.mergeToolName);
+    this.syncSelectValue('#diff-tool-select', this.diffToolName);
+  }
+
+  private syncSelectValue(selector: string, value: string | null): void {
+    const select = this.shadowRoot?.querySelector<HTMLSelectElement>(selector);
+    if (select && select.value !== (value ?? '')) {
+      select.value = value ?? '';
+    }
   }
 
   private async loadVersion(): Promise<void> {
@@ -605,8 +629,35 @@ export class LvSettingsDialog extends LitElement {
     if (!repo) return;
 
     if (value === '') {
+      // "None" must actually clear merge.tool in the repo config. Clearing only
+      // local state leaves git (and launch_merge_tool) on the old tool, and the
+      // next loadExternalToolsConfig() reads it back, undoing the user's choice.
+      const result = await gitService.unsetGitConfig(repo.repository.path, 'merge.tool');
+      if (!result.success) {
+        // Keep the select showing the tool that is still configured.
+        select.value = this.mergeToolName ?? '';
+        showToast(result.error?.message ?? 'Failed to clear merge tool', 'error');
+        return;
+      }
+      // The unset only touches this repository's config, but the dialog shows —
+      // and launch_merge_tool uses — the effective value. A merge.tool inherited
+      // from the global/system config survives, so re-read before claiming it is
+      // gone; otherwise the UI says "None" while git still launches the tool.
+      const remaining = await gitService.getMergeToolConfig(repo.repository.path);
+      if (remaining.success && remaining.data?.toolName) {
+        this.mergeToolName = remaining.data.toolName;
+        this.mergeToolCmd = remaining.data.toolCmd;
+        select.value = remaining.data.toolName;
+        showToast(
+          `merge.tool is still set to "${remaining.data.toolName}" outside this repository ` +
+            `(global or system git config); clear it there to use no merge tool.`,
+          'error',
+        );
+        return;
+      }
       this.mergeToolName = null;
       this.mergeToolCmd = null;
+      window.dispatchEvent(new CustomEvent('settings-changed'));
       return;
     }
 
@@ -639,8 +690,34 @@ export class LvSettingsDialog extends LitElement {
     if (!repo) return;
 
     if (value === '') {
+      // "None" must actually clear diff.tool in the repo config, otherwise git
+      // (and launch_diff_tool) keeps using the old tool and reopening Settings
+      // reloads it, silently reverting the user's choice.
+      const result = await gitService.unsetGitConfig(repo.repository.path, 'diff.tool');
+      if (!result.success) {
+        // Keep the select showing the tool that is still configured.
+        select.value = this.diffToolName ?? '';
+        showToast(result.error?.message ?? 'Failed to clear diff tool', 'error');
+        return;
+      }
+      // As above: the unset is repository-local while the dialog and
+      // launch_diff_tool read the effective value, so a diff.tool inherited from
+      // a wider scope survives and must be reported rather than shown as "None".
+      const remaining = await gitService.getDiffToolConfig(repo.repository.path);
+      if (remaining.success && remaining.data?.tool) {
+        this.diffToolName = remaining.data.tool;
+        this.diffToolCmd = remaining.data.cmd;
+        select.value = remaining.data.tool;
+        showToast(
+          `diff.tool is still set to "${remaining.data.tool}" outside this repository ` +
+            `(global or system git config); clear it there to use no diff tool.`,
+          'error',
+        );
+        return;
+      }
       this.diffToolName = null;
       this.diffToolCmd = null;
+      window.dispatchEvent(new CustomEvent('settings-changed'));
       return;
     }
 
@@ -795,7 +872,7 @@ export class LvSettingsDialog extends LitElement {
       };
     });
 
-    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
+    this.downloadCompleteUnlisten = await listen<{ modelId: string; loaded?: boolean; loadError?: string }>('model-download-complete', (event) => {
       // Remove from progress tracking and refresh the model list
       const { [event.payload.modelId]: _, ...rest } = this.downloadProgress;
       this.downloadProgress = rest;
@@ -805,6 +882,10 @@ export class LvSettingsDialog extends LitElement {
       if (event.payload.loaded) {
         this.loadAiProviders();
         window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+      } else if (event.payload.loaded === false) {
+        // The download succeeded but the engine refused the model - the user
+        // still has no AI, so say so instead of silently refreshing the list.
+        this.aiError = `Loading failed for ${event.payload.modelId}: ${event.payload.loadError ?? 'unknown error'}`;
       }
     });
 
@@ -900,25 +981,58 @@ export class LvSettingsDialog extends LitElement {
     }
     if (configResult.success && configResult.data) {
       this.mcpPort = configResult.data.port;
+      this.mcpEnabled = configResult.data.enabled;
     }
   }
 
   private async handleMcpToggle(): Promise<void> {
     this.mcpToggling = true;
-    this.aiError = null;
+    this.mcpError = null;
 
     if (this.mcpStatus.running) {
       const result = await mcpService.stopMcpServer();
       if (!result.success) {
-        this.aiError = result.error?.message ?? 'Failed to stop MCP server';
+        this.mcpError = result.error?.message ?? 'Failed to stop MCP server';
       }
     } else {
-      // Save config first, then start
-      await mcpService.setMcpConfig({ enabled: true, port: this.mcpPort, allowedOrigins: [] });
+      // Persist the config first so the server comes back on the next launch
+      const saved = await mcpService.setMcpConfig({
+        enabled: true,
+        port: this.mcpPort,
+        allowedOrigins: [],
+      });
+      if (!saved.success) {
+        this.mcpError = saved.error?.message ?? 'Failed to save MCP settings';
+        this.mcpToggling = false;
+        return;
+      }
+      this.mcpEnabled = true;
       const result = await mcpService.startMcpServer();
       if (!result.success) {
-        this.aiError = result.error?.message ?? 'Failed to start MCP server';
+        this.mcpError = result.error?.message ?? 'Failed to start MCP server';
       }
+    }
+
+    await this.loadMcpStatus();
+    this.mcpToggling = false;
+  }
+
+  /**
+   * Turn off the launch-time restart for a server that is enabled but not running.
+   * `stopMcpServer` rejects when nothing is running, so persisting `enabled: false`
+   * is the only way out of a start that keeps failing on every launch.
+   */
+  private async handleMcpDisable(): Promise<void> {
+    this.mcpToggling = true;
+    this.mcpError = null;
+
+    const result = await mcpService.setMcpConfig({
+      enabled: false,
+      port: this.mcpPort,
+      allowedOrigins: [],
+    });
+    if (!result.success) {
+      this.mcpError = result.error?.message ?? 'Failed to disable the MCP server';
     }
 
     await this.loadMcpStatus();
@@ -928,11 +1042,50 @@ export class LvSettingsDialog extends LitElement {
   private async handleMcpPortChange(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     this.mcpPort = Math.max(1024, Math.min(65535, parseInt(input.value, 10) || 3001));
+
+    // Persist the port so it survives a restart even while the server is stopped.
+    // Keep the saved enabled flag: a server that failed to bind is still enabled,
+    // and changing its port must not silently turn off the launch-time restart.
+    const result = await mcpService.setMcpConfig({
+      enabled: this.mcpEnabled,
+      port: this.mcpPort,
+      allowedOrigins: [],
+    });
+    this.mcpError = result.success
+      ? null
+      : (result.error?.message ?? 'Failed to save MCP port');
   }
 
-  private handleReset(): void {
-    settingsStore.getState().resetToDefaults();
-    this.loadSettings();
+  private async handleReset(): Promise<void> {
+    // Claimed BEFORE the confirm, not after. showConfirm is an IPC round trip
+    // that runs before the native dialog takes focus, and this button stays on
+    // screen for that whole window, so a flag claimed after the await lets a
+    // double-click stack a second prompt for the same reset.
+    if (this.resetting) return;
+    this.resetting = true;
+    try {
+      // One click here wipes the remote allowlist, offline mode, the default
+      // clone path and every other preference on this screen, with no undo —
+      // the same bar as every other destructive action in the app.
+      const confirmed = await showConfirm(
+        'Reset Settings',
+        'Reset all settings to their defaults? This clears the remote allowlist, offline mode, the default clone path and every other preference on this screen.',
+        'warning'
+      );
+      if (!confirmed) return;
+
+      settingsStore.getState().resetToDefaults();
+      this.loadSettings();
+      // The same notification every other handler in this file performs.
+      // app-shell re-renders avatars, commit size, graph colours and
+      // stale-branch marking off this event, so without it the rest of the app
+      // keeps painting the pre-reset settings until some other setting is
+      // touched.
+      window.dispatchEvent(new CustomEvent('settings-changed'));
+      showToast('Settings reset to defaults', 'success');
+    } finally {
+      this.resetting = false;
+    }
   }
 
   private handleClose(): void {
@@ -1122,6 +1275,7 @@ export class LvSettingsDialog extends LitElement {
                   <span class="setting-description">External tool for resolving merge conflicts</span>
                 </div>
                 <select
+                  id="merge-tool-select"
                   .value=${this.mergeToolName ?? ''}
                   @change=${this.handleMergeToolChange}
                   ?disabled=${this.loadingTools}
@@ -1155,6 +1309,7 @@ export class LvSettingsDialog extends LitElement {
                   <span class="setting-description">External tool for viewing diffs</span>
                 </div>
                 <select
+                  id="diff-tool-select"
                   .value=${this.diffToolName ?? ''}
                   @change=${this.handleDiffToolChange}
                   ?disabled=${this.loadingTools}
@@ -1549,22 +1704,50 @@ export class LvSettingsDialog extends LitElement {
             <div class="setting-label">
               <span class="setting-name">Context Proxy</span>
               <span class="setting-description">
-                Allow external tools (Cursor, VS Code) to query Git context via MCP
+                Allow external tools (Cursor, VS Code) to query Git context via MCP.
+                Restarts automatically on launch while enabled.
               </span>
             </div>
             <div style="display: flex; gap: 8px; align-items: center;">
               <span class="status-indicator ${this.mcpStatus.running ? 'configured' : 'not-configured'}">
                 <span class="status-dot"></span>
-                ${this.mcpStatus.running ? 'Running' : 'Stopped'}
+                ${this.mcpStatus.running ? 'Running' : this.mcpEnabled ? 'Stopped' : 'Disabled'}
               </span>
+              ${!this.mcpStatus.running && this.mcpEnabled ? html`
+                <button
+                  class="mcp-disable"
+                  @click=${this.handleMcpDisable}
+                  ?disabled=${this.mcpToggling}
+                >
+                  Disable
+                </button>
+              ` : nothing}
               <button
+                class="mcp-toggle"
                 @click=${this.handleMcpToggle}
                 ?disabled=${this.mcpToggling}
               >
-                ${this.mcpToggling ? '...' : this.mcpStatus.running ? 'Stop' : 'Start'}
+                ${this.mcpToggling
+                  ? '...'
+                  : this.mcpStatus.running
+                    ? 'Stop'
+                    : this.mcpEnabled
+                      ? 'Retry'
+                      : 'Start'}
               </button>
             </div>
           </div>
+
+          ${this.mcpError ??
+          (!this.mcpStatus.running && this.mcpEnabled ? this.mcpStatus.lastError : null)
+            ? html`
+                <div class="setting-row">
+                  <span class="error-text">
+                    ${this.mcpError ?? this.mcpStatus.lastError}
+                  </span>
+                </div>
+              `
+            : nothing}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1624,7 +1807,7 @@ export class LvSettingsDialog extends LitElement {
       </div>
 
       <div class="footer">
-        <button class="danger" @click=${this.handleReset}>Reset to Defaults</button>
+        <button class="danger" @click=${this.handleReset} ?disabled=${this.resetting}>Reset to Defaults</button>
         <button class="primary" @click=${this.handleClose}>Done</button>
       </div>
     `;

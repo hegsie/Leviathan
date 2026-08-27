@@ -340,6 +340,27 @@ pub fn run_pre_push_tag(repo: &git2::Repository, remote_name: &str, tag_name: &s
     run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
 }
 
+/// Run the pre-push hook for a tag DELETION (blocking, git parity).
+///
+/// git spells a deletion with the literal local ref `(delete)` and an all-zero
+/// local oid, per githooks(5). Only the LOCAL side is zeroed: the remote object
+/// name is still the value the remote advertised for the ref, because that is
+/// what the ref is being deleted FROM. Callers pass it in `remote_oid` (see
+/// `advertised_tag_oid` in commands/tags.rs); [`ZERO_OID`] is correct there
+/// only when the remote does not have the tag at all. A non-zero exit aborts
+/// the deletion.
+pub fn run_pre_push_tag_delete(
+    repo: &git2::Repository,
+    remote_name: &str,
+    tag_name: &str,
+    remote_oid: &str,
+) -> Result<()> {
+    let url = remote_url(repo, remote_name);
+    let remote_ref = format!("refs/tags/{}", tag_name);
+    let stdin = format!("(delete) {} {} {}\n", ZERO_OID, remote_ref, remote_oid);
+    run_hook_blocking(repo, "pre-push", &[remote_name, &url], Some(&stdin))
+}
+
 /// A git hook
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +405,17 @@ const HOOKS: &[(&str, &str)] = &[
     (
         "post-checkout",
         "Run after checkout. Used for environment setup.",
+    ),
+    (
+        "pre-merge-commit",
+        // Leviathan runs this as a blocking hook on merge and on the merge leg
+        // of pull, exactly as git does. Leaving it out of this list meant the
+        // dialog never listed it: a merge vetoed by a broken hook (husky
+        // installs these under core.hooksPath) had no entry to read, edit or
+        // toggle off — the toggle is the only way to disable a hook — and the
+        // footer's "N of M hooks configured" undercounted the hooks that
+        // actually gate the user's operations.
+        "Run before the automatic merge commit. A non-zero exit stops the commit and leaves the merge to be completed or aborted.",
     ),
     (
         "post-merge",
@@ -610,6 +642,107 @@ mod tests {
         assert!(names.contains(&"pre-commit"));
         assert!(names.contains(&"commit-msg"));
         assert!(names.contains(&"pre-push"));
+    }
+
+    #[tokio::test]
+    async fn test_get_hooks_lists_every_hook_the_app_can_run() {
+        // The dialog is data-driven off get_hooks, so a hook the app invokes
+        // but does not list is a hook the user cannot inspect, edit, disable or
+        // delete — and one the "N of M hooks configured" footer never counts.
+        let repo = TestRepo::with_initial_commit();
+        let hooks = get_hooks(repo.path_str()).await.unwrap();
+        let names: Vec<&str> = hooks.iter().map(|h| h.name.as_str()).collect();
+
+        for blocking in [
+            "pre-commit",
+            "commit-msg",
+            "pre-merge-commit",
+            "pre-rebase",
+            "pre-push",
+        ] {
+            assert!(
+                names.contains(&blocking),
+                "the dialog must list every hook the app runs, missing: {blocking}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pre_merge_commit_hook_has_a_description() {
+        // get_hook falls back to unwrap_or_default() for an unlisted name, so an
+        // omission shows as blank help text rather than an error.
+        let repo = TestRepo::with_initial_commit();
+        let hook = get_hook(repo.path_str(), "pre-merge-commit".to_string())
+            .await
+            .unwrap();
+        assert!(
+            !hook.description.is_empty(),
+            "the dialog shows this hook's description"
+        );
+        assert!(hook.description.to_lowercase().contains("merge"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_pre_merge_commit_hook_can_be_inspected_and_disabled() {
+        // The reported dead end: a merge vetoed by a broken pre-merge-commit
+        // hook, with no entry in the dialog to read it or toggle it off.
+        let repo = TestRepo::with_initial_commit();
+        let initial = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature", &[("feature.txt", "content")]);
+        repo.checkout_branch(&initial);
+
+        repo.install_hook("pre-merge-commit", "#!/bin/sh\necho denied 1>&2\nexit 1\n");
+
+        let listed = get_hooks(repo.path_str()).await.unwrap();
+        let hook = listed
+            .iter()
+            .find(|h| h.name == "pre-merge-commit")
+            .expect("the hook that is blocking merges must appear in the dialog");
+        assert!(hook.exists);
+        assert!(hook.enabled);
+        assert!(
+            hook.content.as_deref().unwrap().contains("denied"),
+            "its script must be readable"
+        );
+
+        // Disable it through the same command the dialog's toggle calls.
+        toggle_hook(repo.path_str(), "pre-merge-commit".to_string(), false)
+            .await
+            .unwrap();
+        let listed = get_hooks(repo.path_str()).await.unwrap();
+        let hook = listed
+            .iter()
+            .find(|h| h.name == "pre-merge-commit")
+            .expect("a disabled hook stays listed so the toggle can turn it back on");
+        assert!(hook.exists);
+        assert!(!hook.enabled);
+
+        // The repair is real: the merge the hook was vetoing now completes.
+        // no_ff forces the automatic merge commit, so the hook would run.
+        crate::commands::merge::merge(
+            repo.path_str(),
+            "feature".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            git_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .parent_count(),
+            2,
+            "disabling the hook let the merge commit be created"
+        );
     }
 
     #[tokio::test]

@@ -180,4 +180,41 @@ test.describe('Analytics Panel', () => {
     const retryBtn = page.locator('lv-analytics-panel .retry-btn');
     await expect(retryBtn).toBeVisible({ timeout: 5000 });
   });
+
+  test('should refresh statistics after a repository change made on another tab', async ({ page }) => {
+    await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
+
+    const values = page.locator('lv-analytics-panel .stat-value');
+    await expect(values.first()).toHaveText('256');
+
+    // A commit lands while the user is back on the Changes tab.
+    await injectCommandMock(page, {
+      get_repo_statistics: { ...mockStatistics, totalCommits: 257 },
+    });
+    await rightPanel.changesTab.click();
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('repository-refresh')));
+
+    await rightPanel.switchToAnalytics();
+
+    // Returning to Analytics must show the post-commit numbers, not the ones
+    // captured when the repository was opened.
+    await expect(values.first()).toHaveText('257');
+  });
+
+  test('should re-read statistics when the manual refresh button is clicked', async ({ page }) => {
+    await rightPanel.switchToAnalytics();
+    await reloadAnalyticsPanel(page);
+
+    const values = page.locator('lv-analytics-panel .stat-value');
+    await expect(values.first()).toHaveText('256');
+
+    await injectCommandMock(page, {
+      get_repo_statistics: { ...mockStatistics, totalCommits: 300 },
+    });
+
+    await page.locator('lv-analytics-panel .refresh-btn').click();
+
+    await expect(values.first()).toHaveText('300');
+  });
 });

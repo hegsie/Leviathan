@@ -364,11 +364,12 @@ async function pollLoopbackCallback(
   } catch (e) {
     log.error(`${provider} OAuth error:`, e);
     // Same guard as the success path: only surface/clean up if the flow THIS poll
-    // served is still the current one. A superseded flow's late error/timeout
-    // (the user cancelled and restarted — cancelOAuth can't abort the backend
-    // wait, which runs to its timeout) must NOT fire a spurious error for the new
-    // flow or delete the new flow's pending entry (which would silently drop the
-    // user's real, in-progress sign-in).
+    // served is still the current one. `cancelOAuth` aborts the backend wait via
+    // `oauth_cancel_flow`, so the abandoned wait rejects promptly — often while
+    // the user's restarted flow is already pending. That superseded flow's late
+    // error must NOT fire a spurious error for the new flow or delete the new
+    // flow's pending entry (which would silently drop the user's real,
+    // in-progress sign-in).
     const current = pendingAuthByProvider.get(provider);
     if (!current || current.state !== expectedState) {
       return;
@@ -437,11 +438,16 @@ export async function refreshToken(
   instanceUrl?: string
 ): Promise<OAuthTokenResponse> {
   const clientId = getClientId(provider);
+  // Bitbucket (like GitHub) authenticates the refresh grant with the client
+  // secret, same as the code exchange; PKCE public clients (GitLab, Entra) have
+  // none and send only the client id.
+  const clientSecret = getClientSecret(provider);
 
   const result = await invokeCommand<OAuthTokenResponse>('oauth_refresh_token', {
     provider,
     refreshToken: refreshTokenValue,
     clientId,
+    clientSecret,
     instanceUrl,
   });
   if (!result.success || !result.data) {
@@ -463,6 +469,30 @@ export async function refreshToken(
 }
 
 /**
+ * Release the backend loopback server for an abandoned flow.
+ *
+ * The backend's callback wait owns the socket until it times out (5 minutes),
+ * which blocks a retry for providers pinned to a fixed port (Bitbucket's
+ * registered redirect is 127.0.0.1:8085). Fire-and-forget: the local pending
+ * state is already cleared, and a failure here only means the socket lingers
+ * until that timeout, so it is not surfaced to the user.
+ */
+function releaseLoopbackServer(pending: PendingOAuth): void {
+  const port = pending.loopbackPort;
+  if (port === undefined) return;
+  void invokeCommand('oauth_cancel_flow', { port }).then(
+    (result) => {
+      if (!result.success) {
+        log.debug(`Failed to release OAuth loopback server on port ${port}:`, result.error?.message);
+      }
+    },
+    (e) => {
+      log.debug(`Failed to release OAuth loopback server on port ${port}:`, e);
+    }
+  );
+}
+
+/**
  * Cancel pending OAuth flow
  */
 export function cancelOAuth(provider?: OAuthProvider): void {
@@ -471,12 +501,15 @@ export function cancelOAuth(provider?: OAuthProvider): void {
     if (pending) {
       notifyStateChange({ status: 'idle', provider });
       pendingAuthByProvider.delete(provider);
+      releaseLoopbackServer(pending);
     }
   } else {
+    const cancelled = [...pendingAuthByProvider.values()];
     for (const [p] of pendingAuthByProvider) {
       notifyStateChange({ status: 'idle', provider: p });
     }
     pendingAuthByProvider.clear();
+    cancelled.forEach(releaseLoopbackServer);
   }
 }
 

@@ -71,14 +71,16 @@ class ProgressService {
     });
 
     // NOTE: `remote-operation-completed` is deliberately NOT listened to here.
-    // It carries only an operation NAME ("fetch"/"push"/...) and no repository,
-    // so removing "the first row whose type matches" removed whichever repo's
-    // row happened to be first in insertion order: fetch repo B, Ctrl+Tab,
-    // fetch repo A (a different `fetch:<repo>` key, so the two run
-    // concurrently), and A finishing tore down B's indicator while B was still
-    // fetching. Every fetch/pull/push row is started AND removed by its own
-    // caller in app-shell — completeOperation on success, failOperation on
-    // failure, on every branch — so nothing here needs to guess.
+    // Rows are keyed `fetch:<repo>`, and that event carries no
+    // progress-operation ID — only an operation NAME ("fetch"/"push"/...) and
+    // the repository — so this listener could only guess which row it meant.
+    // Removing "the first row whose type matches" removed whichever repo's row
+    // happened to be first in insertion order: fetch repo B, Ctrl+Tab, fetch
+    // repo A (a different `fetch:<repo>` key, so the two run concurrently),
+    // and A finishing tore down B's indicator while B was still fetching.
+    // Every fetch/pull/push row is started AND removed by its own caller in
+    // app-shell — completeOperation on success, failOperation on failure, on
+    // every branch — so nothing here needs to guess.
     this.unlistenFns.push(unlistenProgress);
   }
 

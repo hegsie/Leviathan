@@ -370,6 +370,7 @@ export class LvRightPanel extends LitElement {
           <div class="analytics-panel">
             <lv-analytics-panel
               .repositoryPath=${this.repositoryPath}
+              .active=${this.activeTab === 'analytics'}
             ></lv-analytics-panel>
           </div>
         </div>
@@ -389,9 +390,14 @@ export class LvRightPanel extends LitElement {
     }
   }
 
-  private handleCommitCreated(): void {
+  /** Forward the repo the commit ran in (captured pre-await by the commit
+   * panel) so the host pins the refresh to it, not whichever tab is active if
+   * the user switched mid-commit. */
+  private handleCommitCreated(e?: Event): void {
+    const repoPath = (e as CustomEvent<{ repositoryPath?: string }> | undefined)?.detail
+      ?.repositoryPath;
     this.dispatchEvent(new CustomEvent('repository-changed', { bubbles: true, composed: true }));
-    window.dispatchEvent(new CustomEvent('repository-refresh'));
+    window.dispatchEvent(new CustomEvent('repository-refresh', { detail: { repoPath } }));
   }
 }
 

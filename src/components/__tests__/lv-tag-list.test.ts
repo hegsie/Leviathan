@@ -396,6 +396,16 @@ describe('lv-tag-list', () => {
     });
 
     it('push tag calls push_tag command and dispatches tags-changed', async () => {
+      // This repo HAS a remote, so the menu names it and pushes there. The
+      // default mock reports none at all, and a repo with nowhere to push is
+      // told to add a remote instead of pushing.
+      const withoutRemotes = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_remotes') {
+          return [{ name: 'origin', url: 'https://example.test/origin.git', pushUrl: null }];
+        }
+        return withoutRemotes(command, args);
+      };
       const el = await renderTagList();
 
       // Find the tag item for v2.1.0
@@ -413,8 +423,10 @@ describe('lv-tag-list', () => {
       el.addEventListener('tags-changed', () => { tagsChangedFired = true; });
 
       const menuItems = el.shadowRoot!.querySelectorAll('.context-menu-item');
+      // Prefix, not an exact label: the item reads "Push to Remote" until the
+      // menu's remote read lands, then names the destination.
       const pushBtn = Array.from(menuItems).find(
-        (item) => item.textContent?.trim() === 'Push to Remote'
+        (item) => item.textContent?.trim().startsWith('Push to ')
       ) as HTMLElement;
       pushBtn.click();
 
@@ -423,7 +435,11 @@ describe('lv-tag-list', () => {
 
       const pushCalls = findCommands('push_tag');
       expect(pushCalls.length).to.equal(1);
-      expect(pushCalls[0].args).to.deep.include({ name: 'v2.1.0', path: REPO_PATH });
+      expect(pushCalls[0].args).to.deep.include({
+        name: 'v2.1.0',
+        path: REPO_PATH,
+        remote: 'origin',
+      });
 
       // Verify it reloads tags and fires tags-changed (consistent with handleDeleteTag)
       const getTagsCalls = findCommands('get_tags');

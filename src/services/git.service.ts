@@ -227,6 +227,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Repository,
   Commit,
+  FileHistoryEntry,
   Branch,
   BranchTrackingInfo,
   Remote,
@@ -297,10 +298,12 @@ import type {
   CherryPickCommand,
   ContinueCherryPickCommand,
   AbortCherryPickCommand,
+  SkipCherryPickCommand,
   CherryPickFromBranchCommand,
   RevertCommand,
   ContinueRevertCommand,
   AbortRevertCommand,
+  SkipRevertCommand,
   ResetCommand,
   CreateStashCommand,
   ApplyStashCommand,
@@ -310,6 +313,7 @@ import type {
   CreateTagCommand,
   DeleteTagCommand,
   PushTagCommand,
+  DeleteRemoteTagCommand,
   GetTagDetailsCommand,
   EditTagMessageCommand,
   DescribeOptions,
@@ -318,9 +322,6 @@ import type {
   GetDiffWithOptionsCommand,
   GetAvatarUrlCommand,
   GetAvatarUrlsCommand,
-  KeyboardShortcutConfig,
-  GetKeyboardShortcutsCommand,
-  SetKeyboardShortcutCommand,
   CheckoutFileFromCommitCommand,
   CheckoutFileFromBranchCommand,
   GetFileAtCommitCommand,
@@ -345,6 +346,183 @@ export async function openRepository(
   return invokeCommand<Repository>("open_repository", args);
 }
 
+/**
+ * Host of a clone URL. Covers the forms the clone dialog accepts:
+ * `https://host/path`, `ssh://git@host/path`, and the scp-like
+ * `git@host:owner/repo.git`.
+ *
+ * Matching on the host — not on a substring of the whole URL, as this used to —
+ * keeps a stored token off a look-alike host (`github.com.example.net`) and off
+ * a repo whose PATH merely names a provider.
+ */
+function cloneUrlHost(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed.includes("://")) {
+    const scpLike = /^[^@/]+@([^:/]+):/.exec(trimmed);
+    return scpLike ? scpLike[1].toLowerCase() : null;
+  }
+  try {
+    return new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a stored token may ride this clone URL.
+ *
+ * The token is sent as the HTTPS password, and `validate_clone_url` also
+ * accepts `http://` and `git://` — plaintext transports that would put the
+ * credential on the wire in clear. SSH URLs (`ssh://` and the scheme-less scp
+ * form) authenticate with a key and never transmit it, so they stay eligible.
+ */
+function cloneUrlIsCredentialSafe(url: string): boolean {
+  const trimmed = url.trim();
+  // scp-like `git@host:owner/repo.git` — always the ssh transport.
+  if (!trimmed.includes("://")) return true;
+  return /^(?:https|ssh):\/\//i.test(trimmed);
+}
+
+/**
+ * The Azure DevOps organization a clone URL names. Every connected ADO account
+ * is scoped to exactly one organization, so this is what picks the right one:
+ *
+ *   https://dev.azure.com/{org}/{project}/_git/{repo}
+ *   https://{org}@dev.azure.com/{org}/...        (userinfo ignored by URL)
+ *   https://ssh.dev.azure.com/v3/{org}/{project}/{repo}
+ *   https://{org}.visualstudio.com/{project}/_git/{repo}
+ */
+function adoUrlOrganization(url: string, host: string): string | undefined {
+  if (host.endsWith(".visualstudio.com")) {
+    return host.slice(0, -".visualstudio.com".length) || undefined;
+  }
+  const trimmed = url.trim();
+  let path: string;
+  if (trimmed.includes("://")) {
+    try {
+      path = new URL(trimmed).pathname;
+    } catch {
+      return undefined;
+    }
+  } else {
+    path = /^[^@/]+@[^:/]+:(.*)$/.exec(trimmed)?.[1] ?? "";
+  }
+  const segments = path.split("/").filter(Boolean);
+  // ssh.dev.azure.com paths carry a `v3` protocol-version prefix.
+  return segments[segments[0] === "v3" ? 1 : 0];
+}
+
+/**
+ * The connected Azure DevOps account for `organization`. Matching on the
+ * organization the URL names — rather than taking the global default account —
+ * keeps one org's token off another org's clone in a multi-account setup.
+ */
+async function findAdoAccountForOrg(organization: string) {
+  const { getAccountsByType } = await import("../stores/unified-profile.store.ts");
+  const wanted = organization.toLowerCase();
+  const matches = getAccountsByType("azure-devops").filter(
+    (account) =>
+      account.config.type === "azure-devops" &&
+      account.config.organization.toLowerCase() === wanted,
+  );
+  return matches.find((account) => account.isDefault) ?? matches[0];
+}
+
+/**
+ * The connected GitLab account whose instance serves `host`. GitLab is
+ * self-hostable, so the instance URL — not a fixed domain — identifies it, and
+ * a repo on `git.acme.dev` must clone with THAT instance's token even when a
+ * gitlab.com account is the global default.
+ */
+async function findGitLabAccountForHost(host: string) {
+  const { getAccountsByType } = await import("../stores/unified-profile.store.ts");
+  const matches = getAccountsByType("gitlab").filter(
+    (account) =>
+      account.config.type === "gitlab" &&
+      cloneUrlHost(account.config.instanceUrl) === host,
+  );
+  return matches.find((account) => account.isDefault) ?? matches[0];
+}
+
+/**
+ * The stored token to clone `url` with. Provider coverage mirrors
+ * `getRepoToken` (GitHub, Azure DevOps, GitLab) so the first clone
+ * authenticates against the same connected account every later fetch, pull and
+ * push will use — previously only GitHub resolved, so a private clone from a
+ * connected GitLab or Azure DevOps account failed with no way forward (the
+ * clone dialog has no token field to work around it with).
+ *
+ * There is no repository on disk yet, so the remote-based detection
+ * `getRepoToken` relies on cannot run here; the URL's host is all we have.
+ *
+ * Bitbucket is absent for the same reason it is absent from `getRepoToken`: no
+ * git network operation resolves Bitbucket credentials, and an app password is
+ * a username/password pair the single-token clone command cannot carry.
+ */
+async function getCloneToken(url: string): Promise<string | undefined> {
+  const host = cloneUrlHost(url);
+  if (!host || !cloneUrlIsCredentialSafe(url)) return undefined;
+
+  try {
+    if (host === "github.com" || host.endsWith(".github.com")) {
+      const result = await getGitHubToken();
+      return result.success && result.data ? result.data : undefined;
+    }
+
+    if (
+      host === "dev.azure.com" ||
+      host === "ssh.dev.azure.com" ||
+      host.endsWith(".visualstudio.com")
+    ) {
+      const org = adoUrlOrganization(url, host);
+      const adoAccount = org ? await findAdoAccountForOrg(org) : undefined;
+      if (adoAccount) {
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        // Refreshes an expiring Entra OAuth token, so a long-lived session
+        // still clones with a valid credential.
+        const token = await getFreshAccountToken("azure-devops", adoAccount.id, "azure");
+        if (token) return token;
+      }
+      // Legacy single-token storage, for a user who never created an account.
+      // Deliberately not getAdoToken(): that falls back to the default account
+      // whatever its organization, which would hand another org's token over.
+      const { AzureDevOpsCredentials } = await import("./credential.service.ts");
+      const token = await AzureDevOpsCredentials.getToken();
+      return token ?? undefined;
+    }
+
+    const gitlabAccount = await findGitLabAccountForHost(host);
+    if (gitlabAccount) {
+      const { getFreshAccountToken } = await import("./credential.service.ts");
+      // Refresh-aware for the same reason the Azure DevOps branch is: a GitLab
+      // account connected by OAuth holds an access token that expires, and the
+      // stored one may already be dead. A PAT account has no OAuth bundle, so
+      // this returns its stored token unchanged.
+      const token = await getFreshAccountToken(
+        "gitlab",
+        gitlabAccount.id,
+        "gitlab",
+        gitlabAccount.config.type === "gitlab" ? gitlabAccount.config.instanceUrl : undefined,
+      );
+      if (token) return token;
+    }
+    if (host === "gitlab.com" || host.endsWith(".gitlab.com")) {
+      // Legacy single-token storage, for a user who never created an account.
+      // Deliberately not getGitLabToken(): that falls back to the default
+      // account whatever its instance, which would hand a self-hosted
+      // instance's token to gitlab.com.
+      const { GitLabCredentials } = await import("./credential.service.ts");
+      const token = await GitLabCredentials.getToken();
+      if (token) return token;
+    }
+  } catch (err) {
+    // Same posture as getRepoToken: a credential lookup failure must not stop
+    // the clone — it just proceeds unauthenticated, as it does today.
+    console.error("Failed to auto-detect clone token:", err);
+  }
+  return undefined;
+}
+
 export async function cloneRepository(
   args: CloneRepositoryCommand,
 ): Promise<CommandResult<Repository>> {
@@ -352,26 +530,12 @@ export async function cloneRepository(
     return blockedResult();
   }
 
-  // If no token is provided, try to find one based on the URL
+  // No token supplied: fall back to the one stored for the account that owns
+  // this URL's host.
   if (args && !args.token) {
-    // We don't have a repo path yet (it's being cloned), so we can't detect by folder.
-    // But we can check the URL domain.
-    if (
-      args.url.includes("github.com") ||
-      args.url.includes("azure.com") ||
-      args.url.includes("visualstudio.com")
-    ) {
-      // Try GitHub first
-      if (args.url.includes("github.com")) {
-        const tokenResult = await getGitHubToken();
-        if (tokenResult.success && tokenResult.data) {
-          args.token = tokenResult.data;
-        }
-      }
-      // Try Azure DevOps (simplified check, would ideally need a specialized helper for URL parsing without repo context)
-      // For now, we'll just support GitHub auto-token on clone, as ADO usually needs organization context which we can infer from URL but it's safer to implement specifically if needed.
-      // But let's at least try the ADO token if we can get it globally (if we had a global getAdoToken).
-      // Since getAdoToken isn't exported globally/generically in this file (it's inside getRepoToken logic), we will stick to GitHub for now.
+    const token = await getCloneToken(args.url);
+    if (token) {
+      args.token = token;
     }
   }
   // Apply the same network timeout fetch/pull/push use. Without it a clone
@@ -1243,15 +1407,30 @@ async function resolveRepoAccount(
 }
 
 /**
- * Helper to get authentication token for a repository.
- * Resolves the account the way the profile UI does — account URL patterns, then
- * the repo's assigned profile, then the global default — before falling back to
- * the legacy single-token methods.
+ * The token for a repository AND the remote it was resolved against.
+ *
+ * The remote matters to any caller that hands the token to the git CLI: the
+ * lookup below probes EVERY remote and returns a token for the first one a
+ * provider claims, so the remote it settles on is routinely not `origin`. A
+ * caller that assumed `origin` would scope the credential to the wrong host —
+ * offering the token to a host it does not belong to, and withholding it from
+ * the one it does.
  */
-async function getRepoToken(
+interface ResolvedRepoToken {
+  token?: string;
+  remoteName?: string;
+}
+
+/**
+ * Helper to get authentication token for a repository, with the remote it came
+ * from. Resolves the account the way the profile UI does — account URL
+ * patterns, then the repo's assigned profile, then the global default —
+ * before falling back to the legacy single-token methods.
+ */
+async function resolveRepoToken(
   repoPath: string,
   remoteName?: string,
-): Promise<string | undefined> {
+): Promise<ResolvedRepoToken> {
   try {
     // --- Multi-account system (preferred) ---
     const { AccountCredentials } = await import("./credential.service.ts");
@@ -1263,23 +1442,24 @@ async function getRepoToken(
       ghRepoResult.data &&
       (!remoteName || ghRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = ghRepoResult.data.remoteName;
       const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         "github",
-        ghRepoResult.data.remoteName,
+        resolvedRemote,
       );
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
-        if (token) return token;
+        if (token) return { token, remoteName: resolvedRemote };
         // This repo resolves to THIS account, but its keyring entry is gone. Every
         // fallback below re-resolves the global default, so continuing would push
         // as a different identity. Fail instead and let the user reconnect it.
-        if (repoSpecific) return undefined;
+        if (repoSpecific) return {};
       }
       // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
 
@@ -1290,10 +1470,11 @@ async function getRepoToken(
       adoRepoResult.data &&
       (!remoteName || adoRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = adoRepoResult.data.remoteName;
       const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         "azure-devops",
-        adoRepoResult.data.remoteName,
+        resolvedRemote,
       );
       if (account) {
         // Refresh the Entra OAuth access token if it is expiring, so push/pull/
@@ -1311,16 +1492,16 @@ async function getRepoToken(
           if (accountOrg && accountOrg === adoRepoResult.data.organization) {
             await syncAdoGitCredentials(adoRepoResult.data.organization, token);
           }
-          return token;
+          return { token, remoteName: resolvedRemote };
         }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
-        if (repoSpecific) return undefined;
+        if (repoSpecific) return {};
       }
       // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
 
@@ -1331,28 +1512,43 @@ async function getRepoToken(
       gitlabRepoResult.data &&
       (!remoteName || gitlabRepoResult.data.remoteName === remoteName)
     ) {
+      const resolvedRemote = gitlabRepoResult.data.remoteName;
       const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         "gitlab",
-        gitlabRepoResult.data.remoteName,
+        resolvedRemote,
       );
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
-        if (token) return token;
+        if (token) return { token, remoteName: resolvedRemote };
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
-        if (repoSpecific) return undefined;
+        if (repoSpecific) return {};
       }
       // Legacy fallback for GitLab
       const tokenResult = await getGitLabToken();
       if (tokenResult.success && tokenResult.data) {
-        return tokenResult.data;
+        return { token: tokenResult.data, remoteName: resolvedRemote };
       }
     }
   } catch (err) {
     console.error("Failed to auto-detect repository token:", err);
   }
-  return undefined;
+  return {};
+}
+
+/**
+ * Helper to get authentication token for a repository.
+ *
+ * Callers that pass the token straight to a backend command which authenticates
+ * with git2 need only the token; callers that hand it to the git CLI want
+ * `resolveRepoToken`, so the credential can be scoped to the right host.
+ */
+async function getRepoToken(
+  repoPath: string,
+  remoteName?: string,
+): Promise<string | undefined> {
+  return (await resolveRepoToken(repoPath, remoteName)).token;
 }
 
 /**
@@ -1579,6 +1775,17 @@ export async function abortCherryPick(
 }
 
 /**
+ * Skip the stopped pick and resume the rest of the sequence
+ * (`git cherry-pick --skip`). Resolves with the last commit the resumed
+ * sequence created, or `null` when there was nothing left to apply.
+ */
+export async function skipCherryPick(
+  args: SkipCherryPickCommand,
+): Promise<CommandResult<Commit | null>> {
+  return invokeCommand<Commit | null>("skip_cherry_pick", args);
+}
+
+/**
  * Revert operations
  */
 export async function revert(
@@ -1597,6 +1804,13 @@ export async function abortRevert(
   args: AbortRevertCommand,
 ): Promise<CommandResult<void>> {
   return invokeCommand<void>("abort_revert", args);
+}
+
+/** Skip the stopped revert (`git revert --skip`). */
+export async function skipRevert(
+  args: SkipRevertCommand,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("skip_revert", args);
 }
 
 /**
@@ -1761,6 +1975,32 @@ export async function pushTag(
   }
 
   return invokeCommand<void>("push_tag", args);
+}
+
+/**
+ * Delete a tag on a remote (`git push <remote> :refs/tags/<name>`).
+ *
+ * The local `deleteTag` above removes the local ref only, and the tag fetch
+ * refspec copies a pushed tag straight back — so without this a "deleted" tag
+ * reappeared on the next fetch.
+ */
+export async function deleteRemoteTag(
+  args: DeleteRemoteTagCommand,
+): Promise<CommandResult<void>> {
+  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote)) {
+    return blockedResult();
+  }
+
+  // Same credential plumbing push_tag needs: without a token this fails with
+  // "No valid credentials found" on a token-authenticated HTTPS remote.
+  if (!args.token) {
+    const token = await getRepoToken(args.path, args.remote);
+    if (token) {
+      args.token = token;
+    }
+  }
+
+  return invokeCommand<void>("delete_remote_tag", args);
 }
 
 export async function getTagDetails(
@@ -1974,15 +2214,16 @@ export async function getImageVersions(
 }
 
 /**
- * Get all commits that modified a specific file
+ * Get all commits that modified a specific file, each paired with the path the
+ * file had in that commit (which differs from `filePath` before a rename).
  */
 export async function getFileHistory(
   repoPath: string,
   filePath: string,
   limit?: number,
   followRenames?: boolean,
-): Promise<CommandResult<Commit[]>> {
-  return invokeCommand<Commit[]>("get_file_history", {
+): Promise<CommandResult<FileHistoryEntry[]>> {
+  return invokeCommand<FileHistoryEntry[]>("get_file_history", {
     path: repoPath,
     filePath,
     limit,
@@ -2179,6 +2420,8 @@ export interface BisectStatus {
   totalSteps: number | null;
   currentStep: number | null;
   log: BisectLogEntry[];
+  /** Set once git has recorded the first bad commit; the session stays active until reset. */
+  culprit: CulpritCommit | null;
 }
 
 export interface CulpritCommit {
@@ -2311,6 +2554,12 @@ export async function updateSubmodules(
     recursive?: boolean;
     remote?: boolean;
     token?: string;
+    /**
+     * The remote `token` belongs to. Required alongside an explicitly supplied
+     * `token`: the backend scopes the credential it hands the git CLI to this
+     * remote's host, and injects nothing when it cannot tell which host that is.
+     */
+    tokenRemote?: string;
   },
 ): Promise<CommandResult<void>> {
   // `git submodule update` fetches (and clones with --init), so it belongs
@@ -2319,10 +2568,18 @@ export async function updateSubmodules(
     return blockedResult();
   }
 
-  // Try to find a token if not provided
+  // Try to find a token if not provided. The remote it was resolved against
+  // travels with it: the backend feeds it to the git CLI as a host-scoped
+  // credential helper, and the lookup does NOT always settle on `origin` — a
+  // repo whose origin is GitLab and whose upstream is GitHub yields a GitHub
+  // token, which scoped to origin would leak to the GitLab host and never
+  // reach the one it authenticates.
   let token = options?.token;
+  let tokenRemote = options?.tokenRemote;
   if (!token) {
-    token = await getRepoToken(repoPath);
+    const resolved = await resolveRepoToken(repoPath);
+    token = resolved.token;
+    tokenRemote = resolved.remoteName;
   }
 
   return invokeCommand<void>("update_submodules", {
@@ -2332,6 +2589,7 @@ export async function updateSubmodules(
     recursive: options?.recursive,
     remote: options?.remote,
     token,
+    tokenRemote,
   });
 }
 
@@ -2379,6 +2637,13 @@ export interface Worktree {
   lockReason: string | null;
   isBare: boolean;
   isPrunable: boolean;
+  /**
+   * Resolved by the backend against the filesystem: true for the worktree the
+   * repo path was opened at. Optional because test doubles and any pre-flag
+   * payload simply omit it — consumers must fall back, never assume `false`
+   * means "not current".
+   */
+  isCurrent?: boolean;
 }
 
 export async function getWorktrees(
@@ -2980,6 +3245,8 @@ export interface CredentialHelper {
   name: string;
   command: string;
   scope: string;
+  /** Config file the helper lives in: "system" | "global" | "local" | ... */
+  configScope: string;
   urlPattern: string | null;
 }
 
@@ -3321,6 +3588,7 @@ export async function listPullRequests(
   repo: string,
   state?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<PullRequestSummary[]>> {
   return invokeProviderCommand<PullRequestSummary[]>("list_pull_requests", {
@@ -3328,6 +3596,7 @@ export async function listPullRequests(
     repo,
     state,
     perPage,
+    page,
     token,
   });
 }
@@ -3380,6 +3649,7 @@ export async function getWorkflowRuns(
   repo: string,
   branch?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<WorkflowRun[]>> {
   return invokeProviderCommand<WorkflowRun[]>("get_workflow_runs", {
@@ -3387,6 +3657,7 @@ export async function getWorkflowRuns(
     repo,
     branch,
     perPage,
+    page,
     token,
   });
 }
@@ -3436,6 +3707,19 @@ export interface IssueSummary {
   body: string | null;
 }
 
+/**
+ * One page of issues plus the cursor for the next request.
+ *
+ * The `/issues` endpoint returns pull requests alongside issues and the backend
+ * filters them out, so the length of `issues` says nothing about whether more
+ * exist — `nextPage` carries that answer instead. `null` means the list ends
+ * here.
+ */
+export interface IssuePage {
+  issues: IssueSummary[];
+  nextPage: number | null;
+}
+
 export interface IssueComment {
   id: number;
   user: GitHubUser;
@@ -3458,14 +3742,16 @@ export async function listIssues(
   state?: string,
   labels?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
-): Promise<CommandResult<IssueSummary[]>> {
-  return invokeProviderCommand<IssueSummary[]>("list_issues", {
+): Promise<CommandResult<IssuePage>> {
+  return invokeProviderCommand<IssuePage>("list_issues", {
     owner,
     repo,
     state,
     labels,
     perPage,
+    page,
     token,
   });
 }
@@ -3672,12 +3958,14 @@ export async function listReleases(
   owner: string,
   repo: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary[]>> {
   return invokeProviderCommand<ReleaseSummary[]>("list_releases", {
     owner,
     repo,
     perPage,
+    page,
     token,
   });
 }
@@ -4014,12 +4302,14 @@ export async function createAzureDevOpsWorkItem(
 export async function listAdoPipelineRuns(
   organization: string,
   project: string,
+  repository: string,
   top?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPipelineRun[]>> {
   return invokeProviderCommand<AdoPipelineRun[]>("list_ado_pipeline_runs", {
     organization,
     project,
+    repository,
     top,
     token,
   });
@@ -4760,8 +5050,21 @@ export async function getRemoteStatus(
 export interface RemoteOperationResult {
   operation: string;
   remote: string;
+  /** Repository the operation ran on, so a late completion refreshes the right tab. */
+  repoPath: string;
   success: boolean;
   message: string;
+  /**
+   * IPC error code of a failed completion (MERGE_CONFLICT, REBASE_CONFLICT,
+   * ...) — the same code the command itself would have returned.
+   *
+   * `null`, not absent, on a successful completion: the Rust field is an
+   * `Option<String>` with no skip, so the wire always carries the key — the
+   * same shape every other Option-backed field is typed with.
+   */
+  errorCode: string | null;
+  /** Arrived after the command already reported a timeout to its caller. */
+  late: boolean;
 }
 
 let remoteOperationUnlisten: UnlistenFn | null = null;
@@ -4780,6 +5083,56 @@ export async function setupRemoteOperationListeners(): Promise<void> {
   remoteOperationUnlisten = await listenToEvent<RemoteOperationResult>(
     "remote-operation-completed",
     (result) => {
+      // A pull or push that lands AFTER the command reported a timeout has
+      // already changed refs and the working tree, and the caller that would
+      // normally refresh returned an error long ago. Say so plainly and
+      // refresh the repository it actually changed — pinned by repoPath, since
+      // the user may have switched tabs in the minutes since.
+      if (result.late) {
+        // A late pull that ended in conflicts is not merely "a pull that
+        // failed": MERGE_HEAD (or the rebase state) is on disk and the only
+        // way out is the conflict dialog's Complete/Abort. app-shell's normal
+        // pull path keys that off the error CODE, so route a late conflict
+        // into the very same flow instead of leaving a red toast and a
+        // repository stuck mid-merge.
+        const conflict =
+          result.errorCode === "MERGE_CONFLICT" ||
+          result.errorCode === "REBASE_CONFLICT";
+        showToast(
+          result.message,
+          result.success || conflict ? "warning" : "error",
+          8000,
+        );
+        // `merge-conflict` is bound on the app-shell ELEMENT, not on window —
+        // a window dispatch would be orphaned. The handler pins the dialog to
+        // repositoryPath and refreshes that repo, so no extra refresh here.
+        // The tag is `lv-app-shell` (see the @customElement in app-shell.ts);
+        // querying "app-shell" found nothing in the real UI, so every late
+        // conflict fell through to the plain refresh below and left the
+        // repository mid-merge with no dialog.
+        const shell = conflict ? document.querySelector("lv-app-shell") : null;
+        if (shell) {
+          shell.dispatchEvent(
+            new CustomEvent("merge-conflict", {
+              detail: {
+                repositoryPath: result.repoPath,
+                operationType:
+                  result.errorCode === "REBASE_CONFLICT" ? "rebase" : "merge",
+              },
+            }),
+          );
+          return;
+        }
+        if (result.repoPath) {
+          window.dispatchEvent(
+            new CustomEvent("repository-refresh", {
+              detail: { repoPath: result.repoPath },
+            }),
+          );
+        }
+        return;
+      }
+
       // Show toast notifications for all remote operations
       if (result.success) {
         // Success notifications
@@ -5359,11 +5712,23 @@ export async function addToGitignore(
   return invokeCommand<void>("add_to_gitignore", { path: repoPath, patterns });
 }
 
+/**
+ * Remove the rule on `lineNumber` (1-based, as reported by `getGitignore`).
+ *
+ * The line is required, not the pattern alone: a .gitignore can repeat a line,
+ * and the backend used to drop every line with matching text — removing one
+ * displayed row took its twins with it.
+ */
 export async function removeFromGitignore(
   repoPath: string,
   pattern: string,
+  lineNumber: number,
 ): Promise<CommandResult<void>> {
-  return invokeCommand<void>("remove_from_gitignore", { path: repoPath, pattern });
+  return invokeCommand<void>("remove_from_gitignore", {
+    path: repoPath,
+    pattern,
+    lineNumber,
+  });
 }
 
 export async function isIgnored(
@@ -5420,11 +5785,19 @@ export async function checkIgnoreVerbose(
 /**
  * Gitattributes management
  */
+/**
+ * Mirrors the externally-tagged Rust `AttributeValue`. Serde emits the unit
+ * variants as the bare strings `"set"` / `"unset"` / `"unspecified"` and the
+ * valued variant as `{ value }` — never `{ type: "set" }`. The previous
+ * object-only union here never matched the wire, so anything rendered from it
+ * showed `undefined`; `attribute_value_unit_variants_serialize_as_bare_strings`
+ * in `src-tauri/src/commands/gitattributes.rs` pins the other side.
+ */
 export type AttributeValue =
-  | { type: "set" }
-  | { type: "unset" }
-  | { type: "value"; value: string }
-  | { type: "unspecified" };
+  | "set"
+  | "unset"
+  | "unspecified"
+  | { value: string };
 
 export interface AttributeEntry {
   name: string;
@@ -7033,61 +7406,6 @@ export async function pruneRemoteTrackingBranches(
     path: repoPath,
     remote,
   });
-}
-
-/**
- * Keyboard Shortcuts operations
- */
-
-/**
- * Get all keyboard shortcuts (defaults merged with user customizations)
- *
- * @param args Optional path for repo-specific shortcuts (reserved for future use)
- * @returns List of keyboard shortcuts with customization status
- */
-export async function getKeyboardShortcuts(
-  args?: GetKeyboardShortcutsCommand,
-): Promise<CommandResult<KeyboardShortcutConfig[]>> {
-  return invokeCommand<KeyboardShortcutConfig[]>("get_keyboard_shortcuts", {
-    path: args?.path ?? null,
-  });
-}
-
-/**
- * Set a keyboard shortcut for a specific action
- *
- * @param args Action name and new shortcut key combination
- * @returns Updated list of all keyboard shortcuts
- */
-export async function setKeyboardShortcut(
-  args: SetKeyboardShortcutCommand,
-): Promise<CommandResult<KeyboardShortcutConfig[]>> {
-  return invokeCommand<KeyboardShortcutConfig[]>("set_keyboard_shortcut", {
-    action: args.action,
-    shortcut: args.shortcut,
-  });
-}
-
-/**
- * Reset all keyboard shortcuts to their default values
- *
- * @returns List of keyboard shortcuts after reset (all defaults)
- */
-export async function resetKeyboardShortcuts(): Promise<
-  CommandResult<KeyboardShortcutConfig[]>
-> {
-  return invokeCommand<KeyboardShortcutConfig[]>("reset_keyboard_shortcuts");
-}
-
-/**
- * Get default keyboard shortcuts (without any user customizations)
- *
- * @returns List of default keyboard shortcuts
- */
-export async function getDefaultShortcuts(): Promise<
-  CommandResult<KeyboardShortcutConfig[]>
-> {
-  return invokeCommand<KeyboardShortcutConfig[]>("get_default_shortcuts");
 }
 
 /**

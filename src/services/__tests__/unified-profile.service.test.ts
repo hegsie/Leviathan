@@ -25,6 +25,7 @@ import {
   saveUnifiedProfile,
   loadUnifiedProfiles,
   updateGlobalAccountCachedUser,
+  applyUnifiedProfile,
 } from '../unified-profile.service.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
 import type { IntegrationAccount, UnifiedProfile } from '../../types/unified-profile.types.ts';
@@ -265,7 +266,7 @@ describe('unified-profile.service - saveUnifiedProfile default-badge sync', () =
     mockInvoke = async (command: string, args?: unknown) => {
       const params = args as Record<string, unknown> | undefined;
       if (command === 'save_unified_profile') {
-        return params?.profile;
+        return { profile: params?.profile, failedRepositories: [] };
       }
       return null;
     };
@@ -302,6 +303,31 @@ describe('unified-profile.service - saveUnifiedProfile default-badge sync', () =
 
     const profiles = unifiedProfileStore.getState().profiles;
     expect(profiles.find((p) => p.id === 'p-a')!.isDefault).to.be.true;
+  });
+
+  // Saving re-applies the profile's identity to every repository assigned to it.
+  // The caller needs the repositories the backend could not rewrite so it can
+  // tell the user which ones kept the pre-edit identity.
+  it('returns the repositories the backend could not update and stores the saved profile', async () => {
+    const pA = makeTestProfile('p-a', { name: 'A', isDefault: true });
+    const pB = makeTestProfile('p-b', { name: 'B', isDefault: false });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [pA, pB],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+    mockInvoke = async () => ({
+      profile: { ...pB, name: 'B renamed' },
+      failedRepositories: ['/repo/gone'],
+    });
+
+    const result = await saveUnifiedProfile({ ...pB, name: 'B renamed' });
+
+    expect(result.failedRepositories).to.deep.equal(['/repo/gone']);
+    expect(result.profile.name).to.equal('B renamed');
+    const profiles = unifiedProfileStore.getState().profiles;
+    expect(profiles.find((p) => p.id === 'p-b')!.name).to.equal('B renamed');
   });
 });
 
@@ -422,5 +448,105 @@ describe('unified-profile.service - updateGlobalAccountCachedUser (V7)', () => {
       (h) => h.command === 'get_unified_profiles_config'
     );
     expect(configReloads).to.have.lengthOf(0);
+  });
+});
+
+// applyUnifiedProfile must mirror the backend's `config.assign_profile` into
+// the store's config.repositoryAssignments. Without it the dashboard's
+// "Manually assigned" badge and the profile manager's assigned-repository list
+// stay stale until the next full loadUnifiedProfiles().
+describe('unified-profile.service - applyUnifiedProfile assignment sync', () => {
+  beforeEach(() => {
+    unifiedProfileStore.getState().reset();
+    invokeHistory.length = 0;
+    mockInvoke = async () => null;
+  });
+
+  it('records the repo→profile assignment in the store config', async () => {
+    const p1 = makeTestProfile('p1', { name: 'Work' });
+    const p2 = makeTestProfile('p2', { name: 'Personal' });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [p1, p2],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+
+    await applyUnifiedProfile('/repo/a', 'p2');
+
+    const state = unifiedProfileStore.getState();
+    expect(state.config!.repositoryAssignments['/repo/a']).to.equal('p2');
+    expect(state.activeProfile!.id).to.equal('p2');
+  });
+
+  it('replaces the previous assignment for the same repo and leaves other repos alone', async () => {
+    const p1 = makeTestProfile('p1', { name: 'Work' });
+    const p2 = makeTestProfile('p2', { name: 'Personal' });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [p1, p2],
+      accounts: [],
+      repositoryAssignments: { '/repo/a': 'p1', '/repo/b': 'p1' },
+    });
+
+    await applyUnifiedProfile('/repo/a', 'p2');
+
+    const assignments = unifiedProfileStore.getState().config!.repositoryAssignments;
+    expect(assignments['/repo/a']).to.equal('p2');
+    expect(assignments['/repo/b']).to.equal('p1');
+  });
+
+  it('records the assignment even when the profile is not in the loaded profiles list', async () => {
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+
+    await applyUnifiedProfile('/repo/a', 'p2');
+
+    const state = unifiedProfileStore.getState();
+    expect(state.config!.repositoryAssignments['/repo/a']).to.equal('p2');
+    expect(state.activeProfile).to.be.null;
+  });
+
+  it('does not record an assignment when the backend rejects', async () => {
+    const p1 = makeTestProfile('p1', { name: 'Work' });
+    const p2 = makeTestProfile('p2', { name: 'Personal' });
+    unifiedProfileStore.getState().setConfig({
+      version: 3,
+      profiles: [p1, p2],
+      accounts: [],
+      repositoryAssignments: {},
+    });
+    unifiedProfileStore.getState().setActiveProfile(p1);
+
+    mockInvoke = async (command: string) => {
+      if (command === 'apply_unified_profile') {
+        throw new Error('Profile not found');
+      }
+      return null;
+    };
+
+    let caught: Error | null = null;
+    try {
+      await applyUnifiedProfile('/repo/a', 'p2');
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught).to.not.be.null;
+    expect(caught!.message).to.equal('Profile not found');
+
+    const state = unifiedProfileStore.getState();
+    expect(state.config!.repositoryAssignments).to.not.have.property('/repo/a');
+    expect(state.activeProfile!.id).to.equal('p1');
+  });
+
+  it('does not throw when no config is loaded', async () => {
+    await applyUnifiedProfile('/repo/a', 'p2');
+
+    expect(unifiedProfileStore.getState().config).to.be.null;
   });
 });
