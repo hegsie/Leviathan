@@ -382,7 +382,8 @@ describe('git.service - getRepoToken keyring sync (via fetch)', () => {
     const key = 'azure-devops_token_ado-1';
     keyring.clear();
     keyring.set(key, 'tok');
-    // Far-future expiry → getFreshAccountToken returns the stored token, no refresh.
+    // Expiry an hour out — well past the 5-minute refresh threshold, so
+    // getFreshAccountToken returns the stored token without refreshing.
     keyring.set(`${key}_oauth`, JSON.stringify({
       accessToken: 'tok',
       refreshToken: 'r',
