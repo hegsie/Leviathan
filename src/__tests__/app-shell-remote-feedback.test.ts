@@ -415,6 +415,69 @@ describe('app-shell remote-operation feedback', () => {
       expect(pushTag!.args.force).to.equal(true);
     });
 
+    it('the tag force push goes to the remote the rejected push was aimed at', async () => {
+      // The rejected push was sent to a remote the user picked in the tag
+      // menu. Leaving the retry's destination to the backend resolver
+      // force-moves the tag on `origin` in a fork checkout — a destructive
+      // write to a remote the user never aimed at, reported as success.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one', 'upstream');
+
+      const pushTag = invokeCallArgs.find((c) => c.command === 'push_tag');
+      expect(pushTag).to.not.be.undefined;
+      expect(pushTag!.args.remote).to.equal('upstream');
+      expect(
+        uiStore.getState().toasts.some((t) => t.message === 'Force pushed tag v1.2.0 to upstream'),
+        'the confirmation names where the tag actually went',
+      ).to.equal(true);
+    });
+
+    it('a tag force push with no chosen remote still leaves the key off', async () => {
+      // The graph ref menu names no remote; the backend resolver has to keep
+      // running, so the key must be absent rather than undefined.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one');
+
+      const pushTag = invokeCallArgs.find((c) => c.command === 'push_tag');
+      expect('remote' in pushTag!.args, 'no remote key at all').to.equal(false);
+    });
+
+    it('the force-push-tag event carries the remote through to the push', async () => {
+      // The suggestion service dispatches on `window`; the remote has to
+      // survive the hop or the retry re-resolves the destination anyway.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const el = shellWithStoreRepo();
+      document.body.appendChild(el);
+      await (el as any).updateComplete;
+      try {
+        let seen: string | undefined = 'unset';
+        (el as any).forcePushTag = (
+          _tag: string,
+          _repo: string,
+          remote?: string,
+        ): Promise<void> => {
+          seen = remote;
+          return Promise.resolve();
+        };
+        window.dispatchEvent(
+          new CustomEvent('force-push-tag', {
+            detail: { tagName: 'v1.2.0', repoPath: '/repo/one', remote: 'upstream' },
+          }),
+        );
+        await new Promise((r) => setTimeout(r, 0));
+        expect(seen).to.equal('upstream');
+      } finally {
+        el.remove();
+      }
+    });
+
     it('declining blocks the tag force push', async () => {
       mockResponses['plugin:dialog|confirm'] = () => 'Cancel';
       mockResponses['plugin:dialog|message'] = () => 'Cancel';

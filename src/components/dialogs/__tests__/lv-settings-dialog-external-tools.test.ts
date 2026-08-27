@@ -1,37 +1,39 @@
 /**
- * Settings Dialog External Tools error-handling tests.
+ * Settings Dialog External Tools Tests
  *
- * setMergeToolConfig / setDiffTool return a CommandResult and never throw, so a
- * failed config write (read-only or locked .git/config) used to be completely
- * silent: the control kept showing a value git never accepted and
- * 'settings-changed' fired as if the write had landed. These tests pin the
- * toast, the revert of both state and DOM control, and the suppressed event.
+ * Two concerns share this file:
+ *
+ * - "None" must actually unset merge.tool / diff.tool in the repository
+ *   config. Clearing only local component state leaves git (and the app's own
+ *   launch-merge-tool / launch-diff-tool flows) on the old tool, and
+ *   reopening Settings reloads it — silently reverting the user's choice.
+ * - setMergeToolConfig / setDiffTool return a CommandResult and never throw,
+ *   so a failed config write (read-only or locked .git/config) used to be
+ *   completely silent: the control kept showing a value git never accepted
+ *   and 'settings-changed' fired as if the write had landed. These tests pin
+ *   the toast, the revert of both state and DOM control, the suppressed
+ *   event, and that a stale write resolving late never clobbers a newer one.
  */
 
 import { expect, fixture, html } from '@open-wc/testing';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
-
-const REPO_PATH = '/test/external-tools-repo';
-const WRITE_ERROR = 'could not lock config file: Permission denied';
-
-async function waitUntil(predicate: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 200; i++) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, 0));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-}
-
-/** Give any pending handler continuation plenty of turns to run. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 50; i++) {
-    await new Promise((r) => setTimeout(r, 0));
-  }
-}
+import type { Repository } from '../../../types/git.types.ts';
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
+interface RecordedCall {
+  command: string;
+  args: Record<string, unknown> | undefined;
+}
+
+const calls: RecordedCall[] = [];
+let responses: Record<string, unknown> = {};
+const failures: Record<string, string> = {};
+/** Whether each tool is configured outside the repository (global/system). */
+const configuredGlobally = { mergeTool: false, diffTool: false };
+
+/** Same purpose as `failures`, but for tests that only need a fixed message. */
 let failingCommands: Set<string> = new Set();
 
 /**
@@ -46,10 +48,17 @@ interface DeferredWrite {
 }
 let deferredWrites: DeferredWrite[] = [];
 
-const mockInvoke: MockInvoke = async (command: string) => {
+const WRITE_ERROR = 'could not lock config file: Permission denied';
+
+const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
+  calls.push({ command, args: args as Record<string, unknown> | undefined });
+
   if (command === 'plugin:notification|is_permission_granted') return false;
   if (failingCommands.has(command)) {
     throw new Error(WRITE_ERROR);
+  }
+  if (failures[command] !== undefined) {
+    throw new Error(failures[command]);
   }
   if (deferredCommands.has(command)) {
     return new Promise((resolve, reject) => {
@@ -60,6 +69,21 @@ const mockInvoke: MockInvoke = async (command: string) => {
       });
     });
   }
+
+  // `git config --unset` writes the repository-local file only, while the
+  // get_* commands read the effective value. A globally configured tool
+  // therefore survives the unset, exactly as in the real backend.
+  if (command === 'unset_git_config') {
+    const key = (args as { key?: string } | undefined)?.key;
+    if (key === 'merge.tool' && !configuredGlobally.mergeTool) {
+      responses['get_merge_tool_config'] = { toolName: null, toolCmd: null };
+    }
+    if (key === 'diff.tool' && !configuredGlobally.diffTool) {
+      responses['get_diff_tool'] = { tool: null, cmd: null, prompt: false };
+    }
+  }
+
+  if (command in responses) return responses[command];
 
   switch (command) {
     case 'get_ai_providers':
@@ -97,19 +121,38 @@ const mockInvoke: MockInvoke = async (command: string) => {
       ];
     case 'set_merge_tool_config':
     case 'set_diff_tool':
+    case 'unset_git_config':
       return null;
     default:
       return null;
   }
 };
 
-(globalThis as unknown as { __TAURI_INTERNALS__: { invoke: MockInvoke } }).__TAURI_INTERNALS__ = {
+let callbackId = 0;
+(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: mockInvoke,
+  transformCallback: () => callbackId++,
+  convertFileSrc: (path: string) => path,
 };
 
-// Import AFTER installing the mock
+// Import AFTER setting up the mock
 import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+
+async function waitUntil(predicate: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** Give any pending handler continuation plenty of turns to run. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
 
 interface ToolState {
   mergeToolName: string | null;
@@ -154,16 +197,97 @@ function errorToasts(): string[] {
     .map((t) => t.message);
 }
 
+function mockRepo(path: string, name: string): Repository {
+  return {
+    path,
+    name,
+    isValid: true,
+    isBare: false,
+    headRef: 'main',
+    detachedHeadOid: null,
+    state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
+  };
+}
+
+function unsetCalls(): RecordedCall[] {
+  return calls.filter((c) => c.command === 'unset_git_config');
+}
+
+/** Find the <select> in the setting row whose name matches `label`. */
+function toolSelect(el: LvSettingsDialog, label: string): HTMLSelectElement {
+  const rows = Array.from(el.shadowRoot?.querySelectorAll('.setting-row') ?? []);
+  const row = rows.find(
+    (r) => r.querySelector('.setting-name')?.textContent?.trim() === label,
+  );
+  const select = row?.querySelector('select') as HTMLSelectElement | null | undefined;
+  expect(select, `${label} select exists`).to.exist;
+  return select as HTMLSelectElement;
+}
+
+async function renderDialog(): Promise<LvSettingsDialog> {
+  const el = await fixture<LvSettingsDialog>(
+    html`<lv-settings-dialog></lv-settings-dialog>`,
+  );
+  await el.updateComplete;
+  // Wait for the async external-tools load kicked off by connectedCallback.
+  for (let i = 0; i < 50; i++) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((el as any).loadingTools === false) break;
+    await new Promise((r) => setTimeout(r, 5));
+    await el.updateComplete;
+  }
+  await el.updateComplete;
+  return el;
+}
+
+/** Drive the real rendered <select> the way a user would. */
+async function chooseNone(el: LvSettingsDialog, label: string): Promise<HTMLSelectElement> {
+  const select = toolSelect(el, label);
+  select.value = '';
+  const handler = label === 'Merge Tool' ? 'handleMergeToolChange' : 'handleDiffToolChange';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (el as any)[handler]({ target: select } as unknown as Event);
+  await el.updateComplete;
+  return select;
+}
+
+function lastToast(): { type: string; message: string } | undefined {
+  const toasts = uiStore.getState().toasts;
+  return toasts[toasts.length - 1];
+}
+
 describe('lv-settings-dialog external tools write failures', () => {
+  const REPO_PATH = '/test/external-tools-repo';
   let el: LvSettingsDialog;
   let settingsChangedCount: number;
   let onSettingsChanged: () => void;
 
   beforeEach(async () => {
+    calls.length = 0;
     failingCommands = new Set();
+    for (const key of Object.keys(failures)) delete failures[key];
     deferredCommands = new Set();
     deferredWrites = [];
+    responses = {
+      get_merge_tool_config: { toolName: null, toolCmd: null },
+      get_diff_tool: { tool: null, cmd: null, prompt: false },
+      get_available_merge_tools: [
+        { name: 'meld', displayName: 'Meld', command: 'meld', available: true },
+        { name: 'vimdiff', displayName: 'Vimdiff', command: 'vimdiff', available: true },
+      ],
+      list_diff_tools: [
+        { name: 'meld', command: 'meld', available: true },
+        { name: 'vimdiff', command: 'vimdiff', available: true },
+      ],
+      set_merge_tool_config: null,
+      set_diff_tool: null,
+      unset_git_config: null,
+    };
     uiStore.setState({ toasts: [] });
+    repositoryStore.getState().reset();
     repositoryStore.getState().addRepository({
       path: REPO_PATH,
       name: 'external-tools-repo',
@@ -193,6 +317,7 @@ describe('lv-settings-dialog external tools write failures', () => {
 
   afterEach(() => {
     window.removeEventListener('settings-changed', onSettingsChanged);
+    repositoryStore.getState().reset();
     uiStore.setState({ toasts: [] });
   });
 
@@ -375,6 +500,7 @@ describe('lv-settings-dialog external tools write failures', () => {
     // The user gives up on external merge tools before the write comes back.
     select.value = '';
     change(select);
+    await waitUntil(() => settingsChangedCount === 2, 'the None clear to land');
     await el.updateComplete;
 
     deferredWrites[0].fail();
@@ -384,7 +510,11 @@ describe('lv-settings-dialog external tools write failures', () => {
     expect(select.value, 'the None choice survives').to.equal('');
     expect(toolState(el).mergeToolName).to.be.null;
     expect(errorToasts(), 'no rollback toast for a superseded write').to.be.empty;
-    expect(settingsChangedCount, 'only the first save dispatched').to.equal(1);
+    // One dispatch for the initial 'meld' save, one for the real unset behind
+    // "None" (it round-trips through the backend and dispatches on success
+    // just like any other write) — the superseded 'vimdiff' write must not add
+    // a third.
+    expect(settingsChangedCount, 'only the meld save and the None clear dispatched').to.equal(2);
   });
 
   it('does not roll the custom diff tool command back over a newer tool selection', async () => {
@@ -428,5 +558,224 @@ describe('lv-settings-dialog external tools write failures', () => {
     expect(select.value).to.equal('meld');
     expect(toolState(el).mergeToolName).to.equal('meld');
     expect(errorToasts(), 'no error toast on success').to.be.empty;
+  });
+});
+
+describe('lv-settings-dialog external tools "None"', () => {
+  const NONE_REPO_PATH = '/repo';
+
+  beforeEach(() => {
+    calls.length = 0;
+    failingCommands = new Set();
+    deferredCommands = new Set();
+    deferredWrites = [];
+    for (const key of Object.keys(failures)) delete failures[key];
+    configuredGlobally.mergeTool = false;
+    configuredGlobally.diffTool = false;
+    responses = {
+      get_merge_tool_config: { toolName: 'meld', toolCmd: null },
+      get_available_merge_tools: [{ name: 'meld', displayName: 'Meld', available: true }],
+      get_diff_tool: { tool: 'vscode', cmd: null, prompt: false },
+      list_diff_tools: [{ name: 'vscode', command: 'code', available: true }],
+      unset_git_config: null,
+      set_merge_tool_config: null,
+      set_diff_tool: null,
+    };
+    uiStore.setState({ toasts: [] });
+    repositoryStore.getState().reset();
+    repositoryStore.getState().addRepository(mockRepo(NONE_REPO_PATH, 'repo'));
+  });
+
+  afterEach(() => {
+    repositoryStore.getState().reset();
+    uiStore.setState({ toasts: [] });
+  });
+
+  it('shows the configured tools as selected when the dialog opens', async () => {
+    const el = await renderDialog();
+
+    // The <select>'s .value binding commits before the <option>s rendered in the
+    // same update, so without an explicit re-sync a configured tool shows "None".
+    expect(toolSelect(el, 'Merge Tool').value, 'merge select').to.equal('meld');
+    expect(toolSelect(el, 'Diff Tool').value, 'diff select').to.equal('vscode');
+  });
+
+  it('keeps the merge tool selected when merge.tool is configured outside the repository', async () => {
+    configuredGlobally.mergeTool = true;
+    const el = await renderDialog();
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Merge Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    // The local unset is still attempted, but merge.tool survives it, so the UI
+    // must not claim the tool is gone while git would still launch it.
+    expect(unsetCalls(), 'local unset attempted').to.have.lengthOf(1);
+    expect(eventFired, 'settings-changed NOT dispatched').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('global or system');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolName, 'still configured').to.equal('meld');
+    expect(select.value, 'select still shows the surviving tool').to.equal('meld');
+  });
+
+  it('keeps the diff tool selected when diff.tool is configured outside the repository', async () => {
+    configuredGlobally.diffTool = true;
+    const el = await renderDialog();
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Diff Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(unsetCalls(), 'local unset attempted').to.have.lengthOf(1);
+    expect(eventFired, 'settings-changed NOT dispatched').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('global or system');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).diffToolName, 'still configured').to.equal('vscode');
+    expect(select.value, 'select still shows the surviving tool').to.equal('vscode');
+  });
+
+  it('unsets merge.tool when Merge Tool is set to None', async () => {
+    const el = await renderDialog();
+    await chooseNone(el, 'Merge Tool');
+
+    const unsets = unsetCalls();
+    expect(unsets, 'unset_git_config was invoked').to.have.lengthOf(1);
+    expect(unsets[0].args).to.deep.equal({ path: NONE_REPO_PATH, key: 'merge.tool', global: undefined });
+  });
+
+  it('dispatches settings-changed and clears the merge tool after a successful unset', async () => {
+    const el = await renderDialog();
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+
+    await chooseNone(el, 'Merge Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(eventFired, 'settings-changed dispatched').to.be.true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolName).to.be.null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolCmd).to.be.null;
+  });
+
+  it('shows an error toast and keeps the configured merge tool when the unset fails', async () => {
+    const el = await renderDialog();
+    failures['unset_git_config'] = 'error: could not unset merge.tool';
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Merge Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(eventFired, 'settings-changed NOT dispatched on failure').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('could not unset');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolName, 'still configured').to.equal('meld');
+    expect(select.value, 'select reverted to the configured tool').to.equal('meld');
+  });
+
+  it('unsets diff.tool when Diff Tool is set to None', async () => {
+    const el = await renderDialog();
+    await chooseNone(el, 'Diff Tool');
+
+    const unsets = unsetCalls();
+    expect(unsets, 'unset_git_config was invoked').to.have.lengthOf(1);
+    expect(unsets[0].args).to.deep.equal({ path: NONE_REPO_PATH, key: 'diff.tool', global: undefined });
+  });
+
+  it('dispatches settings-changed and clears the diff tool after a successful unset', async () => {
+    const el = await renderDialog();
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+
+    await chooseNone(el, 'Diff Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(eventFired, 'settings-changed dispatched').to.be.true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).diffToolName).to.be.null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).diffToolCmd).to.be.null;
+  });
+
+  it('shows an error toast and keeps the configured diff tool when the unset fails', async () => {
+    const el = await renderDialog();
+    failures['unset_git_config'] = 'error: could not unset diff.tool';
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    const select = await chooseNone(el, 'Diff Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    expect(eventFired, 'settings-changed NOT dispatched on failure').to.be.false;
+    expect(lastToast()?.type, 'error toast shown').to.equal('error');
+    expect(lastToast()?.message).to.contain('could not unset');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).diffToolName, 'still configured').to.equal('vscode');
+    expect(select.value, 'select reverted to the configured tool').to.equal('vscode');
+  });
+
+  it('unsets merge.tool when None is chosen after a Custom tool', async () => {
+    const el = await renderDialog();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).mergeToolName = '__custom__';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (el as any).mergeToolCmd = 'meld $LOCAL $REMOTE $MERGED';
+    await el.updateComplete;
+
+    await chooseNone(el, 'Merge Tool');
+
+    const unsets = unsetCalls();
+    expect(unsets, 'unset_git_config was invoked').to.have.lengthOf(1);
+    expect(unsets[0].args).to.include({ key: 'merge.tool' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((el as any).mergeToolCmd).to.be.null;
+  });
+
+  it('still issues the unset when no tool was configured', async () => {
+    responses['get_merge_tool_config'] = { toolName: null, toolCmd: null };
+    const el = await renderDialog();
+
+    let eventFired = false;
+    const listener = () => { eventFired = true; };
+    window.addEventListener('settings-changed', listener);
+    await chooseNone(el, 'Merge Tool');
+    window.removeEventListener('settings-changed', listener);
+
+    // The backend treats a missing key as a benign no-op, so the write is safe
+    // and the UI stays honest about what is configured.
+    const unsets = unsetCalls();
+    expect(unsets).to.have.lengthOf(1);
+    expect(unsets[0].args).to.include({ key: 'merge.tool' });
+    expect(eventFired, 'settings-changed dispatched').to.be.true;
+  });
+
+  it('does nothing when no repository is open', async () => {
+    const el = await renderDialog();
+    repositoryStore.getState().reset();
+    await el.updateComplete;
+
+    const select = document.createElement('select');
+    select.innerHTML = '<option value=""></option>';
+    select.value = '';
+    calls.length = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleMergeToolChange({ target: select } as unknown as Event);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).handleDiffToolChange({ target: select } as unknown as Event);
+
+    expect(unsetCalls(), 'no config write without an active repository').to.have.lengthOf(0);
+    expect(uiStore.getState().toasts, 'no toast').to.have.lengthOf(0);
   });
 });

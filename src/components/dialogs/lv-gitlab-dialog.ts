@@ -761,8 +761,39 @@ export class LvGitLabDialog extends LitElement {
       this.selectedAccountId = null;
       await this.loadInitialData();
     }
-    if (changedProperties.has('repositoryPath') && this.repositoryPath && this.open) {
-      await this.detectRepo();
+    if (changedProperties.has('repositoryPath')) {
+      // The dialog is repo-independent (it stays open across the last tab close),
+      // so an empty path must clear the previously detected repo. Otherwise the
+      // repo-backed tabs keep rendering and acting on the closed repository.
+      // The create-* drafts belong to the repository they were typed against,
+      // so they go too -- otherwise a draft left on screen is submitted into
+      // whichever repository the dialog is repointed at.
+      this.resetRepoScopedDrafts();
+      if (!this.repositoryPath) {
+        this.detectedRepo = null;
+      } else if (this.open) {
+        await this.detectRepo();
+      }
+    }
+  }
+
+  /**
+   * Drop every create-* draft and leave any create-* tab. Called when
+   * repositoryPath changes, because those drafts are scoped to the repository
+   * they were composed against while the create handlers guard only on
+   * detectedRepo, which is re-derived from whatever repository is now current.
+   */
+  private resetRepoScopedDrafts(): void {
+    this.createMrTitle = '';
+    this.createMrDescription = '';
+    this.createMrSource = '';
+    this.createMrTarget = '';
+    this.createMrDraft = false;
+    this.createIssueTitle = '';
+    this.createIssueDescription = '';
+    this.createIssueLabels = [];
+    if (this.activeTab.startsWith('create-')) {
+      this.activeTab = 'connection';
     }
   }
 
@@ -854,13 +885,24 @@ export class LvGitLabDialog extends LitElement {
   }
 
   /**
-   * Get the token for the currently selected account
+   * Get the token for the currently selected account, refreshing an expiring
+   * OAuth access token first (GitLab OAuth access tokens last ~2h, so without
+   * this a signed-in account reads as disconnected on the next open). Personal
+   * access tokens have no OAuth bundle and are returned unchanged.
    */
   private async getSelectedAccountToken(): Promise<string | null> {
-    if (this.selectedAccountId) {
-      return credentialService.getAccountToken('gitlab', this.selectedAccountId);
-    }
-    return null;
+    if (!this.selectedAccountId) return null;
+    // Refresh against the instance the account was created on — a detected repo
+    // on a DIFFERENT instance must not redirect the refresh grant.
+    const account = getAccountById(this.selectedAccountId);
+    const instanceUrl =
+      account?.config.type === 'gitlab' ? account.config.instanceUrl : this.instanceUrlInput;
+    return credentialService.getFreshAccountToken(
+      'gitlab',
+      this.selectedAccountId,
+      'gitlab',
+      instanceUrl || undefined
+    );
   }
 
   /**
@@ -917,7 +959,14 @@ export class LvGitLabDialog extends LitElement {
   private async detectRepo(): Promise<void> {
     if (!this.repositoryPath) return;
 
-    const result = await gitService.detectGitLabRepo(this.repositoryPath);
+    // The dialog outlives the repository -- it stays open when the last tab
+    // closes -- so a detect issued for one path can resolve after the path has
+    // changed. Dropping the stale result stops the closed (or previously
+    // selected) repository from being re-detected and re-loaded over the
+    // current one.
+    const requestedPath = this.repositoryPath;
+    const result = await gitService.detectGitLabRepo(requestedPath);
+    if (this.repositoryPath !== requestedPath) return;
     if (result.success && result.data) {
       this.detectedRepo = result.data;
       this.instanceUrlInput = result.data.instanceUrl;

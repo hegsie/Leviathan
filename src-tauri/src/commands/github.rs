@@ -380,6 +380,48 @@ fn parse_github_url(url: &str) -> Option<(String, String)> {
 }
 
 // ============================================================================
+// Pagination Helpers
+// ============================================================================
+
+/// Maximum `/issues` pages fetched to fill one page of real issues. The issues
+/// endpoint returns pull requests too and they are filtered out below, so a
+/// pull-request-heavy repository can hand back a full API page containing no
+/// issues at all; the walk keeps going in that case, but never past this many
+/// requests.
+const MAX_ISSUE_PAGE_FETCHES: u32 = 5;
+
+/// Maximum label pages collected. Labels feed a picker that has no paging of
+/// its own, so the command gathers the pages itself rather than truncating the
+/// list at the first one.
+const MAX_LABEL_PAGE_FETCHES: u32 = 5;
+
+/// Pagination query pairs shared by the list endpoints. GitHub pages are
+/// 1-based, so anything lower means the first page.
+fn pagination_query(per_page: u32, page: Option<u32>) -> [(&'static str, String); 2] {
+    [
+        ("per_page", per_page.to_string()),
+        ("page", page.unwrap_or(1).max(1).to_string()),
+    ]
+}
+
+/// The page to request after `page` returned `raw_len` entries, or `None` when
+/// GitHub returned a short page — the list ends there.
+fn next_page_after(page: u32, raw_len: usize, per_page: u32) -> Option<u32> {
+    if per_page > 0 && raw_len >= per_page as usize {
+        Some(page + 1)
+    } else {
+        None
+    }
+}
+
+/// Whether the issue walk should spend another request: the page of results is
+/// not full yet (pull requests filtered out of `/issues` can leave it short or
+/// even empty) and the request budget is not spent.
+fn should_fetch_more_issues(collected: usize, per_page: u32, fetches: u32) -> bool {
+    collected < per_page as usize && fetches < MAX_ISSUE_PAGE_FETCHES
+}
+
+// ============================================================================
 // Pull Request Commands
 // ============================================================================
 
@@ -390,6 +432,7 @@ pub async fn list_pull_requests(
     repo: String,
     state: Option<String>,
     per_page: Option<u32>,
+    page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<PullRequestSummary>> {
     let token = resolve_github_token(token).await?;
@@ -403,7 +446,8 @@ pub async fn list_pull_requests(
             "{}/repos/{}/{}/pulls",
             GITHUB_API_BASE, owner, repo
         ))
-        .query(&[("state", &state), ("per_page", &per_page.to_string())])
+        .query(&[("state", state.as_str())])
+        .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", "Leviathan-Git-Client")
         .header("Accept", "application/vnd.github+json")
@@ -846,6 +890,7 @@ pub async fn get_workflow_runs(
     repo: String,
     branch: Option<String>,
     per_page: Option<u32>,
+    page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<WorkflowRun>> {
     let token = resolve_github_token(token).await?;
@@ -858,7 +903,7 @@ pub async fn get_workflow_runs(
             "{}/repos/{}/{}/actions/runs",
             GITHUB_API_BASE, owner, repo
         ))
-        .query(&[("per_page", per_page.to_string())])
+        .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", "Leviathan-Git-Client")
         .header("Accept", "application/vnd.github+json")
@@ -1066,6 +1111,19 @@ pub struct IssueSummary {
     pub body: Option<String>,
 }
 
+/// One page of issues plus the cursor for the next request.
+///
+/// `/issues` returns pull requests alongside issues and they are filtered out
+/// when the page is mapped, so the number of issues in a page says nothing
+/// about whether more exist — a full API page of pull requests yields none at
+/// all. `next_page` carries that answer instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuePage {
+    pub issues: Vec<IssueSummary>,
+    pub next_page: Option<u32>,
+}
+
 /// Issue comment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1093,6 +1151,12 @@ pub struct CreateIssueInput {
 // ============================================================================
 
 /// List issues for a repository
+///
+/// The `/issues` endpoint returns pull requests alongside issues and they are
+/// filtered out here, so a single API page can yield few issues or none at
+/// all. The command keeps walking pages until it has a full page of real
+/// issues (bounded by `MAX_ISSUE_PAGE_FETCHES`) and reports where the caller
+/// should resume in `next_page`.
 #[command]
 pub async fn list_issues(
     owner: String,
@@ -1100,42 +1164,13 @@ pub async fn list_issues(
     state: Option<String>,
     labels: Option<String>,
     per_page: Option<u32>,
+    page: Option<u32>,
     token: Option<String>,
-) -> Result<Vec<IssueSummary>> {
+) -> Result<IssuePage> {
     let token = resolve_github_token(token).await?;
 
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
-
-    let client = reqwest::Client::new();
-    let mut request = client
-        .get(format!(
-            "{}/repos/{}/{}/issues",
-            GITHUB_API_BASE, owner, repo
-        ))
-        .query(&[("state", &state), ("per_page", &per_page.to_string())])
-        .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-
-    if let Some(labels) = labels {
-        request = request.query(&[("labels", labels)]);
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e)))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
-            "GitHub API error {}: {}",
-            status, body
-        )));
-    }
 
     #[derive(Deserialize)]
     struct ApiIssue {
@@ -1171,55 +1206,106 @@ pub async fn list_issues(
         description: Option<String>,
     }
 
-    let issues: Vec<ApiIssue> = response
-        .json()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse issues: {}", e)))?;
+    let client = reqwest::Client::new();
+    let mut current = page.unwrap_or(1).max(1);
+    let mut collected: Vec<IssueSummary> = Vec::new();
+    let mut fetches = 0u32;
 
-    // Filter out pull requests (they appear in issues API)
-    Ok(issues
-        .into_iter()
-        .filter(|i| i.pull_request.is_none())
-        .map(|issue| IssueSummary {
-            number: issue.number,
-            title: issue.title,
-            state: issue.state,
-            user: GitHubUser {
-                login: issue.user.login,
-                id: issue.user.id,
-                avatar_url: issue.user.avatar_url,
-                name: issue.user.name,
-                email: issue.user.email,
-            },
-            labels: issue
-                .labels
+    let next_page = loop {
+        let mut request = client
+            .get(format!(
+                "{}/repos/{}/{}/issues",
+                GITHUB_API_BASE, owner, repo
+            ))
+            .query(&[("state", state.as_str())])
+            .query(&pagination_query(per_page, Some(current)))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "Leviathan-Git-Client")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+
+        if let Some(labels) = labels.as_ref() {
+            request = request.query(&[("labels", labels)]);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to fetch issues: {}", e))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LeviathanError::OperationFailed(format!(
+                "GitHub API error {}: {}",
+                status, body
+            )));
+        }
+
+        let issues: Vec<ApiIssue> = response.json().await.map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to parse issues: {}", e))
+        })?;
+
+        fetches += 1;
+        // The raw page length decides whether GitHub has more; the filtered
+        // length decides whether this page is worth showing to the user.
+        let raw_len = issues.len();
+
+        // Filter out pull requests (they appear in issues API)
+        collected.extend(
+            issues
                 .into_iter()
-                .map(|l| Label {
-                    id: l.id,
-                    name: l.name,
-                    color: l.color,
-                    description: l.description,
-                })
-                .collect(),
-            assignees: issue
-                .assignees
-                .into_iter()
-                .map(|u| GitHubUser {
-                    login: u.login,
-                    id: u.id,
-                    avatar_url: u.avatar_url,
-                    name: u.name,
-                    email: u.email,
-                })
-                .collect(),
-            comments: issue.comments,
-            created_at: issue.created_at,
-            updated_at: issue.updated_at,
-            closed_at: issue.closed_at,
-            html_url: issue.html_url,
-            body: issue.body,
-        })
-        .collect())
+                .filter(|i| i.pull_request.is_none())
+                .map(|issue| IssueSummary {
+                    number: issue.number,
+                    title: issue.title,
+                    state: issue.state,
+                    user: GitHubUser {
+                        login: issue.user.login,
+                        id: issue.user.id,
+                        avatar_url: issue.user.avatar_url,
+                        name: issue.user.name,
+                        email: issue.user.email,
+                    },
+                    labels: issue
+                        .labels
+                        .into_iter()
+                        .map(|l| Label {
+                            id: l.id,
+                            name: l.name,
+                            color: l.color,
+                            description: l.description,
+                        })
+                        .collect(),
+                    assignees: issue
+                        .assignees
+                        .into_iter()
+                        .map(|u| GitHubUser {
+                            login: u.login,
+                            id: u.id,
+                            avatar_url: u.avatar_url,
+                            name: u.name,
+                            email: u.email,
+                        })
+                        .collect(),
+                    comments: issue.comments,
+                    created_at: issue.created_at,
+                    updated_at: issue.updated_at,
+                    closed_at: issue.closed_at,
+                    html_url: issue.html_url,
+                    body: issue.body,
+                }),
+        );
+
+        match next_page_after(current, raw_len, per_page) {
+            Some(n) if should_fetch_more_issues(collected.len(), per_page, fetches) => current = n,
+            next => break next,
+        }
+    };
+
+    Ok(IssuePage {
+        issues: collected,
+        next_page,
+    })
 }
 
 /// Get issue details
@@ -1745,6 +1831,10 @@ pub async fn add_issue_comment(
 }
 
 /// Get repository labels
+///
+/// The label picker this feeds has no paging of its own, so a repository with
+/// more labels than one API page would silently lose the rest. The command
+/// collects the pages itself, bounded by `MAX_LABEL_PAGE_FETCHES`.
 #[command]
 pub async fn get_repo_labels(
     owner: String,
@@ -1756,30 +1846,6 @@ pub async fn get_repo_labels(
 
     let per_page = per_page.unwrap_or(100);
 
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!(
-            "{}/repos/{}/{}/labels",
-            GITHUB_API_BASE, owner, repo
-        ))
-        .query(&[("per_page", per_page.to_string())])
-        .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to fetch labels: {}", e)))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
-            "GitHub API error {}: {}",
-            status, body
-        )));
-    }
-
     #[derive(Deserialize)]
     struct ApiLabel {
         id: u64,
@@ -1788,20 +1854,57 @@ pub async fn get_repo_labels(
         description: Option<String>,
     }
 
-    let labels: Vec<ApiLabel> = response
-        .json()
-        .await
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse labels: {}", e)))?;
+    let client = reqwest::Client::new();
+    let mut current = 1u32;
+    let mut fetches = 0u32;
+    let mut labels: Vec<Label> = Vec::new();
 
-    Ok(labels
-        .into_iter()
-        .map(|l| Label {
+    loop {
+        let response = client
+            .get(format!(
+                "{}/repos/{}/{}/labels",
+                GITHUB_API_BASE, owner, repo
+            ))
+            .query(&pagination_query(per_page, Some(current)))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "Leviathan-Git-Client")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| {
+                LeviathanError::OperationFailed(format!("Failed to fetch labels: {}", e))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(LeviathanError::OperationFailed(format!(
+                "GitHub API error {}: {}",
+                status, body
+            )));
+        }
+
+        let raw: Vec<ApiLabel> = response.json().await.map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to parse labels: {}", e))
+        })?;
+
+        fetches += 1;
+        let raw_len = raw.len();
+        labels.extend(raw.into_iter().map(|l| Label {
             id: l.id,
             name: l.name,
             color: l.color,
             description: l.description,
-        })
-        .collect())
+        }));
+
+        match next_page_after(current, raw_len, per_page) {
+            Some(n) if fetches < MAX_LABEL_PAGE_FETCHES => current = n,
+            _ => break,
+        }
+    }
+
+    Ok(labels)
 }
 
 // ============================================================================
@@ -1863,6 +1966,7 @@ pub async fn list_releases(
     owner: String,
     repo: String,
     per_page: Option<u32>,
+    page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<ReleaseSummary>> {
     let token = resolve_github_token(token).await?;
@@ -1875,7 +1979,7 @@ pub async fn list_releases(
             "{}/repos/{}/{}/releases",
             GITHUB_API_BASE, owner, repo
         ))
-        .query(&[("per_page", per_page.to_string())])
+        .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", "Leviathan-Git-Client")
         .header("Accept", "application/vnd.github+json")
@@ -2377,6 +2481,93 @@ mod tests {
         assert!(!status.connected);
         assert!(status.user.is_none());
         assert!(status.scopes.is_empty());
+    }
+
+    // ========================================================================
+    // List Pagination Tests
+    // ========================================================================
+
+    /// Every list request must carry a `page` param; with no page asked for it
+    /// is the first one.
+    #[test]
+    fn test_pagination_query_defaults_to_first_page() {
+        let query = pagination_query(30, None);
+        assert_eq!(query[0], ("per_page", "30".to_string()));
+        assert_eq!(query[1], ("page", "1".to_string()));
+    }
+
+    /// A requested page reaches the API verbatim — that is what makes page 2
+    /// of a list reachable at all.
+    #[test]
+    fn test_pagination_query_uses_requested_page() {
+        let query = pagination_query(30, Some(4));
+        assert_eq!(query[1], ("page", "4".to_string()));
+    }
+
+    /// GitHub pages are 1-based; page 0 would silently repeat page 1, so it is
+    /// clamped instead of forwarded.
+    #[test]
+    fn test_pagination_query_clamps_zero_to_first_page() {
+        let query = pagination_query(30, Some(0));
+        assert_eq!(query[1], ("page", "1".to_string()));
+    }
+
+    /// A full page means GitHub may hold more, so the list continues.
+    #[test]
+    fn test_next_page_after_full_page_continues() {
+        assert_eq!(next_page_after(2, 30, 30), Some(3));
+    }
+
+    /// A short page is the end of the list — no further request, and no
+    /// "Load more" offered to the user.
+    #[test]
+    fn test_next_page_after_short_page_ends_list() {
+        assert_eq!(next_page_after(2, 12, 30), None);
+        assert_eq!(next_page_after(1, 0, 30), None);
+    }
+
+    /// A `per_page` of zero must not loop forever on empty pages.
+    #[test]
+    fn test_next_page_after_zero_per_page_ends_list() {
+        assert_eq!(next_page_after(1, 0, 0), None);
+    }
+
+    /// The issue undercount: an API page made up entirely of pull requests
+    /// leaves zero issues collected. Stopping there is what rendered
+    /// "No open issues" for a repository that has them.
+    #[test]
+    fn test_should_fetch_more_issues_when_page_held_only_pull_requests() {
+        assert!(should_fetch_more_issues(0, 30, 1));
+    }
+
+    /// Once a full page of real issues is collected the walk stops.
+    #[test]
+    fn test_should_fetch_more_issues_stops_once_page_is_full() {
+        assert!(!should_fetch_more_issues(30, 30, 1));
+    }
+
+    /// A repository of nothing but pull requests must not walk forever.
+    #[test]
+    fn test_should_fetch_more_issues_stops_at_request_budget() {
+        assert!(!should_fetch_more_issues(0, 30, MAX_ISSUE_PAGE_FETCHES));
+    }
+
+    /// The issue page cursor crosses the Tauri boundary as camelCase, like
+    /// every other field the frontend reads.
+    #[test]
+    fn test_issue_page_serializes_next_page_as_camel_case() {
+        let page = IssuePage {
+            issues: vec![],
+            next_page: Some(2),
+        };
+
+        let json = serde_json::to_string(&page).expect("serialize failed");
+        assert!(json.contains("\"nextPage\":2"), "unexpected json: {}", json);
+        assert!(
+            !json.contains("next_page"),
+            "unexpected snake_case: {}",
+            json
+        );
     }
 
     // ========================================================================

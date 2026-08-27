@@ -5,6 +5,7 @@
  */
 
 let failingCommands: Set<string> = new Set();
+let commandOverrides: Record<string, unknown> = {};
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 
@@ -14,6 +15,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
   if (failingCommands.has(command)) {
     throw { code: 'COMMAND_ERROR', message: 'Operation failed' };
   }
+
+  if (command in commandOverrides) return commandOverrides[command];
 
   switch (command) {
     case 'get_tags':
@@ -41,6 +44,56 @@ import type { LvChangelogDialog } from '../lv-changelog-dialog.ts';
 describe('lv-changelog-dialog', () => {
   beforeEach(() => {
     failingCommands = new Set();
+    commandOverrides = {};
+  });
+
+  it('names the unavailable provider instead of claiming none is configured', async () => {
+    // A provider IS selected in Settings; it is just unreachable. Since a
+    // selected provider is never substituted, the generic "configure one"
+    // warning would send the user looking for a problem that is not there.
+    commandOverrides = {
+      is_ai_available: false,
+      ai_unavailable_reason: {
+        reason:
+          'Anthropic Claude is not available. Please check its API key in Settings, or select a different provider.',
+        providerSelected: true,
+      },
+    };
+
+    const el = await fixture<LvChangelogDialog>(
+      html`<lv-changelog-dialog .repositoryPath=${'/test/repo'}></lv-changelog-dialog>`,
+    );
+    await el.open();
+    await el.updateComplete;
+
+    const warning = el.shadowRoot!.querySelector('.ai-warning');
+    expect(warning, 'warning rendered').to.not.be.null;
+    expect(warning!.textContent).to.include('Anthropic Claude');
+    expect(warning!.textContent).to.include('API key');
+  });
+
+  it('falls back to the generic warning when no reason is available', async () => {
+    commandOverrides = { is_ai_available: false, ai_unavailable_reason: null };
+
+    const el = await fixture<LvChangelogDialog>(
+      html`<lv-changelog-dialog .repositoryPath=${'/test/repo'}></lv-changelog-dialog>`,
+    );
+    await el.open();
+    await el.updateComplete;
+
+    const warning = el.shadowRoot!.querySelector('.ai-warning');
+    expect(warning, 'warning rendered').to.not.be.null;
+    expect(warning!.textContent).to.include('No AI provider available');
+  });
+
+  it('shows no AI warning while AI is usable', async () => {
+    const el = await fixture<LvChangelogDialog>(
+      html`<lv-changelog-dialog .repositoryPath=${'/test/repo'}></lv-changelog-dialog>`,
+    );
+    await el.open();
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('.ai-warning')).to.be.null;
   });
 
   it('renders the modal', async () => {

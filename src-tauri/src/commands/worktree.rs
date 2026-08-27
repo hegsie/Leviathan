@@ -27,6 +27,8 @@ pub struct Worktree {
     pub is_bare: bool,
     /// Whether this worktree is prunable (stale)
     pub is_prunable: bool,
+    /// Whether this worktree is the one the caller's `path` points at
+    pub is_current: bool,
 }
 
 /// Helper to run git commands
@@ -88,6 +90,7 @@ pub async fn get_worktrees(path: String) -> Result<Vec<Worktree>> {
                 lock_reason: None,
                 is_bare: false,
                 is_prunable: false,
+                is_current: false,
             });
         } else if let Some(ref mut wt) = current_worktree {
             if line.starts_with("HEAD ") {
@@ -124,6 +127,23 @@ pub async fn get_worktrees(path: String) -> Result<Vec<Worktree>> {
     // Mark the first worktree as main (the original)
     if let Some(first) = worktrees.first_mut() {
         first.is_main = true;
+    }
+
+    // Resolve, don't compare spellings. The frontend guards `git worktree
+    // remove` against the worktree the app currently has OPEN, and a string
+    // compare cannot answer that: git prints Windows paths with forward slashes
+    // (C:/work/repo) where the OS file dialog hands back C:\work\repo, and a
+    // repo opened under /var is the same directory git prints as /private/var.
+    // Both sides go through canonicalize here, the only place the filesystem
+    // can answer. Falling back to the raw strings when either side will not
+    // resolve keeps a vanished (prunable) worktree from being mistaken for the
+    // open one — the fallback can only ever say "no".
+    let canonical_repo = std::fs::canonicalize(repo_path).ok();
+    for wt in &mut worktrees {
+        wt.is_current = match (&canonical_repo, std::fs::canonicalize(&wt.path).ok()) {
+            (Some(repo), Some(resolved)) => *repo == resolved,
+            _ => wt.path == path,
+        };
     }
 
     Ok(worktrees)
@@ -368,6 +388,56 @@ mod tests {
         assert_eq!(worktrees.len(), 1);
         assert!(worktrees[0].is_main);
         assert!(worktrees[0].head_oid.is_some());
+        assert!(worktrees[0].is_current);
+    }
+
+    /// The path the app was opened at and the path git prints can be two
+    /// spellings of the same directory — the reason `is_current` is resolved
+    /// here instead of string-compared in the dialog.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_worktrees_marks_current_through_a_symlink() {
+        let repo = TestRepo::with_initial_commit();
+        let link_dir = TempDir::new().unwrap();
+        let link = link_dir.path().join("repo-link");
+        std::os::unix::fs::symlink(&repo.path, &link).unwrap();
+
+        let passed = link.to_string_lossy().to_string();
+        let worktrees = get_worktrees(passed.clone()).await.unwrap();
+
+        assert_ne!(
+            worktrees[0].path, passed,
+            "git prints its own resolved path, so the spellings really do differ"
+        );
+        assert!(
+            worktrees[0].is_current,
+            "the worktree we opened must be marked current"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_worktrees_marks_only_the_opened_worktree_current() {
+        let repo = TestRepo::with_initial_commit();
+        let wt_dir = TempDir::new().unwrap();
+        let worktree_path = wt_dir.path().join("linked");
+        add_worktree_cli(&repo.path, &worktree_path, "linked-branch");
+
+        // `git worktree list` always prints the main worktree first, wherever
+        // it runs — so "first" never means "the one that is open".
+        let from_main = get_worktrees(repo.path_str()).await.unwrap();
+        assert_eq!(from_main.len(), 2);
+        assert!(from_main[0].is_main && from_main[0].is_current);
+        assert!(!from_main[1].is_current);
+
+        let from_linked = get_worktrees(worktree_path.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        assert_eq!(from_linked.len(), 2);
+        assert!(
+            !from_linked[0].is_current,
+            "the main worktree is not the one we opened"
+        );
+        assert!(from_linked[1].is_current);
     }
 
     #[tokio::test]
@@ -629,6 +699,7 @@ mod tests {
             lock_reason: None,
             is_bare: false,
             is_prunable: false,
+            is_current: false,
         };
 
         assert_eq!(worktree.path, "/path/to/worktree");
@@ -651,6 +722,7 @@ mod tests {
             lock_reason: Some("Ongoing work".to_string()),
             is_bare: false,
             is_prunable: false,
+            is_current: false,
         };
 
         assert!(worktree.is_locked);
