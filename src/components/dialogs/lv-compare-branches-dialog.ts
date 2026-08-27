@@ -283,6 +283,7 @@ export class LvCompareBranchesDialog extends LitElement {
     if (this.isOpen) {
       if (compareRef) {
         this.compareRef = compareRef;
+        this.resolveBaseCollision();
         this.comparison = null;
         this.error = '';
       }
@@ -343,6 +344,19 @@ export class LvCompareBranchesDialog extends LitElement {
   }
 
   /**
+   * Move `baseRef` off `compareRef` when a re-aim collides them, picking the
+   * first other loaded branch. Shared with the initial branch load's own
+   * collision correction so base/compare cannot silently become equal on
+   * either path — a re-entry that names the branch already on the base
+   * picker would otherwise leave both pickers on the same ref and Compare
+   * permanently disabled with no explanation.
+   */
+  private resolveBaseCollision(): void {
+    if (this.baseRef !== this.compareRef) return;
+    this.baseRef = this.branches.find((b) => b.name !== this.compareRef)?.name ?? this.baseRef;
+  }
+
+  /**
    * Fill the two pickers. Without a branch list there is nothing to compare,
    * so a failure here is shown in the dialog rather than only logged — the
    * dialog stays open, so the message goes inline like every other field
@@ -374,8 +388,7 @@ export class LvCompareBranchesDialog extends LitElement {
           // The caller can hand us the branch that is ALSO the default base.
           // Two identical pickers over a permanently disabled Compare button
           // is a dead end, so move the base off it instead.
-          this.baseRef =
-            result.data.find((b) => b.name !== this.compareRef)?.name ?? this.baseRef;
+          this.resolveBaseCollision();
         }
       } else {
         this.error = result.error?.message ?? 'Failed to load branches';

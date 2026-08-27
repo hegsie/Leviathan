@@ -263,6 +263,27 @@ describe('lv-compare-branches-dialog', () => {
     ).to.be.false;
   });
 
+  it('moves the base off a compare ref that collides on re-entry while already open', async () => {
+    // The command palette can re-fire open() with a new target while the
+    // dialog is already up. Naming the branch currently on the base picker
+    // must not silently leave both pickers on the same ref.
+    const el = await makeDialog();
+    await openAndSettle(el, 'feature');
+
+    const baseSelect = el.renderRoot.querySelector('#base-ref-select') as HTMLSelectElement;
+    expect(baseSelect.value, 'base is on the current branch before re-entry').to.equal('main');
+
+    await openAndSettle(el, 'main');
+
+    const compareSelect = el.renderRoot.querySelector('#compare-ref-select') as HTMLSelectElement;
+    expect(compareSelect.value).to.equal('main');
+    expect(baseSelect.value, 'base moved off the re-entry collision').to.not.equal('main');
+    expect(
+      (el.renderRoot.querySelector('.btn-primary') as HTMLButtonElement).disabled,
+      'Compare is usable',
+    ).to.be.false;
+  });
+
   it('drops a stale result when either ref is changed', async () => {
     const el = await makeDialog();
     await openAndSettle(el, 'feature');
