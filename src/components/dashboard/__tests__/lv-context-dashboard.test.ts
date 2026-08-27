@@ -72,6 +72,7 @@ function makeRepository(overrides: Partial<Repository> = {}): Repository {
     isValid: true,
     isBare: false,
     headRef: 'refs/heads/main',
+    detachedHeadOid: null,
     state: 'clean',
     isShallow: false,
     isPartialClone: false,
@@ -225,6 +226,31 @@ describe('lv-context-dashboard', () => {
       expect(identity).to.not.be.null;
       expect(identity!.textContent).to.include('John Doe');
       expect(identity!.textContent).to.include('john@work.com');
+    });
+
+    it('warns about a detached HEAD in the collapsed bar', async () => {
+      setupStores({
+        repository: makeRepository({
+          headRef: 'HEAD',
+          detachedHeadOid: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+        }),
+        currentBranch: null,
+      });
+      const el = await renderDashboard();
+
+      const chip = el.shadowRoot!.querySelector('.dashboard-compact .detached-head');
+      expect(chip).to.not.be.null;
+      expect(chip!.textContent).to.include('Detached HEAD @ a1b2c3d');
+      expect(chip!.getAttribute('title')).to.include(
+        'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+      );
+    });
+
+    it('shows no detached warning while on a branch', async () => {
+      setupStores();
+      const el = await renderDashboard();
+
+      expect(el.shadowRoot!.querySelector('.detached-head')).to.be.null;
     });
 
     it('shows profile color dot in compact view', async () => {
@@ -641,6 +667,288 @@ describe('lv-context-dashboard', () => {
       await el.updateComplete;
 
       expect(uiStore.getState().toasts.filter((t) => t.type === 'error')).to.have.lengthOf(0);
+    });
+  });
+
+  // ── Backend parity for account/profile resolution ──────────────────────────
+  describe('repository account resolution (backend parity)', () => {
+    // getRelevantAccount()/getProfileAssignmentSource() must predict what the
+    // Rust `get_repository_preferred_account` / `url_matches_pattern` resolve,
+    // otherwise the dashboard advertises one account while PR and pipeline
+    // calls use another.
+
+    it('falls back to the global default account, not the first account of the type', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'First GitHub' }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+
+    it('uses the global default when no profile is active', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'First GitHub' }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: null,
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+
+    it('matches an account whose trailing /* pattern spans nested path segments', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({ id: 'account-1', name: 'Global GitHub', isDefault: true }),
+          makeAccount({
+            id: 'account-2',
+            name: 'Work-org GitHub',
+            urlPatterns: ['github.com/work-org/*'],
+          }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      expect(card, 'integration card rendered').to.not.be.null;
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Work-org GitHub');
+    });
+
+    it('labels the profile as matched by URL pattern for a nested remote', async () => {
+      setupStores({
+        profile: makeProfile({ urlPatterns: ['github.com/work-org/*'], isDefault: false }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const profileCard = el.shadowRoot!.querySelector('lv-profile-card');
+      expect(profileCard, 'profile card rendered').to.not.be.null;
+      const source = profileCard!.shadowRoot!.querySelector('.assignment-source');
+      expect(source!.textContent).to.include('Matched by URL pattern');
+    });
+
+    it('shows the connect card when no account of the detected provider exists', async () => {
+      setupStores({
+        accounts: [makeAccount({ id: 'gl-1', integrationType: 'gitlab', isDefault: true })],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/user/repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('lv-integration-card')).to.be.null;
+      const cardTitle = el.shadowRoot!.querySelector('.configure-card-title');
+      expect(cardTitle!.textContent).to.include('GitHub not connected');
+    });
+
+    it('does not let a non-matching pattern account hijack resolution', async () => {
+      setupStores({
+        accounts: [
+          makeAccount({
+            id: 'account-1',
+            name: 'Other-host GitHub',
+            urlPatterns: ['gitlab.com/work-org/*'],
+          }),
+          makeAccount({ id: 'account-2', name: 'Global GitHub', isDefault: true }),
+        ],
+        profile: makeProfile({ defaultAccounts: {} }),
+        remotes: [makeRemote({ url: 'https://github.com/work-org/team/some-repo.git' })],
+      });
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      const card = el.shadowRoot!.querySelector('lv-integration-card');
+      const name = card!.shadowRoot!.querySelector('.account-name');
+      expect(name!.textContent).to.include('Global GitHub');
+    });
+  });
+
+  // ── Profile-switch refresh + confirmation ──────────────────────────────────
+  // Applying a profile rewrites the repo's local git identity/signing config,
+  // so the switch must refresh listeners (the commit panel re-reads the author
+  // behind its commit-template placeholder) and confirm itself, exactly like
+  // the profile manager dialog's Apply and this component's fetch/pull/push.
+  describe('profile switch refresh + confirmation', () => {
+    const personalProfile = makeProfile({ id: 'profile-2', name: 'Personal' });
+
+    function captureRefresh(el: HTMLElement): { event: CustomEvent | null } {
+      const captured: { event: CustomEvent | null } = { event: null };
+      el.addEventListener('repository-refresh', (e: Event) => {
+        captured.event = e as CustomEvent;
+      });
+      return captured;
+    }
+
+    it('dispatches repository-refresh naming the repo the switch ran on', async () => {
+      setupStores({ profiles: [defaultProfile, personalProfile] });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      const captured = captureRefresh(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleSelectProfile(personalProfile);
+      await el.updateComplete;
+
+      expect(captured.event, 'a repository-refresh is dispatched').to.not.be.null;
+      // bubbles + composed so it escapes the shadow root and reaches both
+      // app-shell's @repository-refresh binding and its window listener.
+      expect(captured.event!.bubbles, 'event bubbles').to.be.true;
+      expect(captured.event!.composed, 'event is composed').to.be.true;
+      expect(captured.event!.detail.repoPath).to.equal('/test/repo');
+    });
+
+    it('confirms the switch with a success toast naming the profile', async () => {
+      setupStores({ profiles: [defaultProfile, personalProfile] });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      uiStore.setState({ toasts: [] });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleSelectProfile(personalProfile);
+      await el.updateComplete;
+
+      const successToasts = uiStore.getState().toasts.filter((t) => t.type === 'success');
+      expect(successToasts, 'a success toast is shown').to.have.lengthOf(1);
+      expect(successToasts[0].message).to.include('Personal');
+    });
+
+    it('names the repo the switch started in even if the user switches tabs mid-apply', async () => {
+      setupStores({ profiles: [defaultProfile, personalProfile] });
+      mockInvoke = async (command: string) => {
+        if (command === 'apply_unified_profile') {
+          // The user opens another repo while the IPC round-trip is in flight;
+          // addRepository activates it, so this.activeRepository changes before
+          // the await resolves.
+          repositoryStore
+            .getState()
+            .addRepository(makeRepository({ path: '/test/other', name: 'other' }));
+        }
+        return null;
+      };
+
+      const el = await renderDashboard();
+      const captured = captureRefresh(el);
+      clearHistory();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleSelectProfile(personalProfile);
+      await el.updateComplete;
+
+      const applyCall = invokeHistory.find((c) => c.command === 'apply_unified_profile');
+      expect(applyCall, 'the profile was applied').to.not.be.undefined;
+      expect((applyCall!.args as { path: string }).path).to.equal('/test/repo');
+
+      expect(captured.event, 'a repository-refresh is dispatched').to.not.be.null;
+      expect(captured.event!.detail.repoPath).to.equal('/test/repo');
+    });
+
+    it('emits no refresh and no success toast when the switch fails', async () => {
+      setupStores({ profiles: [defaultProfile, personalProfile] });
+      mockInvoke = async (command: string) => {
+        if (command === 'apply_unified_profile') {
+          throw new Error('git config is locked');
+        }
+        return null;
+      };
+
+      const el = await renderDashboard();
+      uiStore.setState({ toasts: [] });
+      const captured = captureRefresh(el);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleSelectProfile(personalProfile);
+      await el.updateComplete;
+
+      expect(captured.event, 'no refresh for a failed apply').to.be.null;
+      expect(
+        uiStore.getState().toasts.filter((t) => t.type === 'success'),
+        'no success toast for a failed apply'
+      ).to.have.lengthOf(0);
+      const errorToasts = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errorToasts.length, 'the failure is still surfaced').to.be.greaterThan(0);
+      expect(errorToasts[0].message).to.include('Failed to switch profile');
+    });
+  });
+
+  // ── Assignment-source badge sync after a profile switch ───────────────────
+  describe('profile switch assignment badge', () => {
+    it("shows 'Manually assigned' on the profile card after switching profile from the dropdown", async () => {
+      const personal = makeProfile({ id: 'profile-2', name: 'Personal' });
+      setupStores({
+        profiles: [defaultProfile, personal],
+        repositoryAssignments: {},
+      });
+      mockInvoke = async () => null;
+
+      const el = await renderDashboard();
+      const expandBtn = el.shadowRoot!.querySelector('.expand-btn') as HTMLButtonElement;
+      expandBtn.click();
+      await el.updateComplete;
+
+      // Before the switch: no assignment, no URL pattern, not the default
+      // profile — the card renders the fallback badge.
+      const card = el.shadowRoot!.querySelector('lv-profile-card') as HTMLElement & {
+        updateComplete: Promise<unknown>;
+      };
+      await card.updateComplete;
+      expect(card.shadowRoot!.querySelectorAll('.assignment-source.fallback')).to.have.lengthOf(1);
+
+      // Switch profile via the real dropdown.
+      const selectorBtn = el.shadowRoot!.querySelector(
+        '.profile-selector-btn'
+      ) as HTMLButtonElement;
+      selectorBtn.click();
+      await el.updateComplete;
+      const items = Array.from(
+        el.shadowRoot!.querySelectorAll('.dropdown-item')
+      ) as HTMLButtonElement[];
+      const personalItem = items.find((i) => i.textContent?.includes('Personal'));
+      expect(personalItem, 'the Personal entry is in the dropdown').to.not.be.undefined;
+      personalItem!.click();
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      await card.updateComplete;
+
+      // applyUnifiedProfile mirrors the backend's repo→profile assignment into
+      // the store, so the badge flips to 'Manually assigned' right away.
+      expect(card.shadowRoot!.querySelectorAll('.assignment-source.fallback')).to.have.lengthOf(0);
+      const badge = card.shadowRoot!.querySelector('.assignment-source');
+      expect(badge, 'assignment-source badge is rendered').to.not.be.null;
+      expect(badge!.textContent!.trim()).to.equal('Manually assigned');
     });
   });
 

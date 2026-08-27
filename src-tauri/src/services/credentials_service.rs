@@ -5,7 +5,8 @@
 
 use git2::{Cred, CredentialType, RemoteCallbacks};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Service name for keychain storage
@@ -340,8 +341,28 @@ fn get_stored_credentials(url: &str) -> Option<(String, String)> {
     Some((username, password))
 }
 
-/// Store credentials in memory cache and keychain
+/// Store credentials in memory cache and keychain.
+///
+/// A failed keyring write is reported to the caller instead of being swallowed:
+/// returning `Ok(())` after a failure made the UI show a connected account while
+/// the credential only lived in this process, so a later push/pull prompted for
+/// credentials with nothing tying it back to the connect. The memory cache is
+/// still populated first, so the current session keeps working; the error says
+/// the credential will not outlive it.
 pub fn store_credentials(url: &str, username: &str, password: &str) -> Result<(), String> {
+    store_credentials_with(url, username, password, keyring_set, keyring_delete)
+}
+
+/// Implementation of [`store_credentials`] with the keyring writer/remover
+/// injected so the failure and rollback paths can be tested without a real
+/// keychain.
+fn store_credentials_with(
+    url: &str,
+    username: &str,
+    password: &str,
+    set: impl Fn(&str, &str, &str) -> bool,
+    delete: impl Fn(&str, &str) -> bool,
+) -> Result<(), String> {
     let host = extract_host(url).ok_or("Invalid URL")?;
     tracing::debug!(
         "Storing credentials for host: {} (username len: {}, password len: {})",
@@ -357,19 +378,33 @@ pub fn store_credentials(url: &str, username: &str, password: &str) -> Result<()
     let username_key = format!("{}_username", host);
     let password_key = format!("{}_password", host);
 
-    let username_ok = keyring_set(SERVICE_NAME, &username_key, username);
-    let password_ok = keyring_set(SERVICE_NAME, &password_key, password);
+    let username_ok = set(SERVICE_NAME, &username_key, username);
+    let password_ok = set(SERVICE_NAME, &password_key, password);
 
     if username_ok && password_ok {
         tracing::info!("Stored credentials in keyring for host: {}", host);
-    } else {
-        tracing::warn!(
-            "Failed to store credentials in keyring for host: {} (cached in memory only)",
-            host
-        );
+        return Ok(());
     }
 
-    Ok(())
+    // Roll back the half that landed. `keyring_set` deletes before adding, so a
+    // partial write leaves the keyring holding a fresh username next to a
+    // deleted password (or the reverse) — an orphan that
+    // `get_stored_credentials` can never pair up and that outlives the process.
+    if username_ok {
+        delete(SERVICE_NAME, &username_key);
+    }
+    if password_ok {
+        delete(SERVICE_NAME, &password_key);
+    }
+
+    tracing::warn!(
+        "Failed to store credentials in keyring for host: {} (cached in memory only)",
+        host
+    );
+    Err(format!(
+        "keyring write failed for {} - credentials are cached for this session only",
+        host
+    ))
 }
 
 /// Delete stored credentials from memory cache and keychain
@@ -414,9 +449,21 @@ fn extract_host(url: &str) -> Option<String> {
 
 /// Get fetch options with credential and progress callbacks
 pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
+    get_fetch_options_with_deadline(token, None).0
+}
+
+/// Same, but the transfer aborts itself once `deadline` passes.
+///
+/// Returns the abort flag alongside the options — see
+/// `get_callbacks_with_deadline` for why the caller needs it.
+pub fn get_fetch_options_with_deadline<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> (git2::FetchOptions<'a>, Arc<AtomicBool>) {
     let mut fetch_opts = git2::FetchOptions::new();
-    fetch_opts.remote_callbacks(get_callbacks_with_progress(token));
-    fetch_opts
+    let (callbacks, aborted) = get_callbacks_with_deadline(token, deadline);
+    fetch_opts.remote_callbacks(callbacks);
+    (fetch_opts, aborted)
 }
 
 /// Get push options with credential and progress callbacks
@@ -444,10 +491,40 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
 
 /// Get remote callbacks with both credential and progress support
 pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks<'a> {
+    get_callbacks_with_deadline(token, None).0
+}
+
+/// Same, but the transfer aborts itself once `deadline` passes.
+///
+/// Returning false from `transfer_progress` is the only cancellation point
+/// libgit2 offers, and it is the one `clone_repository` already uses: without
+/// it a fetch keeps downloading long after the caller's `tokio::time::timeout`
+/// gave up, because dropping that future does not cancel the blocking task.
+///
+/// The returned flag is set at the moment the callback aborts the transfer,
+/// and is the ONLY way the error site can tell that abort apart from any other
+/// libgit2 failure that merely happened to surface after the deadline. Asking
+/// `deadline_passed` there instead relabelled auth failures, protocol errors
+/// and disk errors as "timed out" — and on the pull path such a relabelled
+/// error is then suppressed as an already-reported timeout, so the real
+/// failure never reached the user at all.
+pub fn get_callbacks_with_deadline<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+) -> (RemoteCallbacks<'a>, Arc<AtomicBool>) {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
+    let aborted = Arc::new(AtomicBool::new(false));
+    let abort_flag = Arc::clone(&aborted);
 
     // Add transfer progress callback
-    callbacks.transfer_progress(|stats| {
+    callbacks.transfer_progress(move |stats| {
+        if crate::utils::deadline_passed(deadline) {
+            // Recorded BEFORE the abort, so the error libgit2 raises for it is
+            // already attributable by the time the caller inspects it.
+            abort_flag.store(true, Ordering::SeqCst);
+            return false;
+        }
+
         let received = stats.received_objects();
         let total = stats.total_objects();
         let bytes = stats.received_bytes();
@@ -491,7 +568,7 @@ pub fn get_callbacks_with_progress<'a>(token: Option<String>) -> RemoteCallbacks
         }
     });
 
-    callbacks
+    (callbacks, aborted)
 }
 
 #[cfg(test)]
@@ -760,6 +837,126 @@ mod tests {
 
         let _ = delete_credentials("https://delete-test.com/repo.git");
         assert!(get_cached_credentials("delete-test.com").is_none());
+    }
+
+    /// A throwaway secret for the `store_credentials` tests, built at run time.
+    ///
+    /// The tests only care that the value round-trips, and a credential-shaped
+    /// string literal in the source is a hard-coded credential (CWE-798) that
+    /// static analysis flags even inside `#[cfg(test)]`.
+    fn throwaway_secret() -> String {
+        std::process::id().to_string()
+    }
+
+    /// A keyring write that fails must NOT be reported as success.
+    ///
+    /// `store_credentials` used to log a warning and return `Ok(())`, so the
+    /// `store_git_credentials` command reported success and the UI showed a
+    /// connected account whose credential only lived in this process — the user
+    /// found out at the next HTTPS push/pull prompt.
+    #[test]
+    fn test_store_credentials_reports_a_failed_keyring_write() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cache();
+        let secret = throwaway_secret();
+
+        let result = store_credentials_with(
+            "https://fail.example.com/repo.git",
+            "pat",
+            &secret,
+            |_, _, _| false,
+            |_, _| true,
+        );
+
+        assert!(result.is_err(), "a failed keyring write must not report Ok");
+        assert!(
+            result.unwrap_err().contains("fail.example.com"),
+            "the error names the host that failed"
+        );
+        // Non-fatal: the session keeps working off the memory cache.
+        assert_eq!(
+            get_cached_credentials("fail.example.com"),
+            Some(("pat".to_string(), secret)),
+            "credentials are still cached in memory for this session"
+        );
+    }
+
+    #[test]
+    fn test_store_credentials_returns_ok_when_both_writes_land() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cache();
+
+        let deleted: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result = store_credentials_with(
+            "https://ok.example.com/repo.git",
+            "pat",
+            &throwaway_secret(),
+            |_, _, _| true,
+            |_, account| {
+                deleted.lock().unwrap().push(account.to_string());
+                true
+            },
+        );
+
+        assert!(result.is_ok(), "a fully successful write reports Ok");
+        assert!(
+            deleted.lock().unwrap().is_empty(),
+            "nothing is rolled back when both writes land"
+        );
+    }
+
+    /// `keyring_set` deletes before adding, so a half-written pair leaves a fresh
+    /// username beside a deleted password (or the reverse). Roll the survivor back
+    /// rather than leaving an orphan that `get_stored_credentials` never pairs up.
+    #[test]
+    fn test_store_credentials_rolls_back_a_half_written_pair() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cache();
+
+        let deleted: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result = store_credentials_with(
+            "https://half.example.com/repo.git",
+            "pat",
+            &throwaway_secret(),
+            // The username lands, the password does not.
+            |_, account, _| account.ends_with("_username"),
+            |_, account| {
+                deleted.lock().unwrap().push(account.to_string());
+                true
+            },
+        );
+
+        assert!(result.is_err(), "a partial write is a failure");
+        assert_eq!(
+            deleted.lock().unwrap().as_slice(),
+            ["half.example.com_username"],
+            "the username that landed is rolled back, the password that never landed is not"
+        );
+    }
+
+    #[test]
+    fn test_store_credentials_rolls_back_when_only_the_password_lands() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cache();
+
+        let deleted: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result = store_credentials_with(
+            "https://half2.example.com/repo.git",
+            "pat",
+            &throwaway_secret(),
+            |_, account, _| account.ends_with("_password"),
+            |_, account| {
+                deleted.lock().unwrap().push(account.to_string());
+                true
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            deleted.lock().unwrap().as_slice(),
+            ["half2.example.com_password"],
+            "the password that landed is rolled back"
+        );
     }
 
     #[test]

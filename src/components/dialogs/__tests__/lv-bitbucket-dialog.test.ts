@@ -143,6 +143,8 @@ const mockAccount = createTestAccount({
 
 let connectionResponse: unknown = mockDisconnectedStatus;
 let detectedRepoResponse: unknown = mockDetectedRepo;
+/** Raw result of `oauth_refresh_token`; null → the refresh fails. */
+let refreshResponse: unknown = null;
 
 function setupMockInvoke(): void {
   keyringStore.clear();
@@ -193,6 +195,7 @@ function setupMockInvoke(): void {
 
     // OAuth
     if (command === 'get_oauth_client_id') return null;
+    if (command === 'oauth_refresh_token') return refreshResponse;
 
     return null;
   };
@@ -203,6 +206,7 @@ describe('lv-bitbucket-dialog', () => {
     invokeHistory.length = 0;
     connectionResponse = mockDisconnectedStatus;
     detectedRepoResponse = mockDetectedRepo;
+    refreshResponse = null;
     unifiedProfileStore.getState().reset();
     setupMockInvoke();
   });
@@ -247,6 +251,135 @@ describe('lv-bitbucket-dialog', () => {
         expect(repoName.textContent).to.include('test-workspace');
         expect(repoName.textContent).to.include('test-repo');
       }
+    });
+
+    // Regression: these provider dialogs are repo-independent (they stay open
+    // when the last repository tab closes), at which point repositoryPath goes
+    // to ''. The detected repo must be cleared, or the dialog keeps showing --
+    // and acting on -- the repository whose tab was just closed.
+    it('clears the detected repo when repositoryPath becomes empty', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header with a repository open'
+      ).to.equal(1);
+
+      // Last repository tab closed: the host rebinds repositoryPath to ''.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'stale repo header after the last repository tab closed'
+      ).to.equal(0);
+
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const repoTab = Array.from(tabs).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      repoTab.click();
+      await waitForLoad(el);
+
+      const emptyText = el.shadowRoot!.querySelector('.empty-state')?.textContent?.trim() ?? '';
+      expect(emptyText, 'repo-backed tab after the last repository tab closed').to.contain(
+        'No Bitbucket repository detected'
+      );
+    });
+
+    // Regression: the dialog outlives the repository, so a detect_bitbucket_repo
+    // issued for the repository whose tab has since closed can resolve
+    // afterwards. Its result must be dropped, or the repo header -- and the
+    // repo-backed loaders behind it -- come back for a repository that is gone.
+    it('ignores a repository detection that resolves after the repository closed', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Hold the detection open so it can be made to land late.
+      const baseInvoke = mockInvoke;
+      const pendingDetects: Array<() => void> = [];
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'detect_bitbucket_repo') {
+          await new Promise<void>((resolve) => pendingDetects.push(resolve));
+        }
+        return baseInvoke(command, args);
+      };
+
+      el.repositoryPath = '/mock/repo';
+      await waitForLoad(el);
+      expect(pendingDetects.length, 'detection in flight').to.equal(1);
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header while the detection is still in flight'
+      ).to.equal(0);
+
+      // Last repository tab closed while the detection was still in flight.
+      el.repositoryPath = '';
+      await waitForLoad(el);
+
+      pendingDetects.forEach((resolve) => resolve());
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('.repo-name').length,
+        'repo header restored by a detection for the closed repository'
+      ).to.equal(0);
+    });
+
+    // Regression: a create-* draft is scoped to the repository it was composed
+    // against, but the create handlers guard only on the detected repo. Leaving
+    // the draft on screen when the dialog is repointed would submit it into the
+    // new repository.
+    it('drops the pull request draft when the repository changes', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const listTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      listTab.click();
+      await waitForLoad(el);
+
+      const newButton = Array.from(el.shadowRoot!.querySelectorAll('button.btn')).find(
+        (b) => b.textContent?.trim() === '+ New PR'
+      ) as HTMLButtonElement;
+      expect(newButton === undefined, 'missing + New PR button').to.be.false;
+      newButton.click();
+      await waitForLoad(el);
+
+      const titleInput = el.shadowRoot!.querySelector(
+        'input[placeholder="Pull request title"]'
+      ) as HTMLInputElement | null;
+      expect(titleInput === null, 'missing draft title input').to.be.false;
+      titleInput!.value = 'Draft for the first repository';
+      titleInput!.dispatchEvent(new Event('input'));
+      await waitForLoad(el);
+
+      // The user switches to a different repository with the draft on screen.
+      el.repositoryPath = '/mock/other-repo';
+      await waitForLoad(el);
+
+      expect(
+        el.shadowRoot!.querySelectorAll('input[placeholder="Pull request title"]').length,
+        'submittable draft form after the repository changed'
+      ).to.equal(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((el as any).createPrTitle, 'retained draft title').to.equal('');
     });
 
     it('shows account selector when accounts exist', async () => {
@@ -1082,6 +1215,81 @@ describe('lv-bitbucket-dialog', () => {
     });
   });
 
+  describe('Cancelling a pending OAuth sign-in', () => {
+    /** Starts a Bitbucket sign-in that hangs waiting for the browser callback. */
+    async function startPendingSignIn(options: { cancelFails?: boolean } = {}) {
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return {
+            authorizeUrl: 'https://bitbucket.org/site/oauth2/authorize',
+            state: 'bb-state-1',
+            loopbackPort: 8085,
+          };
+        }
+        // Never resolves: the flow stays pending, as it does while the user is
+        // in the browser.
+        if (command === 'oauth_wait_for_callback') return new Promise(() => {});
+        if (command === 'oauth_cancel_flow' && options.cancelFails) {
+          throw new Error('No server found for port 8085');
+        }
+        return previousMock(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await el.updateComplete;
+
+      await oauthService.startOAuth('bitbucket', 'test-client-id');
+      await el.updateComplete;
+      return el;
+    }
+
+    afterEach(() => {
+      oauthService.cancelOAuth();
+    });
+
+    it('offers a Cancel button while pending and returns the form to idle', async () => {
+      const el = await startPendingSignIn();
+
+      const signInButton = el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement;
+      expect(signInButton.disabled, 'sign in is disabled while pending').to.be.true;
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton, 'a pending sign-in must offer a way out').to.exist;
+
+      invokeHistory.length = 0;
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el as unknown as { oauthState: { status: string } }).oauthState.status).to.equal('idle');
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(el.shadowRoot!.querySelector('.oauth-cancel'), 'cancel disappears once idle').to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'spinner is gone').to.not.exist;
+
+      const release = invokeHistory.find((h) => h.command === 'oauth_cancel_flow');
+      expect(release, 'the backend loopback server is released').to.exist;
+      expect(release!.args).to.deep.equal({ port: 8085 });
+    });
+
+    it('returns the dialog to idle even when the backend release fails', async () => {
+      const el = await startPendingSignIn({ cancelFails: true });
+
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton).to.exist;
+
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'no spinner remains').to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-status.error'), 'a failed release is not user-facing').to.not.exist;
+      expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+  });
+
   describe('OAuth completes after dialog closed', () => {
     it('persists the account and surfaces a toast instead of failing silently', async () => {
       connectionResponse = mockConnectedStatus;
@@ -1108,6 +1316,99 @@ describe('lv-bitbucket-dialog', () => {
 
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'success' && /Connected Bitbucket/.test(t.message))).to.be.true;
+    });
+  });
+  // Regression: Bitbucket OAuth access tokens expire in ~2h. The dialog read the
+  // raw stored access token once at open and reused that cached value for every
+  // API call, so a signed-in account read as disconnected on the next open and a
+  // long-open dialog kept using a token that had since expired.
+  describe('OAuth token refresh (regression)', () => {
+    function seedExpiringOAuthToken(): void {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'stale-access');
+      keyringStore.set(
+        'bitbucket_token_bb-acc-1_oauth',
+        JSON.stringify({
+          accessToken: 'stale-access',
+          refreshToken: 'r1',
+          expiresAt: Date.now() + 60_000,
+        })
+      );
+    }
+
+    function findInvoke(command: string): { command: string; args: unknown } | undefined {
+      return invokeHistory.find((h) => h.command === command);
+    }
+
+    it('refreshes an expiring OAuth access token on open', async () => {
+      seedExpiringOAuthToken();
+      refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const check = findInvoke('check_bitbucket_connection_with_token');
+      expect(check, 'connection was checked with a token').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('fresh-access');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['bb-acc-1']?.status
+      ).to.equal('connected');
+    });
+
+    it('re-reads the token for each API call instead of reusing the cached one', async () => {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'tok-1');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      // Another caller (e.g. a background refresh, or a push) rotated the stored
+      // credential while the dialog stayed open.
+      keyringStore.set('bitbucket_token_bb-acc-1', 'tok-2');
+      invokeHistory.length = 0;
+
+      await (el as unknown as { loadPullRequests: () => Promise<void> }).loadPullRequests();
+      await el.updateComplete;
+
+      const list = findInvoke('list_bitbucket_pull_requests');
+      expect(list, 'pull requests were requested').to.not.be.undefined;
+      expect((list!.args as { token: string }).token).to.equal('tok-2');
+    });
+
+    it('verifies the newly entered app password, not the stored credential', async () => {
+      keyringStore.set('bitbucket_token_bb-acc-1', 'bbapp:olduser:old-secret');
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const priv = el as unknown as {
+        usernameInput: string;
+        appPasswordInput: string;
+        selectedAccountId: string | null;
+        handleSaveCredentials: () => Promise<void>;
+      };
+      priv.selectedAccountId = 'bb-acc-1';
+      priv.usernameInput = 'newuser';
+      priv.appPasswordInput = 'new-secret';
+      invokeHistory.length = 0;
+
+      await priv.handleSaveCredentials();
+      await el.updateComplete;
+
+      const check = findInvoke('check_bitbucket_connection_with_token');
+      expect(check, 'the entered credential was verified').to.not.be.undefined;
+      expect((check!.args as { token: string }).token).to.equal('bbapp:newuser:new-secret');
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('bbapp:newuser:new-secret');
     });
   });
 });

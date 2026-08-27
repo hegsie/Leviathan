@@ -27,6 +27,35 @@ interface FileContextMenuState {
 }
 
 /**
+ * Render a working-tree path as a .gitignore pattern that matches THAT file and
+ * nothing else.
+ *
+ * Anchored with a leading slash so it resolves against the repo-root
+ * .gitignore — a bare `notes.txt` would also ignore `docs/notes.txt`. Glob
+ * metacharacters are escaped so a file literally called `a[1].txt` is not read
+ * back as a character class, and a trailing space is escaped because git strips
+ * unescaped trailing whitespace from a pattern (the rule would then miss the
+ * very file it was written for).
+ */
+function gitignorePatternForPath(path: string): string {
+  const escaped = path
+    .replace(/[\\*?[\]]/g, (c) => `\\${c}`)
+    .replace(/ $/, "\\ ");
+  return `/${escaped}`;
+}
+
+/**
+ * `*.log` for `logs/run.log`. Null when the file name carries no usable
+ * extension — `Makefile`, a dotfile like `.env`, or a name ending in a dot.
+ */
+function gitignoreExtensionPattern(path: string): string | null {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return null;
+  return `*.${name.slice(dot + 1).replace(/[\\*?[\]]/g, (c) => `\\${c}`)}`;
+}
+
+/**
  * File status component
  * Displays staged and unstaged changes with staging functionality
  */
@@ -659,6 +688,51 @@ export class LvFileStatus extends LitElement {
       );
     }
     return count;
+  }
+
+  /**
+   * Count only the files a tree node actually RENDERS — a collapsed folder
+   * renders none. The keyboard model (getAllVisibleFiles) numbers rows this
+   * way, so the data-index the rows carry has to be counted the same way;
+   * counting hidden files here put `.focused` on a different row than the one
+   * Enter/s/u acted on. `path` is the node's own full path.
+   */
+  private countVisibleTreeNodeFiles(
+    node: { file?: StatusEntry; children: Map<string, unknown> },
+    path: string,
+  ): number {
+    if (node.file) return 1;
+    if (!this.expandedFolders.has(path)) return 0;
+    let count = 0;
+    for (const [childName, child] of node.children.entries()) {
+      count += this.countVisibleTreeNodeFiles(
+        child as { file?: StatusEntry; children: Map<string, unknown> },
+        path ? `${path}/${childName}` : childName,
+      );
+    }
+    return count;
+  }
+
+  /**
+   * How many rows a section actually renders (collapsed folders hide theirs).
+   * `prebuiltTree` lets a caller that has already built this section's tree
+   * hand it over, so one render pass does not build the same tree twice.
+   */
+  private visibleFileCount(
+    files: StatusEntry[],
+    prebuiltTree?: Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >,
+  ): number {
+    if (this.viewMode !== "tree") return files.length;
+    const visible: StatusEntry[] = [];
+    this.collectVisibleFromNode(
+      prebuiltTree ?? this.buildFileTree(files),
+      "",
+      visible,
+    );
+    return visible.length;
   }
 
   /** Collect all file paths under a given directory prefix */
@@ -1719,6 +1793,30 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  /**
+   * Write a .gitignore rule for the context-menu file.
+   *
+   * Shaped like every sibling handler: the menu closes synchronously before the
+   * await, the working tree is reloaded on success, and a failure speaks
+   * through a toast rather than the console.
+   */
+  private async handleContextIgnore(pattern: string): Promise<void> {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const result = await gitService.addToGitignore(this.repositoryPath, [
+      pattern,
+    ]);
+    if (result.success) {
+      // add_to_gitignore skips a pattern that is already present, so this reads
+      // true whether the rule was written now or was already in the file.
+      showToast(`"${file.path}" is now ignored`, "success");
+      await this.loadStatus();
+    } else {
+      showToast(result.error?.message ?? "Failed to update .gitignore", "error");
+    }
+  }
+
   private handleContextViewDiff(): void {
     const file = this.contextMenu.file;
     if (!file) return;
@@ -2131,11 +2229,12 @@ export class LvFileStatus extends LitElement {
                   staged,
                   currentIndex,
                 );
-                currentIndex += this.countTreeNodeFiles(
+                currentIndex += this.countVisibleTreeNodeFiles(
                   childNode as {
                     file?: StatusEntry;
                     children: Map<string, unknown>;
                   },
+                  childPath,
                 );
                 return result;
               })}
@@ -2189,9 +2288,13 @@ export class LvFileStatus extends LitElement {
     files: StatusEntry[],
     staged: boolean,
     indexOffset: number,
+    prebuiltTree?: Map<
+      string,
+      { file?: StatusEntry; children: Map<string, unknown> }
+    >,
   ) {
     if (this.viewMode === "tree") {
-      const tree = this.buildFileTree(files);
+      const tree = prebuiltTree ?? this.buildFileTree(files);
       let currentIndex = indexOffset;
 
       return html`
@@ -2205,7 +2308,7 @@ export class LvFileStatus extends LitElement {
               staged,
               currentIndex,
             );
-            currentIndex += this.countTreeNodeFiles(node);
+            currentIndex += this.countVisibleTreeNodeFiles(node, name);
             return result;
           })}
         </ul>
@@ -2223,6 +2326,9 @@ export class LvFileStatus extends LitElement {
     if (!this.contextMenu.visible || !this.contextMenu.file) return nothing;
 
     const { x, y, isStaged } = this.contextMenu;
+    // Non-null past the early return above.
+    const file = this.contextMenu.file;
+    const extensionPattern = gitignoreExtensionPattern(file.path);
 
     return html`
       <div class="context-menu" role="menu" aria-label="File actions" style="left: ${x}px; top: ${y}px"
@@ -2329,6 +2435,48 @@ export class LvFileStatus extends LitElement {
           </svg>
           Copy file path
         </button>
+        ${!isStaged && file.status === "untracked"
+          ? html`
+              <div class="context-menu-divider" role="separator"></div>
+              <button
+                class="context-menu-item"
+                role="menuitem"
+                @click=${() =>
+                  this.handleContextIgnore(gitignorePatternForPath(file.path))}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="4.9" y1="4.9" x2="19.1" y2="19.1"></line>
+                </svg>
+                Add to .gitignore
+              </button>
+              ${extensionPattern
+                ? html`
+                    <button
+                      class="context-menu-item"
+                      role="menuitem"
+                      @click=${() => this.handleContextIgnore(extensionPattern)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                      >
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="4.9" y1="4.9" x2="19.1" y2="19.1"></line>
+                      </svg>
+                      Ignore all ${extensionPattern} files
+                    </button>
+                  `
+                : nothing}
+            `
+          : nothing}
         ${isStaged
           ? nothing
           : html`
@@ -2383,6 +2531,13 @@ export class LvFileStatus extends LitElement {
         </div>
       `;
     }
+
+    // The staged tree is needed twice below — once to render the staged rows,
+    // once to count them for the unstaged section's index offset. Build it once.
+    const stagedTree =
+      this.viewMode === "tree"
+        ? this.buildFileTree(this.stagedFiles)
+        : undefined;
 
     return html`
       <!-- Toolbar -->
@@ -2465,7 +2620,7 @@ export class LvFileStatus extends LitElement {
         </div>
         ${this.stagedExpanded ? this.renderSelectionActions(true) : nothing}
         ${this.stagedFiles.length > 0 && this.stagedExpanded
-          ? this.renderFileList(this.stagedFiles, true, 0)
+          ? this.renderFileList(this.stagedFiles, true, 0, stagedTree)
           : nothing}
       </div>
 
@@ -2524,7 +2679,9 @@ export class LvFileStatus extends LitElement {
           ? this.renderFileList(
               this.unstagedFiles,
               false,
-              this.stagedExpanded ? this.stagedFiles.length : 0,
+              this.stagedExpanded
+                ? this.visibleFileCount(this.stagedFiles, stagedTree)
+                : 0,
             )
           : nothing}
       </div>

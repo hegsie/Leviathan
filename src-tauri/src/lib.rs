@@ -24,6 +24,7 @@ use services::ai::AiState;
 use services::commit_index::SharedCommitIndex;
 use services::{
     create_ai_state, create_autofetch_state, create_update_state, CancellationRegistry,
+    RemoteOpRegistry,
 };
 
 /// Initialize the application
@@ -122,11 +123,12 @@ pub fn run() {
         .manage(create_autofetch_state())
         .manage(create_update_state())
         .manage(CancellationRegistry::default())
+        .manage(RemoteOpRegistry::default())
         .manage(SharedCommitIndex::default())
         .setup(|app| {
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
-            app.manage(create_ai_state(config_dir));
+            app.manage(create_ai_state(config_dir.clone()));
 
             // Initialize local AI state with models directory
             let models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
@@ -141,8 +143,20 @@ pub fn run() {
                 service.set_local_ai_state(local_ai_state);
             }
 
-            // Initialize MCP server state
-            app.manage(create_mcp_state());
+            // Initialize MCP server state from the saved configuration
+            let mcp_state = create_mcp_state(config_dir);
+            app.manage(mcp_state.clone());
+
+            // Restart the MCP server if it was running when the app last exited.
+            // A bind failure is recorded in the status so Settings can explain it.
+            tauri::async_runtime::spawn(async move {
+                let mut server = mcp_state.write().await;
+                if server.get_config().enabled {
+                    if let Err(e) = server.start().await {
+                        tracing::warn!("Failed to auto-start MCP server: {}", e);
+                    }
+                }
+            });
 
             // Initialize embedding index state
             let embedding_models_dir = app.path().app_data_dir().unwrap_or_default().join("models");
@@ -359,6 +373,7 @@ pub fn run() {
             commands::tags::create_tag,
             commands::tags::delete_tag,
             commands::tags::push_tag,
+            commands::tags::delete_remote_tag,
             commands::tags::edit_tag_message,
             commands::diff::get_diff,
             commands::diff::get_diff_with_options,
@@ -376,9 +391,11 @@ pub fn run() {
             commands::rewrite::cherry_pick,
             commands::rewrite::continue_cherry_pick,
             commands::rewrite::abort_cherry_pick,
+            commands::rewrite::skip_cherry_pick,
             commands::rewrite::revert,
             commands::rewrite::continue_revert,
             commands::rewrite::abort_revert,
+            commands::rewrite::skip_revert,
             commands::rewrite::reset,
             commands::rewrite::get_rebase_state,
             commands::rewrite::get_rebase_todo,
@@ -634,6 +651,7 @@ pub fn run() {
             commands::ai::auto_detect_ai_providers,
             commands::ai::generate_commit_message,
             commands::ai::is_ai_available,
+            commands::ai::ai_unavailable_reason,
             commands::ai::suggest_conflict_resolution,
             commands::ai::generate_changelog,
             commands::ai::analyze_staged_changes,
@@ -667,6 +685,7 @@ pub fn run() {
             commands::oauth::oauth_refresh_token,
             commands::oauth::oauth_wait_for_callback,
             commands::oauth::oauth_wait_for_github_callback,
+            commands::oauth::oauth_cancel_flow,
             commands::oauth::discover_oidc_provider,
             commands::oauth::decode_oidc_id_token,
             // Git Flow
@@ -787,11 +806,6 @@ pub fn run() {
             commands::clipboard::copy_to_clipboard,
             commands::clipboard::get_commit_info_for_copy,
             commands::clipboard::get_file_path_for_copy,
-            // Keyboard shortcuts
-            commands::shortcuts::get_keyboard_shortcuts,
-            commands::shortcuts::set_keyboard_shortcut,
-            commands::shortcuts::reset_keyboard_shortcuts,
-            commands::shortcuts::get_default_shortcuts,
             // Commit message validation
             commands::validation::validate_commit_message,
             commands::validation::get_commit_message_rules,
