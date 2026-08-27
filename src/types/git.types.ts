@@ -8,6 +8,12 @@ export interface Repository {
   isValid: boolean;
   isBare: boolean;
   headRef: string | null;
+  /**
+   * Commit HEAD points at when detached; null when HEAD is on a branch or
+   * unborn. `headRef` is the literal 'HEAD' while detached, so it names no
+   * commit.
+   */
+  detachedHeadOid: string | null;
   state: RepositoryState;
   isShallow: boolean;
   isPartialClone: boolean;
@@ -49,6 +55,17 @@ export interface Commit {
    * rather than the file's current path. Absent everywhere else.
    */
   path?: string;
+}
+
+/** One entry of a file's history: a commit plus the path the file had there. */
+export interface FileHistoryEntry {
+  commit: Commit;
+  /**
+   * Path the file had in that commit. Differs from the file's current path for
+   * commits older than a rename — diffing or blaming those under the current
+   * path fails, because the file did not exist under that name yet.
+   */
+  pathAtCommit: string;
 }
 
 export interface Signature {
@@ -641,6 +658,7 @@ export interface WorkspaceRepoStatus {
   isValidRepo: boolean;
   changedFilesCount: number;
   currentBranch: string | null;
+  isDetached: boolean;
   ahead: number;
   behind: number;
 }

@@ -24,6 +24,20 @@ pub struct Commit {
     pub path: Option<String>,
 }
 
+/// One entry of a file's history: the commit, plus the path the file had in
+/// that commit.
+///
+/// Following a rename backwards rewrites the path being tracked, so an entry
+/// older than the rename must carry its own path. Diffing or blaming such a
+/// commit under the file's CURRENT name fails — the file did not exist under
+/// that name yet — which turns every pre-rename row in the UI into a dead end.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryEntry {
+    pub commit: Commit,
+    pub path_at_commit: String,
+}
+
 /// Git signature (author/committer)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

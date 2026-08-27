@@ -1096,12 +1096,15 @@ export class LvProfileManagerDialog extends LitElement {
   }
 
   // D5: This and its sibling mutators (handleSaveAccount, handleDelete,
-  // handleDeleteGlobalAccount) intentionally dispatch NO change event. The
-  // Zustand unified-profile store subscription is the single source of truth for
-  // UI sync — these handlers call unifiedProfileService.* which updates the store,
-  // and subscribed components re-render. Do NOT add a CustomEvent here: there is
-  // no parent listener for it, so it would be an orphan event (CLAUDE.md
-  // "Event Dispatch Consistency").
+  // handleDeleteGlobalAccount) intentionally dispatch NO profile-change event.
+  // The Zustand unified-profile store subscription is the single source of truth
+  // for UI sync — these handlers call unifiedProfileService.* which updates the
+  // store, and subscribed components re-render. Do NOT add a profile-change
+  // CustomEvent here: there is no parent listener for it, so it would be an
+  // orphan event (CLAUDE.md "Event Dispatch Consistency"). The window-level
+  // `repository-refresh` below is a different thing: saving rewrites the open
+  // repository's .git/config, and app-shell listens for that event (same as
+  // handleApply).
   private async handleSave(): Promise<void> {
     if (!this.editingProfile) return;
 
@@ -1135,13 +1138,31 @@ export class LvProfileManagerDialog extends LitElement {
 
     try {
       const wasCreate = this.viewMode === 'create';
-      await unifiedProfileService.saveUnifiedProfile(profile);
-      showToast(wasCreate ? 'Profile created' : 'Profile saved', 'success');
+      const { failedRepositories } = await unifiedProfileService.saveUnifiedProfile(profile);
+      if (failedRepositories.length > 0) {
+        // Saving rewrites the git identity of every repository assigned to this
+        // profile. Name the ones that kept the old identity instead of showing a
+        // bare "saved" — they are still committing and signing as the profile
+        // was before this edit.
+        const names = failedRepositories.map((p) => this.formatRepoPath(p)).join(', ');
+        showToast(
+          `Profile saved, but ${failedRepositories.length} ${failedRepositories.length === 1 ? 'repository' : 'repositories'} kept the old identity: ${names}`,
+          'warning'
+        );
+      } else {
+        showToast(wasCreate ? 'Profile created' : 'Profile saved', 'success');
+      }
       // After creating a new profile, re-evaluate which profile applies to the
       // current repo. Without this, a freshly-created default profile sits in
       // the list but never becomes active until the user manually applies it.
       if (this.repoPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repoPath);
+        // If the open repo is assigned to the profile just saved, its
+        // .git/config was rewritten by the save — refresh so listeners re-read
+        // the identity now (same reason handleApply refreshes).
+        if (this.repositoryAssignments[this.repoPath] === profile.id) {
+          window.dispatchEvent(new CustomEvent('repository-refresh'));
+        }
       }
       // Changes are persisted — clear the dirty flag so navigating back doesn't
       // prompt to discard.

@@ -686,6 +686,8 @@ export class LvCommitPanel extends LitElement {
 
   // AI state
   @state() private aiAvailable: boolean = false;
+  /** Why AI is unavailable — names the selected provider when it is the one at fault. */
+  @state() private aiUnavailableReason: string = '';
   @state() private isGenerating: boolean = false;
   @state() private generationError: string | null = null;
 
@@ -871,6 +873,12 @@ export class LvCommitPanel extends LitElement {
 
   private async checkAiAvailability(): Promise<void> {
     this.aiAvailable = await aiService.isAiAvailable();
+    // A selected provider is never substituted, so "unavailable" usually means
+    // that one provider is unreachable rather than nothing being configured.
+    // Carry the reason so the tooltip can say which provider needs attention.
+    this.aiUnavailableReason = this.aiAvailable
+      ? ''
+      : ((await aiService.getAiUnavailableReason())?.reason ?? '');
     console.log('[lv-commit-panel] checkAiAvailability:', this.aiAvailable);
   }
 
@@ -1257,6 +1265,25 @@ export class LvCommitPanel extends LitElement {
     }
   }
 
+  /** Basename of a repo path, for naming an off-screen repo to the user. */
+  private repoLabel(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  }
+
+  /**
+   * Report a failed commit where the user will actually see it: the panel's
+   * own banner while it still shows the repo that failed, a repo-named toast
+   * once the user has tabbed away (the banner would otherwise blame the repo
+   * now on screen for a failure in a different one).
+   */
+  private reportCommitFailure(repoPath: string, message: string): void {
+    if (this.repositoryPath === repoPath) {
+      this.error = message;
+    } else {
+      showToast(`${this.repoLabel(repoPath)}: ${message}`, 'error');
+    }
+  }
+
   private async handleCommit(): Promise<void> {
     if (!this.canCommit) return;
 
@@ -1272,24 +1299,47 @@ export class LvCommitPanel extends LitElement {
     try {
       const message = this.buildCommitMessage();
 
-      const result = await gitService.createCommit(this.repositoryPath, {
+      const result = await gitService.createCommit(repoPath, {
         message,
         amend: this.amend,
       });
 
       if (result.success) {
         this.saveToHistory(message);
-        this.success = `Created commit ${result.data?.shortId}`;
-        this.summary = '';
-        this.description = '';
-        this.amend = false;
-        this.lastCommit = null;
-        this.originalSummary = '';
-        this.originalDescription = '';
 
-        // Notify parent to refresh
+        if (this.repositoryPath === repoPath) {
+          this.success = `Created commit ${result.data?.shortId}`;
+          this.summary = '';
+          this.description = '';
+          this.amend = false;
+          this.lastCommit = null;
+          this.originalSummary = '';
+          this.originalDescription = '';
+
+          // Clear success message after a delay
+          setTimeout(() => {
+            this.success = null;
+          }, 3000);
+        } else {
+          // The user switched tabs while create_commit was out, so this
+          // long-lived panel is bound to ANOTHER repo and willUpdate has
+          // already swapped that repo's draft into the fields. Clearing them
+          // here would wipe a draft that was never committed and hang our
+          // success banner off the wrong repo. Retire the committed repo's
+          // CACHED draft instead — willUpdate stashed the message we just
+          // committed there — and name the repo in a toast, since the panel
+          // is no longer showing it.
+          this.draftCache.delete(repoPath);
+          showToast(
+            `Created commit ${result.data?.shortId} in ${this.repoLabel(repoPath)}`,
+            'success'
+          );
+        }
+
+        // Notify parent to refresh. The originating repo rides along so
+        // forwarders can keep their own refresh pinned to it.
         this.dispatchEvent(new CustomEvent('commit-created', {
-          detail: { commit: result.data },
+          detail: { commit: result.data, repositoryPath: repoPath },
           bubbles: true,
           composed: true,
         }));
@@ -1297,21 +1347,19 @@ export class LvCommitPanel extends LitElement {
         // Trigger file status refresh immediately
         window.dispatchEvent(new CustomEvent('status-refresh'));
 
-        // Trigger graph refresh and badge update
-        window.dispatchEvent(new CustomEvent('repository-refresh'));
-
-        // Clear success message after a delay
-        setTimeout(() => {
-          this.success = null;
-        }, 3000);
+        // Trigger graph refresh and badge update. Names the repo the commit
+        // ran IN — captured before the await. Without it the host falls back to
+        // refreshing whichever tab is active, so a commit the user tabbed away
+        // from would leave its own repo stale until the file watcher noticed.
+        window.dispatchEvent(new CustomEvent('repository-refresh', { detail: { repoPath } }));
       } else if (!gitService.isNetworkGateRefusal(result.error)) {
         // A declined confirm — the pushed-amend warning, or the network gate —
         // is the user's own decision, already accounted for. Showing it in the
         // red error banner reports their click back to them as a failure.
-        this.error = result.error?.message ?? 'Failed to create commit';
+        this.reportCommitFailure(repoPath, result.error?.message ?? 'Failed to create commit');
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Unknown error';
+      this.reportCommitFailure(repoPath, err instanceof Error ? err.message : 'Unknown error');
     } finally {
       this.isCommitting = false;
       releaseRefOp(repoPath);
@@ -1334,7 +1382,7 @@ export class LvCommitPanel extends LitElement {
             ?disabled=${this.isGenerating || (this.aiAvailable && this.stagedCount === 0)}
             title=${this.aiAvailable
               ? (this.stagedCount === 0 ? 'Stage changes to generate a commit message' : 'Generate commit message using AI')
-              : (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages')}
+              : (this.aiUnavailableReason || (this.stagedCount > 0 ? 'Configure an AI provider in Settings' : 'Stage changes and configure AI to generate commit messages'))}
           >
             ${this.isGenerating ? html`
               <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

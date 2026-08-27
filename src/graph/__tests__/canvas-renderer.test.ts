@@ -530,3 +530,49 @@ describe('CanvasRenderer avatar cache', () => {
     renderer.destroy();
   });
 });
+
+describe('CanvasRenderer commit-size node scaling', () => {
+  type NodeRadiusInternals = { getNodeRadius(oid: string): number };
+
+  // A fresh Map per test: CanvasRenderer.destroy() clears the Map it was
+  // handed, so a shared instance would silently empty out between tests.
+  const bigStats = () =>
+    new Map([['a', { additions: 5000, deletions: 5000, filesChanged: 20 }]]);
+
+  it('scales the node radius by change volume by default', () => {
+    const renderer = makeRenderer({ nodeRadius: 6, minNodeRadius: 5, maxNodeRadius: 10 });
+    renderer.setCommitStats(bigStats());
+    const internals = renderer as unknown as NodeRadiusInternals;
+
+    expect(internals.getNodeRadius('a')).to.be.greaterThan(6);
+    renderer.destroy();
+  });
+
+  it('uses the configured node radius when scaleNodesByCommitSize is false', () => {
+    const renderer = makeRenderer({
+      nodeRadius: 6,
+      minNodeRadius: 5,
+      maxNodeRadius: 10,
+      scaleNodesByCommitSize: false,
+    });
+    renderer.setCommitStats(bigStats());
+    const internals = renderer as unknown as NodeRadiusInternals;
+
+    expect(internals.getNodeRadius('a')).to.equal(6);
+    renderer.destroy();
+  });
+
+  it('falls back to the configured radius for commits with no stats', () => {
+    const renderer = makeRenderer({
+      nodeRadius: 6,
+      minNodeRadius: 5,
+      maxNodeRadius: 10,
+      scaleNodesByCommitSize: false,
+    });
+    renderer.setCommitStats(new Map());
+    const internals = renderer as unknown as NodeRadiusInternals;
+
+    expect(internals.getNodeRadius('missing')).to.equal(6);
+    renderer.destroy();
+  });
+});

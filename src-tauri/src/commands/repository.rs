@@ -7,6 +7,7 @@ use tauri::{command, AppHandle, Emitter};
 
 use crate::error::{LeviathanError, Result};
 use crate::models::{Repository, RepositoryState};
+use crate::utils::create_command;
 
 /// Progress event payload for clone operations
 #[derive(Clone, serde::Serialize)]
@@ -46,7 +47,8 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let head_ref = repo.head().ok().map(|h| {
+    let head = repo.head().ok();
+    let head_ref = head.as_ref().map(|h| {
         h.shorthand()
             .ok()
             .map(|s| s.to_string())
@@ -56,6 +58,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
                     .unwrap_or_default()
             })
     });
+    let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
     // Detect shallow and partial clone status
     let is_shallow = repo.is_shallow();
@@ -67,6 +70,7 @@ pub async fn open_repository(path: String) -> Result<Repository> {
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref,
+        detached_head_oid,
         state: RepositoryState::from(repo.state()),
         is_shallow,
         is_partial_clone,
@@ -136,6 +140,103 @@ fn validate_clone_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the `git clone` invocation used by the CLI fallback path.
+///
+/// The token is deliberately NOT spliced into the URL. An argv is world
+/// readable in the process list for the whole life of the clone, and git
+/// echoes the URL back in its own error text, which the clone dialog renders.
+/// It is handed to git out of band instead, through a one-shot credential
+/// helper that reads it from the child's environment — the same mechanism the
+/// force-push path in remote.rs uses. As a side effect the token no longer has
+/// to survive URL syntax, so one containing `/`, `@` or `:` works.
+#[allow(clippy::too_many_arguments)]
+fn build_clone_command(
+    url: &str,
+    dest: &Path,
+    bare: bool,
+    branch: Option<&str>,
+    depth: Option<u32>,
+    filter: Option<&str>,
+    single_branch: bool,
+    token: Option<&str>,
+) -> std::process::Command {
+    // `create_command` is what pins `LC_ALL=C`. That is not cosmetic here:
+    // `parse_cli_clone_progress` matches git's English stage names
+    // ("Receiving objects", "Resolving deltas"). Under a localized git those
+    // strings are translated, every stderr line parses as `None`, and a
+    // shallow, partial or single-branch clone sits at 0% until it finishes.
+    // It also suppresses the Windows console window and the credential prompt,
+    // the way every other git shell-out in the app does.
+    let mut cmd = create_command("git");
+    cmd.arg("clone");
+
+    // `--progress` is not cosmetic either: git only writes transfer progress to
+    // stderr when stderr is a terminal, and here it is a pipe — without the
+    // flag the clone reports nothing at all until it exits.
+    cmd.arg("--progress");
+
+    if let Some(depth_val) = depth {
+        cmd.arg("--depth").arg(depth_val.to_string());
+    }
+
+    if let Some(filter_spec) = filter {
+        cmd.arg("--filter").arg(filter_spec);
+    }
+
+    if single_branch {
+        cmd.arg("--single-branch");
+    }
+
+    if bare {
+        cmd.arg("--bare");
+    }
+
+    if let Some(branch) = branch {
+        cmd.arg("--branch").arg(branch);
+    }
+
+    // `--` prevents URL/path from being parsed as a flag
+    // (defense against `--upload-pack=` style injection).
+    cmd.arg("--");
+    cmd.arg(url);
+    cmd.arg(dest);
+
+    // Only HTTPS can consume a token; the previous in-URL form was gated the
+    // same way, so an ssh:// or git:// clone keeps using the user's own
+    // credentials exactly as before.
+    if let (Some(token_value), true) = (token, url.starts_with("https://")) {
+        cmd.env("LEVIATHAN_CLONE_TOKEN", token_value);
+        // Two entries: the empty helper resets the list, so the token the
+        // caller gave us wins outright the way in-URL credentials did. Without
+        // the reset, a system helper holding a stale credential for the same
+        // host would answer first and the clone would fail where it used to
+        // succeed. Nothing is set when we have no token, so the user's own
+        // helper is untouched on every other clone.
+        cmd.env("GIT_CONFIG_COUNT", "2");
+        cmd.env("GIT_CONFIG_KEY_0", "credential.helper");
+        cmd.env("GIT_CONFIG_VALUE_0", "");
+        cmd.env("GIT_CONFIG_KEY_1", "credential.helper");
+        // `git` as the username matches the git2 path's fallback; every
+        // provider we support authenticates a token as the password and
+        // ignores the username.
+        cmd.env(
+            "GIT_CONFIG_VALUE_1",
+            "!f() { echo username=git; echo \"password=$LEVIATHAN_CLONE_TOKEN\"; }; f",
+        );
+    }
+
+    cmd
+}
+
+/// Wrap git's stderr in the error the clone dialog displays, with any
+/// credentials embedded in a URL stripped first.
+fn clone_failed(stderr: &str) -> LeviathanError {
+    LeviathanError::Custom(format!(
+        "git clone failed: {}",
+        crate::commands::credentials::redact_credentials_in_text(stderr.trim())
+    ))
+}
+
 /// Detect if a repository is a partial clone and extract the filter
 fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>) {
     let config = match repo.config() {
@@ -157,6 +258,20 @@ fn detect_partial_clone_status(repo: &git2::Repository) -> (bool, Option<String>
     }
 }
 
+/// The commit a detached HEAD points at — a tag or commit checkout, or an
+/// interrupted rebase/bisect. Takes the already-resolved HEAD instead of
+/// re-reading it: an unborn HEAD does not resolve, so asking for it again would
+/// turn opening a freshly initialised repository into an error.
+fn detached_head_oid(
+    repo: &git2::Repository,
+    head: Option<&git2::Reference<'_>>,
+) -> Result<Option<String>> {
+    match head {
+        Some(head) if repo.head_detached()? => Ok(head.target().map(|oid| oid.to_string())),
+        _ => Ok(None),
+    }
+}
+
 /// Set when the user cancels an in-flight clone.
 ///
 /// A single flag is sufficient: the clone dialog runs one clone at a time and
@@ -174,6 +289,163 @@ static CLONE_CANCELLED: AtomicBool = AtomicBool::new(false);
 pub async fn cancel_clone() -> Result<()> {
     CLONE_CANCELLED.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+/// Parse the `(received/total)` group of a `git clone --progress` line.
+fn parse_progress_counts(rest: &str) -> Option<(usize, usize)> {
+    let open = rest.find('(')?;
+    let close = rest[open..].find(')')? + open;
+    let (a, b) = rest[open + 1..close].split_once('/')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parse the transferred size that follows the count group, e.g. the
+/// `1.50 MiB` of `Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s`.
+/// Returns 0 when the line carries no size (git omits it before the first
+/// bytes arrive, and always for `Resolving deltas`).
+fn parse_progress_bytes(rest: &str) -> usize {
+    let Some(idx) = rest.find("), ") else {
+        return 0;
+    };
+    let mut tokens = rest[idx + 3..].split_whitespace();
+    let Some(value) = tokens.next().and_then(|v| v.parse::<f64>().ok()) else {
+        return 0;
+    };
+    let unit = tokens.next().unwrap_or("bytes");
+    let multiplier = match unit.trim_end_matches(',') {
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "KiB" => 1024.0,
+        // `bytes` and the bare `B` git uses in some locales
+        _ => 1.0,
+    };
+    (value * multiplier) as usize
+}
+
+/// Turn one `git clone --progress` stderr line into a `CloneProgress`.
+///
+/// Percentages are mapped onto the same 0-80 (receiving) / 80-100 (indexing)
+/// bands the git2 clone path uses, so the dialog's bar behaves identically
+/// whichever path performed the clone. Lines that are not progress reports —
+/// `Cloning into 'x'...`, `fatal: ...` — yield `None`.
+fn parse_cli_clone_progress(line: &str) -> Option<CloneProgress> {
+    let line = line.trim();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    let (name, rest) = line.split_once(':')?;
+    let name = name.trim();
+    let rest = rest.trim();
+
+    let percent_in_phase = rest
+        .split('%')
+        .next()
+        .and_then(|p| p.trim().parse::<u32>().ok());
+    let (count, total) = parse_progress_counts(rest).unwrap_or((0, 0));
+
+    match name {
+        "Receiving objects" => {
+            let pct = percent_in_phase?.min(100);
+            Some(CloneProgress {
+                stage: "Receiving objects".to_string(),
+                received_objects: count,
+                total_objects: total,
+                indexed_objects: 0,
+                received_bytes: parse_progress_bytes(rest),
+                percent: (pct * 80 / 100) as u8,
+            })
+        }
+        "Resolving deltas" => {
+            let pct = percent_in_phase?.min(100);
+            Some(CloneProgress {
+                stage: "Resolving deltas".to_string(),
+                received_objects: count,
+                total_objects: total,
+                indexed_objects: count,
+                received_bytes: 0,
+                percent: (80 + pct * 20 / 100) as u8,
+            })
+        }
+        // Remote-side work: there is nothing local to count yet, so these move
+        // the label rather than the bar.
+        "Counting objects" | "Compressing objects" => Some(CloneProgress {
+            stage: name.to_string(),
+            received_objects: 0,
+            total_objects: 0,
+            indexed_objects: 0,
+            received_bytes: 0,
+            percent: 0,
+        }),
+        _ => None,
+    }
+}
+
+/// Drain `git clone`'s stderr, emitting a `CloneProgress` for every progress
+/// update it reports, and return the full text for the failure message.
+///
+/// Draining is mandatory (an unread pipe deadlocks the child once its buffer
+/// fills); parsing while draining is what gives shallow/partial/single-branch
+/// clones the progress the git2 path already has.
+fn drain_clone_stderr<R: std::io::Read>(
+    mut pipe: R,
+    mut emit: impl FnMut(CloneProgress),
+) -> String {
+    // Bytes, not read_to_string: git may emit a non-UTF-8 path or remote
+    // message, and read_to_string aborts on the first invalid sequence —
+    // leaving the pipe undrained (the very deadlock this exists to prevent)
+    // and the error lost.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    // Offset of the first not-yet-parsed byte. `buf` is never drained, so the
+    // complete text survives for `git clone failed: {stderr}`.
+    let mut parsed_from = 0usize;
+    let mut last_emitted: Option<(String, u8)> = None;
+    let mut max_bytes = 0usize;
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            // A signal can interrupt a blocking read on a pipe. The
+            // `read_to_end` this loop replaced retried in that case; breaking
+            // instead would silently freeze the progress bar for the rest of
+            // the clone and truncate the text `git clone failed: {stderr}` is
+            // built from.
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        buf.extend_from_slice(&chunk[..read]);
+
+        // git overwrites an in-place progress update with `\r` and terminates a
+        // finished phase with `\n`; a trailing partial segment stays buffered
+        // until its terminator arrives with a later chunk.
+        let mut segment_start = parsed_from;
+        for i in parsed_from..buf.len() {
+            if buf[i] != b'\r' && buf[i] != b'\n' {
+                continue;
+            }
+            let segment = String::from_utf8_lossy(&buf[segment_start..i]).into_owned();
+            segment_start = i + 1;
+
+            let Some(mut progress) = parse_cli_clone_progress(&segment) else {
+                continue;
+            };
+            // Carry the transferred size forward so later phases report what
+            // was downloaded instead of `0 B`.
+            max_bytes = max_bytes.max(progress.received_bytes);
+            progress.received_bytes = max_bytes;
+
+            // Same "only emit when it changed" discipline as the git2 callback,
+            // so a percent repeated across refreshes is not re-broadcast.
+            let key = (progress.stage.clone(), progress.percent);
+            if last_emitted.as_ref() == Some(&key) {
+                continue;
+            }
+            last_emitted = Some(key);
+            emit(progress);
+        }
+        parsed_from = segment_start;
+    }
+
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Clone a repository with progress reporting
@@ -227,49 +499,16 @@ pub async fn clone_repository(
         if needs_cli {
             // git2 doesn't support --depth, --filter, or --single-branch, so fall back to git CLI
             let result = tokio::task::spawn_blocking(move || {
-                let mut cmd = std::process::Command::new("git");
-                cmd.arg("clone");
-
-                if let Some(depth_val) = depth {
-                    cmd.arg("--depth").arg(depth_val.to_string());
-                }
-
-                if let Some(ref filter_spec) = filter {
-                    cmd.arg("--filter").arg(filter_spec);
-                }
-
-                if single_branch {
-                    cmd.arg("--single-branch");
-                }
-
-                if bare {
-                    cmd.arg("--bare");
-                }
-
-                if let Some(ref branch) = branch {
-                    cmd.arg("--branch").arg(branch);
-                }
-
-                // If a token is provided, inject it into the URL for HTTPS authentication
-                let effective_url = if let Some(ref token) = token_clone {
-                    if url_clone.starts_with("https://") {
-                        url_clone.replacen(
-                            "https://",
-                            &format!("https://x-access-token:{}@", token),
-                            1,
-                        )
-                    } else {
-                        url_clone.clone()
-                    }
-                } else {
-                    url_clone.clone()
-                };
-
-                // `--` prevents URL/path from being parsed as a flag
-                // (defense against `--upload-pack=` style injection).
-                cmd.arg("--");
-                cmd.arg(&effective_url);
-                cmd.arg(&dest_path);
+                let mut cmd = build_clone_command(
+                    &url_clone,
+                    &dest_path,
+                    bare,
+                    branch.as_deref(),
+                    depth,
+                    filter.as_deref(),
+                    single_branch,
+                    token_clone.as_deref(),
+                );
 
                 // Spawned rather than run to completion so a cancel can kill it.
                 // stderr is drained on its own thread: git clone writes progress
@@ -284,16 +523,13 @@ pub async fn clone_repository(
 
                 let stderr_pipe = child.stderr.take();
                 let stderr_reader = std::thread::spawn(move || {
-                    use std::io::Read;
-                    // Bytes, not read_to_string: git may emit a non-UTF-8 path or
-                    // remote message, and read_to_string aborts on the first
-                    // invalid sequence — leaving the pipe undrained (the very
-                    // deadlock this thread exists to prevent) and the error lost.
-                    let mut buf = Vec::new();
-                    if let Some(mut pipe) = stderr_pipe {
-                        let _ = pipe.read_to_end(&mut buf);
+                    if let Some(pipe) = stderr_pipe {
+                        drain_clone_stderr(pipe, |progress| {
+                            let _ = app_for_progress.emit("clone-progress", progress);
+                        })
+                    } else {
+                        String::new()
                     }
-                    String::from_utf8_lossy(&buf).into_owned()
                 });
 
                 enum CloneOutcome {
@@ -357,10 +593,7 @@ pub async fn clone_repository(
                 let stderr = stderr_reader.join().unwrap_or_default();
 
                 if !status.success() {
-                    return Err(LeviathanError::Custom(format!(
-                        "git clone failed: {}",
-                        stderr.trim()
-                    )));
+                    return Err(clone_failed(&stderr));
                 }
 
                 git2::Repository::open(&dest_path).map_err(|e| {
@@ -378,12 +611,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -407,6 +642,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow,
                 is_partial_clone,
@@ -555,12 +791,14 @@ pub async fn clone_repository(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let head_ref = repo.head().ok().map(|h| {
+            let head = repo.head().ok();
+            let head_ref = head.as_ref().map(|h| {
                 h.shorthand()
                     .ok()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             });
+            let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
             // Emit completion
             let _ = app.emit(
@@ -581,6 +819,7 @@ pub async fn clone_repository(
                 is_valid: true,
                 is_bare: repo.is_bare(),
                 head_ref,
+                detached_head_oid,
                 state: RepositoryState::from(repo.state()),
                 is_shallow: false, // Full clone via git2 is never shallow
                 is_partial_clone: false,
@@ -694,14 +933,47 @@ pub async fn list_tracked_files(path: String) -> Result<Vec<String>> {
 
 /// Initialize a new repository
 #[command]
-pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Repository> {
+pub async fn init_repository(
+    path: String,
+    bare: Option<bool>,
+    initial_branch: Option<String>,
+) -> Result<Repository> {
     let path = Path::new(&path);
 
-    let repo = if bare.unwrap_or(false) {
-        git2::Repository::init_bare(path)?
-    } else {
-        git2::Repository::init(path)?
-    };
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.bare(bare.unwrap_or(false));
+
+    // libgit2 writes the initial_head into HEAD verbatim and validates nothing,
+    // so a bad name here would produce a repository git itself cannot use.
+    // Reject it before anything is created on disk. An absent or blank value
+    // leaves initial_head unset so libgit2 keeps honouring the user's
+    // `init.defaultBranch` git config.
+    if let Some(branch) = initial_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        // libgit2 only prefixes `refs/heads/` when the name does NOT already
+        // start with `refs/` — otherwise it uses it verbatim. Validating
+        // `refs/heads/{branch}` unconditionally would therefore check a
+        // different ref than the one written: `refs/tags/v1` would pass and
+        // then point HEAD outside the branch namespace. Build the exact ref
+        // libgit2 will use, require it to be a branch, and pass that.
+        let full_ref = if branch.starts_with("refs/") {
+            branch.to_string()
+        } else {
+            format!("refs/heads/{}", branch)
+        };
+        if !full_ref.starts_with("refs/heads/") || !git2::Reference::is_valid_name(&full_ref) {
+            return Err(LeviathanError::Custom(format!(
+                "Invalid initial branch name: {}",
+                branch
+            )));
+        }
+        opts.initial_head(&full_ref);
+    }
+
+    let repo = git2::Repository::init_opts(path, &opts)?;
 
     let name = path
         .file_name()
@@ -714,6 +986,8 @@ pub async fn init_repository(path: String, bare: Option<bool>) -> Result<Reposit
         is_valid: true,
         is_bare: repo.is_bare(),
         head_ref: None,
+        // A fresh repository's HEAD is unborn, which is not detached.
+        detached_head_oid: None,
         state: RepositoryState::Clean,
         is_shallow: false,
         is_partial_clone: false,
@@ -732,6 +1006,345 @@ mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
     use tempfile::TempDir;
+
+    /// Feeds a canned transcript in small pieces so `drain_clone_stderr` has to
+    /// cope with reads that split a progress update mid-line, exactly as a real
+    /// pipe does.
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.data.len() - self.pos;
+            let n = remaining.min(self.chunk).min(out.len());
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn drain(transcript: &[u8], chunk: usize) -> (String, Vec<CloneProgress>) {
+        let reader = ChunkedReader {
+            data: transcript.to_vec(),
+            pos: 0,
+            chunk,
+        };
+        let mut events = Vec::new();
+        let text = drain_clone_stderr(reader, |p| events.push(p));
+        (text, events)
+    }
+
+    /// Regression: the CLI clone path only reports progress if git is asked
+    /// for it AND speaks the language the parser reads.
+    #[test]
+    fn test_build_clone_command_requests_progress_and_pins_the_locale() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            None,
+        );
+
+        // git suppresses transfer progress entirely when stderr is a pipe, so
+        // `--progress` must be present even in the minimal invocation.
+        assert!(
+            args_of(&cmd).contains(&"--progress".to_string()),
+            "without --progress git reports nothing until the clone exits: {:?}",
+            args_of(&cmd)
+        );
+        // `parse_cli_clone_progress` matches git's English stage names; under a
+        // localized git they are translated, every line parses as `None`, and
+        // the dialog sits at 0% for the whole clone.
+        assert_eq!(
+            env_of(&cmd, "LC_ALL").as_deref(),
+            Some("C"),
+            "LC_ALL must be pinned, or a localized git yields no progress at all"
+        );
+    }
+    #[test]
+    fn test_parse_cli_clone_progress_maps_receiving_to_first_80_percent() {
+        let p =
+            parse_cli_clone_progress("Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s")
+                .expect("receiving line is progress");
+        assert_eq!(p.stage, "Receiving objects");
+        assert_eq!(p.percent, 40);
+        assert_eq!(p.received_objects, 500);
+        assert_eq!(p.total_objects, 1000);
+        assert_eq!(p.received_bytes, 1_572_864);
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_maps_resolving_deltas_to_last_20_percent() {
+        let p = parse_cli_clone_progress("Resolving deltas:  50% (250/500)")
+            .expect("resolving line is progress");
+        assert_eq!(p.stage, "Resolving deltas");
+        assert_eq!(p.percent, 90);
+        assert_eq!(p.indexed_objects, 250);
+        assert_eq!(p.total_objects, 500);
+
+        let done = parse_cli_clone_progress("Resolving deltas: 100% (500/500), done.")
+            .expect("resolving line is progress");
+        assert_eq!(done.percent, 100);
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_reports_remote_phases_without_moving_the_bar() {
+        let p = parse_cli_clone_progress("remote: Compressing objects:  40% (4/10)")
+            .expect("compressing line is progress");
+        assert_eq!(p.stage, "Compressing objects");
+        assert_eq!(p.percent, 0);
+        assert_eq!(p.total_objects, 0);
+
+        assert!(parse_cli_clone_progress("Cloning into 'foo'...").is_none());
+        assert!(parse_cli_clone_progress("remote: Enumerating objects: 40, done.").is_none());
+        // An error line must never be mistaken for a progress update.
+        assert!(parse_cli_clone_progress("fatal: repository 'x' not found").is_none());
+    }
+
+    #[test]
+    fn test_parse_cli_clone_progress_parses_byte_units() {
+        let bytes = |line: &str| {
+            parse_cli_clone_progress(line)
+                .expect("receiving line is progress")
+                .received_bytes
+        };
+        assert_eq!(
+            bytes("Receiving objects: 100% (3/3), 226 bytes | 226.00 KiB/s, done."),
+            226
+        );
+        assert_eq!(
+            bytes("Receiving objects:   5% (50/1000), 12.50 KiB | 1.00 MiB/s"),
+            12_800
+        );
+        assert_eq!(
+            bytes("Receiving objects: 100% (1000/1000), 4.19 MiB | 3.00 MiB/s, done."),
+            4_393_533
+        );
+        assert_eq!(
+            bytes("Receiving objects: 100% (9/9), 2.00 GiB | 3.00 MiB/s, done."),
+            2_147_483_648
+        );
+        // No size field yet — report 0 rather than inventing a number.
+        assert_eq!(bytes("Receiving objects:  10% (100/1000)"), 0);
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_emits_progress_across_carriage_returns_and_chunk_boundaries() {
+        let transcript = concat!(
+            "Cloning into 'r'...\n",
+            "remote: Compressing objects:  40% (4/10)\r",
+            "Receiving objects:   5% (50/1000), 12.50 KiB | 1.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects: 100% (1000/1000), 4.19 MiB | 3.00 MiB/s, done.\r",
+            "Resolving deltas:  50% (250/500)\r",
+            "Resolving deltas: 100% (500/500), done.\n",
+        );
+        // 7-byte reads guarantee updates are split mid-line.
+        let (text, events) = drain(transcript.as_bytes(), 7);
+
+        assert_eq!(text, transcript);
+        assert!(
+            events.len() >= 5,
+            "expected a stream of updates, got {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(events[0].stage, "Compressing objects");
+        assert!(events[1..events.len() - 2]
+            .iter()
+            .all(|e| e.stage == "Receiving objects"));
+        assert_eq!(events.last().unwrap().stage, "Resolving deltas");
+        assert_eq!(events.last().unwrap().percent, 100);
+        assert!(
+            events.windows(2).all(|w| w[0].percent <= w[1].percent),
+            "percent must never go backwards"
+        );
+        // Every `\r`-separated update is emitted exactly once despite the splits.
+        let receiving: Vec<u8> = events
+            .iter()
+            .filter(|e| e.stage == "Receiving objects")
+            .map(|e| e.percent)
+            .collect();
+        assert_eq!(receiving, vec![4, 40, 80]);
+    }
+
+    /// A signal interrupting the blocking pipe read must not end the drain:
+    /// `read_to_end`, which this loop replaced, retried on `Interrupted`.
+    #[test]
+    fn test_drain_clone_stderr_survives_an_interrupted_read() {
+        struct InterruptOnce {
+            data: Vec<u8>,
+            pos: usize,
+            interrupted: bool,
+        }
+
+        impl std::io::Read for InterruptOnce {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                // Interrupt exactly once, after the first update has been read.
+                if self.pos > 0 && !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "signal",
+                    ));
+                }
+                let n = (self.data.len() - self.pos).min(32).min(out.len());
+                out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+
+        let transcript = concat!(
+            "Receiving objects:  25% (250/1000), 1.00 MiB | 3.00 MiB/s\r",
+            "Receiving objects: 100% (1000/1000), 4.00 MiB | 3.00 MiB/s\r",
+            "fatal: the remote end hung up unexpectedly\n",
+        );
+        let mut events = Vec::new();
+        let text = drain_clone_stderr(
+            InterruptOnce {
+                data: transcript.as_bytes().to_vec(),
+                pos: 0,
+                interrupted: false,
+            },
+            |p| events.push(p),
+        );
+
+        // Everything after the interruption must still arrive.
+        assert_eq!(text, transcript, "stderr truncated at the interruption");
+        assert_eq!(
+            events.iter().map(|e| e.percent).collect::<Vec<_>>(),
+            vec![20, 80],
+            "progress stopped at the interruption"
+        );
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_dedupes_repeated_percentages_and_carries_received_bytes() {
+        let transcript = concat!(
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Receiving objects:  50% (500/1000), 1.50 MiB | 3.00 MiB/s\r",
+            "Resolving deltas:  50% (250/500)\n",
+        );
+        let (_, events) = drain(transcript.as_bytes(), 4096);
+
+        assert_eq!(
+            events.len(),
+            2,
+            "the repeated percent must not be re-emitted"
+        );
+        assert_eq!(events[0].stage, "Receiving objects");
+        assert_eq!(events[0].percent, 40);
+        assert_eq!(events[1].stage, "Resolving deltas");
+        // Carried forward, so the dialog keeps showing the downloaded size.
+        assert_eq!(events[1].received_bytes, 1_572_864);
+    }
+
+    /// The parser reads real `git clone --progress` output, so pin it against
+    /// the git binary on this machine rather than only against canned text:
+    /// clone a local repository over the git transport (`--no-local` forces the
+    /// pack path that reports progress) and drain the process's own stderr.
+    #[test]
+    fn test_drain_clone_stderr_emits_progress_for_a_real_shallow_clone() {
+        let source = TestRepo::with_initial_commit();
+        for i in 0..20 {
+            source.create_commit(
+                &format!("commit {}", i),
+                &[(&format!("file{}.txt", i), &"x".repeat(4096))],
+            );
+        }
+        let dest = TempDir::new().expect("temp dir");
+        let dest_path = dest.path().join("clone");
+
+        // The production builder, not a hand-rolled argv: this is what pins
+        // `--progress` and the locale the parser depends on. A `file://` URL
+        // takes git's pack transport rather than the local hardlink shortcut,
+        // which is the path that reports progress.
+        let mut child = build_clone_command(
+            &format!("file://{}", source.path.display()),
+            &dest_path,
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            None,
+        )
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git clone spawns");
+
+        let pipe = child.stderr.take().expect("stderr is piped");
+        let mut events = Vec::new();
+        let text = drain_clone_stderr(pipe, |p| events.push(p));
+        let status = child.wait().expect("git clone finishes");
+
+        assert!(status.success(), "clone failed: {}", text);
+        assert!(
+            !events.is_empty(),
+            "no progress parsed from real git output: {:?}",
+            text
+        );
+        assert!(
+            events.iter().any(|e| e.stage == "Receiving objects"),
+            "expected a receiving update, got {:?}",
+            events.iter().map(|e| &e.stage).collect::<Vec<_>>()
+        );
+        assert!(
+            events.windows(2).all(|w| w[0].percent <= w[1].percent),
+            "percent must never go backwards: {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        let last = events.last().expect("at least one event");
+        assert!(
+            last.percent >= 80,
+            "the final update should reach the end of the receiving band, got {}",
+            last.percent
+        );
+        assert!(dest_path.join(".git").exists());
+    }
+
+    #[test]
+    fn test_drain_clone_stderr_keeps_full_text_and_never_reads_progress_from_an_error() {
+        // A clone that dies mid-transfer: the updates it managed to report are
+        // real progress, the failure lines are not, and the whole text must
+        // survive for `git clone failed: {stderr}`. The invalid UTF-8 byte is
+        // what forced this drain to be byte-based in the first place.
+        let transcript = b"Receiving objects:  30% (300/1000), 1.50 MiB | 3.00 MiB/s\rfatal: could not read Username for 'https://host': \xff\nfatal: the remote end hung up unexpectedly\n";
+        let (text, events) = drain(transcript, 5);
+
+        assert!(
+            text.contains("fatal: could not read Username"),
+            "stderr text lost: {}",
+            text
+        );
+        assert!(text.contains("fatal: the remote end hung up unexpectedly"));
+        assert_eq!(
+            events.len(),
+            1,
+            "only the transfer update is progress, got {:?}",
+            events
+                .iter()
+                .map(|e| (&e.stage, e.percent))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(events[0].stage, "Receiving objects");
+        assert_eq!(events[0].percent, 24);
+    }
 
     #[test]
     fn test_validate_clone_url_accepts_https_and_ssh_schemes() {
@@ -778,6 +1391,246 @@ mod tests {
         assert!(validate_clone_url("plainstring").is_err());
     }
 
+    // ========================================================================
+    // build_clone_command / clone_failed: the token must never reach argv
+    // ========================================================================
+
+    fn args_of(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    /// The command line of a running process is readable by every other
+    /// process on the machine, so a token spliced into the clone URL is a
+    /// plaintext credential leak for the whole life of the clone.
+    #[test]
+    fn test_build_clone_command_keeps_the_token_out_of_argv() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+
+        let args = args_of(&cmd);
+        assert!(
+            args.iter().all(|a| !a.contains("ghp_s3cret")),
+            "token must not appear in argv: {:?}",
+            args
+        );
+        assert!(
+            args.iter().all(|a| !a.contains("x-access-token")),
+            "userinfo must not appear in argv: {:?}",
+            args
+        );
+        assert!(
+            args.contains(&"https://github.com/o/r.git".to_string()),
+            "the plain URL must still be passed to git: {:?}",
+            args
+        );
+    }
+
+    /// Keeping the token out of argv is only a fix if the clone still
+    /// authenticates: git must receive it out of band, through a credential
+    /// helper reading it from the child's environment.
+    #[test]
+    fn test_build_clone_command_hands_the_token_to_git_through_a_credential_helper() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            Some("ghp_s3cret".to_string())
+        );
+        assert_eq!(env_of(&cmd, "GIT_CONFIG_COUNT"), Some("2".to_string()));
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_0"),
+            Some("credential.helper".to_string())
+        );
+        // The empty helper resets the list so a stale system helper cannot
+        // answer ahead of the token the caller handed us.
+        assert_eq!(env_of(&cmd, "GIT_CONFIG_VALUE_0"), Some(String::new()));
+        assert_eq!(
+            env_of(&cmd, "GIT_CONFIG_KEY_1"),
+            Some("credential.helper".to_string())
+        );
+        let helper = env_of(&cmd, "GIT_CONFIG_VALUE_1").expect("helper must be configured");
+        assert!(
+            helper.contains("$LEVIATHAN_CLONE_TOKEN"),
+            "helper must read the token from the environment: {}",
+            helper
+        );
+        assert!(
+            helper.contains("username=git"),
+            "helper must supply a username: {}",
+            helper
+        );
+    }
+
+    /// A token containing URL syntax characters could not survive the splice
+    /// into the URL; handing it over out of band means it no longer has to.
+    #[test]
+    fn test_build_clone_command_handles_a_token_with_url_special_characters() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("to/ken@we:ird"),
+        );
+
+        let args = args_of(&cmd);
+        assert!(
+            args.contains(&"https://github.com/o/r.git".to_string()),
+            "URL must be passed byte-for-byte: {:?}",
+            args
+        );
+        assert_eq!(
+            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            Some("to/ken@we:ird".to_string())
+        );
+    }
+
+    /// Guard (passes before and after the fix): the credential.helper reset
+    /// must never be set on a clone we have no token for, or it would disable
+    /// the user's own helper on an ordinary clone.
+    #[test]
+    fn test_build_clone_command_sets_no_credential_env_without_a_token() {
+        let no_token = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            None,
+        );
+        // Asserted per-key rather than by counting: `create_command` now
+        // contributes the locale pin and the terminal-prompt guard to every
+        // git shell-out, so a zero count would fail for a reason that has
+        // nothing to do with credentials. The guard's subject is the
+        // credential.helper override, and that must still be absent.
+        for key in [
+            "LEVIATHAN_CLONE_TOKEN",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "GIT_CONFIG_KEY_1",
+            "GIT_CONFIG_VALUE_1",
+        ] {
+            assert_eq!(
+                env_of(&no_token, key),
+                None,
+                "{} must not be set on a clone with no token",
+                key
+            );
+        }
+        assert!(args_of(&no_token).contains(&"https://github.com/o/r.git".to_string()));
+
+        // ssh:// cannot consume an HTTPS token — same gate as the old in-URL form.
+        let ssh = build_clone_command(
+            "ssh://git@host/o/r.git",
+            Path::new("/tmp/x"),
+            false,
+            None,
+            Some(1),
+            None,
+            false,
+            Some("ghp_s3cret"),
+        );
+        assert_eq!(env_of(&ssh, "LEVIATHAN_CLONE_TOKEN"), None);
+        assert_eq!(env_of(&ssh, "GIT_CONFIG_COUNT"), None);
+        assert!(args_of(&ssh).contains(&"ssh://git@host/o/r.git".to_string()));
+    }
+
+    /// Guard for the extraction: the flags the CLI path exists for, and the
+    /// `--` that stops a URL from being read as a flag, must all survive.
+    #[test]
+    fn test_build_clone_command_still_passes_the_shallow_and_filter_flags() {
+        let cmd = build_clone_command(
+            "https://github.com/o/r.git",
+            Path::new("/tmp/x"),
+            true,
+            Some("dev"),
+            Some(5),
+            Some("blob:none"),
+            true,
+            None,
+        );
+
+        assert_eq!(
+            args_of(&cmd),
+            vec![
+                "clone",
+                "--progress",
+                "--depth",
+                "5",
+                "--filter",
+                "blob:none",
+                "--single-branch",
+                "--bare",
+                "--branch",
+                "dev",
+                "--",
+                "https://github.com/o/r.git",
+                "/tmp/x",
+            ]
+        );
+    }
+
+    /// git's stderr is rendered verbatim by the clone dialog, so a URL
+    /// carrying credentials — one git did not anonymize, or one the user typed
+    /// with a password in it — would be displayed on screen.
+    #[test]
+    fn test_clone_failed_redacts_credentials_from_git_stderr() {
+        let err = clone_failed(
+            "fatal: unable to access 'https://x-access-token:ghp_s3cret@github.com/o/r.git/': The requested URL returned error: 404",
+        );
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("git clone failed:"),
+            "message must keep its prefix: {}",
+            msg
+        );
+        assert!(!msg.contains("ghp_s3cret"), "token leaked: {}", msg);
+        assert!(!msg.contains("x-access-token"), "userinfo leaked: {}", msg);
+        assert!(
+            msg.contains("github.com/o/r.git"),
+            "message must stay diagnostically useful: {}",
+            msg
+        );
+        assert!(
+            msg.contains("404"),
+            "git's own diagnosis must survive: {}",
+            msg
+        );
+    }
+
     #[tokio::test]
     async fn test_open_repository_valid() {
         let repo = TestRepo::with_initial_commit();
@@ -806,6 +1659,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_open_repository_reports_a_detached_head() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("Second", &[("a.txt", "a")]);
+        repo.repo().set_head_detached(target).unwrap();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert_eq!(result.detached_head_oid, Some(target.to_string()));
+        // Why the OID has to be its own field: a detached HEAD's shorthand is
+        // the literal "HEAD", which names no commit the UI could show.
+        assert_eq!(result.head_ref.as_deref(), Some("HEAD"));
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_reports_no_detached_head_on_a_branch() {
+        let repo = TestRepo::with_initial_commit();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.detached_head_oid.is_none());
+        assert!(result.head_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_repository_unborn_head_is_not_detached() {
+        // An unborn HEAD still resolves as a symbolic ref, so it must not be
+        // reported as detached — an empty repository is not a tag checkout.
+        let repo = TestRepo::new();
+
+        let result = open_repository(repo.path_str()).await.unwrap();
+
+        assert!(result.head_ref.is_none());
+        assert!(result.detached_head_oid.is_none());
+    }
+
+    #[tokio::test]
     async fn test_open_repository_nonexistent() {
         let result = open_repository("/nonexistent/path/to/repo".to_string()).await;
         assert!(result.is_err());
@@ -824,7 +1713,7 @@ mod tests {
         let path = dir.path().join("new-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), None).await;
+        let result = init_repository(path.to_string_lossy().to_string(), None, None).await;
         assert!(result.is_ok());
         let repo_info = result.unwrap();
         assert!(repo_info.is_valid);
@@ -841,7 +1730,7 @@ mod tests {
         let path = dir.path().join("bare-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), Some(true)).await;
+        let result = init_repository(path.to_string_lossy().to_string(), Some(true), None).await;
         assert!(result.is_ok());
         let repo_info = result.unwrap();
         assert!(repo_info.is_valid);
@@ -851,13 +1740,156 @@ mod tests {
         assert!(path.join("HEAD").exists());
     }
 
+    /// Resolve the symbolic target of HEAD (`refs/heads/<name>`) for an
+    /// unborn-HEAD repository.
+    fn head_symbolic_target(path: &Path) -> String {
+        let repo = git2::Repository::open(path).expect("Failed to open repo");
+        let head = repo.find_reference("HEAD").expect("HEAD missing");
+        head.symbolic_target()
+            .expect("HEAD target is not valid UTF-8")
+            .expect("HEAD is not symbolic")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_uses_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("new-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("trunk".to_string()),
+        )
+        .await
+        .expect("init should succeed");
+
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_bare_uses_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("bare-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let repo_info = init_repository(
+            path.to_string_lossy().to_string(),
+            Some(true),
+            Some("trunk".to_string()),
+        )
+        .await
+        .expect("init should succeed");
+
+        assert!(repo_info.is_bare);
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_rejects_invalid_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("bad-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        let result = init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("bad name".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("invalid branch name must be rejected");
+        assert!(
+            err.to_string().contains("Invalid initial branch name"),
+            "unexpected error: {}",
+            err
+        );
+        // Validation runs before anything is created on disk.
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_blank_initial_branch_falls_back_to_git_default() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("blank-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("   ".to_string()),
+        )
+        .await
+        .expect("blank branch name should fall back to git's default");
+
+        // A naive implementation would forward the blank string and write
+        // `ref: refs/heads/   ` into HEAD.
+        let target = head_symbolic_target(&path);
+        assert!(
+            target.starts_with("refs/heads/"),
+            "unexpected HEAD target: {}",
+            target
+        );
+        let name = &target["refs/heads/".len()..];
+        assert!(
+            !name.is_empty() && name.trim() == name,
+            "bad branch: {name:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_rejects_non_branch_ref_as_initial_branch() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("tag-ref-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // libgit2 uses a `refs/`-prefixed initial_head verbatim, so this would
+        // otherwise write `ref: refs/tags/v1` into HEAD and point the new
+        // repository at the tag namespace.
+        let result = init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/tags/v1".to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a non-branch ref must be rejected");
+        assert!(
+            err.to_string().contains("Invalid initial branch name"),
+            "unexpected error: {}",
+            err
+        );
+        // Validation runs before anything is created on disk.
+        assert!(!path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_init_repository_accepts_fully_qualified_branch_ref() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let path = dir.path().join("qualified-branch-repo");
+        std::fs::create_dir(&path).expect("Failed to create dir");
+
+        // A fully qualified branch ref must not be double-prefixed into
+        // `refs/heads/refs/heads/trunk`.
+        init_repository(
+            path.to_string_lossy().to_string(),
+            None,
+            Some("refs/heads/trunk".to_string()),
+        )
+        .await
+        .expect("a fully qualified branch ref should be accepted");
+
+        assert_eq!(head_symbolic_target(&path), "refs/heads/trunk");
+    }
+
     #[tokio::test]
     async fn test_init_repository_state_is_clean() {
         let dir = TempDir::new().expect("Failed to create temp dir");
         let path = dir.path().join("clean-repo");
         std::fs::create_dir(&path).expect("Failed to create dir");
 
-        let result = init_repository(path.to_string_lossy().to_string(), None)
+        let result = init_repository(path.to_string_lossy().to_string(), None, None)
             .await
             .unwrap();
         assert!(matches!(result.state, RepositoryState::Clean));

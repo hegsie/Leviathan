@@ -4,9 +4,9 @@ import { RightPanelPage } from '../pages/panels.page';
 import {
   startCommandCapture,
   startCommandCaptureWithMocks,
+  findCommand,
   injectCommandMock,
   injectCommandError,
-  findCommand,
 } from '../fixtures/test-helpers';
 
 /**
@@ -361,7 +361,7 @@ test.describe('Commit Details - UI Outcome Verification', () => {
     // Provide commit files
     await injectCommandMock(page, {
       get_commit_files: mockFiles,
-      get_commit_diff: {
+      get_commit_file_diff: {
         path: 'src/main.ts',
         oldPath: null,
         status: 'modified',
@@ -400,9 +400,12 @@ test.describe('Commit Details - UI Outcome Verification', () => {
     // Verify the file becomes selected
     await expect(rightPanel.commitFilesChanged.first()).toHaveClass(/selected/);
 
-    // Verify the diff view becomes visible with content
+    // Verify the diff view becomes visible with the mocked content
     const diffView = page.locator('lv-diff-view');
     await expect(diffView).toBeVisible({ timeout: 5000 });
+    await expect(diffView.locator('.line.code-addition')).toHaveCount(1);
+    await expect(diffView.locator('.line.code-deletion')).toHaveCount(1);
+    await expect(diffView.locator('.line.code-addition')).toContainText('const x = 2;');
   });
 
   test('merge commit with multiple parents should show merge info', async ({ page }) => {
@@ -571,5 +574,123 @@ test.describe('Commit Details - Restore file from commit', () => {
     const toast = page.locator('lv-toast-container .toast.error .toast-message');
     await expect(toast).toBeVisible();
     await expect(toast).toContainText('File not found in commit');
+  });
+});
+
+test.describe('Commit Details - Renamed Files', () => {
+  /** The rename entry the backend reports for a moved-and-edited file. */
+  const renamedEntry = {
+    path: 'src/new_name.ts',
+    oldPath: 'src/old_name.ts',
+    status: 'renamed',
+    additions: 1,
+    deletions: 1,
+  };
+
+  test('clicking a renamed file shows the rename diff, not the whole file as added', async ({
+    page,
+  }) => {
+    const rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_commit_files: [renamedEntry],
+      get_commit_file_diff: {
+        path: 'src/new_name.ts',
+        oldPath: 'src/old_name.ts',
+        status: 'renamed',
+        hunks: [
+          {
+            header: '@@ -1,4 +1,4 @@',
+            oldStart: 1,
+            oldLines: 4,
+            newStart: 1,
+            newLines: 4,
+            lines: [
+              { content: 'alpha', origin: 'context', oldLineNo: 1, newLineNo: 1 },
+              { content: 'beta', origin: 'deletion', oldLineNo: 2, newLineNo: null },
+              { content: 'beta-edited', origin: 'addition', oldLineNo: null, newLineNo: 2 },
+              { content: 'gamma', origin: 'context', oldLineNo: 3, newLineNo: 3 },
+            ],
+          },
+        ],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 1,
+        deletions: 1,
+      },
+    });
+
+    await selectCommit(page, defaultCommit);
+    await rightPanel.switchToDetails();
+
+    // The file list must badge the entry as a rename and name where it came from.
+    await expect(rightPanel.commitFilesChanged).toHaveCount(1);
+    await expect(rightPanel.commitFilesChanged.first().locator('.file-status')).toHaveText('R');
+    await expect(rightPanel.commitFilesChanged.first().locator('.file-renamed-from')).toContainText(
+      'src/old_name.ts'
+    );
+
+    await rightPanel.commitFilesChanged.first().click();
+
+    const diffView = page.locator('lv-diff-view');
+    await expect(diffView).toBeVisible({ timeout: 5000 });
+
+    // Only the edited pair renders — a whole-file add would show every line as
+    // an addition and none as a deletion.
+    await expect(diffView.locator('.line.code-addition')).toHaveCount(1);
+    await expect(diffView.locator('.line.code-addition')).toContainText('beta-edited');
+    await expect(diffView.locator('.line.code-deletion')).toHaveCount(1);
+    await expect(diffView.locator('.line.code-deletion')).toContainText('beta');
+
+    // The command must be asked for the file's current path in this commit.
+    const calls = await findCommand(page, 'get_commit_file_diff');
+    expect(calls.length).toBeGreaterThan(0);
+    expect((calls[0].args as { filePath: string }).filePath).toBe('src/new_name.ts');
+    expect((calls[0].args as { commitOid: string }).commitOid).toBe(defaultCommit.oid);
+  });
+
+  test('a pure rename shows the empty-diff notice rather than a blank pane', async ({ page }) => {
+    const rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, {
+      get_commit_files: [{ ...renamedEntry, additions: 0, deletions: 0 }],
+      get_commit_file_diff: {
+        path: 'src/new_name.ts',
+        oldPath: 'src/old_name.ts',
+        status: 'renamed',
+        hunks: [],
+        isBinary: false,
+        isImage: false,
+        imageType: null,
+        additions: 0,
+        deletions: 0,
+      },
+    });
+
+    await selectCommit(page, defaultCommit);
+    await rightPanel.switchToDetails();
+    await rightPanel.commitFilesChanged.first().click();
+
+    const diffView = page.locator('lv-diff-view');
+    await expect(diffView.locator('.empty')).toHaveText('No changes in this file');
+    await expect(diffView.locator('.line.code-addition')).toHaveCount(0);
+  });
+
+  test('a failing rename diff shows an error instead of an empty pane', async ({ page }) => {
+    const rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(page);
+
+    await injectCommandMock(page, { get_commit_files: [renamedEntry] });
+    await injectCommandError(page, 'get_commit_file_diff', 'File not found in commit');
+
+    await selectCommit(page, defaultCommit);
+    await rightPanel.switchToDetails();
+    await rightPanel.commitFilesChanged.first().click();
+
+    const diffView = page.locator('lv-diff-view');
+    await expect(diffView.locator('.error')).toContainText('File not found in commit');
   });
 });

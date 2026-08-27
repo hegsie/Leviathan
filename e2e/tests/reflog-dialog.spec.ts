@@ -329,3 +329,44 @@ test.describe('Reflog Dialog - Extended Tests', () => {
     expect(args.reflogIndex).toBe(1);
   });
 });
+
+/**
+ * A first page that comes back completely full — the only signal available
+ * that older entries may exist, since get_reflog reports no total.
+ */
+const FIFTY_ENTRIES = Array.from({ length: 50 }, (_, i) => ({
+  oid: `oid${i}`.padEnd(12, '0'),
+  shortId: `oid${i}`.padEnd(7, '0').slice(0, 7),
+  index: i,
+  action: 'commit',
+  message: `commit: entry ${i}`,
+  timestamp: Date.now() / 1000 - i * 60,
+  author: 'Test User',
+}));
+
+test.describe('Reflog Dialog pagination', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, { get_reflog: FIFTY_ENTRIES });
+    await openReflogDialog(page);
+  });
+
+  test('offers older entries when the first page fills up', async ({ page }) => {
+    await expect(page.locator('lv-reflog-dialog .show-more-btn')).toBeVisible();
+    await expect(page.locator('lv-reflog-dialog .list-note')).toContainText('first 50');
+
+    await page.locator('lv-reflog-dialog .show-more-btn').click();
+
+    await expect
+      .poll(async () => {
+        const calls = await findCommand(page, 'get_reflog');
+        return (calls[calls.length - 1].args as { limit?: number }).limit;
+      })
+      .toBe(100);
+
+    // The mock returns the same 50 for a limit of 100, so the list is now
+    // known-complete and the control must retire rather than sit there dead.
+    await expect(page.locator('lv-reflog-dialog .show-more-btn')).toHaveCount(0);
+    await expect(page.locator('lv-reflog-dialog .list-note')).toContainText('Showing all 50');
+  });
+});

@@ -8,14 +8,14 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
-import type { Commit } from '../../types/git.types.ts';
+import type { FileHistoryEntry } from '../../types/git.types.ts';
 import { restoreFileFromCommit } from '../../utils/restore-file.ts';
 
 interface HistoryContextMenuState {
   visible: boolean;
   x: number;
   y: number;
-  commit: Commit | null;
+  entry: FileHistoryEntry | null;
 }
 
 @customElement('lv-file-history')
@@ -193,6 +193,13 @@ export class LvFileHistory extends LitElement {
         height: 12px;
       }
 
+      .commit-path {
+        font-family: var(--font-mono);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .view-diff-btn {
         padding: var(--spacing-xs) var(--spacing-sm);
         font-size: var(--font-size-xs);
@@ -264,11 +271,11 @@ export class LvFileHistory extends LitElement {
   @property({ type: String }) repositoryPath = '';
   @property({ type: String }) filePath = '';
 
-  @state() private commits: Commit[] = [];
+  @state() private entries: FileHistoryEntry[] = [];
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private selectedCommit: string | null = null;
-  @state() private contextMenu: HistoryContextMenuState = { visible: false, x: 0, y: 0, commit: null };
+  @state() private contextMenu: HistoryContextMenuState = { visible: false, x: 0, y: 0, entry: null };
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -297,7 +304,7 @@ export class LvFileHistory extends LitElement {
   private async loadHistory(): Promise<void> {
     this.loading = true;
     this.error = null;
-    this.commits = [];
+    this.entries = [];
 
     try {
       const result = await gitService.getFileHistory(
@@ -308,7 +315,7 @@ export class LvFileHistory extends LitElement {
       );
 
       if (result.success && result.data) {
-        this.commits = result.data;
+        this.entries = result.data;
       } else if (!result.success) {
         this.error = result.error?.message ?? 'Failed to load file history';
       }
@@ -324,19 +331,22 @@ export class LvFileHistory extends LitElement {
     this.dispatchEvent(new CustomEvent('close', { bubbles: true, composed: true }));
   }
 
-  private handleCommitClick(commit: Commit): void {
-    this.selectedCommit = commit.oid;
+  private handleCommitClick(entry: FileHistoryEntry): void {
+    this.selectedCommit = entry.commit.oid;
     this.dispatchEvent(new CustomEvent('commit-selected', {
-      detail: { commit },
+      detail: { commit: entry.commit },
       bubbles: true,
       composed: true,
     }));
   }
 
-  private handleViewDiff(e: Event, commit: Commit): void {
+  private handleViewDiff(e: Event, entry: FileHistoryEntry): void {
     e.stopPropagation();
     this.dispatchEvent(new CustomEvent('view-diff', {
-      detail: { commitOid: commit.oid, filePath: this.filePath },
+      // The path the file had AT THAT COMMIT, not this.filePath: before a
+      // rename the current name does not exist in that commit's tree and the
+      // diff would fail with "File not found in commit".
+      detail: { commitOid: entry.commit.oid, filePath: entry.pathAtCommit },
       bubbles: true,
       composed: true,
     }));
@@ -366,32 +376,34 @@ export class LvFileHistory extends LitElement {
   }
 
   // Context menu handlers
-  private handleContextMenuOpen(e: MouseEvent, commit: Commit): void {
+  private handleContextMenuOpen(e: MouseEvent, entry: FileHistoryEntry): void {
     e.preventDefault();
     e.stopPropagation();
-    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, commit };
+    this.contextMenu = { visible: true, x: e.clientX, y: e.clientY, entry };
   }
 
   private handleContextViewDiff(): void {
-    const commit = this.contextMenu.commit;
-    if (!commit) return;
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.handleViewDiff(new Event('click'), commit);
+    this.handleViewDiff(new Event('click'), entry);
   }
 
   private handleContextShowCommit(): void {
-    const commit = this.contextMenu.commit;
-    if (!commit) return;
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
-    this.handleCommitClick(commit);
+    this.handleCommitClick(entry);
   }
 
   private handleContextViewBlame(): void {
-    const commit = this.contextMenu.commit;
-    if (!commit) return;
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
     this.dispatchEvent(new CustomEvent('show-blame', {
-      detail: { filePath: this.filePath, commitOid: commit.oid },
+      // Same reason as view-diff: blaming a pre-rename commit under the file's
+      // current name fails, the file did not exist under it yet.
+      detail: { filePath: entry.pathAtCommit, commitOid: entry.commit.oid },
       bubbles: true,
       composed: true,
     }));
@@ -406,29 +418,29 @@ export class LvFileHistory extends LitElement {
    * commit <oid>" comes back through the helper as an error toast, which is
    * the honest outcome.
    *
-   * `commit.path` — not `this.filePath` — is the path to restore: we load with
-   * follow=true, so every commit from before a rename holds the file under its
-   * OLD name and its tree does not contain the current one. Falls back to
-   * this.filePath for a backend that did not report a path.
+   * `entry.pathAtCommit` — not `this.filePath` — is the path to restore: we
+   * load with follow=true, so every commit from before a rename holds the
+   * file under its OLD name and its tree does not contain the current one.
+   * Falls back to this.filePath for a backend that did not report a path.
    */
   private async handleContextRestoreFile(): Promise<void> {
-    const commit = this.contextMenu.commit;
-    if (!commit || !this.repositoryPath || !this.filePath) return;
+    const entry = this.contextMenu.entry;
+    if (!entry || !this.repositoryPath || !this.filePath) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
     await restoreFileFromCommit(
       this.repositoryPath,
-      commit.path ?? this.filePath,
-      commit.oid,
-      commit.shortId
+      entry.pathAtCommit ?? this.filePath,
+      entry.commit.oid,
+      entry.commit.shortId
     );
   }
 
   private async handleContextCopyHash(): Promise<void> {
-    const commit = this.contextMenu.commit;
-    if (!commit) return;
+    const entry = this.contextMenu.entry;
+    if (!entry) return;
     this.contextMenu = { ...this.contextMenu, visible: false };
     try {
-      await navigator.clipboard.writeText(commit.oid);
+      await navigator.clipboard.writeText(entry.commit.oid);
     } catch (err) {
       console.error('Failed to copy hash:', err);
       showToast('Failed to copy hash to clipboard', 'error');
@@ -450,7 +462,7 @@ export class LvFileHistory extends LitElement {
           </div>
         </div>
         ${!this.loading ? html`
-          <span class="commit-count">${this.commits.length} commits</span>
+          <span class="commit-count">${this.entries.length} commits</span>
         ` : nothing}
         <button class="close-btn" @click=${this.handleClose} title="Close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -465,23 +477,23 @@ export class LvFileHistory extends LitElement {
           ? html`<div class="loading">Loading history...</div>`
           : this.error
             ? html`<div class="error">${this.error}</div>`
-          : this.commits.length === 0
+          : this.entries.length === 0
             ? html`<div class="empty">No history found for this file</div>`
             : html`
                 <div class="commit-list">
-                  ${this.commits.map(commit => html`
+                  ${this.entries.map(entry => html`
                     <div
-                      class="commit-item ${this.selectedCommit === commit.oid ? 'selected' : ''}"
-                      @click=${() => this.handleCommitClick(commit)}
-                      @contextmenu=${(e: MouseEvent) => this.handleContextMenuOpen(e, commit)}
+                      class="commit-item ${this.selectedCommit === entry.commit.oid ? 'selected' : ''}"
+                      @click=${() => this.handleCommitClick(entry)}
+                      @contextmenu=${(e: MouseEvent) => this.handleContextMenuOpen(e, entry)}
                     >
                       <div class="commit-row">
-                        <span class="commit-oid">${commit.shortId}</span>
-                        <span class="commit-summary">${commit.summary}</span>
+                        <span class="commit-oid">${entry.commit.shortId}</span>
+                        <span class="commit-summary">${entry.commit.summary}</span>
                         <button
                           class="view-diff-btn"
-                          @click=${(e: Event) => this.handleViewDiff(e, commit)}
-                          title="View diff at this commit"
+                          @click=${(e: Event) => this.handleViewDiff(e, entry)}
+                          title="View diff of ${entry.pathAtCommit} at this commit"
                         >
                           View
                         </button>
@@ -492,15 +504,18 @@ export class LvFileHistory extends LitElement {
                             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                             <circle cx="12" cy="7" r="4"></circle>
                           </svg>
-                          ${commit.author.name}
+                          ${entry.commit.author.name}
                         </span>
                         <span class="commit-date">
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="12" cy="12" r="10"></circle>
                             <polyline points="12 6 12 12 16 14"></polyline>
                           </svg>
-                          ${this.formatDate(commit.timestamp)}
+                          ${this.formatDate(entry.commit.timestamp)}
                         </span>
+                        ${entry.pathAtCommit !== this.filePath
+                          ? html`<span class="commit-path" title="${entry.pathAtCommit}">${entry.pathAtCommit}</span>`
+                          : nothing}
                       </div>
                     </div>
                   `)}
@@ -512,7 +527,7 @@ export class LvFileHistory extends LitElement {
   }
 
   private renderContextMenu() {
-    if (!this.contextMenu.visible || !this.contextMenu.commit) return nothing;
+    if (!this.contextMenu.visible || !this.contextMenu.entry) return nothing;
 
     const { x, y } = this.contextMenu;
 

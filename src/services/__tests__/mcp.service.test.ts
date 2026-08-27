@@ -13,9 +13,10 @@ const mockResults: Record<string, unknown> = {
   start_mcp_server: null,
   stop_mcp_server: null,
   get_mcp_status: {
-    running: true,
+    running: false,
     port: 3000,
-    url: 'http://localhost:3000',
+    url: null,
+    lastError: 'Failed to bind to 127.0.0.1:3000: Address already in use',
   } as McpStatus,
   get_mcp_config: {
     enabled: true,
@@ -51,9 +52,17 @@ describe('MCP Service - getMcpStatus', () => {
     const result = await getMcpStatus();
     expect(result.success).to.be.true;
     expect(result.data).to.not.be.undefined;
-    expect(result.data!.running).to.be.true;
+    expect(result.data!.running).to.be.false;
     expect(result.data!.port).to.equal(3000);
-    expect(result.data!.url).to.equal('http://localhost:3000');
+    expect(result.data!.url).to.be.null;
+  });
+
+  it('should surface why a stopped server failed to start', async () => {
+    const result = await getMcpStatus();
+    expect(result.success).to.be.true;
+    expect(result.data!.lastError).to.equal(
+      'Failed to bind to 127.0.0.1:3000: Address already in use'
+    );
   });
 });
 

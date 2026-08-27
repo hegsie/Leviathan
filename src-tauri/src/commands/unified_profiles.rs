@@ -233,13 +233,29 @@ pub async fn get_unified_profile(profile_id: String) -> Result<Option<UnifiedPro
     Ok(config.profiles.into_iter().find(|p| p.id == profile_id))
 }
 
-/// Save a unified profile (create or update)
+/// Outcome of saving a profile: the stored profile plus the repositories whose
+/// local git config could not be rewritten with the edited identity.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProfileResult {
+    pub profile: UnifiedProfile,
+    pub failed_repositories: Vec<String>,
+}
+
+/// Save a unified profile (create or update) and push the (possibly edited)
+/// identity back into every repository already assigned to it.
+///
+/// Repositories whose local git config could not be rewritten come back in
+/// `failed_repositories` instead of failing the save.
 #[command]
-pub async fn save_unified_profile(profile: UnifiedProfile) -> Result<UnifiedProfile> {
+pub async fn save_unified_profile(profile: UnifiedProfile) -> Result<SaveProfileResult> {
     let mut config = load_unified_profiles_config()?;
-    config.save_profile(profile.clone());
+    let failed_repositories = save_and_reapply(&mut config, &profile);
     save_unified_profiles_config(&config)?;
-    Ok(profile)
+    Ok(SaveProfileResult {
+        profile,
+        failed_repositories,
+    })
 }
 
 /// Delete a unified profile
@@ -688,6 +704,39 @@ fn apply_profile_git_config(repo_path: &Path, profile: &UnifiedProfile) -> Resul
     }
 
     Ok(())
+}
+
+/// Store an edited profile AND push its identity back into every repository
+/// already assigned to it.
+///
+/// These must happen together, for the same reason assignment writes git config:
+/// the dashboard and the profile list render the profile's identity as the
+/// repository's commit identity, so persisting only the JSON left every assigned
+/// repository committing — and signing — as the profile was BEFORE the edit.
+/// Fixing a typo in a work email or rotating a signing key changed nothing but
+/// what the UI displayed.
+///
+/// Best effort per repository: one that has been moved or deleted must not block
+/// the edit, so its path is returned instead of failing the save.
+///
+/// Takes the config by reference so the pairing is testable without the global
+/// on-disk profile store.
+fn save_and_reapply(config: &mut UnifiedProfilesConfig, profile: &UnifiedProfile) -> Vec<String> {
+    config.save_profile(profile.clone());
+
+    let mut failed: Vec<String> = config
+        .repository_assignments
+        .iter()
+        .filter(|(_, assigned_id)| assigned_id.as_str() == profile.id)
+        .filter(|(repo_path, _)| {
+            apply_profile_git_config(Path::new(repo_path.as_str()), profile).is_err()
+        })
+        .map(|(repo_path, _)| repo_path.clone())
+        .collect();
+    // HashMap iteration order is arbitrary; sort so the paths the UI names come
+    // out in a stable order.
+    failed.sort();
+    failed
 }
 
 /// Apply a profile to a repository (set git config)
@@ -1449,6 +1498,146 @@ mod tests {
                 key
             );
         }
+    }
+
+    /// Editing a profile must rewrite the identity of the repositories that
+    /// already use it.
+    ///
+    /// Saving used to persist only the JSON, so fixing a typo in an email or
+    /// rotating a signing key changed what the dashboard displayed while every
+    /// assigned repository kept committing — and signing — as the profile was
+    /// before the edit.
+    #[test]
+    fn test_editing_a_profile_rewrites_assigned_repositories() {
+        let repo = TestRepo::with_initial_commit();
+
+        let profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        let profile_id = profile.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile.clone());
+        assign_and_apply(&mut config, repo.path_str(), profile_id.clone())
+            .expect("assignment should succeed");
+
+        let mut edited = profile;
+        edited.git_email = "alice@newwork.example".to_string();
+        edited.signing_key = Some("ssh-ed25519 AAAAC3Nz".to_string());
+
+        let failed = save_and_reapply(&mut config, &edited);
+
+        assert!(failed.is_empty(), "no repository should have failed");
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.email"]
+            )
+            .unwrap(),
+            "alice@newwork.example"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.signingkey"]
+            )
+            .unwrap(),
+            "ssh-ed25519 AAAAC3Nz"
+        );
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "gpg.format"]
+            )
+            .unwrap(),
+            "ssh"
+        );
+    }
+
+    /// A repository that has been moved or deleted must not block the edit — it
+    /// is reported so the UI can name it.
+    #[test]
+    fn test_editing_a_profile_reports_repositories_it_could_not_update() {
+        let repo = TestRepo::with_initial_commit();
+        let missing = repo.path.join("gone-repo").to_string_lossy().to_string();
+
+        let profile = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        let profile_id = profile.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile.clone());
+        assign_and_apply(&mut config, repo.path_str(), profile_id.clone())
+            .expect("assignment should succeed");
+        // A path that was assigned once and has since disappeared.
+        config.assign_profile(missing.clone(), profile_id.clone());
+
+        let mut edited = profile;
+        edited.git_email = "alice@newwork.example".to_string();
+
+        let failed = save_and_reapply(&mut config, &edited);
+
+        assert_eq!(failed, vec![missing]);
+        // The live repository was still updated...
+        assert_eq!(
+            run_git_config(
+                Some(repo.path.as_path()),
+                &["--local", "--get", "user.email"]
+            )
+            .unwrap(),
+            "alice@newwork.example"
+        );
+        // ...and the edit itself was still stored.
+        assert_eq!(
+            config.get_profile(&profile_id).unwrap().git_email,
+            "alice@newwork.example"
+        );
+    }
+
+    /// Only the edited profile's own repositories may be rewritten.
+    #[test]
+    fn test_editing_a_profile_leaves_other_profiles_repositories_alone() {
+        let repo_a = TestRepo::with_initial_commit();
+        let repo_b = TestRepo::with_initial_commit();
+
+        let profile_a = UnifiedProfile::new(
+            "Work".to_string(),
+            "Alice Work".to_string(),
+            "alice@work.example".to_string(),
+        );
+        let profile_b = UnifiedProfile::new(
+            "Personal".to_string(),
+            "Alice Home".to_string(),
+            "alice@home.example".to_string(),
+        );
+        let id_a = profile_a.id.clone();
+        let id_b = profile_b.id.clone();
+
+        let mut config = UnifiedProfilesConfig::default();
+        config.save_profile(profile_a.clone());
+        config.save_profile(profile_b);
+        assign_and_apply(&mut config, repo_a.path_str(), id_a).expect("assign a");
+        assign_and_apply(&mut config, repo_b.path_str(), id_b).expect("assign b");
+
+        let mut edited = profile_a;
+        edited.git_email = "alice@newwork.example".to_string();
+
+        let failed = save_and_reapply(&mut config, &edited);
+
+        assert!(failed.is_empty());
+        assert_eq!(
+            run_git_config(
+                Some(repo_b.path.as_path()),
+                &["--local", "--get", "user.email"]
+            )
+            .unwrap(),
+            "alice@home.example"
+        );
     }
 
     /// An unknown profile must not be recorded as an assignment.

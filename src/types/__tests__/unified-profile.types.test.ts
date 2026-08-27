@@ -13,6 +13,7 @@ import {
   filterAccountsByType,
   resolveDefaultGlobalAccount,
   resolveProfilePreferredAccount,
+  matchesUrlPattern,
   getGlobalAccountCountByType,
   getAccountDisplayLabel,
   // Deprecated v2 functions (for migration)
@@ -436,6 +437,72 @@ describe('unified-profile.types', () => {
       const preferred = resolveProfilePreferredAccount(profile, accounts, 'github');
 
       expect(preferred?.id).to.equal('g1');
+    });
+  });
+
+  describe('matchesUrlPattern (v3)', () => {
+    // These cases pin the helper to `url_matches_pattern` in
+    // src-tauri/src/models/unified_profile.rs. The dashboard uses it to predict
+    // which account/profile the backend will resolve, so any divergence here is
+    // a bug the user sees as "the card shows a different account than the one
+    // my PRs actually come from".
+
+    it('matches the exact repository under a trailing /* pattern', () => {
+      expect(matchesUrlPattern('https://github.com/work-org/some-repo', 'github.com/work-org/*')).to
+        .be.true;
+    });
+
+    it('matches nested path segments under a trailing /* pattern', () => {
+      // The backend treats a trailing "/*" as a plain prefix match, so it spans
+      // more than one path segment.
+      expect(
+        matchesUrlPattern('https://github.com/work-org/team/some-repo.git', 'github.com/work-org/*')
+      ).to.be.true;
+    });
+
+    it('matches the SSH remote form', () => {
+      expect(matchesUrlPattern('git@github.com:work-org/repo.git', 'github.com/work-org/*')).to.be
+        .true;
+    });
+
+    it('ignores a trailing slash and .git suffix on the URL', () => {
+      expect(matchesUrlPattern('https://github.com/work-org/repo.git/', 'github.com/work-org/*')).to
+        .be.true;
+    });
+
+    it('supports an embedded wildcard', () => {
+      expect(matchesUrlPattern('https://github.com/any/repo', 'github.com/*/repo')).to.be.true;
+      expect(matchesUrlPattern('https://github.com/any/other', 'github.com/*/repo')).to.be.false;
+    });
+
+    it('treats a wildcard-free pattern as equality or a path prefix', () => {
+      expect(matchesUrlPattern('https://github.com/work-org', 'github.com/work-org')).to.be.true;
+      expect(matchesUrlPattern('https://github.com/work-org/repo', 'github.com/work-org')).to.be
+        .true;
+      // Prefix must break on a path separator, not mid-segment.
+      expect(matchesUrlPattern('https://github.com/work-organisation', 'github.com/work-org')).to.be
+        .false;
+    });
+
+    it('does not match a different host or organisation', () => {
+      expect(matchesUrlPattern('https://gitlab.com/work-org/repo', 'github.com/work-org/*')).to.be
+        .false;
+      expect(matchesUrlPattern('https://github.com/other/repo', 'github.com/work-org/*')).to.be
+        .false;
+    });
+
+    it('reproduces the backend quirk where /* also matches a longer org name', () => {
+      // Deliberate parity case: the Rust matcher strips the "/*" and does a raw
+      // starts_with, so "github.com/work-org/*" also matches "work-org-2".
+      // Asserted here so this port is provably identical to the backend rather
+      // than accidentally stricter.
+      expect(matchesUrlPattern('https://github.com/work-org-2/repo', 'github.com/work-org/*')).to.be
+        .true;
+    });
+
+    it('normalizes protocol and trailing slash on the pattern', () => {
+      expect(matchesUrlPattern('https://github.com/work-org/repo', 'https://github.com/work-org/')).
+        to.be.true;
     });
   });
 

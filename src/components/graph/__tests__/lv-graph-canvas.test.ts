@@ -33,6 +33,7 @@ import type { Commit, RefsByCommit } from '../../../types/git.types.ts';
 import '../lv-graph-canvas.ts';
 import type { LvGraphCanvas } from '../lv-graph-canvas.ts';
 import { clearGraphCacheForTests, evictGraphCache } from '../lv-graph-canvas.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -1277,6 +1278,281 @@ describe('lv-graph-canvas', () => {
     });
   });
 
+  // ── Selection validation after a reload ──────────────────────────────
+  describe('selection validation after reload', () => {
+    type SelectionInternals = {
+      selectedNode: { oid: string; row: number } | null;
+      selectedNodes: Set<string>;
+      lastClickedNode: { oid: string; row: number } | null;
+    };
+
+    /** Trigger refresh() and let the reload + relayout settle */
+    async function reload(el: LvGraphCanvas): Promise<void> {
+      el.refresh();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    function captureSelectionEvents(
+      el: LvGraphCanvas
+    ): Array<{ commit: Commit | null; commits: Commit[] }> {
+      const events: Array<{ commit: Commit | null; commits: Commit[] }> = [];
+      el.addEventListener('commit-selected', (e) => {
+        const detail = (e as CustomEvent<{ commit: Commit | null; commits: Commit[] }>).detail;
+        events.push({ commit: detail.commit, commits: detail.commits });
+      });
+      return events;
+    }
+
+    it('clears the selection and notifies listeners when a reload rewrites away the selected commit', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      expect(el.selectCommit(commit3.oid)).to.be.true;
+
+      // The tip commit is amended: the old OID is gone from the rewritten history
+      const amended = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Third commit (amended)',
+        message: 'Third commit (amended)',
+        timestamp: 1700002500,
+        parentIds: [commit2.oid],
+      });
+      setupDefaultMocks({
+        commits: [amended, commit2, commit1],
+        refs: {
+          [amended.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      expect(events).to.have.length(1);
+      expect(events[0].commit).to.be.null;
+      expect(events[0].commits).to.have.length(0);
+
+      const internals = el as unknown as SelectionInternals;
+      expect(internals.selectedNode).to.be.null;
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(internals.lastClickedNode).to.be.null;
+    });
+
+    it('prunes only the vanished OIDs from a multi-selection and keeps the rest', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+      internals.selectedNodes.add(commit3.oid);
+      expect(internals.selectedNodes.size).to.equal(2);
+
+      // The branch holding commit3 is deleted: only commit3 leaves the graph
+      setupDefaultMocks({
+        commits: [commit2, commit1],
+        refs: {
+          [commit2.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      expect(events).to.have.length(1);
+      expect(events[0].commit?.oid).to.equal(commit2.oid);
+      expect(events[0].commits).to.have.length(1);
+      expect([...internals.selectedNodes]).to.deep.equal([commit2.oid]);
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+    });
+
+    it('rebinds a surviving selection to its node in the new layout', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+      expect(internals.selectedNode?.row).to.equal(1);
+
+      // A new commit lands on top, shifting every existing row down by one
+      const commit4 = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Fourth commit',
+        message: 'Fourth commit',
+        timestamp: 1700003000,
+        parentIds: [commit3.oid],
+      });
+      setupDefaultMocks({
+        commits: [commit4, commit3, commit2, commit1],
+        refs: {
+          [commit4.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // Same commit, new row — range-select and the SR position read this row
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(internals.selectedNode?.row).to.equal(2);
+      expect(internals.lastClickedNode?.oid).to.equal(commit2.oid);
+      expect(internals.lastClickedNode?.row).to.equal(2);
+      // An ordinary reload that keeps the selection must not churn the panel
+      expect(events).to.have.length(0);
+    });
+
+    it('keeps the selection when a reload fails', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      expect(el.selectCommit(commit2.oid)).to.be.true;
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_history') {
+          throw new Error('walk failed');
+        }
+        return previous(command, args);
+      };
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // A failed load never rebuilds the layout, so the details panel must
+      // keep showing exactly what it showed before
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(internals.selectedNodes.size).to.equal(1);
+      expect(events).to.have.length(0);
+    });
+
+    it('promotes a surviving selected commit when the primary one is rewritten away', async () => {
+      setupDefaultMocks();
+      const el = await renderCanvas();
+      const internals = el as unknown as SelectionInternals;
+
+      // Multi-selection with commit3 primary and commit2 also selected
+      expect(el.selectCommit(commit3.oid)).to.be.true;
+      internals.selectedNodes.add(commit2.oid);
+      expect(internals.selectedNode?.oid).to.equal(commit3.oid);
+
+      // The tip is amended away; commit2 stays in the rewritten history
+      const amended = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Third commit (amended)',
+        message: 'Third commit (amended)',
+        timestamp: 1700002500,
+        parentIds: [commit2.oid],
+      });
+      setupDefaultMocks({
+        commits: [amended, commit2, commit1],
+        refs: {
+          [amended.oid]: [
+            { name: 'refs/heads/main', shorthand: 'main', refType: 'localBranch', isHead: true },
+          ],
+        },
+      });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // The survivor becomes the primary, so the highlighted graph and the
+      // details panel agree and keyboard navigation keeps its anchor
+      expect([...internals.selectedNodes]).to.deep.equal([commit2.oid]);
+      expect(internals.selectedNode?.oid).to.equal(commit2.oid);
+      expect(events).to.have.length(1);
+      expect(events[0].commit?.oid).to.equal(commit2.oid);
+      expect(events[0].commits).to.have.length(1);
+    });
+
+    it('keeps a selection from a later page when a reload only brings back the first page', async () => {
+      const deepCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Deep commit',
+        message: 'Deep commit',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      // commitCount 3 == page size, so the reload comes back truncated
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const el = await renderCanvas(3);
+      const internals = el as unknown as SelectionInternals & {
+        loadMoreCommits(): Promise<void>;
+      };
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(el.selectCommit(deepCommit.oid)).to.be.true;
+
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const events = captureSelectionEvents(el);
+      await reload(el);
+
+      // The commit is still in the repository — it just sits below the
+      // reloaded page, so the details panel must not be emptied
+      expect(internals.selectedNode?.oid).to.equal(deepCommit.oid);
+      expect([...internals.selectedNodes]).to.deep.equal([deepCommit.oid]);
+      expect(events).to.have.length(0);
+
+      // The catch-up page brings it back and confirms it is still there
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(internals.selectedNode?.oid).to.equal(deepCommit.oid);
+      expect(events).to.have.length(0);
+    });
+
+    it('prunes a selection from a later page once the catch-up page proves it is gone', async () => {
+      const deepCommit = makeCommit({
+        oid: 'ddd4444444444444444444444444444444444444',
+        shortId: 'ddd4444',
+        summary: 'Deep commit',
+        message: 'Deep commit',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      setupDefaultMocks({ moreCommits: [deepCommit], total: 4 });
+      const el = await renderCanvas(3);
+      const internals = el as unknown as SelectionInternals & {
+        loadMoreCommits(): Promise<void>;
+      };
+
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+      expect(el.selectCommit(deepCommit.oid)).to.be.true;
+
+      // A rebase rewrites the deep commit: the catch-up page returns a
+      // different OID in its place
+      const rewritten = makeCommit({
+        oid: 'eee5555555555555555555555555555555555555',
+        shortId: 'eee5555',
+        summary: 'Deep commit (rewritten)',
+        message: 'Deep commit (rewritten)',
+        timestamp: 1699999000,
+        parentIds: [],
+      });
+      setupDefaultMocks({ moreCommits: [rewritten], total: 4 });
+
+      const events = captureSelectionEvents(el);
+      await reload(el);
+      await internals.loadMoreCommits();
+      await el.updateComplete;
+
+      expect(internals.selectedNode).to.be.null;
+      expect(internals.selectedNodes.size).to.equal(0);
+      expect(events).to.have.length(1);
+      expect(events[0].commit).to.be.null;
+    });
+  });
+
   describe('pull request loading race', () => {
     it('discards PRs fetched for a previously active repository', async () => {
       let resolvePrs: ((v: unknown) => void) | null = null;
@@ -1943,5 +2219,262 @@ describe('lv-graph-canvas', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).commits.length).to.equal(defaultCommits.length + 1);
     });
+  });
+
+  // ── Semantic search fallback ─────────────────────────────────────────
+  describe('semantic search fallback', () => {
+    beforeEach(() => {
+      clearGraphCacheForTests();
+    });
+
+    /** Layer semantic/keyword answers on top of the default mocks */
+    function setupSemanticMocks(opts: {
+      semantic: 'throw' | Array<{ oid: string; distance: number; summary: string }>;
+      keyword?: Commit[];
+    }): void {
+      setupDefaultMocks();
+      const base = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'semantic_search') {
+          if (opts.semantic === 'throw') throw new Error('Embedding model not downloaded');
+          return opts.semantic;
+        }
+        if (command === 'search_commits') return opts.keyword ?? [];
+        return base(command, args);
+      };
+    }
+
+    async function applySemanticQuery(el: LvGraphCanvas, query: string): Promise<void> {
+      el.searchFilter = {
+        query,
+        author: '',
+        dateFrom: '',
+        dateTo: '',
+        filePath: '',
+        branch: '',
+        searchMode: 'semantic',
+      };
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 200));
+      await el.updateComplete;
+    }
+
+    function matchedOids(el: LvGraphCanvas): Set<string> {
+      return (el as unknown as { matchedCommitOids: Set<string> }).matchedCommitOids;
+    }
+
+    function collectNotices(el: LvGraphCanvas): Array<{ message: string; type?: string }> {
+      const notices: Array<{ message: string; type?: string }> = [];
+      el.addEventListener('graph-notice', (e) => {
+        notices.push((e as CustomEvent<{ message: string; type?: string }>).detail);
+      });
+      return notices;
+    }
+
+    it('falls back to keyword search when semantic search fails', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // The keyword block must actually run after the semantic failure
+      expect(findCommands('search_commits').length).to.equal(1);
+      expect(matchedOids(el).has(commit2.oid)).to.be.true;
+    });
+
+    it('notifies the user when semantic search is unavailable', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      expect(notices.length).to.equal(1);
+      expect(notices[0].type).to.equal('info');
+      expect(notices[0].message).to.contain('Semantic search is unavailable');
+    });
+
+    it('still notifies when the keyword fallback also finds nothing', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // A broken index must not look identical to "no commits matched"
+      expect(findCommands('search_commits').length).to.equal(1);
+      expect(matchedOids(el).size).to.equal(0);
+      expect(notices.length).to.equal(1);
+    });
+
+    it('shows the unavailable notice only once while the user keeps typing', async () => {
+      setupSemanticMocks({ semantic: 'throw', keyword: [commit2] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      // The search bar has no debounce: one search per keystroke
+      await applySemanticQuery(el, 'auth');
+      await applySemanticQuery(el, 'auth rework');
+
+      expect(notices.length).to.equal(1);
+      // ...but the keyword fallback still runs for every query
+      expect(findCommands('search_commits').length).to.equal(2);
+    });
+
+    it('does not fall back when semantic search returns no matches', async () => {
+      setupSemanticMocks({ semantic: [], keyword: [commit1] });
+      const el = await renderCanvas();
+      clearHistory();
+      const notices = collectNotices(el);
+
+      await applySemanticQuery(el, 'auth rework');
+
+      // A semantic search that RAN and found nothing genuinely means
+      // "no matches" — no keyword fallback, no notice
+      expect(findCommands('search_commits').length).to.equal(0);
+      expect(matchedOids(el).size).to.equal(0);
+      expect(notices.length).to.equal(0);
+    });
+  });
+});
+
+describe('lv-graph-canvas commit-size setting', () => {
+  type RendererInternals = { renderer: { config: { scaleNodesByCommitSize: boolean } } };
+
+  afterEach(() => {
+    settingsStore.getState().setShowCommitSize(true);
+  });
+
+  it('initialises the renderer from the Show Commit Size setting', async () => {
+    settingsStore.getState().setShowCommitSize(false);
+
+    const el = await renderCanvas(10);
+
+    const { config } = (el as unknown as RendererInternals).renderer;
+    expect(config.scaleNodesByCommitSize).to.be.false;
+  });
+
+  it('updates the renderer when Show Commit Size is toggled', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const { renderer } = el as unknown as RendererInternals;
+    expect(renderer.config.scaleNodesByCommitSize).to.be.true;
+
+    settingsStore.getState().setShowCommitSize(false);
+    await el.updateComplete;
+
+    expect(renderer.config.scaleNodesByCommitSize).to.be.false;
+  });
+});
+
+describe('lv-graph-canvas SVG export node sizing', () => {
+  type CanvasInternals = {
+    exportAsSvg(): void;
+    renderer: {
+      config: { nodeRadius: number };
+      setCommitStats(stats: Map<string, { additions: number; deletions: number; filesChanged: number }>): void;
+    };
+  };
+
+  beforeEach(() => {
+    clearHistory();
+    setupDefaultMocks();
+    try {
+      localStorage.removeItem('leviathan-graph-zoom');
+      localStorage.removeItem('leviathan-graph-optional-columns');
+    } catch {
+      // Ignore
+    }
+  });
+
+  afterEach(() => {
+    settingsStore.getState().setShowCommitSize(true);
+  });
+
+  /**
+   * Run the SVG export and return the generated markup. The download is
+   * neutralised so the test never navigates.
+   */
+  async function captureSvgExport(el: LvGraphCanvas): Promise<string> {
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    let captured: Blob | null = null;
+
+    URL.createObjectURL = ((blob: Blob) => {
+      captured = blob;
+      return 'blob:stub';
+    }) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL;
+    HTMLAnchorElement.prototype.click = () => {};
+
+    try {
+      (el as unknown as CanvasInternals).exportAsSvg();
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      HTMLAnchorElement.prototype.click = originalClick;
+    }
+
+    return captured ? await (captured as Blob).text() : '';
+  }
+
+  function circleRadii(svg: string): number[] {
+    return [...svg.matchAll(/<circle [^>]*\br="([\d.]+)"/g)].map((m) => Number(m[1]));
+  }
+
+  /** A large commit and a tiny one, so scaled radii must differ. */
+  function statsFor(oids: string[]): Map<string, { additions: number; deletions: number; filesChanged: number }> {
+    const stats = new Map<string, { additions: number; deletions: number; filesChanged: number }>();
+    stats.set(oids[0], { additions: 5000, deletions: 5000, filesChanged: 40 });
+    return stats;
+  }
+
+  it('scales SVG node radii by commit size like the on-screen graph', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+    internals.renderer.setCommitStats(statsFor(defaultCommits.map((c) => c.oid)));
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    // 10000 changes maps to the renderer's maxNodeRadius
+    expect(radii).to.include(10);
+    expect(radii.some((r) => r !== baseRadius)).to.be.true;
+  });
+
+  it('uses uniform SVG node radii when Show Commit Size is off', async () => {
+    settingsStore.getState().setShowCommitSize(false);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+    internals.renderer.setCommitStats(statsFor(defaultCommits.map((c) => c.oid)));
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    expect(radii.every((r) => r === baseRadius)).to.be.true;
+  });
+
+  it('falls back to the base radius for commits with no stats', async () => {
+    settingsStore.getState().setShowCommitSize(true);
+
+    const el = await renderCanvas(10);
+    const internals = el as unknown as CanvasInternals;
+    const baseRadius = internals.renderer.config.nodeRadius;
+
+    const radii = circleRadii(await captureSvgExport(el));
+
+    expect(radii.length).to.be.greaterThan(1);
+    expect(radii.every((r) => r === baseRadius)).to.be.true;
   });
 });
