@@ -1133,9 +1133,9 @@ mod tests {
             stdout
         );
         assert!(
-            !stdout.contains("******"),
             !stdout.contains("password="),
             "git must supply no password at all for a foreign host: {}",
+            stdout
         );
     }
 
