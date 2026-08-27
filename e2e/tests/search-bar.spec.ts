@@ -350,6 +350,98 @@ test.describe('Search Query Filtering', () => {
 
     await expect(filterButton).toHaveClass(/active/);
   });
+
+  /**
+   * Apply a graph search filter through the same `search-change` contract
+   * lv-toolbar emits when the user clicks Apply in the filter panel.
+   *
+   * NOTE: this does not type into the search bar because of a separate
+   * pre-existing defect — lv-search-bar's `search-change` is `composed`, so
+   * app-shell receives both the toolbar's `{ filter }` event and the search
+   * bar's own raw-filter event, and the raw one arrives last leaving
+   * app-shell's searchFilter `undefined`. Emitting the toolbar's contract
+   * still exercises the real components end to end.
+   */
+  async function applyGraphFilter(
+    page: import('@playwright/test').Page,
+    filter: Record<string, string>
+  ): Promise<void> {
+    await page.evaluate((f) => {
+      const findToolbar = (root: Document | ShadowRoot): Element | null => {
+        for (const el of Array.from(root.querySelectorAll('*'))) {
+          if (el.tagName.toLowerCase() === 'lv-toolbar') return el;
+          if (el.shadowRoot) {
+            const found = findToolbar(el.shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const toolbar = findToolbar(document);
+      if (!toolbar) throw new Error('lv-toolbar not found');
+      toolbar.dispatchEvent(
+        new CustomEvent('search-change', { detail: { filter: f }, bubbles: true, composed: true })
+      );
+    }, filter);
+  }
+
+  const pathFilter = {
+    query: '',
+    author: '',
+    dateFrom: '',
+    dateTo: '',
+    filePath: 'src/**/*.ts',
+    branch: '',
+    searchMode: 'keyword',
+  };
+
+  test('a Path filter reaches git directly, bypassing the commit index', async ({ page }) => {
+    // Opening the repo builds the commit index in the background, which is
+    // the condition the graph's search path branches on. The index has no
+    // file dimension: if it is asked, it answers with everything it holds
+    // and every commit lights up as a "match". A Path filter must therefore
+    // go to the direct commit search instead.
+    await startCommandCaptureWithMocks(page, {
+      search_index: [
+        {
+          oid: 'abc123def456',
+          shortOid: 'abc123d',
+          summary: 'Initial commit',
+          messageLower: 'initial commit',
+          authorName: 'Test User',
+          authorEmail: 'test@example.com',
+          authorDate: 1700000000,
+          parentCount: 0,
+        },
+      ],
+      search_commits: [],
+    });
+
+    await applyGraphFilter(page, pathFilter);
+
+    await waitForCommand(page, 'search_commits');
+
+    const directSearches = await findCommand(page, 'search_commits');
+    expect(directSearches.length).toBeGreaterThan(0);
+    expect((directSearches[0].args as { filePath?: string }).filePath).toBe('src/**/*.ts');
+
+    const indexSearches = await findCommand(page, 'search_index');
+    expect(indexSearches).toHaveLength(0);
+  });
+
+  test('a failed Path search is announced, not shown as zero matches', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      search_commits: { __error__: 'fatal: bad pathspec' },
+    });
+
+    await applyGraphFilter(page, pathFilter);
+
+    await expect(
+      page.locator('lv-toast-container .toast .toast-message', {
+        hasText: 'Search failed',
+      })
+    ).toBeVisible();
+  });
 });
 
 test.describe('Search Bar - Error Scenarios', () => {
