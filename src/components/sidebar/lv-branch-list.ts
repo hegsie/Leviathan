@@ -1476,6 +1476,28 @@ export class LvBranchList extends LitElement {
     }
   }
 
+  /**
+   * Ask the host to open the comparison dialog aimed at this branch.
+   *
+   * Read-only, so unlike its merge/rebase siblings it is not gated on
+   * `operationInProgress`: nothing about looking at a diff conflicts with a
+   * running working-tree operation, and disabling it would leave the user
+   * without the one entry point that could explain what is going on.
+   */
+  private handleCompareBranch(): void {
+    const branch = this.contextMenu.branch;
+    if (!branch) return;
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.dispatchEvent(new CustomEvent('compare-branch', {
+      bubbles: true,
+      composed: true,
+      // Full name, so a remote branch resolves as "origin/x" rather than
+      // colliding with a same-named local branch — same reason as merge/rebase.
+      detail: { compareRef: branch.name },
+    }));
+  }
+
   private handleInteractiveRebase(): void {
     const branch = this.contextMenu.branch;
     // Only opens the dialog — it starts no git operation itself, so it checks
@@ -2187,6 +2209,18 @@ export class LvBranchList extends LitElement {
           </svg>
           Create branch from here
         </button>
+
+        ${!isHead ? html`
+          <button class="context-menu-item" role="menuitem" @click=${this.handleCompareBranch}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="6" cy="6" r="3"></circle>
+              <circle cx="18" cy="18" r="3"></circle>
+              <line x1="6" y1="9" x2="6" y2="21"></line>
+              <line x1="18" y1="3" x2="18" y2="15"></line>
+            </svg>
+            Compare with current branch
+          </button>
+        ` : ''}
 
         ${!isLocal ? html`
           <button class="context-menu-item" role="menuitem" @click=${this.handleTrackRemoteBranch}>

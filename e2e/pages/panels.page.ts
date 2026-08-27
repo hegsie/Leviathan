@@ -21,6 +21,7 @@ export class LeftPanelPage {
   // Stash list
   readonly stashList: Locator;
   readonly stashItems: Locator;
+  readonly stashDetails: Locator;
 
   // Tag list
   readonly tagList: Locator;
@@ -46,6 +47,8 @@ export class LeftPanelPage {
     this.stashList = page.locator('lv-stash-list');
     // Stash items are rendered with stash-item class
     this.stashItems = this.stashList.locator('.stash-item');
+    // The inline `git stash show` preview, revealed by clicking a stash row
+    this.stashDetails = this.stashList.locator('.stash-details');
 
     // Tag list - the component itself
     this.tagList = page.locator('lv-tag-list');

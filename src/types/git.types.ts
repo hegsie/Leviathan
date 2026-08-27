@@ -48,6 +48,13 @@ export interface Commit {
   committer: Signature;
   parentIds: string[];
   timestamp: number;
+  /**
+   * The path the subject file had AT this commit. Only set by path-scoped
+   * walks (getFileHistory) — with rename following on, the commits before a
+   * rename hold the file under its OLD name, so acting on one has to use this
+   * rather than the file's current path. Absent everywhere else.
+   */
+  path?: string;
 }
 
 /** One entry of a file's history: a commit plus the path the file had there. */
@@ -161,6 +168,8 @@ export interface StashFile {
 
 export interface StashShowResult {
   index: number;
+  /** The stash commit this result describes — see the Rust field's note. */
+  oid: string;
   message: string;
   files: StashFile[];
   totalAdditions: number;

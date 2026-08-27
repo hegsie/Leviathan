@@ -474,6 +474,109 @@ test.describe('Commit Details - UI Outcome Verification', () => {
   });
 });
 
+// --------------------------------------------------------------------------
+// Restore a file to its version in the selected commit
+// --------------------------------------------------------------------------
+test.describe('Commit Details - Restore file from commit', () => {
+  let rightPanel: RightPanelPage;
+
+  /** Files including a deleted one, whose blob is not in this commit's tree. */
+  const restoreFiles = [
+    { path: 'src/main.ts', status: 'modified', additions: 10, deletions: 5 },
+    { path: 'src/gone.ts', status: 'deleted', additions: 0, deletions: 9 },
+  ];
+
+  const restoreItem = (page: import('@playwright/test').Page) =>
+    page.locator('lv-commit-details .context-menu .context-menu-item', {
+      hasText: 'Restore this version',
+    });
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, {
+      get_commit_files: restoreFiles,
+      checkout_file_from_commit: {
+        filePath: 'src/main.ts',
+        commitOid: 'abc123def456',
+        content: 'restored',
+        isBinary: false,
+        size: 8,
+      },
+      'plugin:dialog|message': 'Ok',
+    });
+    await selectCommit(page, defaultCommit);
+    await rightPanel.switchToDetails();
+    await expect(rightPanel.commitFilesChanged).toHaveCount(2);
+  });
+
+  test('restores a file from the selected commit and confirms it', async ({ page }) => {
+    await rightPanel.commitFilesChanged.first().click({ button: 'right' });
+    await expect(restoreItem(page)).toBeVisible();
+    await restoreItem(page).click();
+
+    // The user is warned before the working copy is overwritten and staged.
+    const confirms = await findCommand(page, 'plugin:dialog|message');
+    expect(confirms.length).toBeGreaterThan(0);
+    const confirmArgs = confirms[confirms.length - 1].args as Record<string, string>;
+    expect(confirmArgs.title).toBe('Restore File');
+    expect(confirmArgs.message).toContain('src/main.ts');
+    expect(confirmArgs.message).toMatch(/overwrites/i);
+    expect(confirmArgs.message).toMatch(/stages/i);
+
+    await expect
+      .poll(async () => (await findCommand(page, 'checkout_file_from_commit')).length)
+      .toBe(1);
+    const calls = await findCommand(page, 'checkout_file_from_commit');
+    const args = calls[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/main.ts');
+    expect(args.commit).toBe('abc123def456');
+
+    const toast = page.locator('lv-toast-container .toast.success .toast-message');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('src/main.ts');
+  });
+
+  test('offers restore for a file the commit changed but not one it deleted', async ({ page }) => {
+    // Both halves in one test so the negative cannot pass vacuously.
+    await rightPanel.commitFilesChanged.first().click({ button: 'right' });
+    await expect(restoreItem(page)).toBeVisible();
+    // A document click dismisses it (handleDocumentClick).
+    await page.locator('body').click({ position: { x: 2, y: 2 } });
+    await expect(rightPanel.commitDetails.locator('.context-menu')).toHaveCount(0);
+
+    // The deleted file's blob is not in this commit's tree, so restoring it
+    // could only fail — the item is hidden rather than offered and refused.
+    await rightPanel.commitFilesChanged.nth(1).click({ button: 'right' });
+    await expect(rightPanel.commitDetails.locator('.context-menu')).toBeVisible();
+    await expect(restoreItem(page)).toHaveCount(0);
+  });
+
+  test('declining the confirm restores nothing', async ({ page }) => {
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+
+    await rightPanel.commitFilesChanged.first().click({ button: 'right' });
+    await restoreItem(page).click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'plugin:dialog|message')).length)
+      .toBeGreaterThan(0);
+    expect(await findCommand(page, 'checkout_file_from_commit')).toHaveLength(0);
+    await expect(page.locator('lv-toast-container .toast')).toHaveCount(0);
+  });
+
+  test('shows an error toast when the restore fails', async ({ page }) => {
+    await injectCommandError(page, 'checkout_file_from_commit', 'File not found in commit');
+
+    await rightPanel.commitFilesChanged.first().click({ button: 'right' });
+    await restoreItem(page).click();
+
+    const toast = page.locator('lv-toast-container .toast.error .toast-message');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('File not found in commit');
+  });
+});
+
 test.describe('Commit Details - Renamed Files', () => {
   /** The rename entry the backend reports for a moved-and-edited file. */
   const renamedEntry = {

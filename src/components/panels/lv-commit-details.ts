@@ -14,6 +14,7 @@ import type { GitNote } from '../../services/git.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { loggers, openExternalUrl } from '../../utils/index.ts';
+import { restoreFileFromCommit } from '../../utils/restore-file.ts';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { join } from '@tauri-apps/api/path';
 
@@ -1316,6 +1317,18 @@ export class LvCommitDetails extends LitElement {
     }));
   }
 
+  private async handleContextRestoreFile(): Promise<void> {
+    const file = this.contextMenu.file;
+    const commit = this.commit;
+    // A file the commit DELETED is not in its tree, so find_blob_in_commit
+    // would fail. The menu hides the item for those; this guards the handler.
+    if (!file || !commit || !this.repositoryPath || file.status === 'deleted') return;
+    // Closed synchronously, like every sibling: the confirm is an IPC round
+    // trip, and a menu left on screen through it takes a second click.
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    await restoreFileFromCommit(this.repositoryPath, file.path, commit.oid, commit.shortId);
+  }
+
   private async handleContextOpenInEditor(): Promise<void> {
     const file = this.contextMenu.file;
     if (!file || file.status === 'deleted') return;
@@ -1587,6 +1600,9 @@ export class LvCommitDetails extends LitElement {
     const { x, y, file } = this.contextMenu;
     const canBlame = file.status !== 'deleted';
     const canOpen = file.status !== 'deleted';
+    // Restoring needs the blob to exist in THIS commit's tree, which it does
+    // not for a file the commit deleted.
+    const canRestore = file.status !== 'deleted' && !!this.commit;
 
     return html`
       <div class="context-menu" style="left: ${x}px; top: ${y}px">
@@ -1612,6 +1628,15 @@ export class LvCommitDetails extends LitElement {
           </svg>
           View history
         </button>
+        ${canRestore ? html`
+          <button class="context-menu-item" @click=${this.handleContextRestoreFile}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+              <polyline points="3 3 3 8 8 8"></polyline>
+            </svg>
+            Restore this version
+          </button>
+        ` : nothing}
         <div class="context-menu-divider"></div>
         ${canOpen ? html`
           <button class="context-menu-item" @click=${this.handleContextOpenInEditor}>
