@@ -3643,6 +3643,21 @@ export class AppShell extends LitElement {
     showToast(`Copied SHA ${e.detail.sha} to clipboard`, 'success');
   }
 
+  /**
+   * A note was added, edited or removed in the commit details panel. Notes
+   * live in refs/notes/*, which the graph does not draw, so there is nothing
+   * to refresh — the panel owns its own reload. All this needs to do is
+   * confirm the write, the same way handleCopySha confirms a copy.
+   */
+  private handleNotesChanged(
+    e: CustomEvent<{ action: 'added' | 'updated' | 'removed'; commitOid: string; notesRef: string }>
+  ): void {
+    const { action, commitOid } = e.detail;
+    const shortOid = commitOid.substring(0, 7);
+    const verb = action === 'added' ? 'added to' : action === 'updated' ? 'updated on' : 'removed from';
+    showToast(`Note ${verb} ${shortOid}`, 'success');
+  }
+
   private handleGraphNotice(e: CustomEvent<{ message: string; type?: 'info' | 'success' | 'error' }>): void {
     // User-facing notices from the graph canvas (it has no toast of its own)
     showToast(e.detail.message, e.detail.type ?? 'info', 4000);
@@ -5556,6 +5571,7 @@ export class AppShell extends LitElement {
                   @show-blame=${this.handleShowBlame}
                   @show-file-history=${this.handleShowFileHistory}
                   @copy-sha=${this.handleCopySha}
+                  @notes-changed=${this.handleNotesChanged}
                   @repository-changed=${() => this.handleRefresh()}
                 >
                   <lv-right-panel
