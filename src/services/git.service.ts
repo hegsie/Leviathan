@@ -3512,6 +3512,7 @@ export async function listPullRequests(
   repo: string,
   state?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<PullRequestSummary[]>> {
   return invokeProviderCommand<PullRequestSummary[]>("list_pull_requests", {
@@ -3519,6 +3520,7 @@ export async function listPullRequests(
     repo,
     state,
     perPage,
+    page,
     token,
   });
 }
@@ -3571,6 +3573,7 @@ export async function getWorkflowRuns(
   repo: string,
   branch?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<WorkflowRun[]>> {
   return invokeProviderCommand<WorkflowRun[]>("get_workflow_runs", {
@@ -3578,6 +3581,7 @@ export async function getWorkflowRuns(
     repo,
     branch,
     perPage,
+    page,
     token,
   });
 }
@@ -3627,6 +3631,19 @@ export interface IssueSummary {
   body: string | null;
 }
 
+/**
+ * One page of issues plus the cursor for the next request.
+ *
+ * The `/issues` endpoint returns pull requests alongside issues and the backend
+ * filters them out, so the length of `issues` says nothing about whether more
+ * exist — `nextPage` carries that answer instead. `null` means the list ends
+ * here.
+ */
+export interface IssuePage {
+  issues: IssueSummary[];
+  nextPage: number | null;
+}
+
 export interface IssueComment {
   id: number;
   user: GitHubUser;
@@ -3649,14 +3666,16 @@ export async function listIssues(
   state?: string,
   labels?: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
-): Promise<CommandResult<IssueSummary[]>> {
-  return invokeProviderCommand<IssueSummary[]>("list_issues", {
+): Promise<CommandResult<IssuePage>> {
+  return invokeProviderCommand<IssuePage>("list_issues", {
     owner,
     repo,
     state,
     labels,
     perPage,
+    page,
     token,
   });
 }
@@ -3863,12 +3882,14 @@ export async function listReleases(
   owner: string,
   repo: string,
   perPage?: number,
+  page?: number,
   token?: string | null,
 ): Promise<CommandResult<ReleaseSummary[]>> {
   return invokeProviderCommand<ReleaseSummary[]>("list_releases", {
     owner,
     repo,
     perPage,
+    page,
     token,
   });
 }
