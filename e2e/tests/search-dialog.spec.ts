@@ -91,7 +91,13 @@ test.describe('Search dialog', () => {
 
     await expect(page.locator('lv-search-dialog[open]')).toHaveCount(0);
     await expect(page.locator('lv-blame-view')).toBeVisible();
-    await expect(page.locator('lv-blame-view')).toContainText('src/main.ts');
+    // The blame header shows only the file name (compact header), with the
+    // full path as a hover tooltip rather than in the visible text — this is
+    // the component's long-standing, deliberate rendering (getFileName()),
+    // not a regression, so verify each half of the intended display in the
+    // place it actually appears.
+    await expect(page.locator('lv-blame-view .file-path')).toHaveText('main.ts');
+    await expect(page.locator('lv-blame-view .file-path')).toHaveAttribute('title', 'src/main.ts');
   });
 
   test('a backend failure is shown inside the dialog', async ({ page }) => {
