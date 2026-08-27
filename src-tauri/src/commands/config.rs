@@ -459,13 +459,19 @@ pub async fn get_common_settings(path: String) -> Result<Vec<ConfigEntry>> {
         // settings (e.g. core.autocrlf set by the Windows Git installer) and
         // conditional includes are reflected, with their true scope.
         let (value, scope) = read_effective_config(repo_path, key);
-        if let Some(val) = value {
-            settings.push(ConfigEntry {
-                key: key.to_string(),
-                value: val,
-                scope,
-            });
-        }
+        // Keys with no value are reported too, as an empty value with the
+        // "unset" scope. The Settings tab renders one editor per entry, so
+        // dropping them here left a freshly cloned repository with nothing it
+        // could configure — the very settings the tab exists to manage.
+        settings.push(ConfigEntry {
+            key: key.to_string(),
+            value: value.unwrap_or_default(),
+            scope: if scope.is_empty() {
+                "unset".to_string()
+            } else {
+                scope
+            },
+        });
     }
 
     Ok(settings)
@@ -841,6 +847,54 @@ mod tests {
             .find(|e| e.key == "core.autocrlf")
             .expect("core.autocrlf present via include");
         assert_eq!(autocrlf.value, "input");
+    }
+
+    // --- Settings tab: every common key must be reportable, set or not ---
+
+    #[tokio::test]
+    async fn test_get_common_settings_includes_unset_keys() {
+        // The Settings tab renders one editor per returned entry, so a key that
+        // is omitted here cannot be configured from the app at all.
+        let repo = TestRepo::new();
+
+        let settings = get_common_settings(repo.path_str()).await.unwrap();
+
+        assert_eq!(
+            settings.len(),
+            15,
+            "every common key must be reported, configured or not: {:?}",
+            settings.iter().map(|e| &e.key).collect::<Vec<_>>()
+        );
+
+        let rebase = settings
+            .iter()
+            .find(|e| e.key == "pull.rebase")
+            .expect("pull.rebase reported even though it is not set");
+        assert_eq!(rebase.value, "");
+        assert_eq!(rebase.scope, "unset");
+    }
+
+    #[tokio::test]
+    async fn test_get_common_settings_marks_configured_scope() {
+        let repo = TestRepo::new();
+        set_local_config(&repo, "push.default", "current");
+
+        let settings = get_common_settings(repo.path_str()).await.unwrap();
+
+        let push_default = settings
+            .iter()
+            .find(|e| e.key == "push.default")
+            .expect("push.default reported");
+        assert_eq!(push_default.value, "current");
+        assert_eq!(push_default.scope, "local");
+
+        // A configured key must not crowd out the unconfigured ones.
+        let conflictstyle = settings
+            .iter()
+            .find(|e| e.key == "merge.conflictstyle")
+            .expect("merge.conflictstyle reported even though it is not set");
+        assert_eq!(conflictstyle.value, "");
+        assert_eq!(conflictstyle.scope, "unset");
     }
 
     // --- Finding 5: unset must refuse on real failures, not report success ---
