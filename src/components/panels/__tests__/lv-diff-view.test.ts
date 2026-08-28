@@ -101,6 +101,26 @@ function clearHistory(): void {
   invokeHistory.length = 0;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsyncUpdates(el: LvDiffView): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await el.updateComplete;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function findCommands(name: string): Array<{ command: string; args?: unknown }> {
   return invokeHistory.filter((h) => h.command === name);
 }
@@ -128,7 +148,8 @@ function setupDefaultMocks(opts: {
         return undefined;
       case 'get_diff_tool':
         return opts.diffToolConfig ?? { tool: null };
-      // showConfirm() resolves to (this result === okLabel); default ok is 'Ok'.
+      case 'plugin:dialog|confirm':
+        return confirmAnswer === 'Ok';
       case 'plugin:dialog|message':
         return confirmAnswer;
       default:
@@ -194,6 +215,393 @@ describe('lv-diff-view', () => {
     // Word wrap is a shared setting now — start every test from a known off.
     settingsStore.getState().setWordWrap(false);
     localStorage.removeItem('leviathan-diff-word-wrap');
+  });
+
+  describe('async diff context pinning', () => {
+    it('ignores a working diff response for a file that is no longer selected', async () => {
+      const el = document.createElement('lv-diff-view') as LvDiffView;
+      const first = deferred<DiffFile>();
+      const second = deferred<DiffFile>();
+
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_file_diff') {
+          const filePath = (args as { filePath: string }).filePath;
+          return filePath === 'src/first.ts' ? first.promise : second.promise;
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      el.repositoryPath = REPO_PATH;
+      (el as unknown as { initCodeLanguage: () => Promise<void> }).initCodeLanguage =
+        async () => {};
+      el.file = makeStatusEntry({ path: 'src/first.ts' });
+      const firstLoad = (
+        el as unknown as { loadWorkingDiff: () => Promise<void> }
+      ).loadWorkingDiff();
+      el.file = makeStatusEntry({ path: 'src/second.ts' });
+      const secondLoad = (
+        el as unknown as { loadWorkingDiff: () => Promise<void> }
+      ).loadWorkingDiff();
+
+      second.resolve(makeDiffFile({ path: 'src/second.ts' }));
+      first.resolve(makeDiffFile({ path: 'src/first.ts' }));
+      await Promise.all([firstLoad, secondLoad]);
+      expect(
+        (el as unknown as { diff: DiffFile }).diff.path,
+        'the older response replaced the selected file diff',
+      ).to.equal('src/second.ts');
+    });
+
+    it('ignores a commit diff response for a commit file that is no longer selected', async () => {
+      const el = document.createElement('lv-diff-view') as LvDiffView;
+      const first = deferred<DiffFile>();
+      const second = deferred<DiffFile>();
+
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_commit_file_diff') {
+          const filePath = (args as { filePath: string }).filePath;
+          return filePath === 'src/first.ts' ? first.promise : second.promise;
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      el.repositoryPath = REPO_PATH;
+      (el as unknown as { initCodeLanguage: () => Promise<void> }).initCodeLanguage =
+        async () => {};
+      el.commitFile = { commitOid: 'first', filePath: 'src/first.ts' };
+      const firstLoad = (
+        el as unknown as { loadCommitDiff: () => Promise<void> }
+      ).loadCommitDiff();
+      el.commitFile = { commitOid: 'second', filePath: 'src/second.ts' };
+      const secondLoad = (
+        el as unknown as { loadCommitDiff: () => Promise<void> }
+      ).loadCommitDiff();
+
+      second.resolve(makeDiffFile({ path: 'src/second.ts' }));
+      first.resolve(makeDiffFile({ path: 'src/first.ts' }));
+      await Promise.all([firstLoad, secondLoad]);
+
+      expect(
+        (el as unknown as { diff: DiffFile }).diff.path,
+        'the older commit response replaced the selected commit file diff',
+      ).to.equal('src/second.ts');
+    });
+
+    it('does not stage a displayed hunk after the selection changes', async () => {
+      const el = await renderDiffView();
+      const oldDiff = (el as unknown as { diff: DiffFile }).diff;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_file_diff') return makeDiffFile({ path: 'src/next.ts' });
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      el.file = makeStatusEntry({ path: 'src/next.ts' });
+      clearHistory();
+
+      await (
+        el as unknown as {
+          handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+        }
+      ).handleStageHunk(oldDiff.hunks[0], new Event('click'));
+
+      expect(
+        findCommands('stage_hunk').length,
+        'a hunk from the previous file was staged against the new selection',
+      ).to.equal(0);
+      await flushAsyncUpdates(el);
+    });
+
+    it('clears positional line selections before the replacement diff can use them', async () => {
+      const el = await renderDiffView();
+      (el as unknown as { selectedLines: Set<string> }).selectedLines = new Set(['0-1']);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_file_diff') return makeDiffFile({ path: 'src/next.ts' });
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      el.file = makeStatusEntry({ path: 'src/next.ts' });
+      await flushAsyncUpdates(el);
+
+      clearHistory();
+      await (
+        el as unknown as { stageSelectedLines: () => Promise<boolean> }
+      ).stageSelectedLines();
+
+      expect(
+        findCommands('stage_hunk').length,
+        'line indexes selected in the previous file were applied to the new diff',
+      ).to.equal(0);
+    });
+
+    it('does not let an older file read replace a newer edit buffer', async () => {
+      const el = document.createElement('lv-diff-view') as LvDiffView;
+      const first = deferred<string>();
+      const second = deferred<string>();
+      let reads = 0;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'read_file_content') {
+          reads++;
+          return reads === 1 ? first.promise : second.promise;
+        }
+        return null;
+      };
+
+      el.repositoryPath = REPO_PATH;
+      el.file = makeStatusEntry({ path: 'src/main.ts' });
+      const view = el as unknown as {
+        loadFileContent: () => Promise<void>;
+        editContent: string;
+      };
+      const firstLoad = view.loadFileContent();
+      const secondLoad = view.loadFileContent();
+
+      second.resolve('newer content');
+      await secondLoad;
+      view.editContent = 'typed after newer load';
+      first.resolve('older content');
+      await firstLoad;
+
+      expect(view.editContent).to.equal('typed after newer load');
+    });
+
+    it('keeps an edit load valid across a same-file status refresh', async () => {
+      const el = await renderDiffView();
+      const read = deferred<string>();
+      mockInvoke = async (command: string) => {
+        if (command === 'read_file_content') return read.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const view = el as unknown as {
+        loadFileContent: () => Promise<void>;
+        editMode: boolean;
+        editContent: string;
+      };
+      const load = view.loadFileContent();
+      el.file = makeStatusEntry({ path: 'src/main.ts', status: 'modified' });
+      await flushAsyncUpdates(el);
+      read.resolve('loaded content');
+      await load;
+
+      expect(view.editMode).to.be.true;
+      expect(view.editContent).to.equal('loaded content');
+    });
+
+    it('invalidates an edit load when the same file becomes conflicted', async () => {
+      const el = await renderDiffView();
+      const read = deferred<string>();
+      mockInvoke = async (command: string) => {
+        if (command === 'read_file_content') return read.promise;
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const view = el as unknown as {
+        loadFileContent: () => Promise<void>;
+        editMode: boolean;
+      };
+      const load = view.loadFileContent();
+      el.file = makeStatusEntry({ path: 'src/main.ts', isConflicted: true });
+      await flushAsyncUpdates(el);
+      read.resolve('stale content');
+      await load;
+
+      expect(view.editMode).to.be.false;
+    });
+
+    it('does not restore an old selection when context-menu staging fails after a file switch', async () => {
+      const el = await renderDiffView();
+      const view = el as unknown as {
+        diff: DiffFile;
+        selectedLines: Set<string>;
+        contextMenu: {
+          visible: boolean;
+          x: number;
+          y: number;
+          line: DiffLine | null;
+          hunk: DiffHunk | null;
+        };
+        handleContextStageLine: () => Promise<void>;
+      };
+      const oldHunk = view.diff.hunks[0];
+      const stage = deferred<unknown>();
+      view.selectedLines = new Set(['0-2']);
+      view.contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        line: oldHunk.lines[1],
+        hunk: oldHunk,
+      };
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile({ path: 'src/next.ts' });
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const operation = view.handleContextStageLine();
+      el.file = makeStatusEntry({ path: 'src/next.ts' });
+      await flushAsyncUpdates(el);
+      view.selectedLines = new Set(['0-1']);
+      stage.reject({ code: 'COMMAND_ERROR', message: 'patch does not apply' });
+      await operation;
+
+      expect([...view.selectedLines]).to.deep.equal(['0-1']);
+    });
+
+    it('does not let an older save completion discard a newer edit buffer', async () => {
+      const el = document.createElement('lv-diff-view') as LvDiffView;
+      const write = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'write_file_content') return write.promise;
+        return null;
+      };
+
+      el.repositoryPath = REPO_PATH;
+      el.file = makeStatusEntry({ path: 'src/a.ts' });
+      const view = el as unknown as {
+        editMode: boolean;
+        editPath: string | null;
+        editRepositoryPath: string | null;
+        editRequestId: number;
+        editContent: string;
+        originalContent: string;
+        saveEdit: () => Promise<void>;
+      };
+      view.editMode = true;
+      view.editPath = 'src/a.ts';
+      view.editRepositoryPath = REPO_PATH;
+      view.editContent = 'save A';
+      view.originalContent = 'old A';
+      let editedEvents = 0;
+      el.addEventListener('file-edited', () => editedEvents++);
+
+      const save = view.saveEdit();
+      view.editRequestId++;
+      el.file = makeStatusEntry({ path: 'src/b.ts' });
+      view.editPath = 'src/b.ts';
+      view.editRepositoryPath = REPO_PATH;
+      view.editContent = 'unsaved B';
+      view.originalContent = 'old B';
+      write.resolve(undefined);
+      await save;
+
+      expect(view.editMode).to.be.true;
+      expect(view.editContent).to.equal('unsaved B');
+      expect(view.editPath).to.equal('src/b.ts');
+      expect(editedEvents, 'a successful write must still refresh repository status').to.equal(1);
+    });
+
+    it('does not restore old line indexes after a same-file diff reload', async () => {
+      const el = await renderDiffView();
+      const view = el as unknown as {
+        diff: DiffFile;
+        selectedLines: Set<string>;
+        contextMenu: {
+          visible: boolean;
+          x: number;
+          y: number;
+          line: DiffLine | null;
+          hunk: DiffHunk | null;
+        };
+        handleContextStageLine: () => Promise<void>;
+        loadWorkingDiff: () => Promise<void>;
+      };
+      const oldHunk = view.diff.hunks[0];
+      const stage = deferred<unknown>();
+      view.selectedLines = new Set(['0-2']);
+      view.contextMenu = {
+        visible: true,
+        x: 0,
+        y: 0,
+        line: oldHunk.lines[1],
+        hunk: oldHunk,
+      };
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const operation = view.handleContextStageLine();
+      await view.loadWorkingDiff();
+      view.selectedLines = new Set(['0-1']);
+      stage.reject({ code: 'COMMAND_ERROR', message: 'patch does not apply' });
+      await operation;
+
+      expect([...view.selectedLines]).to.deep.equal(['0-1']);
+    });
+
+    it('clears positional selections when staging a whole hunk reloads the diff', async () => {
+      const el = await renderDiffView();
+      const view = el as unknown as {
+        diff: DiffFile;
+        selectedLines: Set<string>;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+      };
+      view.selectedLines = new Set(['0-1']);
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return null;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      await view.handleStageHunk(view.diff.hunks[0], new Event('click'));
+
+      expect(view.selectedLines.size).to.equal(0);
+    });
+
+    it('serializes overlapping hunk staging operations', async () => {
+      const el = await renderDiffView();
+      const stage = deferred<unknown>();
+      const view = el as unknown as {
+        diff: DiffFile;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+      };
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      clearHistory();
+      const first = view.handleStageHunk(view.diff.hunks[0], new Event('click'));
+      const second = view.handleStageHunk(view.diff.hunks[0], new Event('click'));
+      expect(findCommands('stage_hunk').length).to.equal(1);
+
+      stage.resolve(undefined);
+      await Promise.all([first, second]);
+    });
+
+    it('disables every editor exit and input while saving', async () => {
+      const el = await renderDiffView();
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await el.updateComplete;
+
+      (el as unknown as { saving: boolean }).saving = true;
+      el.requestUpdate();
+      await el.updateComplete;
+
+      expect((el.shadowRoot!.querySelector('.edit-btn.active') as HTMLButtonElement).disabled).to.be.true;
+      expect((el.shadowRoot!.querySelector('.cancel-btn') as HTMLButtonElement).disabled).to.be.true;
+      expect((el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement).disabled).to.be.true;
+    });
   });
 
   // ── Rendering ──────────────────────────────────────────────────────────
@@ -544,6 +952,26 @@ describe('lv-diff-view', () => {
         'nothing is at stake, so nothing is asked',
       ).to.equal(false);
       expect(el.shadowRoot!.querySelector('.editor-textarea')).to.be.null;
+    });
+
+    it('switching repositories closes the editor even when the file path is unchanged', async () => {
+      setupDefaultMocks({ fileContent: 'contents from repository A' });
+      const el = await renderDiffView({
+        file: makeStatusEntry({ path: 'src/main.ts' }),
+      });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.editor-textarea')).to.not.be.null;
+
+      el.repositoryPath = '/test/other-repo';
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(
+        el.shadowRoot!.querySelector('.editor-textarea'),
+        'the buffer from repository A remained writable in repository B',
+      ).to.be.null;
     });
 
     it('cancel restores to diff view and discards edits', async () => {
@@ -1343,11 +1771,24 @@ describe('lv-diff-view', () => {
 
     async function viewWithMixedHunk(): Promise<LvDiffView> {
       const el = await bareView();
+      (el as unknown as { repositoryPath: string }).repositoryPath = REPO_PATH;
       (el as unknown as { file: unknown }).file = makeStatusEntry({ path: 'f.txt' });
+      await el.updateComplete;
       (el as unknown as { diff: unknown }).diff = makeDiffFile({
         path: 'f.txt',
         hunks: [mixedHunk()],
       });
+      (el as unknown as {
+        loadedWorkingDiffContext: {
+          repositoryPath: string;
+          filePath: string;
+          isStaged: boolean;
+        };
+      }).loadedWorkingDiffContext = {
+        repositoryPath: REPO_PATH,
+        filePath: 'f.txt',
+        isStaged: false,
+      };
       // Select the deletion at index 1 and the addition at index 3.
       (el as unknown as { selectedLines: Set<string> }).selectedLines = new Set(['0-1', '0-3']);
       return el;
