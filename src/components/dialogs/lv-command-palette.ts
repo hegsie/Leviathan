@@ -198,6 +198,7 @@ export class LvCommandPalette extends LitElement {
   ];
 
   @property({ type: Boolean, reflect: true }) open = false;
+  @property({ type: String }) repositoryPath = '';
 
   /** Focus owner at open time, restored on close. */
   private previouslyFocused: HTMLElement | null = null;
@@ -335,7 +336,7 @@ export class LvCommandPalette extends LitElement {
       icon: 'branch',
       action: () => {
         this.dispatchEvent(new CustomEvent('checkout-branch', {
-          detail: { branch: branch.name },
+          detail: { branch: branch.name, repositoryPath: this.repositoryPath },
           bubbles: true,
           composed: true,
         }));
@@ -352,7 +353,7 @@ export class LvCommandPalette extends LitElement {
         icon: 'branch',
         action: () => {
           this.dispatchEvent(new CustomEvent('navigate-to-commit', {
-            detail: { oid: branch.targetOid },
+            detail: { oid: branch.targetOid, repositoryPath: this.repositoryPath },
             bubbles: true,
             composed: true,
           }));
@@ -366,7 +367,7 @@ export class LvCommandPalette extends LitElement {
       icon: 'commit',
       action: () => {
         this.dispatchEvent(new CustomEvent('navigate-to-commit', {
-          detail: { oid: tag.oid },
+          detail: { oid: tag.oid, repositoryPath: this.repositoryPath },
           bubbles: true,
           composed: true,
         }));
@@ -380,7 +381,7 @@ export class LvCommandPalette extends LitElement {
       icon: 'file',
       action: () => {
         this.dispatchEvent(new CustomEvent('open-file', {
-          detail: { path: filePath },
+          detail: { path: filePath, repositoryPath: this.repositoryPath },
           bubbles: true,
           composed: true,
         }));
@@ -394,7 +395,7 @@ export class LvCommandPalette extends LitElement {
       icon: 'commit',
       action: () => {
         this.dispatchEvent(new CustomEvent('navigate-to-commit', {
-          detail: { oid: commit.oid },
+          detail: { oid: commit.oid, repositoryPath: this.repositoryPath },
           bubbles: true,
           composed: true,
         }));

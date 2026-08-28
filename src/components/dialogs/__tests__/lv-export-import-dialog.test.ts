@@ -142,6 +142,7 @@ async function openDialogAt(
   const el = await fixture<LvExportImportDialog>(html`
     <lv-export-import-dialog
       .repositoryPath=${REPO_PATH}
+      .graphRepositoryPath=${REPO_PATH}
       .branches=${BRANCHES}
       .tags=${TAGS}
       .commits=${commits}
@@ -191,6 +192,57 @@ describe('lv-export-import-dialog', () => {
 
   // ── Archive ──────────────────────────────────────────────────────────────
   describe('archive', () => {
+    it('keeps ref data pinned when the host switches repositories', async () => {
+      const el = await openDialogAt({ tab: 'archive' });
+      el.repositoryPath = '/repo/other';
+      el.graphRepositoryPath = '/repo/other';
+      el.branches = [makeBranch('other-repo-only')];
+      el.tags = [{ name: 'other-tag', oid: 'other-oid' }];
+      await el.updateComplete;
+
+      const values = Array.from(q<HTMLSelectElement>(el, '#archive-ref').options).map(
+        (option) => option.value
+      );
+      expect(values).to.include('feature/x');
+      expect(values).to.include('v1.0');
+      expect(values).not.to.include('other-repo-only');
+      expect(values).not.to.include('other-tag');
+    });
+
+    it('accepts ref data that finishes loading for the pinned repository', async () => {
+      const el = await openDialogAt({ tab: 'archive' });
+      el.tags = [...TAGS, { name: 'late-tag', oid: 'late-oid' }];
+      await el.updateComplete;
+      el.repositoryPath = '/repo/other';
+      el.graphRepositoryPath = '/repo/other';
+      el.tags = [{ name: 'other-tag', oid: 'other-oid' }];
+      await el.updateComplete;
+
+      const values = Array.from(q<HTMLSelectElement>(el, '#archive-ref').options).map(
+        (option) => option.value
+      );
+      expect(values).to.include('late-tag');
+      expect(values).not.to.include('other-tag');
+    });
+
+    it('does not adopt foreign graph refs when switching back to the pinned repository', async () => {
+      const el = await openDialogAt({ tab: 'archive' });
+      el.repositoryPath = '/repo/other';
+      el.graphRepositoryPath = '/repo/other';
+      el.tags = [{ name: 'other-tag', oid: 'other-oid' }];
+      await el.updateComplete;
+
+      el.repositoryPath = REPO_PATH;
+      el.tags = [{ name: 'still-other-tag', oid: 'still-other-oid' }];
+      await el.updateComplete;
+
+      const values = Array.from(q<HTMLSelectElement>(el, '#archive-ref').options).map(
+        (option) => option.value
+      );
+      expect(values).to.include('v1.0');
+      expect(values).not.to.include('still-other-tag');
+    });
+
     it('loads the file preview for the ref it was opened on', async () => {
       const el = await openDialogAt({ tab: 'archive', ref: 'v1.0' });
 

@@ -1392,7 +1392,9 @@ describe('app-shell multi-repo behavior', () => {
         (el as any).handleRefresh = () => { plainRefreshCalled = true; };
 
         await (el as any).handleCheckoutBranch(
-          new CustomEvent('checkout-branch', { detail: { branch: 'feature' } })
+          new CustomEvent('checkout-branch', {
+            detail: { branch: 'feature', repositoryPath: '/repo/a' },
+          })
         );
 
         expect(pinnedCalls).to.deep.equal(['/repo/a']);
@@ -2108,8 +2110,11 @@ describe('the toolbar command-palette button loads the active repo', () => {
     });
     await el.updateComplete;
 
-    const internal = el as unknown as { branches: unknown[]; showCommandPalette: boolean };
-    internal.branches = [];
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      showCommandPalette: boolean;
+    };
+    internal.paletteBranches = [];
     invokeCallArgs.length = 0;
 
     const toolbar = el.shadowRoot!.querySelector('lv-toolbar');
@@ -2131,6 +2136,136 @@ describe('the toolbar command-palette button loads the active repo', () => {
 
     el.remove();
   });
+
+  it('does not reopen or populate the palette with a superseded repository load', async () => {
+    const branchResolvers: Array<(value: unknown[]) => void> = [];
+    const fileResolvers: Array<(value: string[]) => void> = [];
+    mockResponses['get_branches'] = (args) =>
+      args.path === '/repo/a'
+        ? new Promise<unknown[]>((resolve) => branchResolvers.push(resolve))
+        : [];
+    mockResponses['list_tracked_files'] = (args) =>
+      args.path === '/repo/a'
+        ? new Promise<string[]>((resolve) => fileResolvers.push(resolve))
+        : [];
+
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      paletteBranches: Array<{ name: string }>;
+      paletteTrackedFiles: string[];
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    const pendingOpen = internal.openCommandPalette();
+    await waitUntil(() => branchResolvers.length > 0 && fileResolvers.length > 0);
+
+    repositoryStore.setState({ activeIndex: 1 });
+    await el.updateComplete;
+    branchResolvers.forEach((resolve) => resolve([{ name: 'only-in-a' }]));
+    fileResolvers.forEach((resolve) => resolve(['only-in-a.txt']));
+    await pendingOpen;
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette, 'the stale request must not reopen the overlay').to.be.false;
+    expect(internal.paletteBranches.some((branch) => branch.name === 'only-in-a')).to.be.false;
+    expect(internal.paletteTrackedFiles).not.to.include('only-in-a.txt');
+
+    el.remove();
+  });
+
+  it('closes an open palette when the active repository changes', async () => {
+    mockResponses['get_branches'] = () => [];
+    mockResponses['list_tracked_files'] = () => [];
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    await internal.openCommandPalette();
+    await el.updateComplete;
+    expect(internal.showCommandPalette).to.be.true;
+
+    repositoryStore.setState({ activeIndex: 1 });
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette).to.be.false;
+    el.remove();
+  });
+
+  it('rejects a palette action whose repository no longer matches the active tab', async () => {
+    const el = createAppShell();
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+    invokeCallArgs.length = 0;
+
+    await (el as unknown as {
+      handleCheckoutBranch: (
+        event: CustomEvent<{ branch: string; repositoryPath: string }>
+      ) => Promise<void>;
+    }).handleCheckoutBranch(
+      new CustomEvent('checkout-branch', {
+        detail: { branch: 'feature-a', repositoryPath: '/repo/a' },
+      })
+    );
+
+    expect(invokeCallArgs.some((call) => call.command === 'checkout_with_autostash')).to.be.false;
+    el.remove();
+  });
+
+  it('clears failed datasets and reports both load failures', async () => {
+    mockResponses['get_branches'] = () => {
+      throw new Error('branches unavailable');
+    };
+    mockResponses['list_tracked_files'] = () => {
+      throw new Error('files unavailable');
+    };
+    const el = createAppShell();
+    (el as unknown as { activeRepository: unknown }).activeRepository = {
+      repository: mockRepo('/repo/a', 'a'),
+    };
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      paletteTrackedFiles: string[];
+      openCommandPalette: () => Promise<void>;
+    };
+    internal.paletteBranches = [{ name: 'stale-a' }];
+    internal.paletteTrackedFiles = ['stale-a.txt'];
+    uiStore.setState({ toasts: [] });
+
+    await internal.openCommandPalette();
+
+    expect(internal.paletteBranches).to.deep.equal([]);
+    expect(internal.paletteTrackedFiles).to.deep.equal([]);
+    const messages = uiStore.getState().toasts.map((toast) => toast.message);
+    expect(messages.join('|')).to.contain('Failed to load branches');
+    expect(messages.join('|')).to.contain('Failed to load tracked files');
+  });
 });
-
-

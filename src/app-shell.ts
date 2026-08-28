@@ -681,8 +681,10 @@ export class AppShell extends LitElement {
   // Command palette
   @state() private showCommandPalette = false;
   @state() private showOutputPanel = false;
-  @state() private branches: Branch[] = [];
-  @state() private trackedFiles: string[] = [];
+  @state() private paletteBranches: Branch[] = [];
+  @state() private paletteTrackedFiles: string[] = [];
+  private commandPaletteRepositoryPath: string | null = null;
+  private commandPaletteRequestId = 0;
 
   // File history
   @state() private showFileHistory = false;
@@ -1655,6 +1657,11 @@ export class AppShell extends LitElement {
 
       // Clear view state when switching repositories
       if (repoChanged) {
+        this.commandPaletteRequestId++;
+        this.showCommandPalette = false;
+        this.commandPaletteRepositoryPath = null;
+        this.paletteBranches = [];
+        this.paletteTrackedFiles = [];
         // Clear selected commit and refs
         this.selectedCommit = null;
         this.selectedCommitRefs = [];
@@ -4079,6 +4086,7 @@ export class AppShell extends LitElement {
   }
 
   private async openCommandPalette(): Promise<void> {
+    const requestId = ++this.commandPaletteRequestId;
     // Fetch branches and tracked files for quick switching
     if (this.activeRepository) {
       const path = this.activeRepository.repository.path;
@@ -4086,13 +4094,35 @@ export class AppShell extends LitElement {
         gitService.getBranches(path),
         gitService.listTrackedFiles(path),
       ]);
+      if (
+        requestId !== this.commandPaletteRequestId ||
+        this.activeRepository?.repository.path !== path
+      ) return;
       if (branchResult.success && branchResult.data) {
-        this.branches = branchResult.data;
+        this.paletteBranches = branchResult.data;
+      } else {
+        this.paletteBranches = [];
+        showToast(
+          `Failed to load branches: ${branchResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
       if (filesResult.success && filesResult.data) {
-        this.trackedFiles = filesResult.data;
+        this.paletteTrackedFiles = filesResult.data;
+      } else {
+        this.paletteTrackedFiles = [];
+        showToast(
+          `Failed to load tracked files: ${filesResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
+      this.commandPaletteRepositoryPath = path;
+    } else {
+      this.paletteBranches = [];
+      this.paletteTrackedFiles = [];
+      this.commandPaletteRepositoryPath = null;
     }
+    if (requestId !== this.commandPaletteRequestId) return;
     this.showCommandPalette = true;
   }
 
@@ -5194,23 +5224,26 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+  private handleCheckoutBranch(
+    e: CustomEvent<{ branch: string; repositoryPath: string }>,
+  ): Promise<void> {
     // The third checkout surface. Round 33 folded the ref menu's and the graph
     // label's into this lock and left the palette's out — the same stale
     // enumeration again. Two concurrent auto-stash checkouts cross-apply and
     // cross-drop each other's stash, because a stash index is a position.
-    const repoPath = this.activeRepository?.repository.path;
-    if (!repoPath) return Promise.resolve();
-    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromPalette(e));
+    const repoPath = e.detail.repositoryPath;
+    if (!repoPath || this.activeRepository?.repository.path !== repoPath) {
+      return Promise.resolve();
+    }
+    return this.runRefExclusive(repoPath, () =>
+      this.checkoutBranchFromPalette(repoPath, e.detail.branch)
+    );
   }
 
   private async checkoutBranchFromPalette(
-    e: CustomEvent<{ branch: string }>,
+    repoPath: string,
+    branch: string,
   ): Promise<void> {
-    if (!this.activeRepository) return;
-
-    const branch = e.detail.branch;
-    const repoPath = this.activeRepository.repository.path;
     const result = await gitService.checkoutWithAutoStash(repoPath, branch);
 
     if (result.success && result.data?.success) {
@@ -5224,14 +5257,17 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
-    if (!this.activeRepository) return;
+  private async handleOpenFileFromPalette(
+    e: CustomEvent<{ path: string; repositoryPath: string }>,
+  ): Promise<void> {
+    const activeRepoPath = this.activeRepository?.repository.path;
+    if (!activeRepoPath || activeRepoPath !== e.detail.repositoryPath) return;
     // gitService.openInConfiguredEditor returns a CommandResult (invokeCommand
     // never throws), so we must inspect result.success — the catch-only path
     // could never fire, so a file deleted since the palette listed it, or an
     // editor that fails to launch, closed the palette and did nothing at all.
     const result = await gitService.openInConfiguredEditor(
-      this.activeRepository.repository.path,
+      e.detail.repositoryPath,
       e.detail.path,
     );
     if (!result.success || !result.data?.success) {
@@ -5289,7 +5325,10 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
+  private handleNavigateToCommit(
+    e: CustomEvent<{ oid: string; repositoryPath: string }>,
+  ): void {
+    if (this.activeRepository?.repository.path !== e.detail.repositoryPath) return;
     this.revealCommitInGraph(e.detail.oid);
   }
 
@@ -5931,9 +5970,10 @@ export class AppShell extends LitElement {
 
       <lv-command-palette
         ?open=${this.showCommandPalette}
+        .repositoryPath=${this.commandPaletteRepositoryPath ?? ''}
         .commands=${this.getPaletteCommands()}
-        .branches=${this.branches}
-        .files=${this.trackedFiles}
+        .branches=${this.paletteBranches}
+        .files=${this.paletteTrackedFiles}
         .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
         .tags=${this.graphCanvas?.getTagTips() ?? []}
         @close=${() => { this.showCommandPalette = false; }}
@@ -6211,7 +6251,8 @@ export class AppShell extends LitElement {
         ></lv-compare-branches-dialog>
         <lv-export-import-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          .branches=${this.branches}
+          .graphRepositoryPath=${this.graphCanvas?.repositoryPath ?? ''}
+          .branches=${this.activeRepository?.branches ?? []}
           .tags=${this.graphCanvas?.getTagTips() ?? []}
           .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
           @patch-applied=${(e: CustomEvent<{ repositoryPath?: string }>) =>
