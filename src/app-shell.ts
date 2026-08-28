@@ -1673,6 +1673,12 @@ export class AppShell extends LitElement {
         this.showFileHistory = false;
         this.fileHistoryPath = null;
 
+        // Graph context-menu entries are scoped to the repository that
+        // produced their commit/ref. Leaving either menu open across a tab
+        // switch lets a subsequent click resolve against the new active repo.
+        this.contextMenu = { ...this.contextMenu, visible: false };
+        this.refContextMenu = { ...this.refContextMenu, visible: false };
+
         // Clear search filter
         this.searchFilter = null;
 

@@ -1712,6 +1712,40 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('context-menu operation pinning', () => {
+    it('closes commit and ref context menus when the active repository changes', async () => {
+      repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+      repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        await el.updateComplete;
+        (el as any).contextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          commit: { oid: 'commit-from-a', summary: 'A commit', shortId: 'commit-f' },
+        };
+        (el as any).refContextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          refName: 'branch-from-a',
+          fullName: 'refs/heads/branch-from-a',
+          refType: 'localBranch',
+          isHead: false,
+        };
+
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        expect((el as any).contextMenu.visible).to.be.false;
+        expect((el as any).refContextMenu.visible).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('handleResetToCommit hard-resets the origin repo, not the tab switched to during the confirm', async () => {
       // A hard reset discards uncommitted work — it must never run against a
       // repo the user did not confirm. The confirm await yields; a mid-confirm
@@ -1728,10 +1762,12 @@ describe('app-shell multi-repo behavior', () => {
       };
 
       let resolveConfirm: (v: unknown) => void = () => {};
-      mockResponses['plugin:dialog|message'] = () =>
+      const deferredConfirm = () =>
         new Promise((res) => {
           resolveConfirm = res;
         });
+      mockResponses['plugin:dialog|confirm'] = deferredConfirm;
+      mockResponses['plugin:dialog|message'] = deferredConfirm;
 
       const promise = (el as any).handleResetToCommit('hard');
       await new Promise((r) => setTimeout(r, 0));
@@ -2132,5 +2168,4 @@ describe('the toolbar command-palette button loads the active repo', () => {
     el.remove();
   });
 });
-
 
