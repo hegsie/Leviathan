@@ -1,6 +1,6 @@
 //! Merge and rebase command handlers
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 use tauri::command;
 
 use super::path_utils::validate_path_within_repo;
@@ -22,6 +22,20 @@ pub struct InteractiveRebaseOutcome {
     /// True when the rebase stopped at a breakpoint and the repo is still in a
     /// rebase state awaiting `git rebase --continue`.
     pub paused: bool,
+}
+
+fn sequence_editor_command(todo_path: &Path) -> String {
+    sequence_editor_command_for_path(&todo_path.to_string_lossy(), cfg!(target_os = "windows"))
+}
+
+fn sequence_editor_command_for_path(todo_path: &str, windows: bool) -> String {
+    let todo_path_for_shell = if windows {
+        todo_path.replace('\\', "/")
+    } else {
+        todo_path.to_string()
+    };
+
+    format!("cp -- '{}'", todo_path_for_shell.replace('\'', "'\\''"))
 }
 
 /// The commits `git rebase -i` would list for a range, plus how many merge
@@ -701,7 +715,6 @@ fn append_rewritten(repo: &git2::Repository, pairs: &[String]) {
     if pairs.is_empty() {
         return;
     }
-    use std::io::Write;
     let path = rewritten_list_path(repo);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -1224,44 +1237,21 @@ pub async fn execute_interactive_rebase(
     // other's drops — and the predictable path in a world-writable directory
     // was a symlink target for anyone on the machine.
     //
-    // into_temp_path() closes the file handle while keeping the path (and its
-    // delete-on-drop). The script MUST be closed before git execs it: on Linux
-    // exec of a file that any process still holds open for writing fails with
-    // ETXTBSY, and NamedTempFile holds exactly such a handle for its whole
-    // scope. Since git runs GIT_SEQUENCE_EDITOR for every `rebase -i`, that
-    // made every interactive rebase fail with "cannot exec ...: Text file busy"
-    // — not just the squash path this was found through.
-    let todo_path = tempfile::Builder::new()
+    let mut todo_file = tempfile::Builder::new()
         .prefix("leviathan-rebase-todo-")
-        .tempfile()?
-        .into_temp_path();
-    std::fs::write(&todo_path, &todo)?;
+        .tempfile()?;
+    todo_file.write_all(todo.as_bytes())?;
+    todo_file.flush()?;
 
-    // Create a script that outputs the todo file content
-    let script_path = tempfile::Builder::new()
-        .prefix("leviathan-rebase-editor-")
-        .tempfile()?
-        .into_temp_path();
-
-    #[cfg(target_os = "windows")]
-    {
-        let script_content = format!("@echo off\r\ntype \"{}\" > \"%1\"", todo_path.display());
-        std::fs::write(&script_path, script_content)?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let script_content = format!("#!/bin/sh\ncat \"{}\" > \"$1\"", todo_path.display());
-        std::fs::write(&script_path, &script_content)?;
-        // Make the script executable
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
-    }
+    // Git evaluates GIT_SEQUENCE_EDITOR through a shell and appends the actual
+    // todo path as its final argument. A direct copy command avoids the
+    // platform-specific script execution and cmd.exe quoting pitfalls.
+    let sequence_editor = sequence_editor_command(todo_file.path());
 
     // Run git rebase -i with our custom editor
     let output = create_command("git")
         .current_dir(&path)
-        .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
+        .env("GIT_SEQUENCE_EDITOR", sequence_editor)
         // GIT_SEQUENCE_EDITOR only supplies the todo list. A `squash` (or
         // `reword`) line then opens GIT_EDITOR for the combined message, and
         // this is the one rebase in the app whose todo the USER composes, so it
@@ -1281,11 +1271,6 @@ pub async fn execute_interactive_rebase(
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
-
-    // TempPath removes the file on drop; dropping here keeps the cleanup
-    // adjacent to the run it belongs to.
-    drop(todo_path);
-    drop(script_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3281,14 +3266,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_runs_at_all() {
         // The plainest possible plan: reorder nothing, drop nothing, squash
-        // nothing. It failed too — git runs GIT_SEQUENCE_EDITOR for every
-        // `rebase -i`, and the script was still held open for writing by the
-        // NamedTempFile that created it, so exec'ing it returned ETXTBSY. This
-        // test exists so the general case is pinned, not just the squash that
-        // led here.
+        // nothing. Git runs GIT_SEQUENCE_EDITOR for every `rebase -i`: Unix
+        // requires the temp handle to be closed before exec, while Windows must
+        // invoke the editor through Git's bundled shell. This test pins the
+        // general execution path on both platforms.
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();
         repo.create_commit("first", &[("a.txt", "a")]);
@@ -3316,8 +3300,22 @@ mod tests {
         assert_eq!(after.len(), 2, "both commits survive an all-pick plan");
     }
 
+    #[test]
+    fn test_sequence_editor_quotes_paths() {
+        let command = sequence_editor_command_for_path(r"C:\Temp Dir\O'Brien\rebase todo", true);
+        assert_eq!(
+            command, "cp -- 'C:/Temp Dir/O'\\''Brien/rebase todo'",
+            "Windows separators, spaces, and apostrophes must be shell-safe"
+        );
+        assert_eq!(
+            sequence_editor_command_for_path("/tmp/Temp Dir/O'Brien/rebase todo", false),
+            "cp -- '/tmp/Temp Dir/O'\\''Brien/rebase todo'",
+            "Unix spaces and apostrophes must be shell-safe"
+        );
+    }
+
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_drop() {
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();
