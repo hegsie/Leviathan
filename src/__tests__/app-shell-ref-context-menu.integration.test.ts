@@ -77,10 +77,11 @@ function commandIndex(name: string): number {
 /** Make every showConfirm() in the run resolve to "declined". */
 function declineConfirms(): void {
   const previous = mockInvoke;
-  mockInvoke = (command: string, args?: unknown) =>
-    command === 'plugin:dialog|message'
-      ? Promise.resolve('Cancel')
-      : previous(command, args);
+  mockInvoke = (command: string, args?: unknown) => {
+    if (command === 'plugin:dialog|confirm') return Promise.resolve(false);
+    if (command === 'plugin:dialog|message') return Promise.resolve('Cancel');
+    return previous(command, args);
+  };
 }
 
 function setupDefaultMocks(): void {
@@ -91,6 +92,8 @@ function setupDefaultMocks(): void {
       // their sidebar counterparts.
       case 'plugin:dialog|message':
         return 'Ok';
+      case 'plugin:dialog|confirm':
+        return true;
       case 'checkout_with_autostash':
         return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
       case 'open_repository':
@@ -129,14 +132,19 @@ function createAppShell(): AppShell {
   return el;
 }
 
-function setRefContextMenu(el: AppShell, refName: string, refType: 'localBranch' | 'remoteBranch' | 'tag' = 'localBranch'): void {
+function setRefContextMenu(
+  el: AppShell,
+  refName: string,
+  refType: 'localBranch' | 'remoteBranch' | 'tag' = 'localBranch',
+  fullName = refName,
+): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (el as any).refContextMenu = {
     visible: true,
     x: 100,
     y: 100,
     refName,
-    fullName: refName,
+    fullName,
     refType,
   };
 }
@@ -162,6 +170,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(calls[0].args).to.deep.include({
         path: REPO_PATH,
         refName: 'feature-branch',
+      });
+    });
+
+    it('uses the qualified tag ref when a branch has the same short name', async () => {
+      const el = createAppShell();
+      setRefContextMenu(el, 'release', 'tag', 'refs/tags/release');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefCheckout();
+
+      const calls = findCommands('checkout_with_autostash');
+      expect(calls).to.have.length(1);
+      expect(calls[0].args).to.deep.include({
+        path: REPO_PATH,
+        refName: 'refs/tags/release',
       });
     });
 
@@ -686,4 +709,3 @@ describe('app-shell force-delete toast action (integration)', () => {
       .to.be.true;
   });
 });
-
