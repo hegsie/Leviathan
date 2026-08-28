@@ -24,6 +24,18 @@ const CHERRY_PICK_SEQUENCE: &str = "CHERRY_PICK_SEQUENCE";
 /// picks on the branch.
 const CHERRY_PICK_SEQUENCE_HEAD: &str = "CHERRY_PICK_SEQUENCE_HEAD";
 
+fn ensure_index_matches_head(repo: &git2::Repository) -> Result<()> {
+    let head_tree = repo.head()?.peel_to_commit()?.tree()?;
+    let mut index = repo.index()?;
+    if index.write_tree()? != head_tree.id() {
+        return Err(LeviathanError::OperationFailed(
+            "The index has staged changes. Commit or stash them before starting this operation."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Interpret a git path (raw bytes) as a filesystem path.
 ///
 /// git stores paths as bytes, and on unix a name that is not valid UTF-8 is
@@ -405,6 +417,7 @@ pub async fn cherry_pick(
             }
         }
     }
+    ensure_index_matches_head(&repo)?;
 
     // Find the commit to cherry-pick
     let oid = git2::Oid::from_str(&commit_oid)
@@ -675,6 +688,7 @@ pub async fn revert(path: String, commit_oid: String, mainline: Option<u32>) -> 
             "Another operation is in progress".to_string(),
         ));
     }
+    ensure_index_matches_head(&repo)?;
 
     // Find the commit to revert
     let oid = git2::Oid::from_str(&commit_oid)
@@ -912,6 +926,7 @@ pub async fn cherry_pick_range(path: String, commit_oids: Vec<String>) -> Result
             "Another operation is in progress".to_string(),
         ));
     }
+    ensure_index_matches_head(&repo)?;
 
     if commit_oids.is_empty() {
         return Err(LeviathanError::OperationFailed(
@@ -1716,6 +1731,7 @@ pub async fn cherry_pick_from_branch(
             }
         }
     }
+    ensure_index_matches_head(&repo)?;
 
     let count = count.unwrap_or(1);
     if count == 0 {
@@ -3591,6 +3607,175 @@ mod tests {
     }
 
     // ---- Finding 40: aborting must preserve unrelated uncommitted work ----
+
+    fn stage_file(test_repo: &TestRepo, path: &str, content: &str) -> git2::Oid {
+        std::fs::write(test_repo.path.join(path), content).unwrap();
+        let repo = test_repo.repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(path)).unwrap();
+        index.write().unwrap();
+        index.get_path(std::path::Path::new(path), 0).unwrap().id
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_refuses_preexisting_staged_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "original")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+        test_repo.checkout_branch("main");
+
+        let staged_oid = stage_file(&test_repo, "unrelated.txt", "STAGED WORK");
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            test_repo
+                .repo()
+                .index()
+                .unwrap()
+                .get_path(std::path::Path::new("unrelated.txt"), 0)
+                .unwrap()
+                .id,
+            staged_oid
+        );
+    }
+
+    #[tokio::test]
+    async fn test_revert_refuses_preexisting_staged_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+        let revert_oid = test_repo.create_commit("Add file", &[("file.txt", "content")]);
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "original")]);
+
+        let staged_oid = stage_file(&test_repo, "unrelated.txt", "STAGED WORK");
+        let result = revert(test_repo.path_str(), revert_oid.to_string(), None).await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            test_repo
+                .repo()
+                .index()
+                .unwrap()
+                .get_path(std::path::Path::new("unrelated.txt"), 0)
+                .unwrap()
+                .id,
+            staged_oid
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_range_refuses_preexisting_staged_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "original")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+        test_repo.checkout_branch("main");
+
+        let staged_oid = stage_file(&test_repo, "unrelated.txt", "STAGED WORK");
+        let result = cherry_pick_range(test_repo.path_str(), vec![feature_oid.to_string()]).await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            test_repo
+                .repo()
+                .index()
+                .unwrap()
+                .get_path(std::path::Path::new("unrelated.txt"), 0)
+                .unwrap()
+                .id,
+            staged_oid
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_from_branch_refuses_preexisting_staged_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "original")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        test_repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+        test_repo.checkout_branch("main");
+
+        let staged_oid = stage_file(&test_repo, "unrelated.txt", "STAGED WORK");
+        let result =
+            cherry_pick_from_branch(test_repo.path_str(), "feature".to_string(), None).await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+        assert_eq!(test_repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            test_repo
+                .repo()
+                .index()
+                .unwrap()
+                .get_path(std::path::Path::new("unrelated.txt"), 0)
+                .unwrap()
+                .id,
+            staged_oid
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_commit_cherry_pick_refuses_preexisting_staged_changes() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit(
+            "Add files",
+            &[("conflict.txt", "base"), ("unrelated.txt", "original")],
+        );
+        let repo = test_repo.repo();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        let parent = head_commit.parent(0).unwrap();
+        repo.branch("feature", &parent, false).unwrap();
+        test_repo.checkout_branch("feature");
+        let feature_oid =
+            test_repo.create_commit("Feature conflict", &[("conflict.txt", "feature")]);
+        test_repo.checkout_branch("main");
+        test_repo.create_commit("Main conflict", &[("conflict.txt", "main")]);
+
+        let staged_oid = stage_file(&test_repo, "unrelated.txt", "PRECIOUS STAGED WORK");
+        let result = cherry_pick(
+            test_repo.path_str(),
+            feature_oid.to_string(),
+            Some(true),
+            None,
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+
+        let repo = test_repo.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            std::fs::read_to_string(test_repo.path.join("unrelated.txt")).unwrap(),
+            "PRECIOUS STAGED WORK"
+        );
+        assert_eq!(
+            repo.index()
+                .unwrap()
+                .get_path(std::path::Path::new("unrelated.txt"), 0)
+                .unwrap()
+                .id,
+            staged_oid
+        );
+    }
 
     #[tokio::test]
     async fn test_abort_cherry_pick_preserves_unrelated_changes() {
