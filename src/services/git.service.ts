@@ -1433,8 +1433,6 @@ async function resolveRepoToken(
 ): Promise<ResolvedRepoToken> {
   try {
     // --- Multi-account system (preferred) ---
-    const { AccountCredentials } = await import("./credential.service.ts");
-
     // GitHub
     const ghRepoResult = await detectGitHubRepo(repoPath);
     if (
@@ -1449,7 +1447,8 @@ async function resolveRepoToken(
         resolvedRemote,
       );
       if (account) {
-        const token = await AccountCredentials.getToken("github", account.id);
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        const token = await getFreshAccountToken("github", account.id, "github");
         if (token) return { token, remoteName: resolvedRemote };
         // This repo resolves to THIS account, but its keyring entry is gone. Every
         // fallback below re-resolves the global default, so continuing would push
@@ -1519,7 +1518,13 @@ async function resolveRepoToken(
         resolvedRemote,
       );
       if (account) {
-        const token = await AccountCredentials.getToken("gitlab", account.id);
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        const token = await getFreshAccountToken(
+          "gitlab",
+          account.id,
+          "gitlab",
+          account.config.type === "gitlab" ? account.config.instanceUrl : undefined,
+        );
         if (token) return { token, remoteName: resolvedRemote };
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
@@ -3519,10 +3524,10 @@ export async function getGitHubToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
-    const { AccountCredentials } = await import("./credential.service.ts");
+    const { getFreshAccountToken } = await import("./credential.service.ts");
     const account = selectDefaultGlobalAccount("github");
     if (account) {
-      const token = await AccountCredentials.getToken("github", account.id);
+      const token = await getFreshAccountToken("github", account.id, "github");
       if (token) return { success: true, data: token };
     }
     // Fall back to legacy single-account credentials
@@ -4411,10 +4416,15 @@ export async function getGitLabToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
-    const { AccountCredentials } = await import("./credential.service.ts");
+    const { getFreshAccountToken } = await import("./credential.service.ts");
     const account = selectDefaultGlobalAccount("gitlab");
     if (account) {
-      const token = await AccountCredentials.getToken("gitlab", account.id);
+      const token = await getFreshAccountToken(
+        "gitlab",
+        account.id,
+        "gitlab",
+        account.config.type === "gitlab" ? account.config.instanceUrl : undefined,
+      );
       if (token) return { success: true, data: token };
     }
     // Fall back to legacy single-account credentials

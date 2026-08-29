@@ -683,6 +683,9 @@ export async function refreshAccountCachedUser(
     let token: string | null;
     const { getFreshAccountToken } = await import('./credential.service.ts');
     switch (account.integrationType) {
+      case 'github':
+        token = await getFreshAccountToken('github', account.id, 'github');
+        break;
       case 'azure-devops':
         token = await getFreshAccountToken('azure-devops', account.id, 'azure');
         break;
