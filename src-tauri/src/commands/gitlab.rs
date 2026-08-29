@@ -294,7 +294,10 @@ pub async fn check_gitlab_connection(
 
 /// Detect GitLab repository from git remotes
 #[command]
-pub async fn detect_gitlab_repo(path: String) -> Result<Option<DetectedGitLabRepo>> {
+pub async fn detect_gitlab_repo(
+    path: String,
+    remote_name: Option<String>,
+) -> Result<Option<DetectedGitLabRepo>> {
     let repo = git2::Repository::open(&path).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to open repository: {}", e))
     })?;
@@ -303,14 +306,20 @@ pub async fn detect_gitlab_repo(path: String) -> Result<Option<DetectedGitLabRep
         .remotes()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get remotes: {}", e)))?;
 
-    for remote_name in remotes.iter().flatten().flatten() {
-        if let Ok(remote) = repo.find_remote(remote_name) {
+    for candidate in remotes.iter().flatten().flatten() {
+        if remote_name
+            .as_deref()
+            .is_some_and(|wanted| wanted != candidate)
+        {
+            continue;
+        }
+        if let Ok(remote) = repo.find_remote(candidate) {
             if let Ok(url) = remote.url() {
                 if let Some(repo_info) = parse_gitlab_url(url) {
                     return Ok(Some(DetectedGitLabRepo {
                         instance_url: repo_info.0,
                         project_path: repo_info.1,
-                        remote_name: remote_name.to_string(),
+                        remote_name: candidate.to_string(),
                     }));
                 }
             }
@@ -1051,7 +1060,7 @@ mod tests {
         // Add a non-GitLab remote
         repo.add_remote("origin", "https://github.com/user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -1062,7 +1071,7 @@ mod tests {
         // Add a GitLab remote
         repo.add_remote("origin", "https://gitlab.com/user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         let detected = result.unwrap();
         assert!(detected.is_some());
@@ -1074,12 +1083,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_detect_gitlab_repo_targets_requested_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://gitlab.com/personal/repo.git");
+        repo.add_remote("upstream", "https://gitlab.com/work/repo.git");
+
+        let detected = detect_gitlab_repo(repo.path_str(), Some("upstream".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.project_path, "work/repo");
+        assert_eq!(detected.remote_name, "upstream");
+    }
+
+    #[tokio::test]
     async fn test_detect_gitlab_repo_with_ssh_remote() {
         let repo = TestRepo::with_initial_commit();
         // Add a GitLab SSH remote
         repo.add_remote("origin", "git@gitlab.com:user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         let detected = result.unwrap();
         assert!(detected.is_some());

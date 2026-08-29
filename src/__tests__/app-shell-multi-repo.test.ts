@@ -123,6 +123,10 @@ describe('app-shell multi-repo behavior', () => {
     for (const key of Object.keys(mockResponses)) {
       delete mockResponses[key];
     }
+    mockResponses.get_fetch_remote = () => 'origin';
+    mockResponses.get_remotes = () => [
+      { name: 'origin', url: 'https://github.com/example/repo.git', pushUrl: null },
+    ];
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().reset();
     searchIndexService.invalidate();
@@ -2132,5 +2136,3 @@ describe('the toolbar command-palette button loads the active repo', () => {
     el.remove();
   });
 });
-
-

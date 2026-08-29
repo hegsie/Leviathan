@@ -543,6 +543,7 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     detectAdo?: unknown;
     detectGitLab?: unknown;
     remoteUrl?: string;
+    remotes?: Array<{ name: string; url: string; pushUrl: string | null }>;
     /** null → no profile assigned; 'throw' → the profile lookup fails. */
     assignedProfile?: { id: string } | null | 'throw';
     /** What the backend resolver returns; 'throw' → the command fails. */
@@ -556,7 +557,7 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       if (command === 'detect_ado_repo') return opts.detectAdo ?? null;
       if (command === 'detect_gitlab_repo') return opts.detectGitLab ?? null;
       if (command === 'get_remotes') {
-        return [{ name: 'origin', url: opts.remoteUrl ?? GH_URL, pushUrl: null }];
+        return opts.remotes ?? [{ name: 'origin', url: opts.remoteUrl ?? GH_URL, pushUrl: null }];
       }
       if (command === 'get_assigned_unified_profile') {
         if (opts.assignedProfile === 'throw') throw new Error('profile lookup failed');
@@ -635,6 +636,38 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       integrationType: 'github',
       repoUrl: GH_URL,
     });
+  });
+
+  it('scopes provider detection and account resolution to the requested remote', async () => {
+    const { work } = setupGitHubAccounts();
+    const upstreamUrl = 'https://github.com/acme/upstream.git';
+    let detectedRemote: unknown;
+    installMock({
+      detectGitHub: { owner: 'acme', repo: 'upstream', remoteName: 'upstream' },
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: upstreamUrl, pushUrl: null },
+      ],
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+    const baseInvoke = mockInvoke;
+    mockInvoke = async (command: string, args?: unknown) => {
+      if (command === 'detect_github_repo') {
+        detectedRemote = (args as Record<string, unknown>).remoteName;
+      }
+      return baseInvoke(command, args);
+    };
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(detectedRemote).to.equal('upstream');
+    expect(resolverArgs).to.deep.equal({
+      profileId: 'profile-work',
+      integrationType: 'github',
+      repoUrl: upstreamUrl,
+    });
+    expect(fetchToken).to.equal('work-tok');
   });
 
   it('still resolves by account URL patterns when the profile lookup fails', async () => {

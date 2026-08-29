@@ -193,11 +193,16 @@ pub async fn fetch(
         Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
     };
 
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name_owned = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name_owned)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
+    drop(repo);
+
     let repo_path = path.clone();
     let deadline = network_deadline(timeout_secs);
     let path_clone = path.clone();
     let prune_val = prune.unwrap_or(false);
-    let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
     let remote_name_for_event = remote_name_owned.clone();
 
     // git2 fetch is blocking network I/O; offload to a blocking thread so
@@ -277,6 +282,38 @@ pub async fn fetch(
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_fetch_remote(repo: &git2::Repository, requested: Option<String>) -> String {
+    if let Some(remote) = requested {
+        return remote;
+    }
+    let from_upstream = repo
+        .head()
+        .ok()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.name().ok().map(str::to_owned))
+        .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+        .and_then(|name| name.as_str().ok().map(str::to_owned))
+        .filter(|name| name != "." && repo.find_remote(name).is_ok());
+    if let Some(remote) = from_upstream {
+        return remote;
+    }
+    match repo.remotes() {
+        Ok(names) if names.len() == 1 => {
+            names.get(0).ok().flatten().unwrap_or("origin").to_string()
+        }
+        _ => "origin".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_fetch_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
 }
 
 /// The message and IPC error code for a failure reported through an EVENT
@@ -2617,6 +2654,67 @@ mod tests {
             "chosen",
             "an explicit remote still wins over everything"
         );
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_checked_out_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let branch = repo_dir.current_branch();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        repo_dir.add_remote("upstream", "https://example.test/upstream.git");
+        let repo = repo_dir.repo();
+        let mut config = repo.config().unwrap();
+        config
+            .set_str(&format!("branch.{}.remote", branch), "upstream")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo, None), "upstream");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_only_configured_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_local_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), ".")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "origin");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_missing_upstream_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "deleted")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
     }
 
     /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".

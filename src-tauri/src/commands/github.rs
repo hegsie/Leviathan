@@ -329,19 +329,28 @@ pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConn
 
 /// Detect GitHub repository from git remotes
 #[command]
-pub async fn detect_github_repo(path: String) -> Result<Option<DetectedGitHubRepo>> {
+pub async fn detect_github_repo(
+    path: String,
+    remote_name: Option<String>,
+) -> Result<Option<DetectedGitHubRepo>> {
     let repo = git2::Repository::open(&path)
         .map_err(|e| LeviathanError::RepositoryNotFound(e.to_string()))?;
 
     // Check all remotes for GitHub URLs
-    for remote_name in repo.remotes()?.iter().flatten().flatten() {
-        if let Ok(remote) = repo.find_remote(remote_name) {
+    for candidate in repo.remotes()?.iter().flatten().flatten() {
+        if remote_name
+            .as_deref()
+            .is_some_and(|wanted| wanted != candidate)
+        {
+            continue;
+        }
+        if let Ok(remote) = repo.find_remote(candidate) {
             if let Ok(url) = remote.url() {
                 if let Some(parsed) = parse_github_url(url) {
                     return Ok(Some(DetectedGitHubRepo {
                         owner: parsed.0,
                         repo: parsed.1,
-                        remote_name: remote_name.to_string(),
+                        remote_name: candidate.to_string(),
                     }));
                 }
             }

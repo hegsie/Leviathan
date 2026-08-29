@@ -306,7 +306,10 @@ pub async fn check_ado_connection(
 
 /// Detect Azure DevOps repository from git remotes
 #[command]
-pub async fn detect_ado_repo(path: String) -> Result<Option<DetectedAdoRepo>> {
+pub async fn detect_ado_repo(
+    path: String,
+    remote_name: Option<String>,
+) -> Result<Option<DetectedAdoRepo>> {
     let repo = git2::Repository::open(&path).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to open repository: {}", e))
     })?;
@@ -315,15 +318,21 @@ pub async fn detect_ado_repo(path: String) -> Result<Option<DetectedAdoRepo>> {
         .remotes()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get remotes: {}", e)))?;
 
-    for remote_name in remotes.iter().flatten().flatten() {
-        if let Ok(remote) = repo.find_remote(remote_name) {
+    for candidate in remotes.iter().flatten().flatten() {
+        if remote_name
+            .as_deref()
+            .is_some_and(|wanted| wanted != candidate)
+        {
+            continue;
+        }
+        if let Ok(remote) = repo.find_remote(candidate) {
             if let Ok(url) = remote.url() {
                 if let Some(repo_info) = parse_ado_url(url) {
                     return Ok(Some(DetectedAdoRepo {
                         organization: repo_info.0,
                         project: repo_info.1,
                         repository: repo_info.2,
-                        remote_name: remote_name.to_string(),
+                        remote_name: candidate.to_string(),
                     }));
                 }
             }

@@ -99,7 +99,8 @@ const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Prom
 describe('network security gate', () => {
   beforeEach(() => {
     invokeHistory.length = 0;
-    mockInvoke = () => Promise.resolve(null);
+    mockInvoke = (command) =>
+      Promise.resolve(command === 'get_fetch_remote' ? 'origin' : null);
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
 
@@ -304,6 +305,18 @@ describe('network security gate', () => {
       expect(invokeHistory.some((c) => c.command === 'push_tag')).to.equal(false);
     });
 
+    it('does not allow a look-alike hostname containing an allowed domain', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({
+        path: '/repo',
+        remote: 'https://github.com.attacker.test/repo.git',
+      });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
     it('allows a push tag to a remote on the list', async () => {
       settingsStore.setState({ remoteAllowlist: ['github.com'] });
 
@@ -343,6 +356,12 @@ describe('network security gate', () => {
 
     it('startAutoFetch forwards a token so the background loop can authenticate', async () => {
       mockInvoke = (command: string) => {
+        if (command === 'get_fetch_remote') return Promise.resolve('upstream');
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'upstream', url: 'https://github.com/acme/repo.git', pushUrl: null },
+          ]);
+        }
         if (command === 'get_repo_token') return Promise.resolve('tok_abc');
         return Promise.resolve(null);
       };
@@ -355,6 +374,7 @@ describe('network security gate', () => {
         Object.prototype.hasOwnProperty.call(call!.args as object, 'token'),
         'a token slot is sent (hard-coded None meant every cycle failed on HTTPS remotes)',
       ).to.equal(true);
+      expect((call!.args as Record<string, unknown>).remote).to.equal('upstream');
     });
   });
 });

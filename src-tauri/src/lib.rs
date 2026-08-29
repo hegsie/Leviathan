@@ -334,6 +334,7 @@ pub fn run() {
             commands::staging::strip_trailing_whitespace,
             commands::staging::get_sorted_file_status,
             commands::remote::get_remotes,
+            commands::remote::get_fetch_remote,
             commands::remote::add_remote,
             commands::remote::remove_remote,
             commands::remote::rename_remote,
@@ -630,6 +631,7 @@ pub fn run() {
             commands::issue_templates::get_issue_template_content,
             // Auto-fetch
             commands::autofetch::start_auto_fetch,
+            commands::autofetch::trigger_auto_fetch,
             commands::autofetch::stop_auto_fetch,
             commands::autofetch::is_auto_fetch_running,
             commands::autofetch::get_remote_status,
