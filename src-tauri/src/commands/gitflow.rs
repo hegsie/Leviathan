@@ -2,6 +2,8 @@
 //! Implements the git-flow branching model
 
 use std::path::Path;
+
+use sha2::{Digest, Sha256};
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
@@ -301,6 +303,81 @@ pub struct GitFlowFinishResult {
     pub branch_kept_reason: Option<String>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct GitFlowSquashMarker {
+    feature_oid: String,
+    squash_oid: String,
+}
+
+fn squash_marker_path(repo: &git2::Repository, branch_name: &str) -> std::path::PathBuf {
+    let branch_hash = Sha256::digest(branch_name.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    repo.commondir()
+        .join("leviathan")
+        .join("gitflow-squash")
+        .join(format!("{}.json", branch_hash))
+}
+
+fn completed_squash_is_reachable(
+    repo: &git2::Repository,
+    branch_name: &str,
+    feature_oid: git2::Oid,
+    develop_oid: git2::Oid,
+) -> Result<bool> {
+    let Ok(contents) = std::fs::read_to_string(squash_marker_path(repo, branch_name)) else {
+        return Ok(false);
+    };
+    let Ok(marker) = serde_json::from_str::<GitFlowSquashMarker>(&contents) else {
+        return Ok(false);
+    };
+    let (Ok(recorded_feature), Ok(squash_commit)) = (
+        git2::Oid::from_str(&marker.feature_oid),
+        git2::Oid::from_str(&marker.squash_oid),
+    ) else {
+        return Ok(false);
+    };
+
+    if recorded_feature != feature_oid
+        || (develop_oid != squash_commit
+            && !repo
+                .graph_descendant_of(develop_oid, squash_commit)
+                .unwrap_or(false))
+    {
+        return Ok(false);
+    }
+
+    let develop = repo.find_commit(develop_oid)?;
+    let feature = repo.find_commit(feature_oid)?;
+    let mut merge_index = repo.merge_commits(&develop, &feature, None)?;
+    if merge_index.has_conflicts() {
+        return Ok(true);
+    }
+
+    Ok(merge_index.write_tree_to(repo)? == develop.tree_id())
+}
+
+fn record_completed_squash(
+    repo: &git2::Repository,
+    branch_name: &str,
+    feature_oid: git2::Oid,
+    squash_oid: git2::Oid,
+) -> Result<()> {
+    let marker_path = squash_marker_path(repo, branch_name);
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        marker_path,
+        serde_json::to_vec(&GitFlowSquashMarker {
+            feature_oid: feature_oid.to_string(),
+            squash_oid: squash_oid.to_string(),
+        })?,
+    )?;
+    Ok(())
+}
+
 /// Delete the finished branch unless a protection rule forbids it.
 ///
 /// Branch rules are enforced here as well as in `delete_branch` because these
@@ -312,9 +389,8 @@ pub struct GitFlowFinishResult {
 /// hotfix) the tag have already been committed by the time this runs, so
 /// deletion is the optional last step — returning `Err` would report a finish
 /// that actually succeeded as failed, leave the item listed as active, and
-/// invite a retry. A squash retry is NOT idempotent (a squash commit never
-/// makes the feature an ancestor of develop), so each retry mints another
-/// duplicate commit. Every path therefore degrades to `branch_kept_reason`.
+/// invite a retry. Every path therefore degrades to `branch_kept_reason`;
+/// squash finishes retain an internal marker so retry only attempts cleanup.
 fn delete_finished_branch(
     repo: &git2::Repository,
     repo_path: &str,
@@ -438,35 +514,57 @@ pub async fn gitflow_finish_feature(
         // parent, no merge commit). Conflicts abort BEFORE any branch
         // deletion so the user can resolve them.
         //
-        // Idempotency guard: if develop already contains the feature, skip the
-        // merge+commit so a re-run (e.g. after the squash was completed externally
-        // via the conflict-resolution flow) doesn't re-merge the same divergence
-        // and mint a duplicate commit. It then falls through to branch deletion.
+        // An ancestry check handles externally completed merges. The marker
+        // handles Leviathan's own squash commit because a squash never makes
+        // the feature tip an ancestor of develop, and develop may have moved
+        // before the user retries failed branch cleanup.
+        let develop_commit = develop_branch.get().peel_to_commit()?;
+        let squash_already_finished = completed_squash_is_reachable(
+            &repo,
+            &branch_name,
+            feature_commit.id(),
+            develop_commit.id(),
+        )?;
         let (analysis, _) = repo.merge_analysis(&[&annotated_commit])?;
-        if !analysis.is_up_to_date() {
+        if !squash_already_finished && !analysis.is_up_to_date() {
             repo.merge(&[&annotated_commit], None, None)?;
             if repo.index()?.has_conflicts() {
                 return Err(LeviathanError::MergeConflict);
             }
             let mut index = repo.index()?;
             let tree_oid = index.write_tree()?;
-            let tree = repo.find_tree(tree_oid)?;
-            let sig = repo.signature()?;
-            let develop_commit = develop_branch.get().peel_to_commit()?;
-            let message = format!("Squashed branch '{}' into {}", branch_name, develop);
-            repo.commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                &message,
-                &tree,
-                &[&develop_commit],
-            )?;
+            // A previous squash finish leaves the feature tip unmerged by
+            // ancestry, so merge_analysis remains normal on retry even though
+            // develop already has the exact resulting tree. Do not mint an
+            // empty duplicate squash commit; finish the pending cleanup only.
+            let created_squash_commit = tree_oid != develop_commit.tree_id();
+            if created_squash_commit {
+                let tree = repo.find_tree(tree_oid)?;
+                let sig = repo.signature()?;
+                let message = format!("Squashed branch '{}' into {}", branch_name, develop);
+                repo.commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    &message,
+                    &tree,
+                    &[&develop_commit],
+                )?;
+            }
+            let squash_commit = repo.head()?.peel_to_commit()?;
             repo.cleanup_state()?;
-            // git runs post-merge after a merge commit (flag 0 = not a squash
-            // merge). merge.rs fires it; gitflow reimplements the merge inline
-            // and fired nothing.
-            crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["0"]);
+            if let Err(error) = record_completed_squash(
+                &repo,
+                &branch_name,
+                feature_commit.id(),
+                squash_commit.id(),
+            ) {
+                tracing::warn!("Failed to record completed GitFlow squash: {}", error);
+            }
+            // git passes flag 1 to post-merge for a squash merge.
+            if created_squash_commit {
+                crate::commands::hooks::run_hook_noblock(&repo, "post-merge", &["1"]);
+            }
         }
     } else {
         // Regular merge (no-ff)
@@ -500,7 +598,11 @@ pub async fn gitflow_finish_feature(
 
     // Delete feature branch if requested
     if delete_branch.unwrap_or(true) {
-        return Ok(delete_finished_branch(&repo, &path, &branch_name));
+        let result = delete_finished_branch(&repo, &path, &branch_name);
+        if result.branch_deleted {
+            let _ = std::fs::remove_file(squash_marker_path(&repo, &branch_name));
+        }
+        return Ok(result);
     }
 
     Ok(GitFlowFinishResult {
@@ -1687,6 +1789,216 @@ mod tests {
         assert!(git_repo
             .find_branch("feature/noop", git2::BranchType::Local)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_retry_does_not_create_empty_commit() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "retry".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("feature.txt", "content\n")]);
+
+        gitflow_finish_feature(
+            repo.path_str(),
+            "retry".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let first_finish_tip = repo.head_oid();
+        repo.create_commit("Later develop work", &[("develop.txt", "later\n")]);
+        let develop_tip_before_retry = repo.head_oid();
+
+        let result =
+            gitflow_finish_feature(repo.path_str(), "retry".to_string(), Some(true), Some(true))
+                .await
+                .expect("retry should only finish branch cleanup");
+
+        assert_ne!(develop_tip_before_retry, first_finish_tip);
+        assert_eq!(repo.head_oid(), develop_tip_before_retry);
+        assert!(result.branch_deleted);
+        assert!(repo
+            .repo()
+            .find_branch("feature/retry", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_retry_reapplies_after_develop_reset() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        let develop_before_squash = repo.head_oid();
+
+        gitflow_start_feature(repo.path_str(), "reset-retry".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("feature.txt", "content\n")]);
+        gitflow_finish_feature(
+            repo.path_str(),
+            "reset-retry".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let git_repo = repo.repo();
+        git_repo
+            .reference(
+                "refs/heads/develop",
+                develop_before_squash,
+                true,
+                "test reset",
+            )
+            .unwrap();
+        git_repo
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "reset-retry".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .expect("reset develop must invalidate the completion marker");
+
+        assert_ne!(repo.head_oid(), develop_before_squash);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("feature.txt")).unwrap(),
+            "content\n"
+        );
+        assert!(result.branch_deleted);
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_retry_reapplies_reverted_content() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "revert-retry".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("README.md", "# Feature\n")]);
+        gitflow_finish_feature(
+            repo.path_str(),
+            "revert-retry".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        repo.create_commit("Revert feature work", &[("README.md", "# Test Repo")]);
+        let reverted_tip = repo.head_oid();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "revert-retry".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .expect("reverted squash content must be reapplied");
+
+        assert_ne!(repo.head_oid(), reverted_tip);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("README.md")).unwrap(),
+            "# Feature\n"
+        );
+        assert!(result.branch_deleted);
+    }
+
+    #[tokio::test]
+    async fn test_finish_feature_squash_new_feature_tip_is_not_treated_as_retry() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "continued".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("First feature work", &[("first.txt", "first\n")]);
+        gitflow_finish_feature(
+            repo.path_str(),
+            "continued".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let first_squash = repo.head_oid();
+
+        repo.checkout_branch("feature/continued");
+        repo.create_commit("More feature work", &[("second.txt", "second\n")]);
+        gitflow_finish_feature(
+            repo.path_str(),
+            "continued".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .expect("a changed feature tip must be squashed");
+
+        assert_ne!(repo.head_oid(), first_squash);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("second.txt")).unwrap(),
+            "second\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_finish_feature_squash_retry_does_not_rerun_post_merge_hook() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+        gitflow_start_feature(repo.path_str(), "hook-retry".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("feature.txt", "content\n")]);
+
+        let marker = repo.path.join("post-merge.log");
+        repo.install_hook(
+            "post-merge",
+            &format!("#!/bin/sh\necho \"$1\" >> \"{}\"\n", marker.display()),
+        );
+
+        gitflow_finish_feature(
+            repo.path_str(),
+            "hook-retry".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        gitflow_finish_feature(
+            repo.path_str(),
+            "hook-retry".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let logged = std::fs::read_to_string(&marker).expect("post-merge must run once");
+        assert_eq!(
+            logged.lines().collect::<Vec<_>>(),
+            vec!["1"],
+            "cleanup retry must not rerun post-merge"
+        );
     }
 
     #[tokio::test]
