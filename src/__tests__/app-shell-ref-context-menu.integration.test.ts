@@ -105,6 +105,8 @@ function setupDefaultMocks(): void {
         return null;
       case 'push_tag':
         return null;
+      case 'get_push_remote':
+        return 'origin';
       case 'get_branches':
         return [];
       case 'get_remotes':
@@ -552,6 +554,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(calls[0].args).to.deep.include({
         path: REPO_PATH,
         name: 'v2.0.0',
+        remote: 'origin',
       });
     });
   });
@@ -686,4 +689,3 @@ describe('app-shell force-delete toast action (integration)', () => {
       .to.be.true;
   });
 });
-

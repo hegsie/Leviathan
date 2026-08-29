@@ -33,6 +33,7 @@ function makeTag(name = 'v1.0.0') {
 function defaultMockInvoke(command: string): Promise<unknown> {
   if (command === 'get_tags') return Promise.resolve([]);
   if (command === 'get_tag_sort_mode') return Promise.resolve('name');
+  if (command === 'get_push_remote') return Promise.resolve('origin');
   // Confirmation dialogs return the clicked button label; 'Ok' = confirmed.
   if (command === 'plugin:dialog|message') return Promise.resolve('Ok');
   return Promise.resolve(null);
@@ -140,7 +141,7 @@ describe('lv-tag-list feedback', () => {
 
     const successToast = uiStore.getState().toasts.find(t => t.type === 'success');
     expect(successToast, 'a success toast should be shown').to.not.be.undefined;
-    expect(successToast!.message).to.equal('Pushed tag v2.0.0 to remote');
+    expect(successToast!.message).to.equal('Pushed tag v2.0.0 to origin');
   });
 
   it('deleting a tag confirms the destructive operation happened', async () => {

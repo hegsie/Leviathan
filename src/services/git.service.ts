@@ -37,6 +37,19 @@ async function resolveRemoteUrl(repoPath: string, remote?: string): Promise<stri
   return match?.url ?? null;
 }
 
+async function resolveRemotePushUrl(repoPath: string, remote?: string): Promise<string | null> {
+  if (remote && /^([a-z][a-z0-9+.-]*:\/\/|[^@/]+@[^:/]+:|ssh:\/\/)/i.test(remote)) {
+    return remote;
+  }
+  const result = await invokeCommand<Remote[]>("get_remotes", { path: repoPath });
+  if (!result.success || !result.data) return null;
+  const wanted = remote ?? 'origin';
+  const match =
+    result.data.find((r) => r.name === wanted) ??
+    (remote === undefined ? result.data[0] : undefined);
+  return match?.pushUrl ?? match?.url ?? null;
+}
+
 /**
  * Hard blocks only: offline mode and the remote allowlist. No confirm prompt.
  *
@@ -55,6 +68,7 @@ async function checkNetworkAllowed(
    * "Offline mode is enabled" on the user for every commit, stage and
    * checkout. The refusal still happens — it just doesn't shout. */
   silent = false,
+  resolvedUrl?: string | null,
 ): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
 
@@ -70,7 +84,8 @@ async function checkNetworkAllowed(
   // An allowlist that cannot see the URL must refuse, not wave the operation
   // through: silently allowing is the failure mode that made this setting
   // decorative.
-  const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
+  const url =
+    resolvedUrl ?? (repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null));
   const allowed =
     !!url &&
     settings.remoteAllowlist.some((domain) => url.toLowerCase().includes(domain.toLowerCase()));
@@ -126,8 +141,9 @@ async function checkNetworkPermission(
   operation: string,
   repoPath: string | null,
   remote?: string,
+  resolvedUrl?: string | null,
 ): Promise<boolean> {
-  if (await checkNetworkAllowed(repoPath, remote)) return false;
+  if (await checkNetworkAllowed(repoPath, remote, false, resolvedUrl)) return false;
 
   if (settingsStore.getState().confirmNetworkOps) {
     // A declined confirm is the user's own decision, not a failure — callers
@@ -1419,6 +1435,7 @@ async function resolveRepoAccount(
 interface ResolvedRepoToken {
   token?: string;
   remoteName?: string;
+  refused?: boolean;
 }
 
 /**
@@ -1454,7 +1471,7 @@ async function resolveRepoToken(
         // This repo resolves to THIS account, but its keyring entry is gone. Every
         // fallback below re-resolves the global default, so continuing would push
         // as a different identity. Fail instead and let the user reconnect it.
-        if (repoSpecific) return {};
+        if (repoSpecific) return { refused: true };
       }
       // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
@@ -1496,7 +1513,7 @@ async function resolveRepoToken(
         }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
-        if (repoSpecific) return {};
+        if (repoSpecific) return { refused: true };
       }
       // Legacy fallback for Azure DevOps
       const tokenResult = await getAdoToken();
@@ -1523,7 +1540,7 @@ async function resolveRepoToken(
         if (token) return { token, remoteName: resolvedRemote };
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
-        if (repoSpecific) return {};
+        if (repoSpecific) return { refused: true };
       }
       // Legacy fallback for GitLab
       const tokenResult = await getGitLabToken();
@@ -1549,6 +1566,28 @@ async function getRepoToken(
   remoteName?: string,
 ): Promise<string | undefined> {
   return (await resolveRepoToken(repoPath, remoteName)).token;
+}
+
+async function getPushUrlToken(
+  repoPath: string,
+  remoteName: string,
+  pushUrl: string,
+): Promise<string | undefined> {
+  let resolved = await resolveRepoToken(repoPath, remoteName);
+  if (!resolved.token && !resolved.refused) {
+    resolved = await resolveRepoToken(repoPath);
+  }
+  if (!resolved.token || resolved.refused || !resolved.remoteName) return undefined;
+
+  const fetchUrl = await resolveRemoteUrl(repoPath, resolved.remoteName);
+  const fetchHost = fetchUrl ? cloneUrlHost(fetchUrl) : null;
+  const pushHost = cloneUrlHost(pushUrl);
+  return fetchHost &&
+    pushHost &&
+    fetchHost === pushHost &&
+    cloneUrlIsCredentialSafe(pushUrl)
+    ? resolved.token
+    : undefined;
 }
 
 /**
@@ -1959,7 +1998,8 @@ export async function deleteTag(
 export async function pushTag(
   args: PushTagCommand,
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('push tag', args.path, args.remote)) {
+  const pushUrl = args.remote ? await resolveRemotePushUrl(args.path, args.remote) : null;
+  if (!await checkNetworkPermission('push tag', args.path, args.remote, pushUrl)) {
     return blockedResult();
   }
 
@@ -1968,13 +2008,28 @@ export async function pushTag(
   // remote the toolbar Push worked and "Push tag" failed with "No valid
   // credentials found".
   if (!args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    let token: string | undefined;
+    if (args.remote && pushUrl) {
+      token = await getPushUrlToken(args.path, args.remote, pushUrl);
+    } else if (!args.remote) {
+      token = await getRepoToken(args.path);
+    }
     if (token) {
       args.token = token;
     }
   }
 
   return invokeCommand<void>("push_tag", args);
+}
+
+export async function getPushRemote(
+  path: string,
+  remote?: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("get_push_remote", {
+    path,
+    ...(remote ? { remote } : {}),
+  });
 }
 
 /**
@@ -1987,14 +2042,20 @@ export async function pushTag(
 export async function deleteRemoteTag(
   args: DeleteRemoteTagCommand,
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote)) {
+  const pushUrl = args.remote ? await resolveRemotePushUrl(args.path, args.remote) : null;
+  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote, pushUrl)) {
     return blockedResult();
   }
 
   // Same credential plumbing push_tag needs: without a token this fails with
   // "No valid credentials found" on a token-authenticated HTTPS remote.
   if (!args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    let token: string | undefined;
+    if (args.remote && pushUrl) {
+      token = await getPushUrlToken(args.path, args.remote, pushUrl);
+    } else if (!args.remote) {
+      token = await getRepoToken(args.path);
+    }
     if (token) {
       args.token = token;
     }

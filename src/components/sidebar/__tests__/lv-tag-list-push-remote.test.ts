@@ -68,6 +68,7 @@ async function createComponent(remotes: ReturnType<typeof remote>[] | 'fail'): P
           : Promise.resolve(remotes);
       return remotesCall;
     }
+    if (command === 'get_push_remote') return Promise.resolve('origin');
     if (command === 'push_tag') {
       pushCalls.push(args as PushCall);
       if (pushFailure) return Promise.reject(pushFailure);
@@ -204,9 +205,7 @@ describe('lv-tag-list push destination', () => {
     expect(isRefOpRunning(REPO_PATH), 'the working-tree lock is not held').to.equal(false);
   });
 
-  it('an unreadable remote list still pushes the way it always did', async () => {
-    // remotes === null: the destination is unknown, so the arg is left off
-    // entirely and the backend resolves it.
+  it('an unreadable remote list resolves and names the backend destination', async () => {
     const el = await createComponent('fail');
     await openMenu(el);
     expect(pushLabel(el)).to.equal('Push to Remote');
@@ -215,15 +214,14 @@ describe('lv-tag-list push destination', () => {
     await waitUntil(() => pushCalls.length === 1, 'push_tag to be invoked');
 
     expect(pushCalls[0].name).to.equal('v1.0.0');
-    expect('remote' in pushCalls[0], 'no remote key at all, so the backend resolver runs')
-      .to.equal(false);
+    expect(pushCalls[0].remote).to.equal('origin');
 
     await waitUntil(
       () => uiStore.getState().toasts.some((t) => t.type === 'success'),
       'the success toast'
     );
     const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
-    expect(toast!.message).to.equal('Pushed tag v1.0.0 to remote');
+    expect(toast!.message).to.equal('Pushed tag v1.0.0 to origin');
   });
 
   it('a push clicked before the remote read lands still asks which remote', async () => {
@@ -233,14 +231,20 @@ describe('lv-tag-list push destination', () => {
     // was about to render is never offered.
     pushCalls = [];
     let landRemotes: (value: unknown) => void = () => undefined;
+    let remoteReads = 0;
     mockInvoke = (command: string, args?: unknown) => {
       if (command === 'get_tags') return Promise.resolve([TAG]);
       if (command === 'get_tag_sort_mode') return Promise.resolve('name');
       if (command === 'get_remotes') {
+        remoteReads++;
+        if (remoteReads > 1) {
+          return Promise.resolve([remote('origin'), remote('upstream')]);
+        }
         return new Promise((resolvePending) => {
           landRemotes = resolvePending;
         });
       }
+      if (command === 'get_push_remote') return Promise.resolve('origin');
       if (command === 'push_tag') {
         pushCalls.push(args as PushCall);
         return Promise.resolve(null);

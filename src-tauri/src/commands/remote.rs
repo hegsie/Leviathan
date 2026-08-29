@@ -563,6 +563,7 @@ pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<Str
     if let Some(r) = requested {
         return r;
     }
+
     let head_branch = repo
         .head()
         .ok()
@@ -594,6 +595,15 @@ pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<Str
         }
         _ => "origin".to_string(),
     }
+}
+
+#[tauri::command]
+pub async fn get_push_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_push_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
 }
 
 /// The merge-and-commit body of a non-fast-forward `pull`.
@@ -2583,6 +2593,7 @@ mod tests {
             )
             .unwrap();
         }
+
         assert_eq!(
             resolve_push_remote(&repo, None),
             "upstream",
@@ -2617,6 +2628,18 @@ mod tests {
             "chosen",
             "an explicit remote still wins over everything"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_push_remote_returns_the_resolved_destination() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("upstream", "https://example.test/repo.git");
+
+        let remote = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect("the sole remote should resolve");
+
+        assert_eq!(remote, "upstream");
     }
 
     /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".

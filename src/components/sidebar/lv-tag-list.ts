@@ -906,20 +906,29 @@ export class LvTagList extends LitElement {
     // slow) network push, which rebinds this.repositoryPath.
     const repoPath = this.repositoryPath;
     try {
+      if (!destination) {
+        const remoteResult = await gitService.getPushRemote(repoPath);
+        if (!remoteResult.success || !remoteResult.data) {
+          showToast(
+            `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+            'error',
+          );
+          return;
+        }
+        destination = remoteResult.data;
+      }
       const result = await gitService.pushTag({
         path: repoPath,
         name: tag.name,
         // Omitted, not undefined: the backend resolver only runs when the key
         // is absent, and git.service's allowlist/token lookups key off it too.
-        ...(destination ? { remote: destination } : {}),
+        remote: destination,
       });
 
       if (result.success) {
         await this.loadTags();
         showToast(
-          destination
-            ? `Pushed tag ${tag.name} to ${destination}`
-            : `Pushed tag ${tag.name} to remote`,
+          `Pushed tag ${tag.name} to ${destination}`,
           'success',
         );
         this.dispatchEvent(new CustomEvent('tags-changed', {

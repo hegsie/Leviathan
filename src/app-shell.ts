@@ -2471,11 +2471,20 @@ export class AppShell extends LitElement {
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     try {
-      const result = await gitService.pushTag({ path: repoPath, name: tagName });
+      const remoteResult = await gitService.getPushRemote(repoPath);
+      if (!remoteResult.success || !remoteResult.data) {
+        showToast(
+          `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
+        return;
+      }
+      const remote = remoteResult.data;
+      const result = await gitService.pushTag({ path: repoPath, name: tagName, remote });
 
       if (result.success) {
         this.refreshConflictDialogRepo(repoPath);
-        showToast(`Pushed tag ${tagName}`, 'success');
+        showToast(`Pushed tag ${tagName} to ${remote}`, 'success');
       } else if (!gitService.isNetworkGateRefusal(result.error)) {
         log.error('Push tag failed:', result.error);
         showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
@@ -2483,6 +2492,7 @@ export class AppShell extends LitElement {
           // Carries the tag through to the Force Push Tag suggestion action.
           branchName: tagName,
           repoPath,
+          remote,
         });
       }
     } finally {
@@ -3140,9 +3150,19 @@ export class AppShell extends LitElement {
       .openRepositories.find((r) => r.repository.path === repoPath);
     if (!repo) return;
 
+    const remoteResult = await gitService.getPushRemote(repoPath, remote);
+    if (!remoteResult.success || !remoteResult.data) {
+      showToast(
+        `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
+    const destination = remoteResult.data;
+
     const confirmed = await showConfirm(
       'Force Push Tag',
-      `This moves the tag "${tagName}" on ${remote ?? 'the remote'} in ` +
+      `This moves the tag "${tagName}" on "${destination}" in ` +
         `${repo.repository.name} to your local commit. Anyone who already fetched ` +
         `the tag keeps the old one until they delete it locally.`,
       'error'
@@ -3155,11 +3175,11 @@ export class AppShell extends LitElement {
       force: true,
       // Omitted, not undefined: the backend resolver only runs when the key is
       // absent, and git.service's allowlist/token lookups key off it too.
-      ...(remote ? { remote } : {}),
+      remote: destination,
     });
     if (result.success) {
       showToast(
-        remote ? `Force pushed tag ${tagName} to ${remote}` : `Force pushed tag ${tagName}`,
+        `Force pushed tag ${tagName} to ${destination}`,
         'success',
       );
       this.refreshConflictDialogRepo(repoPath);
