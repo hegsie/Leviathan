@@ -679,16 +679,14 @@ export class LvBranchCleanupDialog extends LitElement {
 
     const toDelete = this.selectedForDeletion();
 
-    // Gate on the SAME deduplicated list the message and the deletes use.
-    // Distinguish MEASURED unpushed commits from unmeasurable divergence —
-    // claiming "has unpushed commits" about a branch we could not compare is
-    // the same false precision the risk badge used to have, reversed.
+    // Confirm the exact snapshot this invocation will delete. Safe branches
+    // still remove refs and may be difficult to recover, so they need the same
+    // explicit count/scope gate as risky branches.
     const risky = toDelete.filter((cb) => cb.risk === 'warning' || cb.risk === 'danger');
 
-    if (risky.length > 0) {
+    if (toDelete.length > 0) {
       const unpushed = risky.filter((cb) => (cb.branch.aheadBehind?.ahead ?? 0) > 0).length;
       const unknown = risky.length - unpushed;
-
       const parts: string[] = [];
       if (unpushed > 0) {
         parts.push(
@@ -700,10 +698,22 @@ export class LvBranchCleanupDialog extends LitElement {
           `${unknown} could not be checked for unmerged work (no upstream to compare against)`,
         );
       }
+      const count = toDelete.length;
+      const names = toDelete.map((cb) => cb.branch.name).join(', ');
+      const riskSummary =
+        parts.length > 0
+          ? `\n\nOf these branches, ${parts.join(', and ')}.`
+          : '\n\nAll selected branches were reported as fully merged or otherwise safe to delete.';
+      const pruneSummary = this.pruneRemotes
+        ? '\n\nRemote-tracking branches will also be pruned.'
+        : '';
 
       const confirmed = await showConfirm(
-        'Delete Branches with Unpushed Work?',
-        `Of the selected branches, ${parts.join(', and ')}.\n\nThis action cannot be undone. Continue?`,
+        `Delete ${count} Local Branch${count === 1 ? '' : 'es'}?`,
+        `${count} selected local branch${count === 1 ? '' : 'es'} will be deleted: ${names}.` +
+          riskSummary +
+          pruneSummary +
+          '\n\nThis action cannot be undone. Continue?',
         'warning',
       );
       if (!confirmed) {
