@@ -12,6 +12,7 @@ use crate::models::Stash;
 #[serde(rename_all = "camelCase")]
 pub struct StashShowResult {
     pub index: u32,
+    pub oid: String,
     pub message: String,
     pub files: Vec<StashFile>,
     pub total_additions: u32,
@@ -344,6 +345,7 @@ pub async fn stash_show(
 
     Ok(StashShowResult {
         index,
+        oid: stash_oid.to_string(),
         message,
         files,
         total_additions,
@@ -648,6 +650,7 @@ mod tests {
         assert!(result.is_ok());
         let show = result.unwrap();
         assert_eq!(show.index, 0);
+        assert_eq!(show.oid, get_stashes(repo.path_str()).await.unwrap()[0].oid);
         assert!(show.message.contains("Show test"));
         assert_eq!(show.files.len(), 1);
         assert_eq!(show.files[0].path, "file.txt");
