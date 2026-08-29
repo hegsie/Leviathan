@@ -649,6 +649,14 @@ export class LvWorkspaceManagerDialog extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .search-failures {
+        padding: var(--spacing-sm);
+        border: 1px solid color-mix(in srgb, var(--color-error) 40%, transparent);
+        border-radius: var(--radius-sm);
+        color: var(--color-error);
+        font-size: var(--font-size-xs);
+      }
+
       .import-export-btns {
         display: flex;
         gap: var(--spacing-xs);
@@ -695,7 +703,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
   // Search
   @state() private searchQuery = '';
   @state() private searchResults: WorkspaceSearchResult[] = [];
+  @state() private searchFailures: string[] = [];
+  @state() private searchCompleted = false;
   @state() private searching = false;
+  private searchRequestId = 0;
 
   // Editable fields
   @state() private editName = '';
@@ -736,6 +747,12 @@ export class LvWorkspaceManagerDialog extends LitElement {
   private selectWorkspace(id: string): void {
     this.selectedWorkspaceId = id;
     this.repoStatuses = new Map();
+    this.searchQuery = '';
+    this.searchResults = [];
+    this.searchFailures = [];
+    this.searchCompleted = false;
+    this.searching = false;
+    this.searchRequestId++;
     this.syncEditorFields();
     this.refreshStatus();
   }
@@ -1089,22 +1106,43 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws || !this.searchQuery.trim()) return;
 
+    const query = this.searchQuery;
+    const requestId = ++this.searchRequestId;
     this.searching = true;
     this.searchResults = [];
+    this.searchFailures = [];
+    this.searchCompleted = false;
 
     const result = await workspaceService.searchWorkspace(
       ws.id,
-      this.searchQuery,
+      query,
       false,
       false,
       undefined,
       200,
     );
 
+    if (
+      requestId !== this.searchRequestId ||
+      this.searchQuery !== query ||
+      this.selectedWorkspace?.id !== ws.id
+    ) {
+      return;
+    }
+
     if (result.success && result.data) {
-      this.searchResults = result.data;
+      this.searchResults = result.data.results;
+      this.searchFailures = result.data.failures;
+      this.searchCompleted = true;
+      if (result.data.failures.length > 0) {
+        showToast(
+          result.data.failures.join('\n'),
+          result.data.results.length > 0 ? 'warning' : 'error',
+        );
+      }
     } else {
-      showToast('Search failed', 'error');
+      showToast(result.error?.message ?? 'Search failed', 'error');
+      this.searchFailures = [result.error?.message ?? 'Search failed'];
     }
     this.searching = false;
   }
@@ -1351,6 +1389,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
                           .value=${this.searchQuery}
                           @input=${(e: InputEvent) => {
                             this.searchQuery = (e.target as HTMLInputElement).value;
+                            this.searchResults = [];
+                            this.searchFailures = [];
+                            this.searchCompleted = false;
+                            this.searching = false;
+                            this.searchRequestId++;
                           }}
                           @keydown=${(e: KeyboardEvent) => this.handleSearchKeyDown(e)}
                         />
@@ -1362,6 +1405,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
                           ${this.searching ? 'Searching...' : 'Search'}
                         </button>
                       </div>
+                      ${this.searchFailures.length > 0 ? html`
+                        <div class="search-failures">
+                          ${this.searchFailures.map((failure) => html`<div>${failure}</div>`)}
+                        </div>
+                      ` : nothing}
                       ${this.searchResults.length > 0 ? html`
                         <div class="search-results">
                           ${Array.from(this.getGroupedSearchResults().entries()).map(
@@ -1387,7 +1435,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
                             `,
                           )}
                         </div>
-                      ` : this.searchQuery && !this.searching ? html`
+                      ` : this.searchCompleted && !this.searching && this.searchFailures.length === 0 ? html`
                         <div class="search-no-results">No results found</div>
                       ` : nothing}
                     </div>

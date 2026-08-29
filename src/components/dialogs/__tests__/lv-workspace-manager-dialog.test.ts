@@ -23,7 +23,12 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect, fixture, html } from '@open-wc/testing';
-import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../../../types/git.types.ts';
+import type {
+  Workspace,
+  WorkspaceRepoStatus,
+  WorkspaceSearchResponse,
+  WorkspaceSearchResult,
+} from '../../../types/git.types.ts';
 import type { LvWorkspaceManagerDialog } from '../lv-workspace-manager-dialog.ts';
 
 // Import the actual component — registers <lv-workspace-manager-dialog>
@@ -121,6 +126,8 @@ function setupDefaultMocks(opts: {
   savedWorkspace?: Workspace;
   deleteFails?: boolean;
   searchResults?: WorkspaceSearchResult[];
+  searchFailures?: string[];
+  searchError?: string;
   exportData?: string;
 } = {}): void {
   const workspaces = opts.workspaces ?? [WS_ALPHA, WS_BETA];
@@ -151,7 +158,11 @@ function setupDefaultMocks(opts: {
       case 'remove_repository_from_workspace':
         return workspaces[0] ?? null;
       case 'search_workspace':
-        return opts.searchResults ?? [];
+        if (opts.searchError) throw new Error(opts.searchError);
+        return {
+          results: opts.searchResults ?? [],
+          failures: opts.searchFailures ?? [],
+        };
       case 'export_workspace':
         return opts.exportData ?? '{"id":"ws-1","name":"Alpha"}';
       case 'import_workspace':
@@ -620,6 +631,108 @@ describe('lv-workspace-manager-dialog', () => {
 
       const searchCalls = findCommands('search_workspace');
       expect(searchCalls.length).to.equal(1);
+    });
+
+    it('shows the repository search failure to the user', async () => {
+      setupDefaultMocks({ searchError: 'Failed to search repository "beta": not a git repository' });
+      uiStore.setState({ toasts: [] });
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'test';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts[toasts.length - 1].message).to.include('beta');
+      expect(toasts[toasts.length - 1].type).to.equal('error');
+      expect(el.shadowRoot!.querySelector('.search-failures')!.textContent).to.include('beta');
+      expect(el.shadowRoot!.querySelector('.search-no-results')).to.be.null;
+    });
+
+    it('keeps successful results while showing skipped repositories', async () => {
+      setupDefaultMocks({
+        searchResults: [
+          {
+            repoName: 'alpha',
+            repoPath: '/repos/alpha',
+            filePath: 'src/main.ts',
+            lineNumber: 42,
+            lineContent: 'const test = true',
+            matchStart: 6,
+            matchEnd: 10,
+          },
+        ],
+        searchFailures: ['Failed to search repository "beta": not a git repository'],
+      });
+      uiStore.setState({ toasts: [] });
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'test';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      (el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      expect(el.shadowRoot!.querySelectorAll('.search-result-item')).to.have.length(1);
+      expect(el.shadowRoot!.querySelector('.search-failures')!.textContent).to.include('beta');
+      expect(uiStore.getState().toasts.at(-1)?.type).to.equal('warning');
+    });
+
+    it('keeps the newest result when searches complete out of order', async () => {
+      setupDefaultMocks();
+      const defaultInvoke = mockInvoke;
+      const pending = new Map<string, (response: WorkspaceSearchResponse) => void>();
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command !== 'search_workspace') return defaultInvoke(command, args);
+        const query = (args as Record<string, string>).query;
+        return new Promise((resolve) => pending.set(query, resolve));
+      };
+      const el = await renderDialog();
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+
+      searchInput.value = 'first';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+      searchInput.value = 'second';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+      pending.get('second')!({
+        results: [{
+          repoName: 'alpha',
+          repoPath: '/repos/alpha',
+          filePath: 'second.txt',
+          lineNumber: 1,
+          lineContent: 'second',
+          matchStart: 0,
+          matchEnd: 6,
+        }],
+        failures: [],
+      });
+      await tick(el, 20);
+      pending.get('first')!({
+        results: [{
+          repoName: 'alpha',
+          repoPath: '/repos/alpha',
+          filePath: 'first.txt',
+          lineNumber: 1,
+          lineContent: 'first',
+          matchStart: 0,
+          matchEnd: 5,
+        }],
+        failures: [],
+      });
+      await tick(el, 20);
+
+      expect(el.shadowRoot!.querySelector('.search-result-file')!.textContent).to.equal('second.txt');
     });
 
     it('does not show search section for workspace with no repos', async () => {

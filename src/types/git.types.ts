@@ -677,3 +677,8 @@ export interface WorkspaceSearchResult {
   matchStart: number;
   matchEnd: number;
 }
+
+export interface WorkspaceSearchResponse {
+  results: WorkspaceSearchResult[];
+  failures: string[];
+}

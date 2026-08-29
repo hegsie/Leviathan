@@ -2,8 +2,9 @@
 //! Manage multi-repository workspaces
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use chrono::Utc;
 use git2::Repository;
@@ -25,6 +26,168 @@ pub struct WorkspaceSearchResult {
     pub line_content: String,
     pub match_start: u32,
     pub match_end: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchResponse {
+    pub results: Vec<WorkspaceSearchResult>,
+    pub failures: Vec<String>,
+}
+
+fn run_workspace_grep(
+    repo_entry: &WorkspaceRepository,
+    query: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+    file_pattern: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, u32, String)>> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(&repo_entry.path)
+        .arg("grep")
+        .arg("-n")
+        .arg("-z")
+        .arg("-I");
+
+    if !case_sensitive {
+        cmd.arg("-i");
+    }
+    if use_regex {
+        cmd.arg("-E");
+    } else {
+        cmd.arg("-F");
+    }
+
+    cmd.arg("-e").arg(query).arg("--");
+    if let Some(pattern) = file_pattern {
+        cmd.arg(pattern);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|error| {
+        LeviathanError::OperationFailed(format!(
+            "Failed to search repository \"{}\": {}",
+            repo_entry.name, error
+        ))
+    })?;
+
+    let stderr = child.stderr.take().ok_or_else(|| {
+        LeviathanError::OperationFailed("Failed to capture git grep errors".to_string())
+    })?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        LeviathanError::OperationFailed("Failed to capture git grep output".to_string())
+    })?;
+    let mut stdout = BufReader::new(stdout);
+    let mut records = Vec::with_capacity(limit.min(128));
+    let mut path = Vec::new();
+    let mut line = Vec::new();
+    let mut content = Vec::new();
+
+    while records.len() < limit {
+        path.clear();
+        if stdout.read_until(0, &mut path)? == 0 {
+            break;
+        }
+        if path.pop() != Some(0) {
+            break;
+        }
+
+        line.clear();
+        if stdout.read_until(0, &mut line)? == 0 || line.pop() != Some(0) {
+            break;
+        }
+
+        content.clear();
+        if stdout.read_until(b'\n', &mut content)? == 0 {
+            break;
+        }
+        if content.last() == Some(&b'\n') {
+            content.pop();
+        }
+        if content.last() == Some(&b'\r') {
+            content.pop();
+        }
+
+        if let Ok(line_number) = String::from_utf8_lossy(&line).parse::<u32>() {
+            records.push((
+                String::from_utf8_lossy(&path).into_owned(),
+                line_number,
+                String::from_utf8_lossy(&content).into_owned(),
+            ));
+        }
+    }
+
+    let reached_limit = records.len() == limit;
+    if reached_limit {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    // git grep returns exit code 1 when no matches are found.
+    if !reached_limit && !status.success() && status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+        let details = if stderr.is_empty() {
+            format!("git grep exited with {}", status)
+        } else {
+            stderr
+        };
+        return Err(LeviathanError::OperationFailed(format!(
+            "Failed to search repository \"{}\": {}",
+            repo_entry.name, details
+        )));
+    }
+
+    Ok(records)
+}
+
+#[cfg(test)]
+fn parse_workspace_grep_output(output: &[u8], limit: usize) -> Vec<(String, u32, String)> {
+    let mut records = Vec::with_capacity(limit.min(128));
+    let mut cursor = 0;
+
+    while cursor < output.len() && records.len() < limit {
+        let Some(path_end) = output[cursor..].iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        let path_end = cursor + path_end;
+        let line_start = path_end + 1;
+        let Some(line_end) = output[line_start..].iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        let line_end = line_start + line_end;
+        let content_start = line_end + 1;
+        let content_end = output[content_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| content_start + offset)
+            .unwrap_or(output.len());
+
+        if let Ok(line_number) =
+            String::from_utf8_lossy(&output[line_start..line_end]).parse::<u32>()
+        {
+            let content = &output[content_start..content_end];
+            let content = content.strip_suffix(b"\r").unwrap_or(content);
+            records.push((
+                String::from_utf8_lossy(&output[cursor..path_end]).into_owned(),
+                line_number,
+                String::from_utf8_lossy(content).into_owned(),
+            ));
+        }
+
+        cursor = content_end.saturating_add(1);
+    }
+
+    records
 }
 
 /// Get the path to the workspaces config file
@@ -276,7 +439,7 @@ pub async fn search_workspace(
     regex: Option<bool>,
     file_pattern: Option<String>,
     max_results: Option<u32>,
-) -> Result<Vec<WorkspaceSearchResult>> {
+) -> Result<WorkspaceSearchResponse> {
     let config = load_workspaces_config()?;
     let workspace = config
         .workspaces
@@ -288,6 +451,7 @@ pub async fn search_workspace(
     let use_regex = regex.unwrap_or(false);
     let max_results = max_results.unwrap_or(500);
     let mut results: Vec<WorkspaceSearchResult> = Vec::new();
+    let mut failures = Vec::new();
 
     for repo_entry in &workspace.repositories {
         if results.len() as u32 >= max_results {
@@ -296,55 +460,30 @@ pub async fn search_workspace(
 
         let repo_path = Path::new(&repo_entry.path);
         if !repo_path.exists() {
+            failures.push(format!(
+                "\"{}\": repository path does not exist",
+                repo_entry.name
+            ));
             continue;
         }
 
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(&repo_entry.path).arg("grep").arg("-n");
-
-        if !case_sensitive {
-            cmd.arg("-i");
-        }
-
-        if use_regex {
-            cmd.arg("-E");
-        }
-
-        cmd.arg("--").arg(&query);
-
-        if let Some(ref pattern) = file_pattern {
-            cmd.arg(pattern);
-        }
-
-        let output = match cmd.output() {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-
-        // git grep returns exit code 1 when no matches found (not an error)
-        if !output.status.success() && output.status.code() != Some(1) {
-            continue;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        for line in stdout.lines() {
-            if results.len() as u32 >= max_results {
-                break;
-            }
-
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() < 3 {
+        let remaining = max_results.saturating_sub(results.len() as u32) as usize;
+        let matches = match run_workspace_grep(
+            repo_entry,
+            &query,
+            case_sensitive,
+            use_regex,
+            file_pattern.as_deref(),
+            remaining,
+        ) {
+            Ok(matches) => matches,
+            Err(error) => {
+                failures.push(error.to_string());
                 continue;
             }
+        };
 
-            let file_path = parts[0].to_string();
-            let line_number: u32 = match parts[1].parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let line_content = parts[2].to_string();
-
+        for (file_path, line_number, line_content) in matches {
             let (match_start, match_end) =
                 find_match_position(&line_content, &query, case_sensitive);
 
@@ -360,7 +499,7 @@ pub async fn search_workspace(
         }
     }
 
-    Ok(results)
+    Ok(WorkspaceSearchResponse { results, failures })
 }
 
 /// Export a workspace configuration as a JSON string
@@ -614,6 +753,88 @@ mod tests {
 
         let empty = TestRepo::new();
         assert_eq!(head_branch(&empty.repo()), (None, false));
+    }
+
+    #[test]
+    fn test_workspace_grep_treats_plain_query_as_literal_text() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add search content",
+            &[("search.txt", "literal a.b\nregex axb\n")],
+        );
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_surfaces_repository_failures() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let entry = WorkspaceRepository {
+            path: dir.path().to_string_lossy().to_string(),
+            name: "broken-repo".to_string(),
+        };
+
+        let error = run_workspace_grep(&entry, "query", false, false, None, 10).unwrap_err();
+
+        assert!(error.to_string().contains("broken-repo"));
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_accepts_colons_in_file_names() {
+        assert_eq!(
+            parse_workspace_grep_output(b"folder:name.txt\042\0matching text\n", 10),
+            vec![(
+                "folder:name.txt".to_string(),
+                42,
+                "matching text".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_accepts_newlines_in_file_names() {
+        assert_eq!(
+            parse_workspace_grep_output(b"folder\nname.txt\07\0matching text\n", 10),
+            vec![(
+                "folder\nname.txt".to_string(),
+                7,
+                "matching text".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_respects_result_limit() {
+        assert_eq!(
+            parse_workspace_grep_output(b"a.txt\01\0first\nb.txt\02\0second\n", 1),
+            vec![("a.txt".to_string(), 1, "first".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_stops_at_result_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add many matches",
+            &[("many.txt", "match\nmatch\nmatch\nmatch\n")],
+        );
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "match", true, false, None, 2).unwrap();
+
+        assert_eq!(matches.len(), 2);
     }
 
     #[test]
