@@ -646,10 +646,18 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
                 return Err(LeviathanError::RebaseConflict);
             }
 
-            let new_oid = rebase.commit(None, &signature, None)?;
-            rewritten.push(format!("{} {}", old_oid, new_oid));
+            // A commit whose patch is already present on `onto` becomes empty.
+            // Canonical git rebase skips it and continues; libgit2 reports
+            // GIT_EAPPLIED from commit(), which used to enter the hard-error
+            // path below and abort the entire rebase.
+            if let Some(new_oid) =
+                commit_or_skip_empty(&repo, &mut rebase, &signature, Some(old_oid))?
+            {
+                rewritten.push(format!("{} {}", old_oid, new_oid));
+            }
         }
 
+        ensure_libgit2_rewritten_file(&repo)?;
         rebase.finish(Some(&signature))?;
         Ok(())
     })();
@@ -948,7 +956,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     let resumed_old = rebase
         .operation_current()
         .and_then(|i| rebase.nth(i).map(|op| op.id()));
-    if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+    if let Some(new_oid) = commit_or_skip_empty(&repo, &mut rebase, &signature, resumed_old)? {
         if let Some(old_oid) = resumed_old {
             rewritten.push(format!("{} {}", old_oid, new_oid));
         }
@@ -965,7 +973,8 @@ pub async fn continue_rebase(path: String) -> Result<()> {
             return Err(LeviathanError::RebaseConflict);
         }
 
-        if let Some(new_oid) = commit_or_skip_empty(&mut rebase, &signature)? {
+        if let Some(new_oid) = commit_or_skip_empty(&repo, &mut rebase, &signature, Some(old_oid))?
+        {
             rewritten.push(format!("{} {}", old_oid, new_oid));
         }
     }
@@ -975,6 +984,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     let mut all_rewritten = take_rewritten(&repo);
     all_rewritten.extend(rewritten);
 
+    ensure_libgit2_rewritten_file(&repo)?;
     rebase.finish(Some(&signature))?;
 
     if !all_rewritten.is_empty() {
@@ -994,15 +1004,125 @@ pub async fn continue_rebase(path: String) -> Result<()> {
 ///
 /// Returns the new commit's oid, or None when the patch was skipped — the
 /// caller pairs it with the original oid for the post-rewrite hook.
-fn commit_or_skip_empty(
+pub(crate) fn commit_or_skip_empty(
+    repo: &git2::Repository,
     rebase: &mut git2::Rebase,
     signature: &git2::Signature,
+    original_oid: Option<git2::Oid>,
 ) -> Result<Option<git2::Oid>> {
     match rebase.commit(None, signature, None) {
         Ok(oid) => Ok(Some(oid)),
-        Err(e) if e.code() == git2::ErrorCode::Applied => Ok(None),
+        Err(e) if e.code() == git2::ErrorCode::Applied => {
+            let Some(original_oid) = original_oid else {
+                return Ok(None);
+            };
+            let original = repo.find_commit(original_oid)?;
+            let started_empty =
+                original.parent_count() == 1 && original.tree_id() == original.parent(0)?.tree_id();
+            if !started_empty {
+                return Ok(None);
+            }
+
+            // Git keeps commits that were intentionally empty before the
+            // rebase, while dropping patches that only became empty because
+            // their change is already upstream. libgit2 reports GIT_EAPPLIED
+            // for both, so recreate the former on the current rebased HEAD.
+            let head = repo.head()?.peel_to_commit()?;
+            let author = original.author();
+            let oid = create_empty_rebase_commit(repo, &head, &author, signature, &original)?;
+            append_libgit2_rewritten(repo, original_oid, oid)?;
+            Ok(Some(oid))
+        }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Recreate a commit that was intentionally empty before the rebase.
+///
+/// `Repository::commit` only accepts UTF-8 and has no encoding argument. Build
+/// the ordinary unsigned commit object directly so a legacy-encoded message is
+/// preserved byte-for-byte, including its encoding header.
+fn create_empty_rebase_commit(
+    repo: &git2::Repository,
+    head: &git2::Commit<'_>,
+    author: &git2::Signature<'_>,
+    committer: &git2::Signature<'_>,
+    original: &git2::Commit<'_>,
+) -> Result<git2::Oid> {
+    use std::io::Write;
+
+    fn write_signature(
+        output: &mut Vec<u8>,
+        label: &str,
+        signature: &git2::Signature<'_>,
+    ) -> std::io::Result<()> {
+        let when = signature.when();
+        let offset = when.offset_minutes();
+        // Match libgit2's serializer: preserve negative zero, but normalize a
+        // missing or malformed raw sign instead of writing NUL/garbage into the
+        // new commit header.
+        let sign = if offset < 0 || when.sign() == '-' {
+            '-'
+        } else {
+            '+'
+        };
+        let absolute = offset.abs();
+        write!(output, "{} ", label)?;
+        output.extend_from_slice(signature.name_bytes());
+        output.extend_from_slice(b" <");
+        output.extend_from_slice(signature.email_bytes());
+        writeln!(
+            output,
+            "> {} {}{:02}{:02}",
+            when.seconds(),
+            sign,
+            absolute / 60,
+            absolute % 60
+        )
+    }
+
+    let mut content = Vec::new();
+    writeln!(content, "tree {}", head.tree_id())?;
+    writeln!(content, "parent {}", head.id())?;
+    write_signature(&mut content, "author", author)?;
+    write_signature(&mut content, "committer", committer)?;
+    if let Some(encoding) = original.message_encoding()? {
+        writeln!(content, "encoding {}", encoding)?;
+    }
+    content.push(b'\n');
+    content.extend_from_slice(original.message_raw_bytes());
+
+    let oid = repo.odb()?.write(git2::ObjectType::Commit, &content)?;
+    repo.reference("HEAD", oid, true, "rebase: preserve empty commit")?;
+    Ok(oid)
+}
+
+/// libgit2 consumes this map during `rebase.finish()` to copy notes. Normally
+/// `Rebase::commit` writes it, but an intentionally empty commit is recreated
+/// directly after that call returns GIT_EAPPLIED.
+fn append_libgit2_rewritten(
+    repo: &git2::Repository,
+    old_oid: git2::Oid,
+    new_oid: git2::Oid,
+) -> Result<()> {
+    use std::io::Write;
+
+    let path = repo.path().join("rebase-merge").join("rewritten");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{} {}", old_oid, new_oid)?;
+    Ok(())
+}
+
+pub(crate) fn ensure_libgit2_rewritten_file(repo: &git2::Repository) -> Result<()> {
+    let path = repo.path().join("rebase-merge").join("rewritten");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    Ok(())
 }
 
 /// Continue a CLI-initiated (interactive) rebase via `git rebase --continue`,
@@ -2725,6 +2845,236 @@ mod tests {
 
         assert_eq!(parent.id(), main_oid);
         assert_ne!(parent.id(), initial_oid);
+    }
+
+    #[tokio::test]
+    async fn test_rebase_skips_commit_already_applied_upstream() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds shared file", &[("shared.txt", "shared\n")]);
+        repo.create_commit(
+            "Feature adds follow-up",
+            &[("follow-up.txt", "follow-up\n")],
+        );
+
+        repo.checkout_branch(&initial_branch);
+        // Same patch as the feature's first commit, but a distinct commit.
+        repo.create_commit(
+            "Main already has shared file",
+            &[("shared.txt", "shared\n")],
+        );
+        let main_oid = repo.head_oid();
+
+        repo.checkout_branch("feature");
+        rebase(repo.path_str(), initial_branch)
+            .await
+            .expect("an already-applied patch must be skipped, not abort the rebase");
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "Feature adds follow-up");
+        assert_eq!(head.parent(0).unwrap().id(), main_oid);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("shared.txt")).unwrap(),
+            "shared\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("follow-up.txt")).unwrap(),
+            "follow-up\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rebase_empty_only_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature adds shared file", &[("shared.txt", "shared\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit(
+            "Main already has shared file",
+            &[("shared.txt", "shared\n")],
+        );
+        let main_oid = repo.head_oid();
+
+        repo.checkout_branch("feature");
+        {
+            let git_repo = repo.repo();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("notes.rewrite.rebase", true).unwrap();
+            config
+                .set_str("notes.rewriteRef", "refs/notes/commits")
+                .unwrap();
+        }
+        super::rebase(repo.path_str(), initial_branch)
+            .await
+            .unwrap();
+
+        assert_eq!(repo.repo().state(), git2::RepositoryState::Clean);
+        assert_eq!(repo.head_oid(), main_oid);
+    }
+
+    #[tokio::test]
+    async fn test_rebase_preserves_commit_that_started_empty() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        {
+            let git_repo = repo.repo();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = head.tree().unwrap();
+            let signature = git_repo.signature().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "Intentional empty marker",
+                    &tree,
+                    &[&head],
+                )
+                .unwrap();
+        }
+        repo.create_commit("Feature follow-up", &[("feature.txt", "feature\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main diverges", &[("main.txt", "main\n")]);
+        let main_oid = repo.head_oid();
+
+        repo.checkout_branch("feature");
+        rebase(repo.path_str(), initial_branch)
+            .await
+            .expect("a commit that started empty must be preserved");
+
+        let git_repo = repo.repo();
+        let follow_up = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let empty = follow_up.parent(0).unwrap();
+        assert_eq!(follow_up.message().unwrap(), "Feature follow-up");
+        assert_eq!(empty.message().unwrap(), "Intentional empty marker");
+        assert_eq!(empty.parent(0).unwrap().id(), main_oid);
+        assert_eq!(empty.tree_id(), empty.parent(0).unwrap().tree_id());
+    }
+
+    #[tokio::test]
+    async fn test_rebase_preserves_raw_metadata_on_commit_that_started_empty() {
+        use std::io::Write;
+
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+
+        {
+            let git_repo = repo.repo();
+            let parent = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let mut content = Vec::new();
+            writeln!(content, "tree {}", parent.tree_id()).unwrap();
+            writeln!(content, "parent {}", parent.id()).unwrap();
+            writeln!(content, "author Legacy <legacy@example.com> 1 -0000").unwrap();
+            writeln!(content, "committer Test User <test@example.com> 1 +0000").unwrap();
+            writeln!(content, "encoding ISO-8859-1").unwrap();
+            content.extend_from_slice(b"\nmarker \xe9\n");
+            let oid = git_repo
+                .odb()
+                .unwrap()
+                .write(git2::ObjectType::Commit, &content)
+                .unwrap();
+            git_repo
+                .find_reference("refs/heads/feature")
+                .unwrap()
+                .set_target(oid, "test raw empty commit")
+                .unwrap();
+            git_repo.set_head("refs/heads/feature").unwrap();
+            git_repo
+                .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
+        }
+        repo.create_commit("Feature follow-up", &[("feature.txt", "feature\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main diverges", &[("main.txt", "main\n")]);
+        repo.checkout_branch("feature");
+        rebase(repo.path_str(), initial_branch).await.unwrap();
+
+        let git_repo = repo.repo();
+        let empty = git_repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent(0)
+            .unwrap();
+        assert_eq!(empty.author().when().sign(), '-');
+        assert_eq!(empty.message_encoding().unwrap(), Some("ISO-8859-1"));
+        assert_eq!(empty.message_raw_bytes(), b"marker \xe9\n");
+    }
+
+    #[tokio::test]
+    async fn test_rebase_preserves_notes_on_commit_that_started_empty() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+
+        repo.create_branch("feature");
+        repo.checkout_branch("feature");
+        let empty_oid = {
+            let git_repo = repo.repo();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = head.tree().unwrap();
+            let signature = git_repo.signature().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "Noted empty marker",
+                    &tree,
+                    &[&head],
+                )
+                .unwrap()
+        };
+        {
+            let git_repo = repo.repo();
+            let signature = git_repo.signature().unwrap();
+            git_repo
+                .note(
+                    &signature,
+                    &signature,
+                    Some("refs/notes/commits"),
+                    empty_oid,
+                    "keep this note",
+                    true,
+                )
+                .unwrap();
+            let mut config = git_repo.config().unwrap();
+            config.set_bool("notes.rewrite.rebase", true).unwrap();
+            config
+                .set_str("notes.rewriteRef", "refs/notes/commits")
+                .unwrap();
+        }
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main diverges", &[("main.txt", "main\n")]);
+        repo.checkout_branch("feature");
+
+        rebase(repo.path_str(), initial_branch)
+            .await
+            .expect("notes rewriting must accept a synthetic empty commit");
+
+        let git_repo = repo.repo();
+        let rebased_empty = git_repo.head().unwrap().peel_to_commit().unwrap();
+        let note = git_repo
+            .find_note(Some("refs/notes/commits"), rebased_empty.id())
+            .expect("the original note must be copied");
+        assert_eq!(note.message().unwrap(), "keep this note");
     }
 
     // Like `git rebase`, a modification to a tracked file must abort the rebase

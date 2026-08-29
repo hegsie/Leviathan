@@ -796,14 +796,23 @@ pub(crate) fn pull_branch(
         let mut commit_count = 0;
         let rebase_result = (|| -> Result<()> {
             while let Some(op) = rebase_obj.next() {
-                let _op = op?;
+                let op = op?;
                 if repo.index()?.has_conflicts() {
                     return Err(LeviathanError::RebaseConflict);
                 }
                 let signature = repo.signature()?;
-                rebase_obj.commit(None, &signature, None)?;
-                commit_count += 1;
+                if crate::commands::merge::commit_or_skip_empty(
+                    &repo,
+                    &mut rebase_obj,
+                    &signature,
+                    Some(op.id()),
+                )?
+                .is_some()
+                {
+                    commit_count += 1;
+                }
             }
+            crate::commands::merge::ensure_libgit2_rewritten_file(&repo)?;
             rebase_obj.finish(Some(&repo.signature()?))?;
             Ok(())
         })();
