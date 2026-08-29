@@ -546,6 +546,28 @@ describe('lv-bitbucket-dialog', () => {
       );
       expect(newPrBtn).to.not.be.undefined;
     });
+
+    it('discloses capped pull requests with the active filter', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) =>
+        command === 'list_bitbucket_pull_requests'
+          ? Array.from({ length: 30 }, (_, index) => ({ ...mockPullRequests[0], id: index + 1 }))
+          : baseInvoke(command, args);
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Pull Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include('30');
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('state=OPEN');
+    });
   });
 
   describe('Issues Tab', () => {
@@ -574,6 +596,26 @@ describe('lv-bitbucket-dialog', () => {
       const metaText = firstIssue.querySelector('.issue-meta')?.textContent;
       expect(metaText).to.include('bug');
       expect(metaText).to.include('critical');
+    });
+
+    it('discloses capped issues once', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) =>
+        command === 'list_bitbucket_issues'
+          ? Array.from({ length: 30 }, (_, index) => ({ ...mockIssues[0], id: index + 1 }))
+          : baseInvoke(command, args);
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(1);
     });
   });
 
@@ -749,6 +791,36 @@ describe('lv-bitbucket-dialog', () => {
       // Status indicator should exist
       const statusDot = firstPipeline.querySelector('.pipeline-status');
       expect(statusDot).to.not.be.null;
+    });
+
+    it('discloses when the pipeline list may be truncated', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_bitbucket_pipelines') {
+          return Array.from({ length: 20 }, (_, index) => ({
+            ...mockPipelines[0],
+            uuid: `{pipeline-${index}}`,
+            buildNumber: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      const tab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (item) => item.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include('20');
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/pipelines');
     });
   });
 

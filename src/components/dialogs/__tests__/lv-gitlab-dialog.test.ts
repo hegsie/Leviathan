@@ -554,6 +554,28 @@ describe('lv-gitlab-dialog', () => {
       );
       expect(newMrBtn).to.not.be.undefined;
     });
+
+    it('discloses capped merge requests with the active filter', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) =>
+        command === 'list_gitlab_merge_requests'
+          ? Array.from({ length: 30 }, (_, index) => ({ ...mockMergeRequests[0], iid: index + 1 }))
+          : baseInvoke(command, args);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Merge Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include('30');
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('state=opened');
+    });
   });
 
   describe('Issues Tab', () => {
@@ -583,6 +605,32 @@ describe('lv-gitlab-dialog', () => {
       expect(labels.length).to.equal(2);
       expect(labels[0].textContent?.trim()).to.equal('bug');
       expect(labels[1].textContent?.trim()).to.equal('performance');
+    });
+
+    it('renders one capped hint for label-less issues', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) =>
+        command === 'list_gitlab_issues'
+          ? Array.from({ length: 30 }, (_, index) => ({
+              ...mockIssues[0],
+              iid: index + 1,
+              labels: [],
+            }))
+          : baseInvoke(command, args);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
+      expect(hints.length).to.equal(1);
+      expect(hints[0].querySelector('a')?.getAttribute('href')).to.include('state=opened');
     });
   });
 
@@ -615,6 +663,36 @@ describe('lv-gitlab-dialog', () => {
       // Should show truncated sha
       const metaText = firstPipeline.querySelector('.pipeline-meta')?.textContent;
       expect(metaText).to.include('abc12345');
+    });
+
+    it('discloses when the pipeline list may be truncated', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_pipelines') {
+          return Array.from({ length: 20 }, (_, index) => ({
+            ...mockPipelines[0],
+            id: 1000 + index,
+            iid: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      const tab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (item) => item.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include('20');
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/-/pipelines');
     });
   });
 

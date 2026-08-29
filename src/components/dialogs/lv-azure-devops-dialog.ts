@@ -40,6 +40,7 @@ type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'cr
  * this long, more may exist and the tab shows a "capped" hint.
  */
 const WORK_ITEMS_PAGE_SIZE = 50;
+const PIPELINE_RUNS_PAGE_SIZE = 20;
 
 /** Shown when a PAT connect succeeded but writing the keyring git credential did not. */
 const GIT_CRED_WRITE_FAILED_TOAST =
@@ -2269,6 +2270,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.pipelineRuns.length >= PIPELINE_RUNS_PAGE_SIZE ? html`
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+          Showing the ${PIPELINE_RUNS_PAGE_SIZE} most recent pipeline runs; more may exist.
+          <a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_build"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.
+        </p>
+      ` : nothing}
     `;
   }
 

@@ -31,6 +31,8 @@ import './lv-modal.ts';
 import './lv-account-selector.ts';
 
 const log = loggers.gitlab;
+const GITLAB_LIST_PAGE_SIZE = 30;
+const GITLAB_PIPELINE_PAGE_SIZE = 20;
 
 type TabType = 'connection' | 'merge-requests' | 'issues' | 'pipelines' | 'create-mr' | 'create-issue';
 
@@ -1734,6 +1736,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.mergeRequests.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'merge requests',
+        'merge_requests',
+        this.mrFilter,
+      )}
     `;
   }
 
@@ -1791,6 +1800,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.issues.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'issues',
+        'issues',
+        this.issueFilter,
+      )}
     `;
   }
 
@@ -1831,6 +1847,34 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.pipelines.length,
+        GITLAB_PIPELINE_PAGE_SIZE,
+        'pipelines',
+        'pipelines',
+      )}
+    `;
+  }
+
+  private renderCappedListHint(
+    count: number,
+    limit: number,
+    label: string,
+    route: string,
+    state?: string,
+  ) {
+    if (count < limit || !this.detectedRepo) return nothing;
+    const base = this.detectedRepo.instanceUrl.replace(/\/$/, '');
+    const query = state ? `?state=${encodeURIComponent(state)}` : '';
+    return html`
+      <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+        Showing the first ${limit} ${label}; more may exist.
+        <a
+          class="help-link"
+          href="${base}/${this.detectedRepo.projectPath}/-/${route}${query}"
+          @click=${handleExternalLink}
+        >Open in GitLab</a> for the full list.
+      </p>
     `;
   }
 

@@ -998,6 +998,35 @@ describe('lv-azure-devops-dialog', () => {
       expect(args.top).to.equal(20);
     });
 
+    it('discloses when the pipeline list may be truncated', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_ado_pipeline_runs') {
+          return Array.from({ length: 20 }, (_, index) => ({
+            ...mockPipelineRuns[0],
+            id: 300 + index,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const tab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (item) => item.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include('20');
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/_build');
+    });
+
     it('surfaces a repository resolution failure in the pipelines tab', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;

@@ -31,6 +31,8 @@ import './lv-modal.ts';
 import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr' | 'create-issue';
+const BITBUCKET_LIST_PAGE_SIZE = 30;
+const BITBUCKET_PIPELINE_PAGE_SIZE = 20;
 
 @customElement('lv-bitbucket-dialog')
 export class LvBitbucketDialog extends LitElement {
@@ -1732,6 +1734,13 @@ export class LvBitbucketDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.pullRequests.length,
+        BITBUCKET_LIST_PAGE_SIZE,
+        'pull requests',
+        'pull-requests',
+        this.prFilter,
+      )}
     `;
   }
 
@@ -1785,6 +1794,12 @@ export class LvBitbucketDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.issues.length,
+        BITBUCKET_LIST_PAGE_SIZE,
+        'issues',
+        'issues',
+      )}
     `;
   }
 
@@ -1824,6 +1839,33 @@ export class LvBitbucketDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.pipelines.length,
+        BITBUCKET_PIPELINE_PAGE_SIZE,
+        'pipelines',
+        'pipelines',
+      )}
+    `;
+  }
+
+  private renderCappedListHint(
+    count: number,
+    limit: number,
+    label: string,
+    route: string,
+    state?: string,
+  ) {
+    if (count < limit || !this.detectedRepo) return nothing;
+    const query = state ? `?state=${encodeURIComponent(state)}` : '';
+    return html`
+      <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+        Showing the first ${limit} ${label}; more may exist.
+        <a
+          class="help-link"
+          href="https://bitbucket.org/${this.detectedRepo.workspace}/${this.detectedRepo.repoSlug}/${route}${query}"
+          @click=${handleExternalLink}
+        >Open in Bitbucket</a> for the full list.
+      </p>
     `;
   }
 
