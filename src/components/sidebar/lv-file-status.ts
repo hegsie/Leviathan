@@ -1849,8 +1849,10 @@ export class LvFileStatus extends LitElement {
     this.contextMenu = { ...this.contextMenu, visible: false };
     try {
       const fullPath = await join(this.repositoryPath, file.path);
-      const dirPath = fullPath.substring(0, fullPath.lastIndexOf("/"));
-      await shellOpen(dirPath);
+      const result = await gitService.revealInFileManager(fullPath);
+      if (!result.success) {
+        showToast(result.error?.message ?? "Failed to reveal file in file manager", "error");
+      }
     } catch (err) {
       console.error("Failed to reveal:", err);
       showToast("Failed to reveal file in file manager", "error");
@@ -2400,27 +2402,29 @@ export class LvFileStatus extends LitElement {
           </svg>
           Open in editor
         </button>
-        <button
-          class="context-menu-item"
-          role="menuitem"
-          @click=${this.handleContextRevealInFinder}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path
-              d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-            ></path>
-          </svg>
-          ${navigator.userAgent.includes("Win")
-            ? "Reveal in Explorer"
-            : navigator.userAgent.includes("Linux")
-              ? "Reveal in File Manager"
-              : "Reveal in Finder"}
-        </button>
+        ${file.status !== "deleted"
+          ? html`<button
+              class="context-menu-item"
+              role="menuitem"
+              @click=${this.handleContextRevealInFinder}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                ></path>
+              </svg>
+              ${navigator.userAgent.includes("Win")
+                ? "Reveal in Explorer"
+                : navigator.userAgent.includes("Linux")
+                  ? "Reveal in File Manager"
+                  : "Reveal in Finder"}
+            </button>`
+          : nothing}
         <button class="context-menu-item" role="menuitem" @click=${this.handleContextCopyPath}>
           <svg
             viewBox="0 0 24 24"

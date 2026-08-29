@@ -52,6 +52,10 @@ function findCommands(name: string): Array<{ command: string; args?: unknown }> 
   return invokeHistory.filter((h) => h.command === name);
 }
 
+function isConfirmCommand(command: string): boolean {
+  return command === 'plugin:dialog|message' || command === 'plugin:dialog|confirm';
+}
+
 function setupDefaultMocks(
   opts: { entries?: typeof mockStatusEntries; postStageEntries?: typeof mockStatusEntries } = {},
 ): void {
@@ -75,9 +79,8 @@ function setupDefaultMocks(
         return null;
       case 'start_watching':
         return null;
-      // plugin-dialog 2.7 routes confirm() through `message` and returns the
-      // clicked button label; 'Ok' means the user confirmed.
       case 'plugin:dialog|message':
+      case 'plugin:dialog|confirm':
         return 'Ok';
       default:
         return null;
@@ -612,6 +615,54 @@ describe('lv-file-status', () => {
       expect(stageItem).to.not.be.undefined;
     });
 
+    it('reveals the selected file through the native file-manager command', async () => {
+      const el = await renderFileStatus();
+      const windowsPath = String.raw`C:\repo\src\app.ts`;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:path|join') return windowsPath;
+        if (command === 'reveal_in_file_manager') {
+          return { success: true, message: null };
+        }
+        return baseMock(command, args);
+      };
+
+      const stagedItem = el.shadowRoot!.querySelector('.section .file-item')!;
+      stagedItem.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
+      );
+      await el.updateComplete;
+      const revealItem = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.context-menu-item'),
+      ).find((item) => item.textContent?.includes('Reveal'));
+      expect(revealItem).to.not.be.undefined;
+
+      revealItem!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const revealCalls = findCommands('reveal_in_file_manager');
+      expect(revealCalls).to.have.length(1);
+      expect((revealCalls[0].args as { path: string }).path).to.equal(windowsPath);
+      expect(findCommands('plugin:shell|open')).to.have.length(0);
+    });
+
+    it('does not offer Reveal for a deleted file that no longer exists', async () => {
+      const el = await renderFileStatus();
+      const deletedItem = Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.file-item')).find(
+        (item) => item.textContent?.includes('README.md'),
+      )!;
+      deletedItem.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
+      );
+      await el.updateComplete;
+
+      const menuText = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.context-menu-item'),
+      ).map((item) => item.textContent ?? '');
+      expect(menuText.some((text) => text.includes('Copy file path'))).to.be.true;
+      expect(menuText.some((text) => text.includes('Reveal'))).to.be.false;
+    });
+
     it('shows "Discard changes" menu item with danger class on an unstaged row', async () => {
       const el = await renderFileStatus();
 
@@ -989,7 +1040,7 @@ describe('lv-file-status', () => {
 
       let resolveConfirm!: (v: unknown) => void;
       mockInvoke = async (command: string) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           return new Promise((resolve) => {
             resolveConfirm = resolve;
           });

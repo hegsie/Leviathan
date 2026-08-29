@@ -40,6 +40,27 @@ pub struct EditorConfig {
     pub visual: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
+fn windows_reveal_argument(target: &Path) -> std::ffi::OsString {
+    use std::ffi::OsString;
+
+    // Explorer parses its own command line and requires the switch outside
+    // quotes with only the path quoted.
+    let mut select_arg = OsString::from("/select,\"");
+    select_arg.push(target.as_os_str());
+    select_arg.push("\"");
+    select_arg
+}
+
+#[cfg(target_os = "windows")]
+fn windows_reveal_command(target: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = create_command("explorer.exe");
+    command.raw_arg(windows_reveal_argument(target));
+    command
+}
+
 /// Run git config command to get a value
 fn get_git_config_value(repo_path: Option<&Path>, key: &str, global: bool) -> Option<String> {
     let mut cmd = create_command("git");
@@ -116,13 +137,9 @@ pub async fn reveal_in_file_manager(path: String) -> Result<OpenResult> {
 
     #[cfg(target_os = "windows")]
     {
-        // On Windows, use explorer /select, to highlight the file
-        std::process::Command::new("explorer")
-            .args(["/select,", &path])
-            .spawn()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to reveal in explorer: {}", e))
-            })?;
+        windows_reveal_command(target).spawn().map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to reveal in explorer: {}", e))
+        })?;
     }
 
     #[cfg(target_os = "macos")]
@@ -139,7 +156,7 @@ pub async fn reveal_in_file_manager(path: String) -> Result<OpenResult> {
     #[cfg(target_os = "linux")]
     {
         // On Linux, try dbus first for better integration, fall back to xdg-open for parent dir
-        let revealed = try_dbus_reveal(&path);
+        let revealed = try_dbus_reveal(target);
         if !revealed {
             // Fall back to opening the parent directory
             let parent = target.parent().unwrap_or(target);
@@ -162,9 +179,12 @@ pub async fn reveal_in_file_manager(path: String) -> Result<OpenResult> {
 }
 
 #[cfg(target_os = "linux")]
-fn try_dbus_reveal(path: &str) -> bool {
+fn try_dbus_reveal(path: &Path) -> bool {
     // Try to use dbus to reveal file in file manager
     // This works with Nautilus, Dolphin, and other modern file managers
+    let Ok(uri) = url::Url::from_file_path(path) else {
+        return false;
+    };
     std::process::Command::new("dbus-send")
         .args([
             "--session",
@@ -172,7 +192,7 @@ fn try_dbus_reveal(path: &str) -> bool {
             "--type=method_call",
             "/org/freedesktop/FileManager1",
             "org.freedesktop.FileManager1.ShowItems",
-            &format!("array:string:file://{}", path),
+            &format!("array:string:{}", uri),
             "string:",
         ])
         .status()
@@ -551,6 +571,15 @@ mod tests {
         let result =
             reveal_in_file_manager("/nonexistent/path/that/does/not/exist".to_string()).await;
         assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_reveal_uses_single_select_argument() {
+        let target = Path::new(r"C:\repo with spaces\src\main.rs");
+        let argument = windows_reveal_argument(target);
+
+        assert_eq!(argument, r#"/select,"C:\repo with spaces\src\main.rs""#);
     }
 
     #[tokio::test]
