@@ -81,6 +81,8 @@ async function renderAndOpen(
     switch (command) {
       case 'get_cleanup_candidates':
         return candidates;
+      case 'get_remotes':
+        return [{ name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null }];
       case 'delete_branch':
         return undefined;
       case 'prune_remote_tracking_branches':

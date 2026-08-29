@@ -3,12 +3,13 @@
 //! Provides functionality for repository cleanup and maintenance operations
 //! similar to GitKraken and SourceTree.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
+use crate::utils::{apply_token_credential_helper, create_command};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Structs from HEAD (feature branch)
@@ -248,7 +249,8 @@ pub async fn run_garbage_collection(
 #[command]
 pub async fn prune_remote_tracking_branches(
     path: String,
-    remote: Option<String>,
+    remotes: Vec<String>,
+    tokens: Option<HashMap<String, String>>,
 ) -> Result<PruneResult> {
     let repo_path = Path::new(&path);
 
@@ -257,43 +259,26 @@ pub async fn prune_remote_tracking_branches(
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
-    // Get list of remotes to prune
-    let remotes_to_prune = if let Some(ref remote_name) = remote {
-        vec![remote_name.clone()]
-    } else {
-        // Get all remotes
-        let output = create_command("git")
-            .current_dir(&path)
-            .args(["remote"])
-            .output()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to list remotes: {}", e))
-            })?;
-
-        if !output.status.success() {
-            return Err(LeviathanError::OperationFailed(
-                "Failed to list remotes".to_string(),
-            ));
-        }
-
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-
     let mut all_pruned_branches = Vec::new();
 
-    for remote_name in remotes_to_prune {
+    for remote_name in remotes {
+        let remote_url = git2::Repository::open(&path)?
+            .find_remote(&remote_name)
+            .ok()
+            .and_then(|remote| remote.url().ok().map(str::to_owned));
+        let token = tokens.as_ref().and_then(|values| values.get(&remote_name));
+
         // First, do a dry-run to see what would be pruned
-        let dry_run_output = create_command("git")
+        let mut dry_run = create_command("git");
+        dry_run
             .current_dir(&path)
-            .args(["remote", "prune", "--dry-run", &remote_name])
-            .output()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
-            })?;
+            .args(["remote", "prune", "--dry-run", &remote_name]);
+        if let (Some(token), Some(url)) = (token, remote_url.as_deref()) {
+            apply_token_credential_helper(&mut dry_run, token, url);
+        }
+        let dry_run_output = dry_run.output().map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
+        })?;
 
         // Parse dry-run output to get branch names
         let dry_run_text = String::from_utf8_lossy(&dry_run_output.stdout);
@@ -317,13 +302,16 @@ pub async fn prune_remote_tracking_branches(
         }
 
         // Actually perform the prune
-        let output = create_command("git")
+        let mut prune = create_command("git");
+        prune
             .current_dir(&path)
-            .args(["remote", "prune", &remote_name])
-            .output()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
-            })?;
+            .args(["remote", "prune", &remote_name]);
+        if let (Some(token), Some(url)) = (token, remote_url.as_deref()) {
+            apply_token_credential_helper(&mut prune, token, url);
+        }
+        let output = prune.output().map_err(|e| {
+            LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -804,7 +792,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
 
         // A repo without remotes should succeed but prune nothing
-        let result = prune_remote_tracking_branches(repo.path_str(), None).await;
+        let result = prune_remote_tracking_branches(repo.path_str(), vec![], None).await;
 
         assert!(result.is_ok());
         let prune_result = result.unwrap();
@@ -822,7 +810,7 @@ mod tests {
 
         // Pruning a specific remote should work (though there's nothing to prune)
         let result =
-            prune_remote_tracking_branches(repo.path_str(), Some("origin".to_string())).await;
+            prune_remote_tracking_branches(repo.path_str(), vec!["origin".to_string()], None).await;
 
         assert!(result.is_ok());
         let prune_result = result.unwrap();
@@ -831,7 +819,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_remote_tracking_branches_invalid_path() {
-        let result = prune_remote_tracking_branches("/nonexistent/path".to_string(), None).await;
+        let result =
+            prune_remote_tracking_branches("/nonexistent/path".to_string(), vec![], None).await;
 
         assert!(result.is_err());
     }

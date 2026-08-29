@@ -71,9 +71,18 @@ async function checkNetworkAllowed(
   // through: silently allowing is the failure mode that made this setting
   // decorative.
   const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
+  const host = url
+    ? cloneUrlHost(url.includes('://') || url.includes('@') ? url : `https://${url}`)
+    : null;
   const allowed =
-    !!url &&
-    settings.remoteAllowlist.some((domain) => url.toLowerCase().includes(domain.toLowerCase()));
+    !!host &&
+    settings.remoteAllowlist.some((entry) => {
+      const normalized = entry.trim().toLowerCase().replace(/^\*\./, '');
+      const allowedHost =
+        cloneUrlHost(normalized.includes('://') ? normalized : `https://${normalized}`) ??
+        normalized;
+      return host === allowedHost || host.endsWith(`.${allowedHost}`);
+    });
   if (!allowed) {
     if (!silent) {
       showToast(
@@ -7397,14 +7406,103 @@ export async function pruneRemoteTrackingBranches(
   repoPath: string,
   remote?: string,
 ): Promise<CommandResult<PruneResult>> {
-  // `git remote prune` queries the remote's ref list — it is `git fetch
-  // --prune` minus the object transfer, so it belongs behind the same gate.
-  if (!await checkNetworkPermission('prune remote-tracking branches', repoPath, remote)) {
+  if (settingsStore.getState().offlineMode) {
+    await checkNetworkAllowed(repoPath, remote);
     return blockedResult();
   }
+
+  let targets: string[];
+  if (remote) {
+    targets = [remote];
+  } else {
+    const remotes = await getRemotes(repoPath);
+    if (!remotes.success) return { success: false, error: remotes.error };
+    if (!Array.isArray(remotes.data)) {
+      return {
+        success: false,
+        error: { code: 'REMOTE_LIST_FAILED', message: 'Failed to list repository remotes' },
+      };
+    }
+    targets = remotes.data.map((item) => item.name);
+  }
+  if (targets.length === 0) {
+    return { success: true, data: { success: true, branchesPruned: [] } };
+  }
+  for (const target of targets) {
+    if (await checkNetworkAllowed(repoPath, target)) {
+      return blockedResult();
+    }
+  }
+  if (settingsStore.getState().confirmNetworkOps) {
+    const ok = await showConfirm(
+      'Network Operation',
+      `Allow pruning remote-tracking branches from ${targets.join(', ')}?`,
+    );
+    if (!ok) {
+      lastNetworkBlockReason = 'declined';
+      return blockedResult();
+    }
+  }
+  const tokens: Record<string, string> = {};
+  for (const target of targets) {
+    const remoteUrl = await resolveRemoteUrl(repoPath, target);
+    const host = remoteUrl ? cloneUrlHost(remoteUrl) : null;
+    let integrationType: IntegrationType | undefined;
+    if (host === 'github.com' || host?.endsWith('.github.com')) {
+      integrationType = 'github';
+    } else if (
+      host === 'dev.azure.com' ||
+      host === 'ssh.dev.azure.com' ||
+      host?.endsWith('.visualstudio.com')
+    ) {
+      integrationType = 'azure-devops';
+    } else if (
+      host === 'gitlab.com' ||
+      host?.endsWith('.gitlab.com') ||
+      (host && await findGitLabAccountForHost(host))
+    ) {
+      integrationType = 'gitlab';
+    }
+
+    let token: string | undefined;
+    if (remoteUrl && integrationType) {
+      const { account, repoSpecific } = await resolveRepoAccount(
+        repoPath,
+        integrationType,
+        target,
+      );
+      if (account) {
+        const { AccountCredentials, getFreshAccountToken } = await import(
+          './credential.service.ts'
+        );
+        if (integrationType === 'azure-devops') {
+          token =
+            await getFreshAccountToken('azure-devops', account.id, 'azure') ?? undefined;
+        } else if (integrationType === 'gitlab') {
+          token =
+            await getFreshAccountToken(
+              'gitlab',
+              account.id,
+              'gitlab',
+              account.config.type === 'gitlab' ? account.config.instanceUrl : undefined,
+            ) ?? undefined;
+        } else {
+          token = await AccountCredentials.getToken('github', account.id) ?? undefined;
+        }
+      }
+      if (!token && !repoSpecific) {
+        token = await getCloneToken(remoteUrl);
+      }
+    } else if (remoteUrl) {
+      token = await getCloneToken(remoteUrl);
+    }
+    if (token) tokens[target] = token;
+  }
+
   return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
     path: repoPath,
-    remote,
+    remotes: targets,
+    tokens,
   });
 }
 

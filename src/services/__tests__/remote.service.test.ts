@@ -31,6 +31,7 @@ import {
   stopAutoFetch,
   isAutoFetchRunning,
   getRemoteStatus,
+  pruneRemoteTrackingBranches,
   type RemoteStatus,
 } from '../git.service.ts';
 import type { Remote } from '../../types/git.types.ts';
@@ -655,6 +656,31 @@ describe('git.service - Remote operations', () => {
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
       expect(args.intervalMinutes).to.equal(5);
+    });
+
+    describe('pruneRemoteTrackingBranches', () => {
+      it('forwards the app-managed token for the selected remote', async () => {
+        mockInvoke = async (command) => {
+          if (command === 'get_remotes') {
+            return [{ name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null }];
+          }
+          if (command === 'detect_github_repo') {
+            return { owner: 'acme', repo: 'repo', remoteName: 'origin' };
+          }
+          if (command === 'get_keyring_token') return 'ghp_test';
+          if (command === 'prune_remote_tracking_branches') {
+            return { success: true, branchesPruned: [] };
+          }
+          return null;
+        };
+
+        await pruneRemoteTrackingBranches('/test/repo', 'origin');
+
+        expect(lastInvokedCommand).to.equal('prune_remote_tracking_branches');
+        expect(
+          (lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin,
+        ).to.equal('ghp_test');
+      });
     });
 
     it('returns success when auto-fetch is started', async () => {
