@@ -558,6 +558,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * that errors "No conflict found" on an already-resolved file. */
   @state() private resolvedInPlace = false;
   @state() private launchingExternalTool = false;
+  @state() private confirmingWholeFileOverwrite = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
   /**
@@ -641,6 +642,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       !this.conflictFile ||
       this.externalToolLocked ||
       this.launchingExternalTool ||
+      this.confirmingWholeFileOverwrite ||
       this.resolving ||
       this.resolvedAsDeleted ||
       // A chooser/verbatim take-side or gitlink resolution leaves the file
@@ -1490,6 +1492,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return (
       this.resolving ||
       this.launchingExternalTool ||
+      this.confirmingWholeFileOverwrite ||
       this.externalToolLocked ||
       this.resolvedAsDeleted ||
       this.resolvedInPlace
@@ -1689,6 +1692,20 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     );
   }
 
+  private async confirmWholeFileOverwrite(): Promise<boolean> {
+    if (!this.hasUnsavedResolutions()) return true;
+    this.confirmingWholeFileOverwrite = true;
+    try {
+      return await showConfirm(
+        'Replace in-progress resolution?',
+        'Using one whole-file version replaces every conflict pick and edit currently in the output. This cannot be undone.',
+        'warning',
+      );
+    } finally {
+      this.confirmingWholeFileOverwrite = false;
+    }
+  }
+
   private async acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): Promise<void> {
     // With a failed load the side contents are not trustworthy — accepting
     // one would replace the segments with fabricated (possibly empty) text.
@@ -1698,26 +1715,38 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     if (this.loadFailed || this.actionsBlocked) return;
     if (origin === 'base' && this.sideReadErrors.base) return;
     const startFile = this.conflictFile;
-    if (this.editingSegmentId !== null) {
-      if (!(await this.confirmDiscardOpenEdit())) return;
+
+    // A side with no entry DELETED the file — accepting it means staging the
+    // deletion, not writing a 0-byte file from its empty content. The
+    // take-side path owns the overwrite confirmation so this delegates
+    // before prompting and never asks twice.
+    if (
+      (origin === 'ours' && !this.conflictFile?.ours) ||
+      (origin === 'theirs' && !this.conflictFile?.theirs)
+    ) {
+      return this.handleTakeSide(origin);
+    }
+
+    if (
+      this.editingSegmentId === null &&
+      this.segments.length === 1 &&
+      this.segments[0].origin === origin
+    ) {
+      return;
+    }
+
+    if (this.hasUnsavedResolutions()) {
+      if (!(await this.confirmWholeFileOverwrite())) return;
       // Re-check after the confirm's await — a resolve/tool session may
       // have started while it was up (same re-check as Reload and Apply),
       // and file IDENTITY too: a switch during the confirm must not let
       // this call overwrite a DIFFERENT file's segments with this side.
       if (this.loadFailed || this.actionsBlocked) return;
       if (this.conflictFile !== startFile) return;
+    }
+    if (this.editingSegmentId !== null) {
       this.editingSegmentId = null;
       this.editDraft = '';
-    }
-
-    // A side with no entry DELETED the file — accepting it means staging the
-    // deletion, not writing a 0-byte file from its empty content.
-    if (
-      (origin === 'ours' && !this.conflictFile?.ours) ||
-      (origin === 'theirs' && !this.conflictFile?.theirs)
-    ) {
-      void this.handleTakeSide(origin);
-      return;
     }
 
     const content =
@@ -2002,16 +2031,14 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
     const startFile = this.conflictFile;
-    // Taking a side writes the whole file — an open typed-but-unapplied
-    // draft would vanish silently. (The acceptWholeFile delegation already
-    // confirmed and cleared the edit, so this only fires for the direct
-    // deleted-side buttons.)
-    if (this.editingSegmentId !== null) {
-      if (!(await this.confirmDiscardOpenEdit())) return;
-      // Re-check identity too: a file switch during the discard confirm
+    if (this.hasUnsavedResolutions()) {
+      if (!(await this.confirmWholeFileOverwrite())) return;
+      // Re-check identity too: a file switch during the overwrite confirm
       // must not let this call take a side on a different file.
       if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
       if (this.conflictFile !== startFile) return;
+    }
+    if (this.editingSegmentId !== null) {
       this.editingSegmentId = null;
       this.editDraft = '';
     }
@@ -2673,6 +2700,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               class="btn"
               @click=${this.handleOpenExternalMergeTool}
               ?disabled=${this.launchingExternalTool ||
+              this.confirmingWholeFileOverwrite ||
               this.externalToolLocked ||
               this.resolving ||
               this.resolvedAsDeleted ||
