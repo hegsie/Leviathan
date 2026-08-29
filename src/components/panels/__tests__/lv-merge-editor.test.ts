@@ -81,6 +81,10 @@ let aiAvailable = false;
 let aiUnavailable: { reason: string; providerSelected: boolean } | null = null;
 let aiSuggestion: (() => Promise<unknown>) | null = null;
 
+function isConfirmCommand(command: string): boolean {
+  return command === 'plugin:dialog|message' || command === 'plugin:dialog|confirm';
+}
+
 function setupDefaultMocks(): void {
   workdirContent = DEFAULT_WORKDIR_CONTENT;
   aiAvailable = false;
@@ -1607,7 +1611,7 @@ describe('lv-merge-editor', () => {
       // The whole-file accept is unsaved work, so Reload confirms first.
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') return 'Ok';
+        if (isConfirmCommand(command)) return 'Ok';
         return baseMock(command, args);
       };
       const el = await renderLoadedEditor();
@@ -2798,7 +2802,7 @@ describe('lv-merge-editor', () => {
       let confirmAnswer: unknown = false;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|confirm') return confirmAnswer;
+        if (isConfirmCommand(command)) return confirmAnswer;
         if (command === 'launch_merge_tool') {
           launchCalls++;
           return { success: true };
@@ -2842,7 +2846,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           // The native confirm is an async IPC round-trip — a second click
           // can land before it resolves.
@@ -2894,7 +2898,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           return new Promise((res) => {
             releaseConfirm = () => res('Ok');
           });
@@ -2939,7 +2943,7 @@ describe('lv-merge-editor', () => {
       let confirmAnswer: unknown = false;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|confirm') return confirmAnswer;
+        if (isConfirmCommand(command)) return confirmAnswer;
         if (command === 'launch_merge_tool') {
           launchCalls++;
           return { success: true };
@@ -3271,7 +3275,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false; // decline
         }
@@ -3295,7 +3299,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') return 'Ok';
+        if (isConfirmCommand(command)) return 'Ok';
         return baseMock(command, args);
       };
       const { el, internal } = await renderWithEdit();
@@ -3315,7 +3319,7 @@ describe('lv-merge-editor', () => {
       let releaseConfirm: (() => void) | null = null;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           return new Promise((res) => {
             releaseConfirm = () => res('Ok');
           });
@@ -3348,7 +3352,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return confirmAnswer;
         }
@@ -3381,7 +3385,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return 'Ok';
         }
@@ -3409,7 +3413,7 @@ describe('lv-merge-editor', () => {
         let confirmCalls = 0;
         const baseMock = mockInvoke;
         mockInvoke = async (command: string, args?: unknown) => {
-          if (command === 'plugin:dialog|confirm') {
+          if (isConfirmCommand(command)) {
             confirmCalls++;
             return confirmAnswer;
           }
@@ -3444,7 +3448,7 @@ describe('lv-merge-editor', () => {
       let takeSideCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') return false;
+        if (isConfirmCommand(command)) return false;
         if (command === 'resolve_conflict_take_side') {
           takeSideCalls++;
           return { success: true };
@@ -3472,7 +3476,7 @@ describe('lv-merge-editor', () => {
       let takeSideCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return 'Ok';
         }
@@ -3505,7 +3509,7 @@ describe('lv-merge-editor', () => {
       let externalToolCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return new Promise((resolve) => {
             releaseConfirm = () => resolve('Ok');
@@ -3548,7 +3552,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return confirmAnswer;
         }
@@ -3582,7 +3586,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return 'Ok';
         }
@@ -3609,7 +3613,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return confirmAnswer;
         }
@@ -3649,7 +3653,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') return 'Ok';
+        if (isConfirmCommand(command)) return 'Ok';
         if (command === 'resolve_conflict_take_side') return { success: true };
         return baseMock(command, args);
       };
@@ -3855,7 +3859,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }
@@ -4088,7 +4092,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmAnswers.calls++;
           return confirmAnswers.answer;
         }
@@ -4144,7 +4148,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }
@@ -4169,7 +4173,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       let confirmCalls = 0;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|confirm') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }
