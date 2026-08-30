@@ -264,6 +264,26 @@ test.describe('Context Menus - repository switch', () => {
 
     await expect(contextMenu).not.toBeVisible();
   });
+
+  test('Ctrl+digit tab switch closes an open sidebar branch context menu', async ({ page }) => {
+    // lv-left-panel keeps ONE lv-branch-list across tabs and only rebinds
+    // `.repositoryPath`, so a leaked menu ends up over the NEW repo's rows
+    // while Delete/Rename still resolve the repo at click time.
+    const branchRow = page.locator('lv-branch-list .branch-item').first();
+    await expect(branchRow).toBeVisible();
+    await branchRow.click({ button: 'right' });
+
+    const contextMenu = page.locator('lv-branch-list .context-menu');
+    await expect(contextMenu).toBeVisible();
+
+    await page.keyboard.press('Control+2');
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute(
+      'title',
+      '/work/other-repo'
+    );
+
+    await expect(contextMenu).not.toBeVisible();
+  });
 });
 
 test.describe('Operation Banner', () => {

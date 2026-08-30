@@ -410,6 +410,11 @@ export class LvStashList extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // A menu entry acts on the stash it was opened over, but resolves the
+      // repo from `this.repositoryPath` at click time — and a keyboard tab
+      // switch produces neither a document click nor Escape, so the menu would
+      // survive the rebind and drop repo A's stash inside repo B.
+      this.contextMenu = { ...this.contextMenu, visible: false };
       // A preview belongs to the repo it was opened in.
       this.collapseDetails();
       await this.loadStashes();

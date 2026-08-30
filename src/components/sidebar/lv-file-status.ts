@@ -1136,6 +1136,11 @@ export class LvFileStatus extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has("repositoryPath") && this.repositoryPath) {
+      // A menu entry acts on the file it was opened over, but resolves the repo
+      // from `this.repositoryPath` at click time — and a keyboard tab switch
+      // produces neither a document click nor Escape, so the menu would survive
+      // the rebind and discard/stage repo A's file inside repo B.
+      this.contextMenu = { ...this.contextMenu, visible: false };
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
       this.statusDirtySeq++;
