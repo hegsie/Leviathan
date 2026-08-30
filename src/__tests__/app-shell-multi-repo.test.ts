@@ -2268,4 +2268,31 @@ describe('the toolbar command-palette button loads the active repo', () => {
     expect(messages.join('|')).to.contain('Failed to load branches');
     expect(messages.join('|')).to.contain('Failed to load tracked files');
   });
+
+  // A succeeded command with an empty payload is not a failure. Gating the
+  // success path on `result.data` being truthy sent a repository with no
+  // branches and no tracked files down the error branch, so every palette
+  // open raised two "Unknown error" toasts nothing had gone wrong in.
+  it('reports no failure when both loads succeed with an empty payload', async () => {
+    mockResponses['get_branches'] = () => null;
+    mockResponses['list_tracked_files'] = () => null;
+    const el = createAppShell();
+    (el as unknown as { activeRepository: unknown }).activeRepository = {
+      repository: mockRepo('/repo/a', 'a'),
+    };
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      paletteTrackedFiles: string[];
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    uiStore.setState({ toasts: [] });
+
+    await internal.openCommandPalette();
+
+    expect(internal.paletteBranches).to.deep.equal([]);
+    expect(internal.paletteTrackedFiles).to.deep.equal([]);
+    expect(internal.showCommandPalette).to.be.true;
+    expect(uiStore.getState().toasts).to.deep.equal([]);
+  });
 });

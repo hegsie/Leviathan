@@ -4098,8 +4098,11 @@ export class AppShell extends LitElement {
         requestId !== this.commandPaletteRequestId ||
         this.activeRepository?.repository.path !== path
       ) return;
-      if (branchResult.success && branchResult.data) {
-        this.paletteBranches = branchResult.data;
+      // Only a failed command is an error. A repository with no branches or no
+      // tracked files succeeds with an empty (or absent) payload, and toasting
+      // that as "Unknown error" would cry wolf every time the palette opens.
+      if (branchResult.success) {
+        this.paletteBranches = branchResult.data ?? [];
       } else {
         this.paletteBranches = [];
         showToast(
@@ -4107,8 +4110,8 @@ export class AppShell extends LitElement {
           'error',
         );
       }
-      if (filesResult.success && filesResult.data) {
-        this.paletteTrackedFiles = filesResult.data;
+      if (filesResult.success) {
+        this.paletteTrackedFiles = filesResult.data ?? [];
       } else {
         this.paletteTrackedFiles = [];
         showToast(
