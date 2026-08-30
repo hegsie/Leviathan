@@ -24,15 +24,32 @@ const CHERRY_PICK_SEQUENCE: &str = "CHERRY_PICK_SEQUENCE";
 /// picks on the branch.
 const CHERRY_PICK_SEQUENCE_HEAD: &str = "CHERRY_PICK_SEQUENCE_HEAD";
 
+/// Refuse to start an index-rewriting operation while the index holds staged
+/// work the operation — or a later abort of it — would destroy.
 fn ensure_index_matches_head(repo: &git2::Repository) -> Result<()> {
     let head_tree = repo.head()?.peel_to_commit()?.tree()?;
     let mut index = repo.index()?;
+
+    // write_tree fails outright on an index with unmerged entries, and that
+    // state is reachable while `state()` is still Clean — a conflicted stash
+    // apply leaves it — so answer it before writing rather than leaking a raw
+    // libgit2 error. The wording deliberately avoids the word "conflict": the
+    // cherry-pick dialog routes any message containing it to the
+    // conflict-resolution flow, which has no operation to resolve here.
+    if index.has_conflicts() {
+        return Err(LeviathanError::OperationFailed(
+            "The index has unmerged files. Resolve them before starting this operation."
+                .to_string(),
+        ));
+    }
+
     if index.write_tree()? != head_tree.id() {
         return Err(LeviathanError::OperationFailed(
             "The index has staged changes. Commit or stash them before starting this operation."
                 .to_string(),
         ));
     }
+
     Ok(())
 }
 
@@ -3774,6 +3791,125 @@ mod tests {
                 .unwrap()
                 .id,
             staged_oid
+        );
+    }
+
+    /// A `no_commit` pick leaves its work staged with `state()` back to Clean,
+    /// so the next pick meets the guard. libgit2's merge preflight refuses that
+    /// index regardless (it rejects any index that differs from HEAD, even a
+    /// pure addition), so the guard is not what makes chaining impossible — it
+    /// only replaces libgit2's "uncommitted changes would be overwritten by
+    /// merge" with something the user can act on. The first pick's work must
+    /// survive intact either way.
+    #[tokio::test]
+    async fn test_no_commit_cherry_pick_chain_reports_actionable_error() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let first = test_repo.create_commit("First", &[("first.txt", "first")]);
+        let second = test_repo.create_commit("Second", &[("second.txt", "second")]);
+        test_repo.checkout_branch("main");
+
+        cherry_pick(test_repo.path_str(), first.to_string(), Some(true), None)
+            .await
+            .expect("first no_commit pick should succeed");
+
+        let err = cherry_pick(test_repo.path_str(), second.to_string(), Some(true), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("index has staged changes"),
+            "expected an actionable message, got: {err}"
+        );
+
+        let repo = test_repo.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        assert!(repo
+            .index()
+            .unwrap()
+            .get_path(std::path::Path::new("first.txt"), 0)
+            .is_some());
+    }
+
+    /// A staged deletion of a path HEAD tracks is work the operation could
+    /// destroy just as surely as a staged edit, so it must still be refused.
+    #[tokio::test]
+    async fn test_cherry_pick_refuses_staged_deletion() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_commit("Add unrelated", &[("unrelated.txt", "original")]);
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+        test_repo.checkout_branch("main");
+
+        let repo = test_repo.repo();
+        let mut index = repo.index().unwrap();
+        index
+            .remove_path(std::path::Path::new("unrelated.txt"))
+            .unwrap();
+        index.write().unwrap();
+
+        let result = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("index has staged changes"));
+    }
+
+    /// A conflicted stash apply leaves unmerged entries in the index while
+    /// `state()` stays Clean. Diffing (or writing) a tree fails outright there,
+    /// so the guard must recognise it rather than leak a raw libgit2 error.
+    fn leave_conflicted_index(test_repo: &TestRepo) {
+        test_repo.create_commit("Base", &[("conflict.txt", "base")]);
+        {
+            let mut repo = test_repo.repo();
+            std::fs::write(test_repo.path.join("conflict.txt"), "stashed").unwrap();
+            let signature = repo.signature().unwrap();
+            repo.stash_save(&signature, "wip", None).unwrap();
+        }
+        test_repo.create_commit("Diverge", &[("conflict.txt", "other")]);
+
+        // Re-open: a Repository handle caches its index, so the one that saved
+        // the stash would apply against a stale snapshot.
+        let mut repo = test_repo.repo();
+        repo.stash_apply(0, None).unwrap();
+        assert!(repo.index().unwrap().has_conflicts());
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+    }
+
+    #[tokio::test]
+    async fn test_revert_refuses_unmerged_index() {
+        let test_repo = TestRepo::with_initial_commit();
+        let revert_oid = test_repo.create_commit("Add file", &[("file.txt", "content")]);
+        leave_conflicted_index(&test_repo);
+
+        let err = revert(test_repo.path_str(), revert_oid.to_string(), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("index has unmerged files"),
+            "expected an actionable message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cherry_pick_refuses_unmerged_index() {
+        let test_repo = TestRepo::with_initial_commit();
+        test_repo.create_branch("feature");
+        test_repo.checkout_branch("feature");
+        let feature_oid = test_repo.create_commit("Feature commit", &[("feature.txt", "feature")]);
+        test_repo.checkout_branch("main");
+        leave_conflicted_index(&test_repo);
+
+        let err = cherry_pick(test_repo.path_str(), feature_oid.to_string(), None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("index has unmerged files"),
+            "expected an actionable message, got: {err}"
         );
     }
 
