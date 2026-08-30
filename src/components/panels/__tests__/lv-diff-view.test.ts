@@ -1308,6 +1308,86 @@ describe('lv-diff-view', () => {
       const writes = invokeHistory.filter((c) => c.command === 'write_file_content');
       expect(writes.length, "B.ts is never written with A's content").to.equal(0);
     });
+
+    it('closes the editor when the file being edited becomes conflicted', async () => {
+      // A merge run elsewhere turns the open file conflicted; app-shell swaps in
+      // the fresh status entry. The path still matches, so nothing else closes
+      // the editor — and the conflict notice hides the textarea, parking the
+      // pre-conflict buffer out of sight instead of reporting it.
+      setupDefaultMocks({ fileContent: 'contents of main' });
+      const el = await renderDiffView({ file: makeStatusEntry({ path: 'src/main.ts' }) });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement;
+      textarea.value = 'pre-conflict text';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      uiStore.setState({ toasts: [] });
+      el.file = makeStatusEntry({ path: 'src/main.ts', isConflicted: true, status: 'conflicted' });
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const view = el as unknown as { editMode: boolean; editContent: string };
+      expect(view.editMode, 'the editor closes on the conflicted transition').to.be.false;
+      expect(view.editContent).to.equal('');
+      const warnings = uiStore.getState().toasts.filter((t) => t.type === 'warning');
+      expect(
+        warnings.some((t) => t.message.includes('src/main.ts')),
+        'the dropped text is reported, not silently parked behind the conflict notice',
+      ).to.be.true;
+
+      // Resolving the conflict swaps the entry back — the editor must not
+      // reappear holding text from before the merge.
+      el.file = makeStatusEntry({ path: 'src/main.ts', isConflicted: false });
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      expect(
+        el.shadowRoot!.querySelector('.editor-textarea'),
+        'the pre-conflict buffer does not come back over the resolved file',
+      ).to.be.null;
+      expect(view.editContent).to.equal('');
+    });
+
+    it('does not report a save in flight as unsaved edits', async () => {
+      // app-shell's teardowns (the x button, Escape, a repository tab switch)
+      // read hasUnsavedEdits to warn. A write already on its way to disk is not
+      // lost text — saveEdit reports its own failure.
+      const write = deferred<unknown>();
+      setupDefaultMocks({ fileContent: 'contents of main' });
+      const el = await renderDiffView({ file: makeStatusEntry({ path: 'src/main.ts' }) });
+
+      (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const textarea = el.shadowRoot!.querySelector('.editor-textarea') as HTMLTextAreaElement;
+      textarea.value = 'edited text';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      expect(el.hasUnsavedEdits, 'typed text with no save started is unsaved').to.be.true;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'write_file_content') return write.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const save = (el as unknown as { saveEdit: () => Promise<void> }).saveEdit();
+      await el.updateComplete;
+      expect(el.hasUnsavedEdits, 'a write in flight is not discarded text').to.be.false;
+
+      write.reject({ code: 'COMMAND_ERROR', message: 'permission denied' });
+      await save;
+      await el.updateComplete;
+
+      expect(el.hasUnsavedEdits, 'a failed write leaves the text unsaved again').to.be.true;
+    });
   });
 
   // ── Conflicted files ──────────────────────────────────────────────────

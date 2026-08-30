@@ -1485,9 +1485,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * `showDiff = false` in app-shell. Every teardown the component CAN see
    * already guards (Cancel confirms, a file change warns); the host needs this
    * to close the gap for the ones it owns.
+   *
+   * A save in flight is NOT unsaved: the write is already on its way to disk
+   * and `saveEdit` reports its own failure, so counting it here would tell the
+   * user their edits were discarded moments before they land.
    */
   public get hasUnsavedEdits(): boolean {
-    return this.editMode && this.hasChanges;
+    return this.editMode && this.hasChanges && !this.saving;
   }
 
   /** The file the unsaved buffer belongs to, for a message naming it. */
@@ -1510,11 +1514,18 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * A confirm is not possible here — the property has already changed by the
    * time `updated()` runs, so there is nothing left to cancel. Unsaved text is
    * therefore reported rather than silently dropped.
+   *
+   * The same file turning conflicted closes the editor too, matching the
+   * invalidation `updated()` already applies to an in-flight load. `render()`
+   * hides the textarea behind the conflict notice, so the buffer would survive
+   * unreachable — and reappear over the merge the user then resolved, with
+   * Save writing pre-conflict text over the resolution.
    */
   private exitEditModeOnFileChange(): void {
     if (!this.editMode) return;
     if (
       !this.commitFile &&
+      !this.file?.isConflicted &&
       this.editPath &&
       this.file?.path === this.editPath &&
       this.editRepositoryPath === this.repositoryPath
