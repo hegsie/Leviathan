@@ -51,6 +51,7 @@ function deleteFlowMock(options: {
   answers?: string[];
   deleteRemoteTag?: () => Promise<unknown>;
   getRemotes?: () => Promise<unknown>;
+  getPushRemote?: () => Promise<unknown>;
 }) {
   const dialogMessages: string[] = [];
   const invokes: Array<{ command: string; args?: unknown }> = [];
@@ -65,6 +66,9 @@ function deleteFlowMock(options: {
     }
     if (command === 'get_remotes') {
       return options.getRemotes ? options.getRemotes() : Promise.resolve(options.remotes ?? []);
+    }
+    if (command === 'get_push_remote' && options.getPushRemote) {
+      return options.getPushRemote();
     }
     if (command === 'delete_tag') return Promise.resolve(null);
     if (command === 'delete_remote_tag') {
@@ -268,6 +272,30 @@ describe('lv-tag-list feedback', () => {
     expect(warning, 'the user is told the remote copy may survive').to.not.be.undefined;
     expect(warning!.message).to.contain('v3.0.0');
     expect(warning!.message).to.contain('remote');
+    expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+  });
+
+  it('an unresolvable push destination warns instead of skipping the follow-up', async () => {
+    // Same hazard as an unreadable remote list: the local delete already
+    // toasted success, so returning silently tells the user the tag is gone
+    // while the remote copy survives and the next fetch restores it.
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      remotes: ORIGIN,
+      // Both dialogs answered, so a missing guard would actually reach the
+      // remote delete rather than stall on an unanswered confirm.
+      answers: ['Ok', 'Ok'],
+      getPushRemote: () =>
+        Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v4.0.0');
+
+    const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
+    expect(warning, 'the user is told the remote copy may survive').to.not.be.undefined;
+    expect(warning!.message).to.contain('v4.0.0');
+    expect(warning!.message).to.contain('push destination could not be resolved');
     expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
   });
 

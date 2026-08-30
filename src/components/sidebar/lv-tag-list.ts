@@ -850,8 +850,9 @@ export class LvTagList extends LitElement {
    * Push the right-clicked tag.
    *
    * `remote` is the destination the user picked in the menu. When it is
-   * undefined the arg is left off the command entirely so the backend resolves
-   * the destination the same way `push` does.
+   * undefined the destination is resolved up front via `get_push_remote`, so
+   * the success toast and the force-push retry can both name where the tag
+   * actually went.
    */
   private async handlePushTag(remote?: string): Promise<void> {
     const tag = this.contextMenu.tag;
@@ -920,8 +921,9 @@ export class LvTagList extends LitElement {
       const result = await gitService.pushTag({
         path: repoPath,
         name: tag.name,
-        // Omitted, not undefined: the backend resolver only runs when the key
-        // is absent, and git.service's allowlist/token lookups key off it too.
+        // Always explicit: the destination was resolved above, so the toast,
+        // the force retry and git.service's allowlist/token lookups all key off
+        // the same remote.
         remote: destination,
       });
 

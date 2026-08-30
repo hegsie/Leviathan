@@ -2642,6 +2642,48 @@ mod tests {
         assert_eq!(remote, "upstream");
     }
 
+    /// A repo with NO remotes resolves to the "origin" default, which does not
+    /// exist. Returning it anyway would send the UI on to push_tag and surface
+    /// "Remote not found: origin" from the push instead of from the lookup the
+    /// callers gate on.
+    #[tokio::test]
+    async fn test_get_push_remote_errors_when_the_repo_has_no_remotes() {
+        let repo_dir = TestRepo::with_initial_commit();
+
+        let err = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect_err("a repo with no remotes has no push destination");
+
+        assert!(
+            matches!(err, LeviathanError::RemoteNotFound(ref name) if name == "origin"),
+            "the missing destination is named: {err:?}"
+        );
+    }
+
+    /// remote.pushDefault can outlive the remote it names (renamed, removed).
+    /// The resolver happily returns the stale name, so the existence check is
+    /// the only thing standing between the user and a confirm dialog naming a
+    /// remote that is not there.
+    #[tokio::test]
+    async fn test_get_push_remote_errors_when_the_configured_default_is_gone() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://example.test/repo.git");
+        {
+            let repo = git2::Repository::open(&repo_dir.path).unwrap();
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("remote.pushDefault", "nope").unwrap();
+        }
+
+        let err = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect_err("a pushDefault naming a missing remote must not resolve");
+
+        assert!(
+            matches!(err, LeviathanError::RemoteNotFound(ref name) if name == "nope"),
+            "the missing destination is named: {err:?}"
+        );
+    }
+
     /// Pull must follow the branch's CONFIGURED upstream, not "origin/<name>".
     ///
     /// In the standard fork workflow (origin = your fork, upstream = canonical,

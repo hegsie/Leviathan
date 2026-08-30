@@ -557,6 +557,29 @@ describe('app-shell ref context menu handlers (integration)', () => {
         remote: 'origin',
       });
     });
+
+    it('reports an unresolvable destination instead of pushing blind', async () => {
+      // The toast and the Force Push Tag suggestion both name the destination,
+      // so a push that could not resolve one must stop rather than let the
+      // backend pick a remote the user is never told about.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) =>
+        command === 'get_push_remote'
+          ? Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' })
+          : previous(command, args);
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: origin');
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
+    });
   });
 
   describe('handleRefresh ordering (regression test for checkout bug)', () => {

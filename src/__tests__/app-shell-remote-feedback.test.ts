@@ -455,6 +455,37 @@ describe('app-shell remote-operation feedback', () => {
       ).to.equal(true);
     });
 
+    it('an unresolvable destination stops the force push before the confirm', async () => {
+      // Without the destination there is nothing honest to name in the "this
+      // moves the remote tag" confirm, and pushing anyway force-moves the tag
+      // on whatever the backend picks — a destructive write to a remote the
+      // user never aimed at.
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      failures['get_push_remote'] = {
+        code: 'REMOTE_NOT_FOUND',
+        message: 'Remote not found: origin',
+      };
+      const el = shellWithStoreRepo();
+
+      await (el as any).forcePushTag('v1.2.0', '/repo/one');
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: origin');
+      expect(
+        invokeCallArgs.some(
+          (c) => c.command === 'plugin:dialog|confirm' || c.command === 'plugin:dialog|message',
+        ),
+        'no confirm for a push that cannot happen',
+      ).to.equal(false);
+      expect(
+        invokeCallArgs.some((c) => c.command === 'push_tag'),
+        'and nothing is pushed',
+      ).to.equal(false);
+    });
+
     it('the force-push-tag event carries the remote through to the push', async () => {
       // The suggestion service dispatches on `window`; the remote has to
       // survive the hop or the retry re-resolves the destination anyway.

@@ -50,6 +50,8 @@ interface PushCall {
 let pushCalls: PushCall[] = [];
 /** When set, push_tag rejects with this instead of succeeding. */
 let pushFailure: { code: string; message: string } | null = null;
+/** When set, get_push_remote rejects with this instead of resolving. */
+let pushRemoteFailure: { code: string; message: string } | null = null;
 /** The in-flight get_remotes call for the most recent context-menu open. */
 let remotesCall: Promise<unknown> | null = null;
 
@@ -68,7 +70,10 @@ async function createComponent(remotes: ReturnType<typeof remote>[] | 'fail'): P
           : Promise.resolve(remotes);
       return remotesCall;
     }
-    if (command === 'get_push_remote') return Promise.resolve('origin');
+    if (command === 'get_push_remote') {
+      if (pushRemoteFailure) return Promise.reject(pushRemoteFailure);
+      return Promise.resolve('origin');
+    }
     if (command === 'push_tag') {
       pushCalls.push(args as PushCall);
       if (pushFailure) return Promise.reject(pushFailure);
@@ -127,6 +132,7 @@ describe('lv-tag-list push destination', () => {
     const state = uiStore.getState();
     state.toasts.forEach((t) => state.removeToast(t.id));
     pushFailure = null;
+    pushRemoteFailure = null;
   });
 
   it('names the sole remote in the menu and pushes to it', async () => {
@@ -222,6 +228,28 @@ describe('lv-tag-list push destination', () => {
     );
     const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
     expect(toast!.message).to.equal('Pushed tag v1.0.0 to origin');
+  });
+
+  it('an unresolvable destination is reported instead of pushing blind', async () => {
+    // The unreadable-remote-list path leans entirely on the backend resolver.
+    // When that fails too there is no destination to name in the toast or to
+    // hand the Force Push Tag retry, so nothing may be pushed.
+    pushRemoteFailure = { code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' };
+    const el = await createComponent('fail');
+    await openMenu(el);
+
+    pushItem(el)!.click();
+    await waitUntil(
+      () => uiStore.getState().toasts.some((t) => t.type === 'error'),
+      'the error toast'
+    );
+
+    const toast = uiStore.getState().toasts.find((t) => t.type === 'error');
+    expect(toast!.message).to.contain('Could not determine the tag destination');
+    expect(toast!.message).to.contain('Remote not found: origin');
+    expect(pushCalls, 'nothing is pushed to a destination nobody could name').to.have.length(0);
+    // The early return must leak no lock.
+    await waitUntil(() => !isRefOpRunning(REPO_PATH), 'the working-tree lock to be released');
   });
 
   it('a push clicked before the remote read lands still asks which remote', async () => {

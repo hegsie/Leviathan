@@ -3173,8 +3173,9 @@ export class AppShell extends LitElement {
       path: repoPath,
       name: tagName,
       force: true,
-      // Omitted, not undefined: the backend resolver only runs when the key is
-      // absent, and git.service's allowlist/token lookups key off it too.
+      // Always explicit: the destination was resolved above, so the confirm,
+      // the toast and git.service's allowlist/token lookups all name the same
+      // remote.
       remote: destination,
     });
     if (result.success) {

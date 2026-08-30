@@ -1436,6 +1436,12 @@ interface ResolvedRepoToken {
   token?: string;
   remoteName?: string;
   refused?: boolean;
+  /**
+   * The account the token belongs to, when one resolved it. Absent for the
+   * legacy single-token fallbacks, which have no account to speak of.
+   */
+  accountId?: string;
+  integrationType?: IntegrationType;
 }
 
 /**
@@ -1467,7 +1473,14 @@ async function resolveRepoToken(
       );
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
-        if (token) return { token, remoteName: resolvedRemote };
+        if (token) {
+          return {
+            token,
+            remoteName: resolvedRemote,
+            accountId: account.id,
+            integrationType: "github",
+          };
+        }
         // This repo resolves to THIS account, but its keyring entry is gone. Every
         // fallback below re-resolves the global default, so continuing would push
         // as a different identity. Fail instead and let the user reconnect it.
@@ -1509,7 +1522,12 @@ async function resolveRepoToken(
           if (accountOrg && accountOrg === adoRepoResult.data.organization) {
             await syncAdoGitCredentials(adoRepoResult.data.organization, token);
           }
-          return { token, remoteName: resolvedRemote };
+          return {
+            token,
+            remoteName: resolvedRemote,
+            accountId: account.id,
+            integrationType: "azure-devops",
+          };
         }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
@@ -1537,7 +1555,14 @@ async function resolveRepoToken(
       );
       if (account) {
         const token = await AccountCredentials.getToken("gitlab", account.id);
-        if (token) return { token, remoteName: resolvedRemote };
+        if (token) {
+          return {
+            token,
+            remoteName: resolvedRemote,
+            accountId: account.id,
+            integrationType: "gitlab",
+          };
+        }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
         if (repoSpecific) return { refused: true };
@@ -1568,26 +1593,81 @@ async function getRepoToken(
   return (await resolveRepoToken(repoPath, remoteName)).token;
 }
 
+/**
+ * Does the account an UNFILTERED lookup landed on also own `pushUrl`?
+ *
+ * The unfiltered fallback resolves the account for whichever remote the
+ * provider detectors found first, which is routinely NOT the remote being
+ * pushed to. Same host is not the same identity: two github.com remotes
+ * (`origin` = the company repo, `personal-fork` = your own) belong to
+ * different accounts, and an account's `urlPatterns` are matched per URL. So
+ * ask the resolver who owns the push URL and only lend the token when the
+ * answer is the same account.
+ *
+ * A lookup that cannot answer withholds the token, which is exactly what the
+ * remote-scoped lookup did before this fallback existed.
+ */
+async function fallbackAccountOwnsPushUrl(
+  repoPath: string,
+  integrationType: IntegrationType,
+  accountId: string,
+  pushUrl: string,
+): Promise<boolean> {
+  try {
+    // Dynamic import for the same cycle reason as resolveRepoAccount's.
+    const { getAssignedUnifiedProfile, fetchRepositoryPreferredAccount } = await import(
+      "./unified-profile.service.ts"
+    );
+    const profile = await getAssignedUnifiedProfile(repoPath).catch(() => null);
+    const account = await fetchRepositoryPreferredAccount(
+      profile?.id ?? "",
+      integrationType,
+      pushUrl,
+    );
+    return !!account && account.id === accountId;
+  } catch (err) {
+    console.error("Failed to resolve the push URL's account:", err);
+    return false;
+  }
+}
+
 async function getPushUrlToken(
   repoPath: string,
   remoteName: string,
   pushUrl: string,
 ): Promise<string | undefined> {
   let resolved = await resolveRepoToken(repoPath, remoteName);
+  // The provider detectors report the FIRST remote they recognise, so a push to
+  // any other remote never matches the name filter and resolves nothing. Retry
+  // unfiltered so those pushes still get a credential — guarded below, because
+  // an unfiltered answer is about a different remote.
+  let unfiltered = false;
   if (!resolved.token && !resolved.refused) {
     resolved = await resolveRepoToken(repoPath);
+    unfiltered = true;
   }
   if (!resolved.token || resolved.refused || !resolved.remoteName) return undefined;
 
   const fetchUrl = await resolveRemoteUrl(repoPath, resolved.remoteName);
   const fetchHost = fetchUrl ? cloneUrlHost(fetchUrl) : null;
   const pushHost = cloneUrlHost(pushUrl);
-  return fetchHost &&
-    pushHost &&
-    fetchHost === pushHost &&
-    cloneUrlIsCredentialSafe(pushUrl)
-    ? resolved.token
-    : undefined;
+  if (!fetchHost || !pushHost || fetchHost !== pushHost || !cloneUrlIsCredentialSafe(pushUrl)) {
+    return undefined;
+  }
+  if (
+    unfiltered &&
+    resolved.accountId &&
+    resolved.integrationType &&
+    !(await fallbackAccountOwnsPushUrl(
+      repoPath,
+      resolved.integrationType,
+      resolved.accountId,
+      pushUrl,
+    ))
+  ) {
+    return undefined;
+  }
+  return resolved.token;
 }
 
 /**
@@ -2011,8 +2091,12 @@ export async function pushTag(
     let token: string | undefined;
     if (args.remote && pushUrl) {
       token = await getPushUrlToken(args.path, args.remote, pushUrl);
-    } else if (!args.remote) {
-      token = await getRepoToken(args.path);
+    } else {
+      // No push URL to scope against — `get_remotes` failed, or the remote is
+      // not in the list. Dropping the credential here would fail the push with
+      // "No valid credentials found"; fall back to the remote-scoped lookup,
+      // which never needed the URL to reach a token.
+      token = await getRepoToken(args.path, args.remote);
     }
     if (token) {
       args.token = token;
@@ -2053,8 +2137,12 @@ export async function deleteRemoteTag(
     let token: string | undefined;
     if (args.remote && pushUrl) {
       token = await getPushUrlToken(args.path, args.remote, pushUrl);
-    } else if (!args.remote) {
-      token = await getRepoToken(args.path);
+    } else {
+      // No push URL to scope against — `get_remotes` failed, or the remote is
+      // not in the list. Dropping the credential here would fail the push with
+      // "No valid credentials found"; fall back to the remote-scoped lookup,
+      // which never needed the URL to reach a token.
+      token = await getRepoToken(args.path, args.remote);
     }
     if (token) {
       args.token = token;
