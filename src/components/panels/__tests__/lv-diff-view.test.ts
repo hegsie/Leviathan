@@ -121,6 +121,11 @@ async function flushAsyncUpdates(el: LvDiffView): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Flush repeatedly so a chain of awaited invokes settles before asserting. */
+async function settleAsyncUpdates(el: LvDiffView, times = 5): Promise<void> {
+  for (let i = 0; i < times; i++) await flushAsyncUpdates(el);
+}
+
 function findCommands(name: string): Array<{ command: string; args?: unknown }> {
   return invokeHistory.filter((h) => h.command === name);
 }
@@ -841,6 +846,127 @@ describe('lv-diff-view', () => {
         'the superseded reload cleared the file the user had switched to'
       ).to.equal('src/next.ts');
       expect(cleared, 'file-cleared was dispatched for a file that was never staged').to.equal(0);
+    });
+
+    it('clears the pane when unstaging the last staged hunk empties the staged diff', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+      (el as unknown as { initCodeLanguage: (path: string) => Promise<void> }).initCodeLanguage =
+        async () => {};
+
+      let unstaged = false;
+      mockInvoke = async (command: string) => {
+        if (command === 'unstage_hunk') {
+          unstaged = true;
+          return null;
+        }
+        if (command === 'get_file_diff') {
+          // Nothing is staged for this file any more, so the backend has no
+          // staged diff to return.
+          if (unstaged) {
+            throw {
+              code: 'COMMAND_ERROR',
+              message:
+                "File 'src/main.ts' not found in diff. Staged: true. Found 1 files: [src/other.ts]",
+            };
+          }
+          return makeDiffFile();
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      (el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement).click();
+      await settleAsyncUpdates(el);
+
+      expect(
+        el.shadowRoot!.textContent,
+        'the backend\'s "not found in diff" text was painted into the pane',
+      ).to.not.contain('not found in diff');
+      expect(el.file, 'the emptied file stayed bound to the pane').to.be.null;
+      expect(
+        el.shadowRoot!.querySelector('.empty')?.textContent,
+        'the pane should fall back to its empty state',
+      ).to.contain('No file selected');
+      expect(cleared, 'file-cleared closes the diff in app-shell').to.equal(1);
+    });
+
+    it('keeps the diff open when unstaging leaves other staged hunks', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+      (el as unknown as { initCodeLanguage: (path: string) => Promise<void> }).initCodeLanguage =
+        async () => {};
+
+      mockInvoke = async (command: string) => {
+        if (command === 'unstage_hunk') return null;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      (el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement).click();
+      await settleAsyncUpdates(el);
+
+      expect(el.file?.path, 'a partial unstage must keep the file selected').to.equal('src/main.ts');
+      expect(cleared, 'file-cleared was dispatched while hunks were still staged').to.equal(0);
+      expect(el.shadowRoot!.querySelectorAll('.line.code-addition').length).to.be.greaterThan(0);
+    });
+
+    it('does not clear a newly selected file when a superseded unstage reload reports "not found in diff"', async () => {
+      const el = await renderDiffView({
+        file: makeStatusEntry({ path: 'src/main.ts', isStaged: true }),
+      });
+      const view = el as unknown as {
+        diff: DiffFile;
+        error: string | null;
+        initCodeLanguage: (path: string) => Promise<void>;
+        handleUnstageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+      };
+      view.initCodeLanguage = async () => {};
+      const hunk = view.diff.hunks[0];
+
+      const reloadOfUnstagedFile = deferred<DiffFile>();
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'unstage_hunk') return null;
+        if (command === 'get_file_diff') {
+          const filePath = (args as { filePath: string }).filePath;
+          if (filePath === 'src/main.ts') return reloadOfUnstagedFile.promise;
+          // The file the user switches to has nothing left to show on its own.
+          throw {
+            code: 'COMMAND_ERROR',
+            message: "File 'src/next.ts' not found in diff. Staged: true.",
+          };
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      const operation = view.handleUnstageHunk(hunk, new Event('click'));
+      // Let unstage_hunk settle so the reload of src/main.ts is in flight.
+      await flushAsyncUpdates(el);
+
+      el.file = makeStatusEntry({ path: 'src/next.ts', isStaged: true });
+      await flushAsyncUpdates(el);
+      expect(view.error, 'the newly selected file reported its own load error').to.contain(
+        'not found in diff'
+      );
+
+      reloadOfUnstagedFile.resolve(makeDiffFile({ path: 'src/main.ts' }));
+      await operation;
+      await el.updateComplete;
+
+      expect(
+        el.file?.path,
+        'the superseded reload cleared the file the user had switched to'
+      ).to.equal('src/next.ts');
+      expect(cleared, 'file-cleared was dispatched for a file that was never unstaged').to.equal(0);
     });
 
     it('disables every editor exit and input while saving', async () => {
@@ -2559,7 +2685,7 @@ describe('lv-diff-view', () => {
      * '0-4') and the context menu open on a third line.
      */
     async function viewWithOpenContextMenu(
-      opts: { isStaged?: boolean; hunkFails?: boolean } = {},
+      opts: { isStaged?: boolean; hunkFails?: boolean; emptyAfterApply?: boolean } = {},
     ): Promise<LvDiffView> {
       const original = makeDiffFile({ hunks: [stageableHunk()] });
       const reloaded = makeDiffFile({ hunks: [reloadedHunk()] });
@@ -2568,6 +2694,14 @@ describe('lv-diff-view', () => {
       mockInvoke = async (command: string) => {
         switch (command) {
           case 'get_file_diff':
+            if (applied && opts.emptyAfterApply) {
+              // The apply took the file's last change on this side, so the
+              // backend has no diff left to return for it.
+              throw {
+                code: 'COMMAND_ERROR',
+                message: `File 'src/main.ts' not found in diff. Staged: ${opts.isStaged ?? false}. Found 0 files: []`,
+              };
+            }
             return applied ? reloaded : original;
           case 'get_diff_tool':
             return { tool: null };
@@ -2625,6 +2759,38 @@ describe('lv-diff-view', () => {
       ).to.equal(0);
       expect(el.shadowRoot!.querySelector('.selection-actions')).to.be.null;
       expect(el.shadowRoot!.querySelectorAll('.line.selected').length).to.equal(0);
+    });
+
+    it('clears the pane when a context-menu stage takes the file\'s last unstaged line', async () => {
+      const el = await viewWithOpenContextMenu({ emptyAfterApply: true });
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      await (el as unknown as Handlers).handleContextStageLine();
+      await el.updateComplete;
+
+      expect(
+        el.shadowRoot!.textContent,
+        'the backend\'s "not found in diff" text was painted into the pane',
+      ).to.not.contain('not found in diff');
+      expect(el.file, 'the emptied file stayed bound to the pane').to.be.null;
+      expect(cleared, 'file-cleared closes the diff in app-shell').to.equal(1);
+    });
+
+    it('clears the pane when a context-menu unstage takes the file\'s last staged line', async () => {
+      const el = await viewWithOpenContextMenu({ isStaged: true, emptyAfterApply: true });
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      await (el as unknown as Handlers).handleContextUnstageLine();
+      await el.updateComplete;
+
+      expect(
+        el.shadowRoot!.textContent,
+        'the backend\'s "not found in diff" text was painted into the pane',
+      ).to.not.contain('not found in diff');
+      expect(el.file, 'the emptied file stayed bound to the pane').to.be.null;
+      expect(cleared, 'file-cleared closes the diff in app-shell').to.equal(1);
     });
 
     it('does not let a follow-up Stage Selected act on stale keys', async () => {

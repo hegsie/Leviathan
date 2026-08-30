@@ -1185,6 +1185,43 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
   }
 
+  /**
+   * Clear the pane when the reload that followed an apply found nothing left.
+   *
+   * Staging the last unstaged hunk (or unstaging the last staged one) empties
+   * this side of the index for the file, and the backend answers that reload
+   * with a "not found in diff" error — which would otherwise be painted into
+   * the pane as raw text. The shell cannot rescue it either: the surviving
+   * entry for the other side has the same path and status, so it never swaps
+   * the bound file. Clear and let the shell close the diff instead.
+   *
+   * A reload for another file can win the request race while the apply is
+   * still awaiting, leaving `error`/`file` describing that other file, so the
+   * selection has to still be the file we applied to.
+   * `isSameWorkingDiffContext` cannot be used for that: a "not found in diff"
+   * reload leaves no loaded context, which is exactly the case handled here.
+   */
+  private clearIfFullyApplied(context: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  }): void {
+    if (
+      this.commitFile ||
+      this.repositoryPath !== context.repositoryPath ||
+      this.file?.path !== context.filePath ||
+      this.file?.isStaged !== context.isStaged
+    ) return;
+    if (!this.error?.includes('not found in diff')) return;
+    this.error = null;
+    this.diff = null;
+    this.file = null;
+    this.dispatchEvent(new CustomEvent('file-cleared', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private async loadWorkingDiff(): Promise<void> {
     if (!this.repositoryPath || !this.file) return;
     const requestId = ++this.diffRequestId;
@@ -1944,6 +1981,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         if (this.isSameWorkingDiffContext(context)) {
           this.selectedLines = new Set();
           await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
         }
         return true;
       }
@@ -1983,6 +2021,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         if (this.isSameWorkingDiffContext(context)) {
           this.selectedLines = new Set();
           await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
         }
         return true;
       }
@@ -2021,27 +2060,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         if (!this.isSameWorkingDiffContext(context)) return;
         this.selectedLines = new Set();
         await this.loadWorkingDiff();
-        // A reload for another file can win the request race while this one is
-        // still awaiting, leaving `error`/`file` describing that other file. Do
-        // not read them unless the selection is still the file we just staged.
-        // `isSameWorkingDiffContext` cannot be used here: a "not found in diff"
-        // reload leaves no loaded context, which is exactly the case below.
-        if (
-          this.commitFile ||
-          this.repositoryPath !== context.repositoryPath ||
-          this.file?.path !== context.filePath ||
-          this.file?.isStaged !== context.isStaged
-        ) return;
-        // Check if we got a "not found" error (file fully staged)
-        if (this.error?.includes('not found in diff')) {
-          this.error = null;
-          this.diff = null;
-          this.file = null;
-          this.dispatchEvent(new CustomEvent('file-cleared', {
-            bubbles: true,
-            composed: true,
-          }));
-        }
+        this.clearIfFullyApplied(context);
       } else {
         console.error('Failed to stage hunk:', result.error);
         showToast(`Failed to stage hunk: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -2074,10 +2093,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           bubbles: true,
           composed: true,
         }));
-        // Reload diff to show updated state
+        // Reload diff - if nothing is left staged for this file, clear the view
         if (this.isSameWorkingDiffContext(context)) {
           this.selectedLines = new Set();
           await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
         }
       } else {
         console.error('Failed to unstage hunk:', result.error);
