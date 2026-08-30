@@ -4129,6 +4129,19 @@ export class AppShell extends LitElement {
     this.showCommandPalette = true;
   }
 
+  /**
+   * Dismissal must also supersede an in-flight load. Ctrl+P stays live while
+   * the palette is up (keyboard.service lets Ctrl/Cmd combos through an open
+   * overlay), so a second press starts another loader; pressing Escape before
+   * it settled cleared the flag, then the loader — same requestId, same
+   * repository — set it straight back and the palette sprang open again over
+   * whatever the user had just returned to.
+   */
+  private handleCommandPaletteClose(): void {
+    this.commandPaletteRequestId++;
+    this.showCommandPalette = false;
+  }
+
   private requiresRepository(action: () => void): () => void {
     return () => {
       if (!this.activeRepository) {
@@ -5979,7 +5992,7 @@ export class AppShell extends LitElement {
         .files=${this.paletteTrackedFiles}
         .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
         .tags=${this.graphCanvas?.getTagTips() ?? []}
-        @close=${() => { this.showCommandPalette = false; }}
+        @close=${() => { this.handleCommandPaletteClose(); }}
         @checkout-branch=${this.handleCheckoutBranch}
         @open-file=${this.handleOpenFileFromPalette}
         @navigate-to-commit=${this.handleNavigateToCommit}

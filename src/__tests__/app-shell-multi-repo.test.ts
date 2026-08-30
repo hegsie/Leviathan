@@ -2184,6 +2184,91 @@ describe('the toolbar command-palette button loads the active repo', () => {
     el.remove();
   });
 
+  // Every palette action carries `repositoryPath` and app-shell drops the ones
+  // that do not match the active tab, so the binding that feeds the palette
+  // that path is load-bearing: leave it empty and Switch/Reveal/Open silently
+  // do nothing.
+  it('hands the palette the repository its data was loaded from', async () => {
+    mockResponses['get_branches'] = () => [];
+    mockResponses['list_tracked_files'] = () => [];
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    await (el as unknown as { openCommandPalette: () => Promise<void> }).openCommandPalette();
+    await el.updateComplete;
+
+    const palette = el.shadowRoot!.querySelector('lv-command-palette');
+    expect(palette, 'the palette must be rendered').to.not.be.null;
+    expect((palette as unknown as { repositoryPath: string }).repositoryPath).to.equal('/repo/a');
+
+    el.remove();
+  });
+
+  // Ctrl+P stays live while the palette is up (keyboard.service lets Ctrl/Cmd
+  // combos through an open overlay), so a second press starts another loader.
+  // Escape before it settled cleared the flag and the loader — same requestId,
+  // same repository — set it straight back.
+  it('a dismissal during an in-flight reload does not spring the palette back open', async () => {
+    const branchResolvers: Array<(value: unknown[]) => void> = [];
+    const fileResolvers: Array<(value: string[]) => void> = [];
+    let deferLoads = false;
+    mockResponses['get_branches'] = () =>
+      deferLoads ? new Promise<unknown[]>((resolve) => branchResolvers.push(resolve)) : [];
+    mockResponses['list_tracked_files'] = () =>
+      deferLoads ? new Promise<string[]>((resolve) => fileResolvers.push(resolve)) : [];
+
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    await internal.openCommandPalette();
+    await el.updateComplete;
+    expect(internal.showCommandPalette, 'the palette is up to begin with').to.be.true;
+
+    deferLoads = true;
+    const pendingOpen = internal.openCommandPalette();
+    await waitUntil(() => branchResolvers.length > 0 && fileResolvers.length > 0);
+
+    // Escape: the palette dismisses itself and reports it through `close`.
+    const palette = el.shadowRoot!.querySelector('lv-command-palette');
+    expect(palette, 'the palette must be rendered').to.not.be.null;
+    (palette as unknown as { close: () => void }).close();
+    await el.updateComplete;
+    expect(internal.showCommandPalette, 'the dismissal takes effect').to.be.false;
+
+    branchResolvers.forEach((resolve) => resolve([]));
+    fileResolvers.forEach((resolve) => resolve([]));
+    await pendingOpen;
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette, 'the superseded load must not reopen it').to.be.false;
+    expect(
+      (palette as unknown as { open: boolean }).open,
+      'and the overlay itself stays down'
+    ).to.be.false;
+
+    el.remove();
+  });
+
   it('closes an open palette when the active repository changes', async () => {
     mockResponses['get_branches'] = () => [];
     mockResponses['list_tracked_files'] = () => [];
