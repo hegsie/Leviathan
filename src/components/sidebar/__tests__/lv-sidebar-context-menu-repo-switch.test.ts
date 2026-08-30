@@ -181,18 +181,29 @@ describe('sidebar context menus across a repository switch', () => {
         expect(menuCount(el), 'no menu survives into the new repository').to.equal(0);
       });
 
-      it('keeps the menu open when the same repository is rebound', async () => {
-        // The guard must be a repo CHANGE, not any re-render: a refresh that
-        // re-sets the same path must not yank the menu out from under a click.
+      it('keeps the menu open across a refresh of the same repository', async () => {
+        // The guard must key off a repo CHANGE, not any re-render: a refresh
+        // must not yank the menu out from under the user's click. Re-assigning
+        // the SAME path would prove nothing — `repositoryPath` is a plain
+        // @property, so Lit's `!==` check requests no update at all. Drive the
+        // component's own refresh instead, which re-renders with
+        // `changedProperties.has('repositoryPath')` false.
         const el = await mounted();
         rightClickRow(el, c.row);
         await el.updateComplete;
         expect(menuCount(el), 'the menu opens on right-click').to.equal(1);
 
-        el.repositoryPath = '/repo/a';
+        await (el as unknown as { refresh: () => unknown }).refresh();
+        // A load that happens to produce identical state re-renders nothing, so
+        // force one update cycle to guarantee `updated()` actually runs.
+        (el as unknown as { requestUpdate: () => void }).requestUpdate();
         await flush(el);
 
-        expect(menuCount(el), 'an unchanged repository leaves the menu alone').to.equal(1);
+        expect(menuCount(el), 'a same-repo refresh leaves the menu alone').to.equal(1);
+        expect(
+          (el as unknown as { contextMenu: { visible: boolean } }).contextMenu.visible,
+          'a same-repo refresh leaves the menu armed'
+        ).to.equal(true);
       });
 
       it('closes the menu even when the new repository fails to load', async () => {

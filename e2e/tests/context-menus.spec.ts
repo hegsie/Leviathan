@@ -282,6 +282,10 @@ test.describe('Context Menus - repository switch', () => {
       '/work/other-repo'
     );
 
+    // The switch reloads the list, and while `loading` is true the whole body
+    // — menu included — is swapped for a placeholder. Wait for the rows back
+    // first, so an absent menu means it was disarmed and not just unrendered.
+    await expect(branchRow).toBeVisible();
     await expect(contextMenu).not.toBeVisible();
   });
 });
