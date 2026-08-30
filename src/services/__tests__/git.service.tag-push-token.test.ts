@@ -34,6 +34,10 @@ const REPO = '/test/repo';
 const ORIGIN_URL = 'https://github.com/acme/app.git';
 /** The user's own fork. Same host, different account. */
 const FORK_URL = 'https://github.com/me/app.git';
+/** A self-hosted intranet remote: plaintext transport, but where this repo lives. */
+const INTRANET_ORIGIN_URL = 'http://git.corp/acme/app.git';
+/** A second remote on the same intranet host, which the detectors never report. */
+const INTRANET_BACKUP_URL = 'http://git.corp/acme/backup.git';
 
 const keyring = new Map<string, string>();
 let pushTagToken: string | undefined;
@@ -149,6 +153,44 @@ describe('git.service - tag push credential scoping', () => {
     );
   });
 
+  it('authenticates a plaintext remote the name filter matched', async () => {
+    // A self-hosted `http://` remote. The remote-name lookup matched the very
+    // remote being pushed to, so the token is the one `push`, `fetch` and
+    // `pull` already send over this transport with no check of their own —
+    // withholding it here fails the push with "No valid credentials found"
+    // while the toolbar Push on the same repo keeps working.
+    const { personal } = setupTwoGitHubAccounts();
+    installMock({
+      remotes: [{ name: 'origin', url: INTRANET_ORIGIN_URL, pushUrl: null }],
+      accountForUrl: () => personal,
+    });
+
+    await pushTag({ path: REPO, name: 'v1.0.0', remote: 'origin' });
+
+    expect(pushTagToken, 'an intranet tag push authenticates like the toolbar push').to.equal(
+      'personal-tok',
+    );
+  });
+
+  it('still withholds the token from a plaintext remote the filter did not match', async () => {
+    // The unfiltered fallback lends a token resolved for a DIFFERENT remote, so
+    // it must not be the thing that first puts a credential on a cleartext
+    // wire: nothing pushed to `backup` today.
+    const { personal } = setupTwoGitHubAccounts();
+    installMock({
+      remotes: [
+        { name: 'origin', url: INTRANET_ORIGIN_URL, pushUrl: null },
+        { name: 'backup', url: INTRANET_BACKUP_URL, pushUrl: null },
+      ],
+      accountForUrl: () => personal,
+    });
+
+    await pushTag({ path: REPO, name: 'v1.0.0', remote: 'backup' });
+
+    expect(pushTagCalled, 'the push still happens').to.equal(true);
+    expect(pushTagToken, 'a borrowed token stays off a cleartext transport').to.be.undefined;
+  });
+
   it('applies the same two rules to a remote tag delete', async () => {
     const { personal, work } = setupTwoGitHubAccounts();
     installMock({ accountForUrl: (url) => (url === FORK_URL ? personal : work) });
@@ -159,5 +201,15 @@ describe('git.service - tag push credential scoping', () => {
     installMock({ remotes: 'fail', accountForUrl: () => personal });
     await deleteRemoteTag({ path: REPO, name: 'v1.0.0', remote: 'origin' });
     expect(deleteRemoteTagToken, 'and the same credential fallback').to.equal('personal-tok');
+
+    deleteRemoteTagToken = undefined;
+    installMock({
+      remotes: [{ name: 'origin', url: INTRANET_ORIGIN_URL, pushUrl: null }],
+      accountForUrl: () => personal,
+    });
+    await deleteRemoteTag({ path: REPO, name: 'v1.0.0', remote: 'origin' });
+    expect(deleteRemoteTagToken, 'and the same intranet remote still authenticates').to.equal(
+      'personal-tok',
+    );
   });
 });

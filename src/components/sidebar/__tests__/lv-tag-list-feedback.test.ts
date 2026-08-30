@@ -275,28 +275,53 @@ describe('lv-tag-list feedback', () => {
     expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
   });
 
-  it('an unresolvable push destination warns instead of skipping the follow-up', async () => {
-    // Same hazard as an unreadable remote list: the local delete already
-    // toasted success, so returning silently tells the user the tag is gone
-    // while the remote copy survives and the next fetch restores it.
+  it('an unresolvable push destination still offers the follow-up on a known remote', async () => {
+    // `resolve_push_remote` answers from config and falls back to the literal
+    // "origin", so a stale `remote.pushDefault` fails `get_push_remote` on a
+    // repo that plainly has remotes. The remote list was read a moment ago —
+    // dropping the follow-up would leave NO surface for deleting the remote
+    // tag, and the next fetch would restore it.
     const el = await createComponent();
     const flow = deleteFlowMock({
       remotes: ORIGIN,
-      // Both dialogs answered, so a missing guard would actually reach the
-      // remote delete rather than stall on an unanswered confirm.
+      answers: ['Ok', 'Ok'],
+      getPushRemote: () =>
+        Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: gone' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v4.0.0');
+
+    const remoteDeletes = flow.invokes.filter((i) => i.command === 'delete_remote_tag');
+    expect(remoteDeletes, 'the remote copy is still deletable').to.have.length(1);
+    expect((remoteDeletes[0].args as { remote: string }).remote).to.equal('origin');
+    expect(flow.dialogMessages[1], 'and the confirm names where it goes').to.contain('origin');
+    expect(uiStore.getState().toasts.find((t) => t.type === 'warning'), 'no dead end').to.be
+      .undefined;
+  });
+
+  it('falls back to the first remote when none is named origin', async () => {
+    // Two remotes, no `origin`, and a detached HEAD (which checking out a tag
+    // puts you in) leaves `resolve_push_remote` guessing "origin" — a name
+    // `find_remote` rejects. The first configured remote is the same pick this
+    // followed before `get_push_remote` existed.
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      remotes: [
+        { name: 'upstream', url: 'https://example.test/u.git', pushUrl: null },
+        { name: 'fork', url: 'https://example.test/f.git', pushUrl: null },
+      ],
       answers: ['Ok', 'Ok'],
       getPushRemote: () =>
         Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' }),
     });
     mockInvoke = flow.mock;
 
-    await runDeleteTag(el, 'v4.0.0');
+    await runDeleteTag(el, 'v5.0.0');
 
-    const warning = uiStore.getState().toasts.find((t) => t.type === 'warning');
-    expect(warning, 'the user is told the remote copy may survive').to.not.be.undefined;
-    expect(warning!.message).to.contain('v4.0.0');
-    expect(warning!.message).to.contain('push destination could not be resolved');
-    expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+    const remoteDeletes = flow.invokes.filter((i) => i.command === 'delete_remote_tag');
+    expect(remoteDeletes).to.have.length(1);
+    expect((remoteDeletes[0].args as { remote: string }).remote).to.equal('upstream');
   });
 
   it('a failed remote delete is reported to the user', async () => {

@@ -1651,7 +1651,19 @@ async function getPushUrlToken(
   const fetchUrl = await resolveRemoteUrl(repoPath, resolved.remoteName);
   const fetchHost = fetchUrl ? cloneUrlHost(fetchUrl) : null;
   const pushHost = cloneUrlHost(pushUrl);
-  if (!fetchHost || !pushHost || fetchHost !== pushHost || !cloneUrlIsCredentialSafe(pushUrl)) {
+  // The plaintext gate applies to the UNFILTERED answer only. A remote-name
+  // match resolved the token for the very remote being pushed to, which is
+  // exactly what `push`, `fetch` and `pull` do with no transport check — gating
+  // it here would break Push Tag and Delete tag on remote on a self-hosted
+  // `http://` remote while the toolbar Push kept working, with nothing telling
+  // the user why. The unfiltered fallback lends a token resolved for a
+  // DIFFERENT remote, so it stays off cleartext transports.
+  if (
+    !fetchHost ||
+    !pushHost ||
+    fetchHost !== pushHost ||
+    (unfiltered && !cloneUrlIsCredentialSafe(pushUrl))
+  ) {
     return undefined;
   }
   if (
