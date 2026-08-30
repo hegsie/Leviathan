@@ -24,20 +24,6 @@ pub struct InteractiveRebaseOutcome {
     pub paused: bool,
 }
 
-fn sequence_editor_command(todo_path: &Path) -> String {
-    sequence_editor_command_for_path(&todo_path.to_string_lossy(), cfg!(target_os = "windows"))
-}
-
-fn sequence_editor_command_for_path(todo_path: &str, windows: bool) -> String {
-    let todo_path_for_shell = if windows {
-        todo_path.replace('\\', "/")
-    } else {
-        todo_path.to_string()
-    };
-
-    format!("cp -- '{}'", todo_path_for_shell.replace('\'', "'\\''"))
-}
-
 /// The commits `git rebase -i` would list for a range, plus how many merge
 /// commits the range contained.
 ///
@@ -1231,12 +1217,11 @@ pub async fn execute_interactive_rebase(
     // CLI-invoking command never added to that list.
     crate::utils::reject_flag_like(&onto, "Rebase target")?;
 
-    // Unique names per call, like apply_patch_to_index. The fixed
-    // /tmp/leviathan-rebase-todo these replace meant two rebases running at
+    // A unique name per call, like apply_patch_to_index. The fixed
+    // /tmp/leviathan-rebase-todo it replaces meant two rebases running at
     // once would read each other's plan — one repo silently rewritten with the
     // other's drops — and the predictable path in a world-writable directory
     // was a symlink target for anyone on the machine.
-    //
     let mut todo_file = tempfile::Builder::new()
         .prefix("leviathan-rebase-todo-")
         .tempfile()?;
@@ -1246,7 +1231,7 @@ pub async fn execute_interactive_rebase(
     // Git evaluates GIT_SEQUENCE_EDITOR through a shell and appends the actual
     // todo path as its final argument. A direct copy command avoids the
     // platform-specific script execution and cmd.exe quoting pitfalls.
-    let sequence_editor = sequence_editor_command(todo_file.path());
+    let sequence_editor = crate::utils::copy_file_editor_command(todo_file.path());
 
     // Run git rebase -i with our custom editor
     let output = create_command("git")
@@ -3269,10 +3254,12 @@ mod tests {
     #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_runs_at_all() {
         // The plainest possible plan: reorder nothing, drop nothing, squash
-        // nothing. Git runs GIT_SEQUENCE_EDITOR for every `rebase -i`: Unix
-        // requires the temp handle to be closed before exec, while Windows must
-        // invoke the editor through Git's bundled shell. This test pins the
-        // general execution path on both platforms.
+        // nothing. It failed too. Git runs GIT_SEQUENCE_EDITOR for every
+        // `rebase -i` and evaluates it through a shell with the real todo path
+        // appended, so the editor is a quoted `cp` and no temp file is ever
+        // exec'd — which is why the todo handle can stay open for the whole
+        // run. This test pins the general execution path, not just the squash
+        // that led here.
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();
         repo.create_commit("first", &[("a.txt", "a")]);
@@ -3298,20 +3285,6 @@ mod tests {
             .unwrap()
             .commits;
         assert_eq!(after.len(), 2, "both commits survive an all-pick plan");
-    }
-
-    #[test]
-    fn test_sequence_editor_quotes_paths() {
-        let command = sequence_editor_command_for_path(r"C:\Temp Dir\O'Brien\rebase todo", true);
-        assert_eq!(
-            command, "cp -- 'C:/Temp Dir/O'\\''Brien/rebase todo'",
-            "Windows separators, spaces, and apostrophes must be shell-safe"
-        );
-        assert_eq!(
-            sequence_editor_command_for_path("/tmp/Temp Dir/O'Brien/rebase todo", false),
-            "cp -- '/tmp/Temp Dir/O'\\''Brien/rebase todo'",
-            "Unix spaces and apostrophes must be shell-safe"
-        );
     }
 
     #[tokio::test]

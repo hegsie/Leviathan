@@ -1099,52 +1099,26 @@ async fn edit_commit_date_with_rebase(
         parent.id().to_string()
     };
 
-    // Resolve via repo.path(): in a linked worktree `<wt>/.git` is a gitdir
-    // POINTER FILE, so writing to `<wt>/.git/<script>` fails with ENOTDIR and
-    // the whole operation dies on a raw OS error.
-    let git_dir = git2::Repository::open(std::path::Path::new(path))?
-        .path()
-        .to_path_buf();
     let short_oid = &oid[..std::cmp::min(7, oid.len())];
 
-    // Create a GIT_SEQUENCE_EDITOR script that changes 'pick <oid>' to 'edit <oid>'
-    let editor_script = if cfg!(target_os = "windows") {
-        let script_path = git_dir.join("date-edit-editor.bat");
-        let script_content = format!(
-            "@echo off\r\n\
-             powershell -Command \"(Get-Content '%1') -replace '^pick {}', 'edit {}' | Set-Content '%1'\"",
-            short_oid, short_oid
-        );
-        std::fs::write(&script_path, &script_content)?;
-        script_path.to_string_lossy().to_string()
-    } else {
-        let script_path = git_dir.join("date-edit-editor.sh");
-        let script_content = format!(
-            "#!/bin/sh\nsed -i.bak 's/^pick {}/edit {}/' \"$1\"",
-            short_oid, short_oid
-        );
-        std::fs::write(&script_path, &script_content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
-        }
-        script_path.to_string_lossy().to_string()
-    };
+    // Git evaluates GIT_SEQUENCE_EDITOR through a shell — the POSIX one Git for
+    // Windows bundles, not cmd.exe — and appends the todo path, so hand it the
+    // command directly. The per-platform script this replaces was written into
+    // the git dir under a FIXED name, so two date edits in one repo clobbered
+    // each other's editor mid-run, and the `?` returns between writing it and
+    // the cleanup left it behind in the user's repository.
+    let sequence_editor = crate::utils::todo_action_editor_command(short_oid, "edit");
 
     // Start the rebase
     let output = crate::utils::create_command("git")
         .current_dir(path)
-        .env("GIT_SEQUENCE_EDITOR", &editor_script)
+        .env("GIT_SEQUENCE_EDITOR", &sequence_editor)
         .args(["rebase", "-i", &parent_oid_str])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to start rebase: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Clean up
-        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
-        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
         return Err(LeviathanError::OperationFailed(format!(
             "Rebase failed: {}",
             stderr
@@ -1175,8 +1149,6 @@ async fn edit_commit_date_with_rebase(
             .current_dir(path)
             .args(["rebase", "--abort"])
             .output();
-        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
-        let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
         return Err(LeviathanError::OperationFailed(format!(
             "Failed to amend commit date: {}",
             stderr
@@ -1191,10 +1163,6 @@ async fn edit_commit_date_with_rebase(
         .map_err(|e| {
             LeviathanError::OperationFailed(format!("Failed to continue rebase: {}", e))
         })?;
-
-    // Clean up temp files
-    let _ = std::fs::remove_file(git_dir.join("date-edit-editor.bat"));
-    let _ = std::fs::remove_file(git_dir.join("date-edit-editor.sh"));
 
     if !continue_output.status.success() {
         let stderr = String::from_utf8_lossy(&continue_output.stderr);
@@ -1289,69 +1257,26 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
     let msg_file = git_dir.join("REWORD_MSG");
     std::fs::write(&msg_file, &message)?;
 
-    // Create a GIT_SEQUENCE_EDITOR script that will change 'pick' to 'reword' for our target commit
-    let editor_script = if cfg!(target_os = "windows") {
-        // On Windows, create a batch file
-        let script_path = git_dir.join("reword-editor.bat");
-        let script_content = format!(
-            "@echo off\r\n\
-             powershell -Command \"(Get-Content '%1') -replace '^pick {}', 'reword {}' | Set-Content '%1'\"",
-            &oid[..7],
-            &oid[..7]
-        );
-        std::fs::write(&script_path, &script_content)?;
-        script_path.to_string_lossy().to_string()
-    } else {
-        // On Unix, create a shell script
-        let script_path = git_dir.join("reword-editor.sh");
-        let script_content = format!(
-            "#!/bin/sh\nsed -i.bak 's/^pick {}/reword {}/' \"$1\"",
-            &oid[..7],
-            &oid[..7]
-        );
-        std::fs::write(&script_path, &script_content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
-        }
-        script_path.to_string_lossy().to_string()
-    };
-
-    // Create a COMMIT_EDITOR script that uses our saved message
-    let commit_editor_script = if cfg!(target_os = "windows") {
-        let script_path = git_dir.join("commit-editor.bat");
-        let msg_file_escaped = msg_file.to_string_lossy().replace('\\', "\\\\");
-        let script_content = format!("@echo off\r\ncopy /Y \"{}\" \"%1\" >nul", msg_file_escaped);
-        std::fs::write(&script_path, &script_content)?;
-        script_path.to_string_lossy().to_string()
-    } else {
-        let script_path = git_dir.join("commit-editor.sh");
-        let script_content = format!("#!/bin/sh\ncp \"{}\" \"$1\"", msg_file.to_string_lossy());
-        std::fs::write(&script_path, &script_content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
-        }
-        script_path.to_string_lossy().to_string()
-    };
+    // Git evaluates both editor variables through a shell — the POSIX one Git
+    // for Windows bundles, not cmd.exe — and appends the file it wants edited,
+    // so hand it the commands directly. The per-platform scripts these replace
+    // interpolated the message path into a DOUBLE-quoted `cp`, so a repository
+    // whose path contained `$` or a quote made the shell rewrite the path and
+    // the reword died on a message file that was never there.
+    let sequence_editor = crate::utils::todo_action_editor_command(&oid[..7], "reword");
+    let commit_editor = crate::utils::copy_file_editor_command(&msg_file);
 
     // Run the rebase
     let output = crate::utils::create_command("git")
         .current_dir(&path)
-        .env("GIT_SEQUENCE_EDITOR", &editor_script)
-        .env("GIT_EDITOR", &commit_editor_script)
+        .env("GIT_SEQUENCE_EDITOR", &sequence_editor)
+        .env("GIT_EDITOR", &commit_editor)
         .args(["rebase", "-i", &parent_oid.to_string()])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
 
     // Clean up temporary files
     let _ = std::fs::remove_file(&msg_file);
-    let _ = std::fs::remove_file(git_dir.join("reword-editor.bat"));
-    let _ = std::fs::remove_file(git_dir.join("reword-editor.sh"));
-    let _ = std::fs::remove_file(git_dir.join("commit-editor.bat"));
-    let _ = std::fs::remove_file(git_dir.join("commit-editor.sh"));
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2933,6 +2858,146 @@ mod tests {
         assert_eq!(reworded.author().name().unwrap(), "Colleague");
         assert_eq!(reworded.author().email().unwrap(), "colleague@example.com");
         assert_eq!(reworded.author().when().seconds(), ORIGINAL_TIME);
+    }
+
+    /// Messages of every commit reachable from HEAD, newest first.
+    fn history(repo: &TestRepo) -> Vec<String> {
+        let repo = repo.repo();
+        let mut revwalk = repo.revwalk().unwrap();
+        revwalk.push_head().unwrap();
+        revwalk
+            .flatten()
+            .map(|oid| {
+                repo.find_commit(oid)
+                    .unwrap()
+                    .message()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Rewording a commit below HEAD goes through `git rebase -i`, which reaches
+    /// the new message through GIT_EDITOR. Nothing about that is Windows-only,
+    /// so it has to keep working before the Windows shape can be trusted.
+    #[tokio::test]
+    async fn test_reword_non_head_commit_rewrites_only_that_message() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("original message", &[("a.txt", "a")]);
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = reword_commit(
+            repo.path_str(),
+            target.to_string(),
+            "reworded message".to_string(),
+        )
+        .await;
+
+        let result = result.expect("reword of a non-HEAD commit must succeed");
+        assert!(result.success);
+        assert_eq!(
+            history(&repo),
+            vec!["descendant", "reworded message", "Initial commit"],
+            "only the targeted commit's message changes, and its descendant survives"
+        );
+    }
+
+    /// The editor commands used to be shell SCRIPTS that interpolated the
+    /// message path into a DOUBLE-quoted `cp`. A repository directory holding a
+    /// `$` — legal on every platform, and all it takes is a folder named
+    /// `re$po` — was then expanded by the shell before `cp` saw it, so the copy
+    /// read a path that did not exist, GIT_EDITOR failed, and the user got
+    /// "Rebase failed" plus a repository stopped mid-rebase.
+    #[tokio::test]
+    async fn test_reword_non_head_commit_in_a_path_the_shell_would_expand() {
+        let repo = TestRepo::with_initial_commit_named("re$po 'dir'");
+        let target = repo.create_commit("original message", &[("a.txt", "a")]);
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = reword_commit(
+            repo.path_str(),
+            target.to_string(),
+            "reworded message".to_string(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a repository path containing shell metacharacters must still reword: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            history(&repo),
+            vec!["descendant", "reworded message", "Initial commit"]
+        );
+        assert_eq!(
+            repo.repo().state(),
+            git2::RepositoryState::Clean,
+            "no rebase may be left in progress"
+        );
+    }
+
+    /// A root commit has no parent to rebase onto, so there is nothing to
+    /// reword through — the user gets a message rather than a raw git error.
+    #[tokio::test]
+    async fn test_reword_root_commit_below_head_is_rejected() {
+        let repo = TestRepo::with_initial_commit();
+        let root = repo.head_oid();
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = reword_commit(repo.path_str(), root.to_string(), "new".to_string()).await;
+
+        let err = result
+            .expect_err("root commit cannot be reworded")
+            .to_string();
+        assert!(err.contains("Cannot reword root commit"), "{err}");
+    }
+
+    /// Editing the date of a commit below HEAD is the other half of the
+    /// sequence-editor path: the todo entry for that ONE commit has to become
+    /// `edit` so the rebase stops there. If it does not, the rebase runs to
+    /// completion and the amend lands on the descendant instead — which is why
+    /// this asserts on the redated commit rather than only on HEAD.
+    #[tokio::test]
+    async fn test_edit_commit_date_non_head_commit() {
+        let repo = TestRepo::with_initial_commit();
+        let target = repo.create_commit("target", &[("a.txt", "a")]);
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            target.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await;
+
+        let result = result.expect("editing a non-HEAD commit date must succeed");
+        assert!(result.success);
+        assert_eq!(
+            history(&repo),
+            vec!["descendant", "target", "Initial commit"],
+            "the rebase replays the descendant on top of the redated commit"
+        );
+
+        let repo_handle = repo.repo();
+        let head = repo_handle
+            .find_commit(git2::Oid::from_str(&result.new_oid).unwrap())
+            .unwrap();
+        let redated = head.parent(0).unwrap();
+        assert_eq!(redated.summary().unwrap(), Some("target"));
+        // 2020-06-15T12:00:00Z
+        assert_eq!(
+            redated.committer().when().seconds(),
+            1592222400,
+            "the rebase must have stopped on `target` for the amend"
+        );
+        assert_ne!(
+            head.committer().when().seconds(),
+            1592222400,
+            "the descendant is replayed, not redated"
+        );
     }
 
     #[tokio::test]
