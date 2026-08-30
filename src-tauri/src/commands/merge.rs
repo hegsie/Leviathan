@@ -2904,7 +2904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_be_aborted() {
         // libgit2 refuses to OPEN an interactive rebase ("interactive rebase is
         // not supported"), so open_rebase failed for every rebase started
