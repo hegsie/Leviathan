@@ -166,6 +166,106 @@ test.describe('Commit Context Menu', () => {
 // 2. Using visual regression testing
 // 3. Testing at the component/unit level instead of E2E
 
+/**
+ * Add a second repository tab without activating it, mirroring how the
+ * welcome/restore flows populate the store.
+ */
+async function addBackgroundRepo(
+  page: import('@playwright/test').Page,
+  path: string,
+  name: string
+): Promise<void> {
+  await page.evaluate(
+    ({ path, name }) => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        repositoryStore: {
+          getState: () => {
+            addRepository: (repo: unknown, options?: { activate?: boolean }) => void;
+          };
+        };
+      };
+      stores.repositoryStore.getState().addRepository(
+        {
+          path,
+          name,
+          isValid: true,
+          isBare: false,
+          headRef: 'main',
+          state: 'clean',
+          isShallow: false,
+          isPartialClone: false,
+          cloneFilter: null,
+        },
+        { activate: false }
+      );
+    },
+    { path, name }
+  );
+}
+
+/**
+ * A context menu targets a commit/ref in ONE repository. Switching tabs by
+ * keyboard never produces a document click, so the menu would otherwise stay
+ * on screen and its next action would resolve against the newly active repo.
+ */
+test.describe('Context Menus - repository switch', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await addBackgroundRepo(page, '/work/other-repo', 'other-repo');
+    await expect(page.locator('lv-toolbar .tab')).toHaveCount(2);
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute('title', '/tmp/test-repo');
+  });
+
+  test('Ctrl+digit tab switch closes an open commit context menu', async ({ page }) => {
+    await rightClickOnCommitRow(page, 0);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+
+    // Keyboard switch — no click, so handleDocumentClick never runs.
+    await page.keyboard.press('Control+2');
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute(
+      'title',
+      '/work/other-repo'
+    );
+
+    await expect(contextMenu).not.toBeVisible();
+  });
+
+  test('Ctrl+digit tab switch closes an open ref context menu', async ({ page }) => {
+    // Ref labels live on the canvas, so drive the real component event the
+    // graph dispatches on a ref-label right-click rather than guessing pixels.
+    const graphHandle = await page.locator('lv-graph-canvas').elementHandle();
+    await page.evaluate((el) => {
+      el!.dispatchEvent(
+        new CustomEvent('ref-context-menu', {
+          detail: {
+            refName: 'main',
+            fullName: 'refs/heads/main',
+            refType: 'localBranch',
+            isHead: true,
+            position: { x: 120, y: 120 },
+          },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    }, graphHandle);
+
+    const contextMenu = page.locator('.context-menu');
+    await expect(contextMenu).toBeVisible({ timeout: 3000 });
+    await expect(contextMenu.locator('.context-menu-summary')).toHaveText('main');
+
+    await page.keyboard.press('Control+2');
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute(
+      'title',
+      '/work/other-repo'
+    );
+
+    await expect(contextMenu).not.toBeVisible();
+  });
+});
+
 test.describe('Operation Banner', () => {
   let app: AppPage;
 
