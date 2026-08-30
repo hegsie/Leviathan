@@ -697,6 +697,152 @@ describe('lv-diff-view', () => {
       await el.updateComplete;
     });
 
+    it('disables the context-menu stage items while a stage is in flight', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const stage = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.stage-btn.stage') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      // A contextmenu event never reaches the document click handler, so the
+      // menu still opens while the stage is in flight.
+      (el.shadowRoot!.querySelector('.line.code-addition') as HTMLElement).dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+      );
+      await el.updateComplete;
+
+      const menuItem = (label: string): HTMLButtonElement => {
+        const item = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+          (b) => (b.textContent ?? '').includes(label)
+        ) as HTMLButtonElement | undefined;
+        expect(item, `the "${label}" context-menu item renders`).to.not.be.undefined;
+        return item!;
+      };
+
+      expect(
+        menuItem('Stage hunk').disabled,
+        'the in-flight stage is visible on the context menu instead of the click being dropped'
+      ).to.be.true;
+      expect(
+        menuItem('Stage line').disabled,
+        'the in-flight stage is visible on the context menu instead of the click being dropped'
+      ).to.be.true;
+      expect(menuItem('Copy line').disabled, 'copy stays usable during a stage').to.be.false;
+
+      stage.resolve(undefined);
+      await flushAsyncUpdates(el);
+      await el.updateComplete;
+
+      expect(menuItem('Stage hunk').disabled, 're-enabled once the stage completes').to.be.false;
+      expect(menuItem('Stage line').disabled, 're-enabled once the stage completes').to.be.false;
+    });
+
+    it('disables the context-menu unstage items while an unstage is in flight', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+      const unstage = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'unstage_hunk') return unstage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      clearHistory();
+      (el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.line.code-addition') as HTMLElement).dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+      );
+      await el.updateComplete;
+
+      const menuItem = (label: string): HTMLButtonElement => {
+        const item = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+          (b) => (b.textContent ?? '').includes(label)
+        ) as HTMLButtonElement | undefined;
+        expect(item, `the "${label}" context-menu item renders`).to.not.be.undefined;
+        return item!;
+      };
+
+      expect(
+        menuItem('Unstage hunk').disabled,
+        'the in-flight unstage is visible on the context menu'
+      ).to.be.true;
+      expect(
+        menuItem('Unstage line').disabled,
+        'the in-flight unstage is visible on the context menu'
+      ).to.be.true;
+
+      unstage.reject(new Error('patch does not apply'));
+      await flushAsyncUpdates(el);
+      await el.updateComplete;
+
+      expect(
+        menuItem('Unstage hunk').disabled,
+        'a failed unstage leaves the context-menu item usable again'
+      ).to.be.false;
+    });
+
+    it('does not clear a newly selected file when a superseded reload reports "not found in diff"', async () => {
+      const el = await renderDiffView({
+        file: makeStatusEntry({ path: 'src/main.ts', isStaged: false }),
+      });
+      const view = el as unknown as {
+        diff: DiffFile;
+        error: string | null;
+        initCodeLanguage: (path: string) => Promise<void>;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+      };
+      view.initCodeLanguage = async () => {};
+      const hunk = view.diff.hunks[0];
+
+      const reloadOfStagedFile = deferred<DiffFile>();
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'stage_hunk') return null;
+        if (command === 'get_file_diff') {
+          const filePath = (args as { filePath: string }).filePath;
+          if (filePath === 'src/main.ts') return reloadOfStagedFile.promise;
+          // The file the user switches to has nothing left to show on its own.
+          throw {
+            code: 'COMMAND_ERROR',
+            message: "File 'src/next.ts' not found in diff. Staged: false.",
+          };
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+
+      const operation = view.handleStageHunk(hunk, new Event('click'));
+      // Let stage_hunk settle so the reload of src/main.ts is in flight.
+      await flushAsyncUpdates(el);
+
+      el.file = makeStatusEntry({ path: 'src/next.ts', isStaged: false });
+      await flushAsyncUpdates(el);
+      expect(view.error, 'the newly selected file reported its own load error').to.contain(
+        'not found in diff'
+      );
+
+      reloadOfStagedFile.resolve(makeDiffFile({ path: 'src/main.ts' }));
+      await operation;
+      await el.updateComplete;
+
+      expect(
+        el.file?.path,
+        'the superseded reload cleared the file the user had switched to'
+      ).to.equal('src/next.ts');
+      expect(cleared, 'file-cleared was dispatched for a file that was never staged').to.equal(0);
+    });
+
     it('disables every editor exit and input while saving', async () => {
       const el = await renderDiffView();
       (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();

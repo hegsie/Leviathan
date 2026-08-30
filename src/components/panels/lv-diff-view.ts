@@ -881,6 +881,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         background: var(--color-bg-hover);
       }
 
+      .context-menu-item:disabled,
+      .context-menu-item:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        background: none;
+      }
+
       .context-menu-item svg {
         width: 14px;
         height: 14px;
@@ -2003,6 +2010,17 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         if (!this.isSameWorkingDiffContext(context)) return;
         this.selectedLines = new Set();
         await this.loadWorkingDiff();
+        // A reload for another file can win the request race while this one is
+        // still awaiting, leaving `error`/`file` describing that other file. Do
+        // not read them unless the selection is still the file we just staged.
+        // `isSameWorkingDiffContext` cannot be used here: a "not found in diff"
+        // reload leaves no loaded context, which is exactly the case below.
+        if (
+          this.commitFile ||
+          this.repositoryPath !== context.repositoryPath ||
+          this.file?.path !== context.filePath ||
+          this.file?.isStaged !== context.isStaged
+        ) return;
         // Check if we got a "not found" error (file fully staged)
         if (this.error?.includes('not found in diff')) {
           this.error = null;
@@ -2947,14 +2965,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ${showStageButton && isChangeableLine ? html`
           <div class="context-menu-divider"></div>
           ${isStaged ? html`
-            <button class="context-menu-item" @click=${this.handleContextUnstageLine}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextUnstageLine}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="5" y1="12" x2="19" y2="12"></line>
               </svg>
               Unstage line
             </button>
           ` : html`
-            <button class="context-menu-item" @click=${this.handleContextStageLine}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextStageLine}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
                 <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -2966,14 +2992,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ${showStageButton ? html`
           <div class="context-menu-divider"></div>
           ${isStaged ? html`
-            <button class="context-menu-item" @click=${this.handleContextUnstageHunk}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextUnstageHunk}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="5" y1="12" x2="19" y2="12"></line>
               </svg>
               Unstage hunk
             </button>
           ` : html`
-            <button class="context-menu-item" @click=${this.handleContextStageHunk}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextStageHunk}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
                 <line x1="5" y1="12" x2="19" y2="12"></line>
