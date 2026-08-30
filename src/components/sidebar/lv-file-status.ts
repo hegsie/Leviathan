@@ -1141,6 +1141,14 @@ export class LvFileStatus extends LitElement {
       // produces neither a document click nor Escape, so the menu would survive
       // the rebind and discard/stage repo A's file inside repo B.
       this.contextMenu = { ...this.contextMenu, visible: false };
+      // The multi-file selection is a set of PATHS, and the row buttons and the
+      // s/u shortcuts redirect to the batch handlers whenever the clicked file
+      // is in it — so a selection carried across the rebind re-selects
+      // same-named files in the new repo (guaranteed with several worktrees of
+      // one project open as tabs) and turns a single-file discard into a batch
+      // discard of files never selected here.
+      this.selectedFiles = new Set();
+      this.lastSelectedFile = null;
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
       this.statusDirtySeq++;

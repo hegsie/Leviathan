@@ -34,10 +34,13 @@ type Loadable = HTMLElement & { repositoryPath: string; updateComplete: Promise<
 let rows: Record<string, Record<string, unknown[]>> = {};
 /** Commands whose next call must reject, simulating a failed load. */
 let failing = new Set<string>();
+/** Every invoke, so a test can assert WHICH paths an operation actually hit. */
+let calls: Array<{ command: string; args: Record<string, unknown> }> = [];
 
 function installMock(): void {
   mockInvoke = (command, args) => {
     const path = String((args as { path?: string })?.path ?? '');
+    calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
     if (failing.has(command)) {
       return Promise.reject({ code: 'COMMAND_ERROR', message: 'repository is locked' });
     }
@@ -151,6 +154,7 @@ describe('sidebar context menus across a repository switch', () => {
   beforeEach(() => {
     rows = {};
     failing = new Set();
+    calls = [];
     installMock();
   });
 
@@ -229,4 +233,126 @@ describe('sidebar context menus across a repository switch', () => {
       });
     });
   }
+});
+
+/**
+ * The multi-file selection must not survive a repository switch either.
+ *
+ * `selectedFiles` holds PATHS, and the row buttons redirect to the batch
+ * handlers whenever the clicked file is in it. Several worktrees of one project
+ * open as tabs share paths by construction, so a selection carried across the
+ * rebind silently re-selects the new repo's same-named files — and the × on one
+ * row then discards every one of them.
+ */
+describe('lv-file-status selection across a repository switch', () => {
+  beforeEach(() => {
+    rows = {};
+    failing = new Set();
+    calls = [];
+    installMock();
+  });
+
+  const entries = [makeEntry('src/main.ts'), makeEntry('README.md')];
+
+  /** Ctrl+click a row by path, as a user building a multi-selection would. */
+  function ctrlClickRow(el: HTMLElement, path: string): void {
+    const row = el.shadowRoot!.querySelector(`.file-item[title="${path}"]`);
+    if (!row) throw new Error(`no row for ${path}`);
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, ctrlKey: true }));
+  }
+
+  function selectedPaths(el: HTMLElement): string[] {
+    return Array.from((el as unknown as { selectedFiles: Set<string> }).selectedFiles).sort();
+  }
+
+  function selectedRowCount(el: HTMLElement): number {
+    return el.shadowRoot!.querySelectorAll('.file-item.selected').length;
+  }
+
+  /** Mounted on /repo/a with both files selected; /repo/b has the same paths. */
+  async function twoSelectedInRepoA(): Promise<Loadable> {
+    rows['/repo/a'] = { get_status: [...entries] };
+    rows['/repo/b'] = { get_status: [...entries] };
+    const el = await fixture<Loadable>('<lv-file-status></lv-file-status>');
+    el.repositoryPath = '/repo/a';
+    await flush(el);
+
+    ctrlClickRow(el, 'src/main.ts');
+    ctrlClickRow(el, 'README.md');
+    await el.updateComplete;
+
+    expect(selectedPaths(el), 'both rows are selected in repo A').to.deep.equal([
+      'README.md',
+      'src/main.ts',
+    ]);
+    expect(selectedRowCount(el), 'both rows render selected').to.equal(2);
+    return el;
+  }
+
+  it('clears the selection when the tab switch rebinds the repository', async () => {
+    const el = await twoSelectedInRepoA();
+
+    el.repositoryPath = '/repo/b';
+    await flush(el);
+
+    expect(selectedPaths(el), 'no selection survives into the new repository').to.deep.equal([]);
+    expect(selectedRowCount(el), 'no row in the new repository renders selected').to.equal(0);
+    expect(
+      (el as unknown as { lastSelectedFile: string | null }).lastSelectedFile,
+      'the shift-range anchor is dropped with the selection'
+    ).to.equal(null);
+  });
+
+  it('keeps a single-file stage single-file after the switch', async () => {
+    // The user-visible failure: handleStageFile redirects to the BATCH handler
+    // whenever the clicked file is in a >1 selection, so a leaked selection
+    // turns one row's + button into an operation over files never selected here.
+    const el = await twoSelectedInRepoA();
+
+    el.repositoryPath = '/repo/b';
+    await flush(el);
+
+    calls = [];
+    const stage = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stage main.ts"]'
+    );
+    expect(stage, 'the row keeps its stage button').to.not.equal(null);
+    stage!.click();
+    await flush(el);
+
+    const staged = calls.filter((c) => c.command === 'stage_files');
+    expect(staged.length, 'exactly one stage command runs').to.equal(1);
+    expect(staged[0].args.path, 'it targets the repository on screen').to.equal('/repo/b');
+    expect(staged[0].args.paths, 'it stages only the clicked file').to.deep.equal([
+      'src/main.ts',
+    ]);
+  });
+
+  it('keeps the selection across a refresh of the same repository', async () => {
+    // The guard keys off a repo CHANGE, not any re-render: a watcher-driven
+    // refresh must not wipe a selection the user is still building.
+    const el = await twoSelectedInRepoA();
+
+    await (el as unknown as { refresh: () => unknown }).refresh();
+    (el as unknown as { requestUpdate: () => void }).requestUpdate();
+    await flush(el);
+
+    expect(selectedPaths(el), 'a same-repo refresh leaves the selection alone').to.deep.equal([
+      'README.md',
+      'src/main.ts',
+    ]);
+  });
+
+  it('clears the selection even when the new repository fails to load', async () => {
+    // The clear must happen BEFORE the reload await, or a failing load leaves
+    // repo A's paths armed behind the error state — ready to fire the moment a
+    // later refresh succeeds.
+    const el = await twoSelectedInRepoA();
+
+    failing.add('get_status');
+    el.repositoryPath = '/repo/b';
+    await flush(el);
+
+    expect(selectedPaths(el), 'a failed load still drops the selection').to.deep.equal([]);
+  });
 });
