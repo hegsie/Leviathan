@@ -51,6 +51,13 @@ function createCandidate(
   };
 }
 
+/**
+ * The prune step lists the repo's remotes so it can route per-remote
+ * credentials, so every mock that reaches a delete/prune run must answer
+ * `get_remotes` — otherwise the prune fails before it is ever invoked.
+ */
+const REMOTES = [{ name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null }];
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function clearHistory(): void {
   invokeHistory.length = 0;
@@ -82,7 +89,7 @@ async function renderAndOpen(
       case 'get_cleanup_candidates':
         return candidates;
       case 'get_remotes':
-        return [{ name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null }];
+        return REMOTES;
       case 'delete_branch':
         return undefined;
       case 'prune_remote_tracking_branches':
@@ -677,6 +684,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -749,6 +757,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let deleteCalls = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'delete_branch') {
           deleteCalls++;
@@ -795,6 +804,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -849,6 +859,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
 
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'delete_branch') return undefined;
         if (command === 'prune_remote_tracking_branches') {
@@ -894,6 +905,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -945,6 +957,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           // Confirm the delete, decline the force escalation.
@@ -994,6 +1007,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
 
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Cancel';
         if (command === 'delete_branch') {
           throw {
@@ -1134,6 +1148,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     it('exposes its pinned repo only while open, for host self-close', async () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         return null;
       };
       const el = await fixture<LvBranchCleanupDialog>(
