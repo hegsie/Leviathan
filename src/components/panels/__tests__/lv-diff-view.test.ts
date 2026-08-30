@@ -588,6 +588,115 @@ describe('lv-diff-view', () => {
       await Promise.all([first, second]);
     });
 
+    it('disables the hunk Stage button while its stage is in flight', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const stage = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      clearHistory();
+      const stageBtn = el.shadowRoot!.querySelector('.stage-btn.stage') as HTMLButtonElement;
+      expect(stageBtn, 'the hunk Stage button renders').to.not.be.null;
+      expect(stageBtn.disabled, 'enabled before any mutation').to.be.false;
+
+      stageBtn.click();
+      await el.updateComplete;
+
+      expect(
+        (el.shadowRoot!.querySelector('.stage-btn.stage') as HTMLButtonElement).disabled,
+        'the in-flight stage is visible on the button instead of being silently swallowed'
+      ).to.be.true;
+
+      // A second click on the now-disabled button cannot reach the handler.
+      (el.shadowRoot!.querySelector('.stage-btn.stage') as HTMLButtonElement).click();
+      expect(findCommands('stage_hunk').length).to.equal(1);
+
+      stage.resolve(undefined);
+      await flushAsyncUpdates(el);
+      await el.updateComplete;
+
+      expect(
+        (el.shadowRoot!.querySelector('.stage-btn.stage') as HTMLButtonElement).disabled,
+        're-enabled once the stage completes'
+      ).to.be.false;
+    });
+
+    it('re-enables the hunk Unstage button after its unstage fails', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: true }) });
+      const unstage = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'unstage_hunk') return unstage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const unstageBtn = el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement;
+      expect(unstageBtn, 'the hunk Unstage button renders').to.not.be.null;
+      unstageBtn.click();
+      await el.updateComplete;
+
+      expect(
+        (el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement).disabled,
+        'disabled while the unstage is in flight'
+      ).to.be.true;
+
+      unstage.reject(new Error('patch does not apply'));
+      await flushAsyncUpdates(el);
+      await el.updateComplete;
+
+      expect(
+        (el.shadowRoot!.querySelector('.stage-btn.unstage') as HTMLButtonElement).disabled,
+        'a failed unstage leaves the button usable again'
+      ).to.be.false;
+    });
+
+    it('disables Stage Selected while the bulk stage is in flight', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const selectionBtn = (): HTMLButtonElement =>
+        el.shadowRoot!.querySelector('.selection-actions .selection-btn.primary') as HTMLButtonElement;
+
+      const toggle = Array.from(el.shadowRoot!.querySelectorAll('.view-btn')).find(
+        (b) => b.getAttribute('title') === 'Toggle line selection mode for staging individual lines'
+      ) as HTMLElement;
+      expect(toggle, 'the line-selection toggle renders').to.not.be.undefined;
+      toggle.click();
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.line.code-addition') as HTMLElement).click();
+      await el.updateComplete;
+      expect(selectionBtn(), 'the bulk selection bar renders').to.not.be.null;
+      expect(selectionBtn().disabled, 'enabled before any mutation').to.be.false;
+
+      const stage = deferred<unknown>();
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile();
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      clearHistory();
+      selectionBtn().click();
+      await el.updateComplete;
+
+      expect(
+        selectionBtn().disabled,
+        'the in-flight bulk stage is visible on the button'
+      ).to.be.true;
+
+      selectionBtn().click();
+      expect(findCommands('stage_hunk').length).to.equal(1);
+
+      stage.resolve(undefined);
+      await flushAsyncUpdates(el);
+      await el.updateComplete;
+    });
+
     it('disables every editor exit and input while saving', async () => {
       const el = await renderDiffView();
       (el.shadowRoot!.querySelector('.edit-btn') as HTMLElement).click();

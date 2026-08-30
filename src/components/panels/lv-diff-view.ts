@@ -384,6 +384,18 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         border-color: var(--color-warning);
       }
 
+      /* The .stage-btn.stage:hover / .stage-btn.unstage:hover rules above are
+         restated here so a disabled button does not still light up on hover. */
+      .stage-btn:disabled,
+      .stage-btn.stage:disabled:hover,
+      .stage-btn.unstage:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        background: var(--color-bg-primary);
+        color: var(--color-text-secondary);
+        border-color: var(--color-border);
+      }
+
       .stage-btn svg {
         width: 12px;
         height: 12px;
@@ -806,6 +818,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         filter: brightness(1.1);
       }
 
+      .selection-btn:disabled,
+      .selection-btn:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        filter: none;
+      }
+
       .selection-btn svg {
         width: 12px;
         height: 12px;
@@ -997,7 +1016,10 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private flatLines: FlatDiffItem[] = [];
   private diffScrollTop = 0;
   private diffRequestId = 0;
-  private diffMutationInProgress = false;
+  // Reactive: the stage/unstage buttons bind `?disabled` to it, so a second
+  // click while a mutation is in flight is visibly refused rather than
+  // silently dropped by the guards in the handlers below.
+  @state() private diffMutationInProgress = false;
   private loadedWorkingDiffContext: {
     repositoryPath: string;
     filePath: string;
@@ -2569,6 +2591,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         <button
           class="stage-btn unstage"
           @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
+          ?disabled=${this.diffMutationInProgress}
           title="Unstage this hunk"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2580,6 +2603,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         <button
           class="stage-btn stage"
           @click=${(e: Event) => this.handleStageHunk(hunk, e)}
+          ?disabled=${this.diffMutationInProgress}
           title="Stage this hunk"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2852,14 +2876,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           Clear
         </button>
         ${isStaged ? html`
-          <button class="selection-btn primary" @click=${this.unstageSelectedLines}>
+          <button
+            class="selection-btn primary"
+            @click=${this.unstageSelectedLines}
+            ?disabled=${this.diffMutationInProgress}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
             Unstage Selected
           </button>
         ` : html`
-          <button class="selection-btn primary" @click=${this.stageSelectedLines}>
+          <button
+            class="selection-btn primary"
+            @click=${this.stageSelectedLines}
+            ?disabled=${this.diffMutationInProgress}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
