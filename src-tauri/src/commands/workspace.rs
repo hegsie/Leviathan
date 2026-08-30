@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn test_workspace_grep_parser_accepts_colons_in_file_names() {
         assert_eq!(
-            parse_workspace_grep_output(b"folder:name.txt\042\0matching text\n", 10),
+            parse_workspace_grep_output(b"folder:name.txt\x0042\0matching text\n", 10),
             vec![(
                 "folder:name.txt".to_string(),
                 42,
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn test_workspace_grep_parser_accepts_newlines_in_file_names() {
         assert_eq!(
-            parse_workspace_grep_output(b"folder\nname.txt\07\0matching text\n", 10),
+            parse_workspace_grep_output(b"folder\nname.txt\x007\0matching text\n", 10),
             vec![(
                 "folder\nname.txt".to_string(),
                 7,
@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn test_workspace_grep_parser_respects_result_limit() {
         assert_eq!(
-            parse_workspace_grep_output(b"a.txt\01\0first\nb.txt\02\0second\n", 1),
+            parse_workspace_grep_output(b"a.txt\x001\0first\nb.txt\x002\0second\n", 1),
             vec![("a.txt".to_string(), 1, "first".to_string())]
         );
     }
