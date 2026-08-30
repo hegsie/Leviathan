@@ -2805,7 +2805,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_squash_without_an_editor() {
         // GIT_SEQUENCE_EDITOR only supplies the todo; a `squash` line then opens
         // GIT_EDITOR for the combined message. This is the one rebase whose todo
@@ -2904,7 +2903,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_be_aborted() {
         // libgit2 refuses to OPEN an interactive rebase ("interactive rebase is
         // not supported"), so open_rebase failed for every rebase started
@@ -3251,7 +3249,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_runs_at_all() {
         // The plainest possible plan: reorder nothing, drop nothing, squash
         // nothing. It failed too. Git runs GIT_SEQUENCE_EDITOR for every
@@ -3288,7 +3285,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_drop() {
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();

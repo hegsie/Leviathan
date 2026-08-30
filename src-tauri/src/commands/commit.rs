@@ -1126,6 +1126,22 @@ async fn edit_commit_date_with_rebase(
         )));
     }
 
+    // Exit 0 does NOT mean the todo rewrite took. Whenever the sequence editor
+    // finds no `pick <oid>` line to turn into `edit` — the target is a MERGE
+    // commit, which `rebase -i` linearizes away rather than listing, or a
+    // config this does not pin reshapes the line — git replays the range to
+    // completion and leaves the DESCENDANT at HEAD. The amend below would then
+    // redate that descendant and report success for a commit the user never
+    // named. A paused rebase is the only state in which it is the right commit.
+    {
+        let repo = git2::Repository::open(Path::new(path))?;
+        if repo.state() == git2::RepositoryState::Clean {
+            return Err(LeviathanError::OperationFailed(
+                "Rebase did not stop at the target commit".to_string(),
+            ));
+        }
+    }
+
     // Now amend the commit with the new date(s)
     let mut amend_cmd = crate::utils::create_command("git");
     amend_cmd
@@ -1156,6 +1172,18 @@ async fn edit_commit_date_with_rebase(
         )));
     }
 
+    // The amend at the `edit` stop produced the FINAL commit for that todo
+    // entry — `rebase --continue` only replays the descendants on top of it —
+    // so read it here. Reading HEAD after the continue instead named the last
+    // replayed descendant, so the (old_oid -> new_oid) pair AmendResult
+    // promises pointed at a commit that was never the one edited, and
+    // disagreed with reword_commit's answer for the same situation.
+    let redated_oid = {
+        let repo = git2::Repository::open(Path::new(path))?;
+        let head_oid = repo.head()?.peel_to_commit()?.id();
+        head_oid.to_string()
+    };
+
     // Continue the rebase
     let continue_output = crate::utils::create_command("git")
         .current_dir(path)
@@ -1185,12 +1213,8 @@ async fn edit_commit_date_with_rebase(
         }
     }
 
-    // Get the new HEAD
-    let repo = git2::Repository::open(Path::new(path))?;
-    let new_head = repo.head()?.peel_to_commit()?;
-
     Ok(AmendResult {
-        new_oid: new_head.id().to_string(),
+        new_oid: redated_oid,
         old_oid: oid.to_string(),
         success: true,
     })
@@ -3028,17 +3052,23 @@ mod tests {
         );
 
         let repo_handle = repo.repo();
-        let head = repo_handle
+        let redated = repo_handle
             .find_commit(git2::Oid::from_str(&result.new_oid).unwrap())
             .unwrap();
-        let redated = head.parent(0).unwrap();
-        assert_eq!(redated.summary().unwrap(), Some("target"));
+        assert_eq!(
+            redated.summary().unwrap(),
+            Some("target"),
+            "new_oid names the REDATED commit, not the descendant replayed on top of it"
+        );
         // 2020-06-15T12:00:00Z
         assert_eq!(
             redated.committer().when().seconds(),
             1592222400,
             "the rebase must have stopped on `target` for the amend"
         );
+
+        let head = repo_handle.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent(0).unwrap().id(), redated.id());
         assert_ne!(
             head.committer().when().seconds(),
             1592222400,
@@ -3072,20 +3102,170 @@ mod tests {
         .expect("editing a non-HEAD commit date must survive core.abbrev");
 
         let repo_handle = repo.repo();
-        let head = repo_handle
+        let redated = repo_handle
             .find_commit(git2::Oid::from_str(&result.new_oid).unwrap())
             .unwrap();
-        let redated = head.parent(0).unwrap();
         assert_eq!(redated.summary().unwrap(), Some("target"));
         assert_eq!(
             redated.committer().when().seconds(),
             1592222400,
             "the rebase must have stopped on `target` even with a 6-character abbreviation"
         );
+
+        let head = repo_handle.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent(0).unwrap().id(), redated.id());
         assert_ne!(
             head.committer().when().seconds(),
             1592222400,
             "the descendant must not be the commit that got redated"
+        );
+    }
+
+    /// `rebase.autoSquash=true` makes git REWRITE the todo before the sequence
+    /// editor ever sees it: every `fixup!`/`squash!` commit in the range has its
+    /// line turned into a `fixup`/`squash` and moved next to the commit it
+    /// names. The reword itself still landed, but the rebase then MELDED the
+    /// user's fixup commit into its target — a commit destroyed by an operation
+    /// that was only ever asked to change one message.
+    #[tokio::test]
+    async fn test_reword_non_head_commit_keeps_the_users_fixup_commits() {
+        let repo = TestRepo::with_initial_commit();
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("rebase.autoSquash", true)
+            .unwrap();
+        let target = repo.create_commit("base work", &[("a.txt", "a")]);
+        repo.create_commit("fixup! base work", &[("b.txt", "b")]);
+        repo.create_commit("descendant", &[("c.txt", "c")]);
+
+        let result = reword_commit(
+            repo.path_str(),
+            target.to_string(),
+            "reworded message".to_string(),
+        )
+        .await
+        .expect("reword must survive rebase.autoSquash");
+
+        assert!(result.success);
+        assert_eq!(
+            history(&repo),
+            vec![
+                "descendant",
+                "fixup! base work",
+                "reworded message",
+                "Initial commit"
+            ],
+            "a reword must not squash the fixup commits the user still has queued"
+        );
+    }
+
+    /// The date-edit half of the same trap: with `rebase.autoSquash=true` the
+    /// rebase that only had to stop on one commit also swallowed the fixup
+    /// commit sitting after it.
+    #[tokio::test]
+    async fn test_edit_commit_date_non_head_commit_keeps_the_users_fixup_commits() {
+        let repo = TestRepo::with_initial_commit();
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("rebase.autoSquash", true)
+            .unwrap();
+        let target = repo.create_commit("base work", &[("a.txt", "a")]);
+        repo.create_commit("fixup! base work", &[("b.txt", "b")]);
+        repo.create_commit("descendant", &[("c.txt", "c")]);
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            target.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await
+        .expect("editing a date must survive rebase.autoSquash");
+
+        assert_eq!(
+            history(&repo),
+            vec![
+                "descendant",
+                "fixup! base work",
+                "base work",
+                "Initial commit"
+            ],
+            "a date edit must not squash the fixup commits the user still has queued"
+        );
+
+        let repo_handle = repo.repo();
+        let redated = repo_handle
+            .find_commit(git2::Oid::from_str(&result.new_oid).unwrap())
+            .unwrap();
+        assert_eq!(
+            redated.committer().when().seconds(),
+            1592222400,
+            "new_oid must still name the commit that got the new date"
+        );
+    }
+
+    /// A merge commit never reaches the todo — `rebase -i` linearizes the range
+    /// and lists the side commits instead — so the sequence editor finds no
+    /// `pick <oid>` to turn into `edit`, git replays everything and exits 0. The
+    /// amend that follows then landed on whatever the completed rebase left at
+    /// HEAD, and the caller was told the date edit had succeeded while naming a
+    /// commit the user never picked.
+    #[tokio::test]
+    async fn test_edit_commit_date_on_a_merge_commit_is_an_error_not_a_silent_success() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("a.txt", "a")]);
+
+        // Built through git2 alone so the side commit never touches the working
+        // tree: the rebase below has to replay it onto a checkout that has never
+        // seen s.txt.
+        let side = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let base = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let blob = git_repo.blob(b"s").unwrap();
+            let mut builder = git_repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+            builder.insert("s.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            git_repo
+                .commit(None, &sig, &sig, "side work", &tree, &[&base])
+                .unwrap()
+        };
+        repo.create_commit("main work", &[("m.txt", "m")]);
+        let merge = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let other = git_repo.find_commit(side).unwrap();
+            let tree = head.tree().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    "Merge side",
+                    &tree,
+                    &[&head, &other],
+                )
+                .unwrap()
+        };
+        repo.create_commit("descendant", &[("d.txt", "d")]);
+
+        let err = edit_commit_date(
+            repo.path_str(),
+            merge.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await
+        .expect_err("a rebase that never stopped must not be reported as a date edit");
+
+        assert!(
+            err.to_string()
+                .contains("Rebase did not stop at the target commit"),
+            "{err}"
         );
     }
 

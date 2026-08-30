@@ -55,18 +55,29 @@ fn copy_file_editor_command_for(source: &Path, windows: bool) -> String {
 /// `core.abbrev=7` is a floor rather than an exact width — git lengthens an
 /// abbreviation that would be ambiguous, and the pattern matches on prefix —
 /// so pinning it keeps the match correct rather than merely likely.
-pub const TODO_FORMAT_ARGS: [&str; 4] = [
+///
+/// `rebase.autoSquash=true` is the third, and it rewrites the todo before the
+/// sequence editor ever sees it: every commit whose subject starts with
+/// `fixup!`/`squash!`/`amend!` has its line changed from `pick` to
+/// `fixup`/`squash` and moved next to the commit it names. A todo the app is
+/// about to edit by hand has to be the one git generated for the range. When
+/// the TARGET is such a commit its line no longer says `pick` and the sed
+/// matches nothing; when a DESCENDANT is, the rebase silently melds the user's
+/// fixup commits into their targets — commits they never asked to squash.
+pub const TODO_FORMAT_ARGS: [&str; 6] = [
     "-c",
     "rebase.abbreviateCommands=false",
     "-c",
     "core.abbrev=7",
+    "-c",
+    "rebase.autosquash=false",
 ];
 
 /// A `GIT_SEQUENCE_EDITOR` command that rewrites the `pick` line for
 /// `short_oid` to `action`, leaving every other line of the todo alone.
 ///
 /// The `rebase -i` it is handed to must also carry [`TODO_FORMAT_ARGS`], which
-/// pins the two config settings this pattern assumes.
+/// pins the config settings this pattern assumes.
 pub fn todo_action_editor_command(short_oid: &str, action: &str) -> String {
     format!(
         "sed -i.bak -e {}",

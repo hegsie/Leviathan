@@ -148,6 +148,45 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  # The rebase flows reach git through GIT_SEQUENCE_EDITOR/GIT_EDITOR, which
+  # Git for Windows evaluates with its own bundled POSIX shell and its own path
+  # rules. Nothing about that is exercised by a Linux runner, so the Windows
+  # behaviour was only ever verified by hand. This job is what makes
+  # "it works on Windows" a claim CI can check.
+  test-backend-windows:
+    name: Test Backend (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+          prefix-key: windows-latest
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run tests
+        working-directory: src-tauri
+        run: cargo test
+
   test-frontend:
     name: Test Frontend
     runs-on: ubuntu-latest
