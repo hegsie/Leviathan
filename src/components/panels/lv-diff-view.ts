@@ -1186,6 +1186,29 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   }
 
   /**
+   * True while the pane still shows the file an apply was made against.
+   *
+   * Deliberately weaker than `isSameWorkingDiffContext`: it ignores the loaded
+   * diff, so it stays true while a reload for the SAME file is still in flight
+   * (the "Load full diff" link can start one mid-apply, and it leaves no loaded
+   * context behind). The apply itself invalidated every positional
+   * `${hunkIndex}-${lineIndex}` key, so the selection must be dropped in that
+   * case too - whichever diff lands renumbers them.
+   */
+  private isStillOnAppliedFile(context: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  }): boolean {
+    return (
+      !this.commitFile &&
+      this.repositoryPath === context.repositoryPath &&
+      this.file?.path === context.filePath &&
+      this.file?.isStaged === context.isStaged
+    );
+  }
+
+  /**
    * Clear the pane when the reload that followed an apply found nothing left.
    *
    * Staging the last unstaged hunk (or unstaging the last staged one) empties
@@ -1206,12 +1229,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     filePath: string;
     isStaged: boolean;
   }): void {
-    if (
-      this.commitFile ||
-      this.repositoryPath !== context.repositoryPath ||
-      this.file?.path !== context.filePath ||
-      this.file?.isStaged !== context.isStaged
-    ) return;
+    if (!this.isStillOnAppliedFile(context)) return;
     if (!this.error?.includes('not found in diff')) return;
     this.error = null;
     this.diff = null;
@@ -1978,8 +1996,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           bubbles: true,
           composed: true,
         }));
+        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
         if (this.isSameWorkingDiffContext(context)) {
-          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
@@ -2018,8 +2036,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           bubbles: true,
           composed: true,
         }));
+        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
         if (this.isSameWorkingDiffContext(context)) {
-          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
@@ -2057,10 +2075,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         // Reload diff - if file is fully staged, clear the view
-        if (!this.isSameWorkingDiffContext(context)) return;
-        this.selectedLines = new Set();
-        await this.loadWorkingDiff();
-        this.clearIfFullyApplied(context);
+        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
+        if (this.isSameWorkingDiffContext(context)) {
+          await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
+        }
       } else {
         console.error('Failed to stage hunk:', result.error);
         showToast(`Failed to stage hunk: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -2094,8 +2113,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         // Reload diff - if nothing is left staged for this file, clear the view
+        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
         if (this.isSameWorkingDiffContext(context)) {
-          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }

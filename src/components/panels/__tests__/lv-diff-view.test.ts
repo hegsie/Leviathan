@@ -153,8 +153,7 @@ function setupDefaultMocks(opts: {
         return undefined;
       case 'get_diff_tool':
         return opts.diffToolConfig ?? { tool: null };
-      case 'plugin:dialog|confirm':
-        return confirmAnswer === 'Ok';
+      // showConfirm() resolves to (this result === okLabel); default ok is 'Ok'.
       case 'plugin:dialog|message':
         return confirmAnswer;
       default:
@@ -568,6 +567,104 @@ describe('lv-diff-view', () => {
       await view.handleStageHunk(view.diff.hunks[0], new Event('click'));
 
       expect(view.selectedLines.size).to.equal(0);
+    });
+
+    it('clears positional selections when a same-file reload starts mid-apply', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const view = el as unknown as {
+        selectedLines: Set<string>;
+        stageSelectedLines: () => Promise<boolean>;
+        handleLoadFullDiff: () => Promise<void>;
+      };
+      const stage = deferred<unknown>();
+      const reload = deferred<DiffFile>();
+      view.selectedLines = new Set(['0-2']);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return reload.promise;
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const apply = view.stageSelectedLines();
+      // "Load full diff" is not disabled while a mutation is in flight, so it
+      // can start a reload of the SAME file mid-apply. That leaves no loaded
+      // context, but the pane still shows the file the stage was applied to.
+      const full = view.handleLoadFullDiff();
+      stage.resolve(undefined);
+      expect(await apply, 'the stage was applied').to.be.true;
+      reload.resolve(makeDiffFile());
+      await full;
+      await flushAsyncUpdates(el);
+
+      expect(
+        view.selectedLines.size,
+        'line indexes invalidated by the apply survived into the renumbered diff',
+      ).to.equal(0);
+    });
+
+    it('clears positional selections when a same-file reload starts mid hunk stage', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const view = el as unknown as {
+        diff: DiffFile;
+        selectedLines: Set<string>;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+        handleLoadFullDiff: () => Promise<void>;
+      };
+      const stage = deferred<unknown>();
+      const reload = deferred<DiffFile>();
+      view.selectedLines = new Set(['0-2']);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return reload.promise;
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const apply = view.handleStageHunk(view.diff.hunks[0], new Event('click'));
+      const full = view.handleLoadFullDiff();
+      stage.resolve(undefined);
+      await apply;
+      reload.resolve(makeDiffFile());
+      await full;
+      await flushAsyncUpdates(el);
+
+      expect(
+        view.selectedLines.size,
+        'line indexes invalidated by the hunk stage survived into the renumbered diff',
+      ).to.equal(0);
+    });
+
+    it('keeps a selection made in another file after an apply to the previous one', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const view = el as unknown as {
+        selectedLines: Set<string>;
+        stageSelectedLines: () => Promise<boolean>;
+      };
+      const stage = deferred<unknown>();
+      view.selectedLines = new Set(['0-2']);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') return makeDiffFile({ path: 'src/next.ts' });
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const apply = view.stageSelectedLines();
+      el.file = makeStatusEntry({ path: 'src/next.ts' });
+      await flushAsyncUpdates(el);
+      view.selectedLines = new Set(['0-1']);
+      stage.resolve(undefined);
+      await apply;
+      await flushAsyncUpdates(el);
+
+      expect(
+        [...view.selectedLines],
+        'an apply to the previous file cleared a selection made in the new one',
+      ).to.deep.equal(['0-1']);
     });
 
     it('serializes overlapping hunk staging operations', async () => {
