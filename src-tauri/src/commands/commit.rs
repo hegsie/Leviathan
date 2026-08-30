@@ -1113,6 +1113,7 @@ async fn edit_commit_date_with_rebase(
     let output = crate::utils::create_command("git")
         .current_dir(path)
         .env("GIT_SEQUENCE_EDITOR", &sequence_editor)
+        .args(crate::utils::TODO_FORMAT_ARGS)
         .args(["rebase", "-i", &parent_oid_str])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to start rebase: {}", e)))?;
@@ -1271,6 +1272,7 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
         .current_dir(&path)
         .env("GIT_SEQUENCE_EDITOR", &sequence_editor)
         .env("GIT_EDITOR", &commit_editor)
+        .args(crate::utils::TODO_FORMAT_ARGS)
         .args(["rebase", "-i", &parent_oid.to_string()])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
@@ -1304,8 +1306,12 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
     let mut new_commit_oid = new_head.id().to_string();
     for rev_oid in revwalk.flatten() {
         let commit = repo.find_commit(rev_oid)?;
-        // The reworded commit will have our new message
-        if commit.message().ok().unwrap_or("") == message {
+        // The reworded commit will have our new message. Compared with the
+        // trailing whitespace off both sides: git normalizes a commit message
+        // to end in a newline, so an exact comparison against the argument
+        // never matched and `new_commit_oid` kept its seed — leaving the caller
+        // with the DESCENDANT's oid for the commit it had just reworded.
+        if commit.message().ok().unwrap_or("").trim_end() == message.trim_end() {
             new_commit_oid = rev_oid.to_string();
             break;
         }
@@ -2901,6 +2907,46 @@ mod tests {
             vec!["descendant", "reworded message", "Initial commit"],
             "only the targeted commit's message changes, and its descendant survives"
         );
+
+        let repo_handle = repo.repo();
+        let new_head = repo_handle.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            result.new_oid,
+            new_head.parent(0).unwrap().id().to_string(),
+            "new_oid names the REWORDED commit, not the descendant replayed on top of it"
+        );
+    }
+
+    /// The todo the sequence editor rewrites is written in a format the USER
+    /// configures. `rebase.abbreviateCommands=true` makes git write
+    /// `p <oid> subject` instead of `pick <oid> subject`, so an unpinned rebase
+    /// matched nothing, replayed every commit as a plain pick and exited 0 —
+    /// and the reword reported success with the old message still in place.
+    #[tokio::test]
+    async fn test_reword_non_head_commit_with_abbreviated_todo_commands() {
+        let repo = TestRepo::with_initial_commit();
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("rebase.abbreviateCommands", true)
+            .unwrap();
+        let target = repo.create_commit("original message", &[("a.txt", "a")]);
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = reword_commit(
+            repo.path_str(),
+            target.to_string(),
+            "reworded message".to_string(),
+        )
+        .await
+        .expect("reword must survive rebase.abbreviateCommands");
+
+        assert!(result.success);
+        assert_eq!(
+            history(&repo),
+            vec!["descendant", "reworded message", "Initial commit"],
+            "the todo line must still be rewritten when git abbreviates the command"
+        );
     }
 
     /// The editor commands used to be shell SCRIPTS that interpolated the
@@ -2997,6 +3043,49 @@ mod tests {
             head.committer().when().seconds(),
             1592222400,
             "the descendant is replayed, not redated"
+        );
+    }
+
+    /// `core.abbrev` sets the width of the oid git writes into the todo, and a
+    /// repository configured below the 7 characters the pattern uses made the
+    /// sed match nothing. The rebase then ran to completion with no `edit`
+    /// stop, so `git commit --amend` landed on the DESCENDANT sitting at HEAD —
+    /// the wrong commit redated, reported to the caller as a success.
+    #[tokio::test]
+    async fn test_edit_commit_date_non_head_commit_with_a_short_core_abbrev() {
+        let repo = TestRepo::with_initial_commit();
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_str("core.abbrev", "6")
+            .unwrap();
+        let target = repo.create_commit("target", &[("a.txt", "a")]);
+        repo.create_commit("descendant", &[("b.txt", "b")]);
+
+        let result = edit_commit_date(
+            repo.path_str(),
+            target.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await
+        .expect("editing a non-HEAD commit date must survive core.abbrev");
+
+        let repo_handle = repo.repo();
+        let head = repo_handle
+            .find_commit(git2::Oid::from_str(&result.new_oid).unwrap())
+            .unwrap();
+        let redated = head.parent(0).unwrap();
+        assert_eq!(redated.summary().unwrap(), Some("target"));
+        assert_eq!(
+            redated.committer().when().seconds(),
+            1592222400,
+            "the rebase must have stopped on `target` even with a 6-character abbreviation"
+        );
+        assert_ne!(
+            head.committer().when().seconds(),
+            1592222400,
+            "the descendant must not be the commit that got redated"
         );
     }
 

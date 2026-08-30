@@ -40,8 +40,33 @@ fn copy_file_editor_command_for(source: &Path, windows: bool) -> String {
     format!("cp -- {}", shell_quote(&shell_path(source, windows)))
 }
 
+/// The `git` options a `rebase -i` must carry for
+/// `todo_action_editor_command`'s pattern to match the todo git writes.
+///
+/// That pattern is anchored on the literal word `pick` and a 7-character
+/// abbreviation, and BOTH are user-configurable. With
+/// `rebase.abbreviateCommands=true` git writes `p abc1234 subject`; with
+/// `core.abbrev=6` it writes `pick abc123 subject`. Either way the sed matches
+/// nothing, git replays every commit as a plain `pick` and exits 0 — so the
+/// caller sees a successful rebase that did not do the one thing it was for:
+/// a reword silently keeps the old message, and a date edit amends the
+/// DESCENDANT the completed rebase left at HEAD.
+///
+/// `core.abbrev=7` is a floor rather than an exact width — git lengthens an
+/// abbreviation that would be ambiguous, and the pattern matches on prefix —
+/// so pinning it keeps the match correct rather than merely likely.
+pub const TODO_FORMAT_ARGS: [&str; 4] = [
+    "-c",
+    "rebase.abbreviateCommands=false",
+    "-c",
+    "core.abbrev=7",
+];
+
 /// A `GIT_SEQUENCE_EDITOR` command that rewrites the `pick` line for
 /// `short_oid` to `action`, leaving every other line of the todo alone.
+///
+/// The `rebase -i` it is handed to must also carry [`TODO_FORMAT_ARGS`], which
+/// pins the two config settings this pattern assumes.
 pub fn todo_action_editor_command(short_oid: &str, action: &str) -> String {
     format!(
         "sed -i.bak -e {}",

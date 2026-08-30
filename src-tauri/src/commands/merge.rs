@@ -2805,7 +2805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn test_interactive_rebase_can_squash_without_an_editor() {
         // GIT_SEQUENCE_EDITOR only supplies the todo; a `squash` line then opens
         // GIT_EDITOR for the combined message. This is the one rebase whose todo
