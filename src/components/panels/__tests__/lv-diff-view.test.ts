@@ -1544,7 +1544,8 @@ describe('lv-diff-view', () => {
       expect(el.shadowRoot!.querySelector('.editor-textarea')).to.not.be.null;
 
       el.repositoryPath = '/test/other-repo';
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
 
       expect(
         el.shadowRoot!.querySelector('.editor-textarea'),
