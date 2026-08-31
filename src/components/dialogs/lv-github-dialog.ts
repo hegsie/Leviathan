@@ -1388,6 +1388,22 @@ export class LvGitHubDialog extends LitElement {
     await oauthService.startOAuth('github', clientId);
   }
 
+  /**
+   * Abandon a sign-in that is waiting on the browser. Scoped to 'github' so a
+   * sign-in pending in another provider's dialog is left alone. The local state
+   * is set explicitly rather than relying on the service's notification, so the
+   * form can never stay stuck if there is no pending entry to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('github');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
+  }
+
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
     const { provider, tokens } = event.detail;
     // Do not log token material (M5) — only presence, never any prefix/value.
@@ -2185,7 +2201,7 @@ export class LvGitHubDialog extends LitElement {
                 <div class="oauth-spinner"></div>
                 <p>${this.oauthState.status === 'exchanging' ? 'Completing sign in...' : 'Waiting for authorization...'}</p>
                 <p class="oauth-hint">Complete the sign in in your browser</p>
-                <button class="btn" @click=${() => oauthService.cancelOAuth()}>Cancel</button>
+                <button class="btn" @click=${this.handleCancelOAuth}>Cancel</button>
               </div>
             ` : html`
               <button

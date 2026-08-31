@@ -1172,6 +1172,108 @@ describe('lv-github-dialog', () => {
         'abandoned target not written'
       ).to.be.false;
     });
+
+    it('releases the pinned OAuth target when the user cancels a pending sign-in', async () => {
+      // Cancelling ends the flow, so it can never complete. A pin left behind
+      // would route the NEXT completion onto the abandoned flow's account
+      // instead of the one the user is looking at.
+      connectionResponse = mockConnectedStatus;
+      const otherAccount = createTestAccount({
+        id: 'gh-acc-2',
+        name: 'Personal GitHub',
+        integrationType: 'github',
+      });
+      unifiedProfileStore.getState().setAccounts([mockAccount, otherAccount]);
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_unified_profiles_config') {
+          return {
+            version: 3,
+            profiles: [],
+            accounts: [mockAccount, otherAccount],
+            repositoryAssignments: {},
+          };
+        }
+        return previous(command, args);
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as {
+        oauthTargetAccountId: string | null | undefined;
+        oauthTargetWasAddingAccount: boolean | undefined;
+        oauthState: { status: string };
+        selectedAccountId: string | null;
+        isAddingAccount: boolean;
+        handleCancelOAuth(): void;
+        handleOAuthComplete(event: CustomEvent): Promise<void>;
+      };
+      internals.selectedAccountId = 'gh-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gh-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+
+      internals.handleCancelOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released on cancel').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthState.status, 'form returned to idle').to.equal('idle');
+
+      // The user now picks a different account; a completion arriving afterwards
+      // must land on that account, not on the cancelled flow's target.
+      internals.selectedAccountId = 'gh-acc-2';
+      invokeHistory.length = 0;
+      await internals.handleOAuthComplete(new CustomEvent('oauth-complete', {
+        detail: {
+          provider: 'github',
+          tokens: { accessToken: 'post-cancel-token', refreshToken: 'refresh', expiresIn: 3600 },
+        },
+      }));
+
+      expect(keyringStore.get('github_token_gh-acc-2')).to.equal('post-cancel-token');
+      const keysAfterCancel = invokeHistory
+        .filter((h) => h.command === 'store_keyring_token')
+        .map((h) => (h.args as Record<string, string>).key);
+      expect(
+        keysAfterCancel.some((k) => k.startsWith('github_token_gh-acc-1')),
+        'cancelled target not written'
+      ).to.be.false;
+    });
+
+    it('cancels only the GitHub sign-in, leaving another provider pending', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          const provider = (args as Record<string, string>)?.provider;
+          // No loopbackPort: the flow stays pending instead of polling for a
+          // callback that never arrives here.
+          return { authorizeUrl: `https://example.com/${provider}`, state: `${provider}-state` };
+        }
+        return previous(command, args);
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      oauthService.cancelOAuth();
+      await oauthService.startOAuth('bitbucket', 'bb-client');
+      await oauthService.startOAuth('github', 'gh-client');
+
+      (el as unknown as { handleCancelOAuth(): void }).handleCancelOAuth();
+
+      expect(
+        oauthService.getPendingProvider(),
+        'a sign-in pending in another provider dialog is left alone'
+      ).to.equal('bitbucket');
+      oauthService.cancelOAuth();
+    });
   });
 
   describe('Add account guard', () => {

@@ -179,7 +179,9 @@ function setupMockInvoke(): void {
       };
     }
     if (command === 'load_unified_profile_for_repository') return null;
-    if (command === 'save_global_account') return params;
+    // The backend echoes the saved account, not the command payload — the
+    // caller reads `savedAccount.id` from it.
+    if (command === 'save_global_account') return (params as { account: unknown }).account;
     if (command === 'update_global_account_cached_user') return null;
 
     // Bitbucket-specific commands
@@ -970,6 +972,10 @@ describe('lv-bitbucket-dialog', () => {
       const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
       expect(account.id).to.not.equal('bb-acc-existing');
       expect((account.config as Record<string, unknown>).type).to.equal('bitbucket');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus[account.id]?.status,
+        'the newly created account shows as connected immediately'
+      ).to.equal('connected');
     });
   });
 
@@ -1455,10 +1461,18 @@ describe('lv-bitbucket-dialog', () => {
       // The user switches to a different account while the browser round-trip
       // is still outstanding.
       internals.selectedAccountId = 'bb-acc-2';
+      // The connection check on open already marked bb-acc-1 connected — clear
+      // it so the final assertion proves handleOAuthComplete set it for the
+      // OAuth target, not for the newer (mid-flight) selection.
+      unifiedProfileStore.getState().setAccountConnectionStatus('bb-acc-1', 'disconnected');
       gate.release();
       await completion;
 
       expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('bbp_reauth');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['bb-acc-1']?.status,
+        'the signed-in account shows as connected without waiting for a re-check'
+      ).to.equal('connected');
       expect(
         keyringStore.has('bitbucket_token_bb-acc-2'),
         'the newly selected account is not overwritten'

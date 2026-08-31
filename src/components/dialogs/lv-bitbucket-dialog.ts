@@ -1350,6 +1350,7 @@ export class LvBitbucketDialog extends LitElement {
       this.selectedAccountId !== targetAccountId ||
       this.isAddingAccount !== targetWasAddingAccount;
     let applyOAuthResultToSelection = false;
+    let connectedAccountId: string | undefined;
 
     try {
       // For Bitbucket OAuth, we need to verify the token and get user info
@@ -1415,6 +1416,7 @@ export class LvBitbucketDialog extends LitElement {
         if (applyOAuthResultToSelection) {
           this.selectedAccountId = existingAccount.id;
         }
+        connectedAccountId = existingAccount.id;
       } else {
         // Create new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
@@ -1452,8 +1454,19 @@ export class LvBitbucketDialog extends LitElement {
           // The new account now exists and is selected — the add flow is complete.
           this.isAddingAccount = false;
         }
+        connectedAccountId = savedAccount.id;
       }
 
+      if (connectedAccountId) {
+        // Mirror the verified status into the shared store so the profile
+        // manager's status dots update immediately (matches checkConnection and
+        // the GitHub/GitLab dialogs) instead of staying stale until the next
+        // periodic token validation. Keyed off the account the flow targeted,
+        // not `selectedAccountId`, which may already point elsewhere.
+        unifiedProfileStore
+          .getState()
+          .setAccountConnectionStatus(connectedAccountId, 'connected');
+      }
       if (!applyOAuthResultToSelection) {
         // The user moved on to a different account mid-flow: the token is saved
         // on the account the flow targeted, but the dialog's visible state (and
