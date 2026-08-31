@@ -177,6 +177,69 @@ describe('network security gate', () => {
       expect(result.success, 'an allowlist that cannot see the URL must fail closed').to.equal(false);
     });
 
+    // The allowlist matches on the URL's HOST. A substring match over the whole
+    // URL let a look-alike domain and a path that merely names the domain both
+    // through, so these pin the host semantics down.
+    it('blocks a look-alike host that merely starts with an allowed domain', async () => {
+      mockRemotes('https://github.com.evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'github.com.evil.test is not github.com').to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('blocks a URL whose PATH names an allowed domain', async () => {
+      mockRemotes('https://evil.test/github.com/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'the domain is in the path, not the host').to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('allows a subdomain of an allowed domain', async () => {
+      mockRemotes('https://api.github.com/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'a subdomain of an allowed domain').to.not.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('accepts a "*." entry for the domain and its subdomains', async () => {
+      mockRemotes('https://git.example.com/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['*.example.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'git.example.com is under *.example.com').to.not.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    it('still blocks an unrelated host under a "*." entry', async () => {
+      mockRemotes('https://example.com.evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['*.example.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
+    it('matches an scp-form remote URL on its host', async () => {
+      mockRemotes('git@github.com:x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(result.success, 'an ssh remote on an allowed host').to.not.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
     it('leaves everything alone when no allowlist is configured', async () => {
       mockRemotes('https://evil.test/x/y.git');
       settingsStore.setState({ remoteAllowlist: [] });
@@ -184,6 +247,77 @@ describe('network security gate', () => {
       await fetch({ path: '/repo', silent: true });
 
       expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+  });
+
+  // Pruning every remote is one gesture over several remotes. It goes through
+  // the shared gate like everything else, so the allowlist applies to each
+  // remote it will touch and the user is asked once for the whole set.
+  describe('an operation over several remotes gates each of them', () => {
+    function mockTwoRemotes(originUrl: string, upstreamUrl: string): void {
+      mockInvoke = (command: string) => {
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'origin', url: originUrl, fetchUrl: originUrl, pushUrl: originUrl },
+            { name: 'upstream', url: upstreamUrl, fetchUrl: upstreamUrl, pushUrl: upstreamUrl },
+          ]);
+        }
+        if (command === 'plugin:dialog|confirm' || command === 'plugin:dialog|message') {
+          return Promise.resolve('Ok');
+        }
+        return Promise.resolve(null);
+      };
+    }
+
+    it('blocks the prune when ANY remote is off the allowlist', async () => {
+      mockTwoRemotes('https://github.com/x/y.git', 'https://evil.test/x/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pruneRemoteTrackingBranches('/repo');
+
+      expect(result.success, 'one disallowed remote refuses the whole prune').to.equal(false);
+      expect(
+        invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches'),
+      ).to.equal(false);
+    });
+
+    it('asks once for the whole set and names every remote', async () => {
+      mockTwoRemotes('https://github.com/x/y.git', 'https://github.com/z/y.git');
+      settingsStore.setState({ confirmNetworkOps: true });
+
+      await pruneRemoteTrackingBranches('/repo');
+
+      const prompts = invokeHistory.filter(
+        (c) => c.command === 'plugin:dialog|confirm' || c.command === 'plugin:dialog|message',
+      );
+      expect(prompts.length, 'one prompt, not one per remote').to.equal(1);
+      const asked = JSON.stringify(prompts[0].args);
+      expect(asked, 'the prompt names origin').to.contain('origin');
+      expect(asked, 'the prompt names upstream').to.contain('upstream');
+      expect(
+        invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches'),
+      ).to.equal(true);
+    });
+
+    it('never prompts for a repo that has no remotes at all', async () => {
+      mockInvoke = (command: string) => {
+        if (command === 'get_remotes') return Promise.resolve([]);
+        return Promise.resolve(null);
+      };
+      settingsStore.setState({ confirmNetworkOps: true });
+
+      const result = await pruneRemoteTrackingBranches('/repo');
+
+      expect(result.success, 'nothing to prune is not a failure').to.equal(true);
+      expect(
+        invokeHistory.some(
+          (c) => c.command === 'plugin:dialog|confirm' || c.command === 'plugin:dialog|message',
+        ),
+        'nothing to gate, so nothing to ask about',
+      ).to.equal(false);
+      expect(
+        invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches'),
+      ).to.equal(false);
     });
   });
 

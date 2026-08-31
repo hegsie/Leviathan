@@ -74,6 +74,13 @@ async function checkNetworkAllowed(
   const host = url
     ? cloneUrlHost(url.includes('://') || url.includes('@') ? url : `https://${url}`)
     : null;
+  // Entries are domains (the settings field says so, and offers "github.com,
+  // gitlab.com"), so they are compared against the URL's HOST. A substring
+  // match over the whole URL — what this used to do — let a look-alike host
+  // through, since "https://github.com.evil.test/x.git" literally contains
+  // "github.com", and let any URL merely NAMING an allowed domain in its path
+  // through too. A leading "*." is accepted and means the domain and its
+  // subdomains, which is what a bare entry already means.
   const allowed =
     !!host &&
     settings.remoteAllowlist.some((entry) => {
@@ -135,15 +142,22 @@ async function checkNetworkPermission(
   operation: string,
   repoPath: string | null,
   remote?: string,
+  /** An operation that touches SEVERAL remotes in one gesture — the prune-all
+   * path. Every remote is checked against the allowlist, and the user is asked
+   * once for the whole set rather than once per remote. */
+  remotes?: string[],
 ): Promise<boolean> {
-  if (await checkNetworkAllowed(repoPath, remote)) return false;
+  for (const target of remotes ?? [remote]) {
+    if (await checkNetworkAllowed(repoPath, target)) return false;
+  }
 
   if (settingsStore.getState().confirmNetworkOps) {
     // A declined confirm is the user's own decision, not a failure — callers
     // distinguish it from a block so they don't report it back as a red error.
+    const label = remotes ? remotes.join(', ') : remote;
     const ok = await showConfirm(
       'Network Operation',
-      `Allow ${operation}${remote ? ` to ${remote}` : ''}?`,
+      `Allow ${operation}${label ? ` to ${label}` : ''}?`,
     );
     if (!ok) {
       lastNetworkBlockReason = 'declined';
@@ -1385,6 +1399,9 @@ async function resolveRepoAccount(
   repoPath: string,
   integrationType: IntegrationType,
   remoteName: string | undefined,
+  /** The remote's URL when the caller already resolved it. Saves a second
+   * `get_remotes` round trip on paths that walk every remote in the repo. */
+  knownRemoteUrl?: string | null,
 ): Promise<{ account: IntegrationAccount | undefined; repoSpecific: boolean }> {
   const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
   try {
@@ -1397,7 +1414,7 @@ async function resolveRepoAccount(
       // A failed profile lookup must not cost us the account-level urlPatterns
       // tier or the global default — resolve with no profile instead.
       getAssignedUnifiedProfile(repoPath).catch(() => null),
-      resolveRemoteUrl(repoPath, remoteName),
+      knownRemoteUrl ?? resolveRemoteUrl(repoPath, remoteName),
     ]);
     // An unknown profile id resolves to no profile on the backend, which simply
     // falls through to the remaining tiers.
@@ -7406,12 +7423,19 @@ export async function pruneRemoteTrackingBranches(
   repoPath: string,
   remote?: string,
 ): Promise<CommandResult<PruneResult>> {
+  // Offline is settled before the remote list is read, so the user hears
+  // "offline mode is enabled" rather than whatever enumerating the remotes
+  // happens to report. `checkNetworkAllowed` is called for its toast; the
+  // refusal is unconditional.
   if (settingsStore.getState().offlineMode) {
     await checkNetworkAllowed(repoPath, remote);
     return blockedResult();
   }
 
   let targets: string[];
+  // The listed remotes already carry their URLs, so the token loop below reads
+  // them from here instead of resolving each one over IPC again.
+  const urlByName = new Map<string, string>();
   if (remote) {
     targets = [remote];
   } else {
@@ -7424,28 +7448,26 @@ export async function pruneRemoteTrackingBranches(
       };
     }
     targets = remotes.data.map((item) => item.name);
+    for (const item of remotes.data) {
+      if (item.url) urlByName.set(item.name, item.url);
+    }
   }
+  // A repo with no remotes has nothing to prune — and nothing to gate either,
+  // so it must not prompt.
   if (targets.length === 0) {
     return { success: true, data: { success: true, branchesPruned: [] } };
   }
-  for (const target of targets) {
-    if (await checkNetworkAllowed(repoPath, target)) {
-      return blockedResult();
-    }
-  }
-  if (settingsStore.getState().confirmNetworkOps) {
-    const ok = await showConfirm(
-      'Network Operation',
-      `Allow pruning remote-tracking branches from ${targets.join(', ')}?`,
-    );
-    if (!ok) {
-      lastNetworkBlockReason = 'declined';
-      return blockedResult();
-    }
+  if (!await checkNetworkPermission(
+    'prune remote-tracking branches',
+    repoPath,
+    undefined,
+    targets,
+  )) {
+    return blockedResult();
   }
   const tokens: Record<string, string> = {};
   for (const target of targets) {
-    const remoteUrl = await resolveRemoteUrl(repoPath, target);
+    const remoteUrl = urlByName.get(target) ?? await resolveRemoteUrl(repoPath, target);
     const host = remoteUrl ? cloneUrlHost(remoteUrl) : null;
     let integrationType: IntegrationType | undefined;
     if (host === 'github.com' || host?.endsWith('.github.com')) {
@@ -7470,6 +7492,7 @@ export async function pruneRemoteTrackingBranches(
         repoPath,
         integrationType,
         target,
+        remoteUrl,
       );
       if (account) {
         const { AccountCredentials, getFreshAccountToken } = await import(

@@ -34,6 +34,9 @@ import {
   pruneRemoteTrackingBranches,
   type RemoteStatus,
 } from '../git.service.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { createEmptyIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import type { Remote } from '../../types/git.types.ts';
 import type { MultiPushResult } from '../../types/api.types.ts';
 
@@ -647,6 +650,160 @@ describe('git.service - Remote operations', () => {
     });
   });
 
+  describe('pruneRemoteTrackingBranches', () => {
+    const keyring = new Map<string, string>();
+    let preferredAccount: IntegrationAccount | null = null;
+
+    /** Keyring-backed invoke mock: only the seeded keys answer. */
+    function mockRepo(remotes: Array<{ name: string; url: string }>): void {
+      mockInvoke = async (command, args) => {
+        const a = args as Record<string, unknown> | undefined;
+        if (command === 'get_remotes') {
+          return remotes.map((r) => ({ ...r, pushUrl: null }));
+        }
+        if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+        if (command === 'store_keyring_token') {
+          keyring.set(a!.key as string, a!.value as string);
+          return null;
+        }
+        if (command === 'oauth_refresh_token') {
+          return { accessToken: 'gl-refreshed', refreshToken: 'r2', expiresIn: 7200 };
+        }
+        if (command === 'get_repository_preferred_account') return preferredAccount;
+        if (command === 'prune_remote_tracking_branches') {
+          return { success: true, branchesPruned: [] };
+        }
+        return null;
+      };
+    }
+
+    function account(
+      integrationType: 'github' | 'gitlab',
+      id: string,
+      instanceUrl?: string,
+    ): IntegrationAccount {
+      return {
+        ...createEmptyIntegrationAccount(integrationType, instanceUrl),
+        id,
+        name: id,
+        isDefault: true,
+      };
+    }
+
+    beforeEach(() => {
+      keyring.clear();
+      preferredAccount = null;
+    });
+
+    afterEach(() => {
+      unifiedProfileStore.getState().reset();
+    });
+
+    it('forwards the app-managed token for the selected remote', async () => {
+      keyring.set('github_token', 'ghp_test');
+      mockRepo([{ name: 'origin', url: 'https://github.com/acme/repo.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo', 'origin');
+
+      expect(lastInvokedCommand).to.equal('prune_remote_tracking_branches');
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin).to.equal(
+        'ghp_test',
+      );
+    });
+
+    it('prunes EVERY remote when none is named, reading the list once', async () => {
+      keyring.set('github_token', 'ghp_test');
+      mockRepo([
+        { name: 'origin', url: 'https://github.com/acme/repo.git' },
+        { name: 'upstream', url: 'https://github.com/upstream/repo.git' },
+      ]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'a dropped remote leaves its stale refs behind').to.deep.equal([
+        'origin',
+        'upstream',
+      ]);
+      // Both remotes are on github.com, so both carry the token.
+      expect(args.tokens).to.deep.equal({ origin: 'ghp_test', upstream: 'ghp_test' });
+      // The listed remotes already carry their URLs, so re-resolving each one is
+      // a round trip per remote for a value already in hand.
+      expect(
+        invokeHistory.filter((c) => c.command === 'get_remotes').length,
+        'the remote list is read once, not once per remote',
+      ).to.equal(1);
+    });
+
+    it("uses a self-hosted GitLab account's refreshed token", async () => {
+      // The repo is pinned to this account, so there is no legacy fallback to
+      // paper over the account branch: the token can only come from there. Its
+      // OAuth bundle has already expired, so the stored access token is dead
+      // and the prune must carry the refreshed one.
+      const gitlab = account('gitlab', 'gl-1', 'https://git.acme.dev');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-stale');
+      keyring.set(
+        'gitlab_token_gl-1_oauth',
+        JSON.stringify({
+          accessToken: 'gl-stale',
+          refreshToken: 'r1',
+          expiresAt: Date.now() - 1000,
+        }),
+      );
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin).to.equal(
+        'gl-refreshed',
+      );
+    });
+
+    it('propagates a failure to list the remotes', async () => {
+      mockInvoke = async (command) => {
+        if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };
+        return null;
+      };
+
+      const result = await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(result.success, 'a prune that never ran is not a success').to.be.false;
+      expect(result.error?.message).to.contain('no remotes');
+      expect(invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches')).to.be
+        .false;
+    });
+
+    it('refuses when the remote list comes back unusable', async () => {
+      // A non-array payload would enumerate to nothing, and pruning "no
+      // remotes" would report success while leaving every stale ref in place.
+      mockInvoke = async () => null;
+
+      const result = await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(result.success).to.be.false;
+      expect(result.error?.code).to.equal('REMOTE_LIST_FAILED');
+      expect(invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches')).to.be
+        .false;
+    });
+
+    it('sends no token when the repo-specific account has none stored', async () => {
+      // A repo pinned to an account means THAT account or nothing — falling
+      // back to the global default would authenticate as the wrong identity.
+      preferredAccount = account('github', 'gh-repo');
+      keyring.set('github_token', 'ghp_default');
+      mockRepo([{ name: 'origin', url: 'https://github.com/acme/repo.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(
+        (lastInvokedArgs as { tokens: Record<string, string> }).tokens,
+        "the default account's token must not stand in",
+      ).to.deep.equal({});
+    });
+  });
+
   describe('startAutoFetch', () => {
     it('invokes start_auto_fetch command with correct arguments', async () => {
       mockInvoke = () => Promise.resolve(null);
@@ -656,31 +813,6 @@ describe('git.service - Remote operations', () => {
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
       expect(args.intervalMinutes).to.equal(5);
-    });
-
-    describe('pruneRemoteTrackingBranches', () => {
-      it('forwards the app-managed token for the selected remote', async () => {
-        mockInvoke = async (command) => {
-          if (command === 'get_remotes') {
-            return [{ name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null }];
-          }
-          if (command === 'detect_github_repo') {
-            return { owner: 'acme', repo: 'repo', remoteName: 'origin' };
-          }
-          if (command === 'get_keyring_token') return 'ghp_test';
-          if (command === 'prune_remote_tracking_branches') {
-            return { success: true, branchesPruned: [] };
-          }
-          return null;
-        };
-
-        await pruneRemoteTrackingBranches('/test/repo', 'origin');
-
-        expect(lastInvokedCommand).to.equal('prune_remote_tracking_branches');
-        expect(
-          (lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin,
-        ).to.equal('ghp_test');
-      });
     });
 
     it('returns success when auto-fetch is started', async () => {
