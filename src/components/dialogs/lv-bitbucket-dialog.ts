@@ -617,6 +617,12 @@ export class LvBitbucketDialog extends LitElement {
   // the next save creates a NEW account). Guards the store subscription from
   // re-selecting an existing account on a background emit.
   private isAddingAccount = false;
+  // The account the in-flight OAuth flow targets, pinned when the flow STARTS.
+  // The browser round-trip is async, so `selectedAccountId` may point at a
+  // different account by the time `oauth-complete` lands — writing the new token
+  // there would route it onto the wrong account.
+  private oauthTargetAccountId: string | null | undefined;
+  private oauthTargetWasAddingAccount: boolean | undefined;
 
   // Create PR form
   @state() private createPrTitle = '';
@@ -649,6 +655,11 @@ export class LvBitbucketDialog extends LitElement {
         if (state.status === 'error') {
           this.error = state.error ?? 'Bitbucket sign-in failed';
           showToast(this.error, 'error');
+          // The flow is over and can no longer emit `oauth-complete`, so release
+          // the pinned target — otherwise a later completion would be attributed
+          // to whichever account was selected when this failed flow started.
+          this.oauthTargetAccountId = undefined;
+          this.oauthTargetWasAddingAccount = undefined;
         }
       }
     });
@@ -1290,6 +1301,10 @@ export class LvBitbucketDialog extends LitElement {
     }
 
     this.error = null;
+    this.oauthTargetAccountId = this.selectedAccountId;
+    this.oauthTargetWasAddingAccount = this.isAddingAccount;
+    // `startOAuth` never rejects — it reports failure through the OAuth state
+    // subscriber — so the pinned target is cleared there, not here.
     await oauthService.startOAuth('bitbucket', clientId);
   }
 
@@ -1304,6 +1319,10 @@ export class LvBitbucketDialog extends LitElement {
     oauthService.cancelOAuth('bitbucket');
     this.oauthState = { status: 'idle' };
     this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
   }
 
   /**
@@ -1313,9 +1332,24 @@ export class LvBitbucketDialog extends LitElement {
     // OAuth can complete after the dialog was closed; still persist the account
     // but surface a toast instead of the (invisible) inline status.
     const wasOpen = this.open;
+    const targetAccountId =
+      this.oauthTargetAccountId !== undefined
+        ? this.oauthTargetAccountId
+        : this.selectedAccountId;
+    const targetWasAddingAccount =
+      this.oauthTargetWasAddingAccount ?? this.isAddingAccount;
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
 
     this.isLoading = true;
     this.error = null;
+    const targetAccountExists = (): boolean =>
+      !targetAccountId ||
+      getAccountsByType('bitbucket').some((account) => account.id === targetAccountId);
+    const selectionChangedDuringOAuth = (): boolean =>
+      this.selectedAccountId !== targetAccountId ||
+      this.isAddingAccount !== targetWasAddingAccount;
+    let applyOAuthResultToSelection = false;
 
     try {
       // For Bitbucket OAuth, we need to verify the token and get user info
@@ -1327,17 +1361,22 @@ export class LvBitbucketDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
+      if (!targetAccountExists()) {
+        this.error = 'The Bitbucket account was removed before sign-in completed. Please sign in again.';
+        showToast(this.error, 'error');
+        return;
+      }
 
       // Get workspace from detected repo or user
       const workspace = this.detectedRepo?.workspace || user?.username || '';
 
-      // Find existing account for this workspace, or use selected account.
-      // When the user explicitly chose "Add account", never match an existing
-      // same-workspace account — that would clobber it instead of creating the
-      // new account they asked for.
-      const existingAccount = this.selectedAccountId
-        ? getAccountById(this.selectedAccountId)
-        : this.isAddingAccount
+      // Find existing account for this workspace, or use the account the flow
+      // targeted. When the user explicitly chose "Add account", never match an
+      // existing same-workspace account — that would clobber it instead of
+      // creating the new account they asked for.
+      const existingAccount = targetAccountId
+        ? getAccountById(targetAccountId)
+        : targetWasAddingAccount
           ? undefined
           : this.accounts.find((a) =>
               a.config.type === 'bitbucket' &&
@@ -1353,6 +1392,14 @@ export class LvBitbucketDialog extends LitElement {
           tokens.refreshToken,
           tokens.expiresIn
         );
+        if (!targetAccountExists()) {
+          // Deleted between the existence check and the write — don't leave an
+          // orphaned credential behind for an account that no longer exists.
+          await credentialService.deleteAccountToken('bitbucket', existingAccount.id);
+          this.error = 'The Bitbucket account was removed before sign-in completed. Please sign in again.';
+          showToast(this.error, 'error');
+          return;
+        }
 
         // Update cached user info
         if (user) {
@@ -1364,7 +1411,10 @@ export class LvBitbucketDialog extends LitElement {
           });
         }
 
-        this.selectedAccountId = existingAccount.id;
+        applyOAuthResultToSelection = !selectionChangedDuringOAuth();
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = existingAccount.id;
+        }
       } else {
         // Create new global account
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
@@ -1390,12 +1440,31 @@ export class LvBitbucketDialog extends LitElement {
           tokens.expiresIn
         );
 
-        this.selectedAccountId = savedAccount.id;
-        // The new account now exists and is selected — the add flow is complete.
-        this.isAddingAccount = false;
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
         this.syncBitbucketAccounts();
+        applyOAuthResultToSelection =
+          (this.selectedAccountId === targetAccountId ||
+            this.selectedAccountId === savedAccount.id) &&
+          this.isAddingAccount === targetWasAddingAccount;
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = savedAccount.id;
+          // The new account now exists and is selected — the add flow is complete.
+          this.isAddingAccount = false;
+        }
+      }
+
+      if (!applyOAuthResultToSelection) {
+        // The user moved on to a different account mid-flow: the token is saved
+        // on the account the flow targeted, but the dialog's visible state (and
+        // `oauthToken`, which drives API calls) must keep describing the account
+        // they are looking at now.
+        this.oauthState = { status: 'idle' };
+        showToast(
+          user?.username ? `Connected Bitbucket account @${user.username}` : 'Connected Bitbucket account',
+          'success'
+        );
+        return;
       }
 
       // Force UI update
@@ -1420,6 +1489,9 @@ export class LvBitbucketDialog extends LitElement {
         await this.loadAllData();
       }
     } catch (err) {
+      if (targetAccountId && !targetAccountExists()) {
+        await credentialService.deleteAccountToken('bitbucket', targetAccountId);
+      }
       this.error = err instanceof Error ? err.message : 'Failed to complete OAuth';
     } finally {
       this.isLoading = false;

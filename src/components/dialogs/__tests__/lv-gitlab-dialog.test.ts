@@ -936,6 +936,239 @@ describe('lv-gitlab-dialog', () => {
     });
   });
 
+  // The browser round-trip is asynchronous: the user can switch accounts (or
+  // start "Add account", or delete the account) between clicking "Sign in with
+  // GitLab" and the callback landing. The flow must stay bound to the account it
+  // started on instead of writing the new token onto whatever is selected then.
+  describe('OAuth target pinning (regression)', () => {
+    interface GitLabDialogInternals {
+      oauthTargetAccountId: string | null | undefined;
+      oauthTargetWasAddingAccount: boolean | undefined;
+      oauthTargetInstanceUrl: string | undefined;
+      selectedAccountId: string | null;
+      isAddingAccount: boolean;
+      instanceUrlInput: string;
+      error: string | null;
+      handleStartOAuth(): Promise<void>;
+      handleOAuthComplete(
+        tokens: { accessToken: string; refreshToken?: string; expiresIn?: number },
+        instanceUrl?: string
+      ): Promise<void>;
+    }
+
+    const secondAccount = createTestAccount({
+      id: 'gl-acc-2',
+      name: 'Personal GitLab',
+      integrationType: 'gitlab',
+      config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+      isDefault: false,
+    });
+
+    /**
+     * Hold `check_gitlab_connection_with_token` open so the test can mutate the
+     * dialog's selection while an OAuth completion is still in flight.
+     */
+    function gateVerification(): { started: Promise<void>; release: () => void } {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'check_gitlab_connection') {
+          markStarted();
+          await gate;
+        }
+        return previous(command, args);
+      };
+      return { started, release };
+    }
+
+    it('pins the selected account and instance when the sign-in flow starts', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return { authorizeUrl: 'https://gitlab.example.com/oauth/authorize', state: 'st-1' };
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.instanceUrlInput = 'https://gitlab.example.com';
+
+      await internals.handleStartOAuth();
+
+      expect(internals.oauthTargetAccountId, 'account pinned at start').to.equal('gl-acc-1');
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pinned at start').to.be.false;
+      expect(internals.oauthTargetInstanceUrl, 'instance pinned at start').to.equal(
+        'https://gitlab.example.com'
+      );
+    });
+
+    it('releases the pinned target when the sign-in flow fails to start', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      // A pin left over from an earlier attempt must not survive a flow that
+      // never started — a later completion would otherwise be attributed to it.
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      // `startOAuth` never rejects — it reports the failure through the OAuth
+      // state subscriber.
+      await internals.handleStartOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetInstanceUrl, 'instance pin released').to.be.undefined;
+    });
+
+    it('writes the token to the account the flow started on, not a later selection', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount, secondAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount, secondAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'glpat_reauth', refreshToken: 'r-1', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      // The user switches to a different account while the browser round-trip
+      // is still outstanding.
+      internals.selectedAccountId = 'gl-acc-2';
+      gate.release();
+      await completion;
+
+      expect(keyringStore.get('gitlab_token_gl-acc-1')).to.equal('glpat_reauth');
+      expect(
+        keyringStore.has('gitlab_token_gl-acc-2'),
+        'the newly selected account is not overwritten'
+      ).to.be.false;
+      expect(internals.selectedAccountId, 'newer selection preserved').to.equal('gl-acc-2');
+    });
+
+    it('keeps a newer add-account flow when a re-auth completes', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'glpat_reauth_2', refreshToken: 'r-2', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      internals.selectedAccountId = null;
+      internals.isAddingAccount = true;
+      gate.release();
+      await completion;
+
+      expect(keyringStore.get('gitlab_token_gl-acc-1')).to.equal('glpat_reauth_2');
+      expect(internals.selectedAccountId, 'add-account selection preserved').to.be.null;
+      expect(internals.isAddingAccount, 'add-account flow preserved').to.be.true;
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status,
+        'the signed-in account is still marked connected'
+      ).to.equal('connected');
+    });
+
+    it('does not recreate an account deleted during the OAuth round-trip', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      invokeHistory.length = 0;
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'orphan-token', refreshToken: 'r-3', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      // The account is deleted from the profile manager mid-flow.
+      unifiedProfileStore.getState().setAccounts([]);
+      keyringStore.delete('gitlab_token_gl-acc-1');
+      gate.release();
+      await completion;
+
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'a deleted account is not resurrected as a new one'
+      ).to.be.false;
+      expect(
+        keyringStore.has('gitlab_token_gl-acc-1'),
+        'no orphaned credential remains'
+      ).to.be.false;
+      expect(internals.error).to.match(/account was removed/i);
+    });
+  });
+
   describe('Create feedback toasts (regression)', () => {
     it('shows a success toast after creating a merge request', async () => {
       unifiedProfileStore.getState().setAccounts([mockAccount]);
