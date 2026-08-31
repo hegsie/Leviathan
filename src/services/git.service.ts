@@ -1191,13 +1191,28 @@ export async function fetch(
 export async function pull(
   args?: PullCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  // Same reason `fetch` resolves first: no pull surface in the app names a
+  // remote, and the backend pulls from the branch's UPSTREAM. Gating on the
+  // "origin" fallback checked the allowlist against the wrong host and handed
+  // origin's token to whatever host the upstream actually lives on.
+  if (args?.path && !args.remote) {
+    const resolved = await invokeCommand<string>('get_pull_remote', {
+      path: args.path,
+      ...(args.branch ? { branch: args.branch } : {}),
+    });
+    if (resolved.success && resolved.data) {
+      args.remote = resolved.data;
+    }
+  }
   if (!await checkNetworkPermission('pull', args?.path ?? null, args?.remote)) {
     return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    const token = args.remote
+      ? await getRemoteToken(args.path, args.remote)
+      : await getRepoToken(args.path);
     if (token) {
       args.token = token;
     }
@@ -1226,13 +1241,25 @@ export async function pull(
 export async function push(
   args?: PushCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  // No push surface names a remote either, and the backend follows
+  // branch.<n>.pushRemote / remote.pushDefault / branch.<n>.remote — none of
+  // which need be origin. Resolve it up front so the gate and the credential
+  // are scoped to the host this push will really reach.
+  if (args?.path && !args.remote) {
+    const resolved = await invokeCommand<string>('get_push_remote', { path: args.path });
+    if (resolved.success && resolved.data) {
+      args.remote = resolved.data;
+    }
+  }
   if (!await checkNetworkPermission('push', args?.path ?? null, args?.remote)) {
     return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    const token = args.remote
+      ? await getRemoteToken(args.path, args.remote)
+      : await getRepoToken(args.path);
     if (token) {
       args.token = token;
     }

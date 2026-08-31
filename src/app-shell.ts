@@ -1126,7 +1126,14 @@ export class AppShell extends LitElement {
           // change every interval while the ahead/behind badge stays frozen —
           // and, without this, saying nothing at all. Clear the dead loop and
           // tell the user their counts are stale.
-          if (immediate) {
+          //
+          // Only while this restart is still the current one, the same guard
+          // the success path below applies: `startAutoFetch` is several IPC
+          // round trips, and the repo can be closed — or the loop legitimately
+          // restarted — while they are in flight. Reporting a superseded
+          // restart's failure toasts about a repo the user has already shut,
+          // and stops a loop somebody else just started.
+          if (immediate && this.autoFetchStartSeq.get(path) === sequence) {
             this.reportAutoFetchFailure(path, r.error?.message);
             await gitService.stopAutoFetch(path);
           }

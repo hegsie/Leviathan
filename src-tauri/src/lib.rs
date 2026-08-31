@@ -335,6 +335,8 @@ pub fn run() {
             commands::staging::get_sorted_file_status,
             commands::remote::get_remotes,
             commands::remote::get_fetch_remote,
+            commands::remote::get_pull_remote,
+            commands::remote::get_push_remote,
             commands::remote::add_remote,
             commands::remote::remove_remote,
             commands::remote::rename_remote,

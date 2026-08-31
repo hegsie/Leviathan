@@ -353,6 +353,113 @@ describe('network security gate', () => {
     });
   });
 
+  /**
+   * No pull or push surface in the app names a remote, and the backend does
+   * NOT default to origin: a pull follows the branch's upstream, and a push
+   * follows pushRemote/pushDefault/branch.<n>.remote. Gating on origin's URL
+   * therefore checked the allowlist against a host the operation never
+   * contacts — the bypass this suite exists to prevent.
+   */
+  describe('the allowlist follows the remote the operation will really contact', () => {
+    /** The ordinary fork layout: origin is your fork, the branch tracks elsewhere. */
+    const installForkLayout = (resolved: string) => {
+      mockInvoke = (command) =>
+        Promise.resolve(
+          command === 'get_pull_remote' || command === 'get_push_remote'
+            ? resolved
+            : command === 'get_remotes'
+              ? [
+                  { name: 'origin', url: 'https://github.com/me/app.git', pushUrl: null },
+                  { name: 'upstream', url: 'https://gitlab.example.com/acme/app.git', pushUrl: null },
+                ]
+              : null,
+        );
+    };
+
+    it('blocks a pull whose upstream remote is off the list', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success, 'allowlisting github.com must not permit gitlab.example.com').to.equal(
+        false,
+      );
+      expect(invokeHistory.some((c) => c.command === 'pull')).to.equal(false);
+    });
+
+    it('blocks a push whose push remote is off the list', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'push')).to.equal(false);
+    });
+
+    it('allows — and names — a pull to the resolved remote when it is on the list', async () => {
+      installForkLayout('origin');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'pull');
+      expect(call, 'pull reaches the backend').to.not.be.undefined;
+      // Passed on rather than dropped: the backend must act on the same remote
+      // the gate just approved, not re-resolve and possibly pick another.
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('allows — and names — a push to the resolved remote when it is on the list', async () => {
+      installForkLayout('origin');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'push');
+      expect(call, 'push reaches the backend').to.not.be.undefined;
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('leaves an explicitly named remote alone', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      await push({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(
+        invokeHistory.some((c) => c.command === 'get_push_remote'),
+        'a caller that already knows the remote must not be second-guessed',
+      ).to.equal(false);
+      const call = invokeHistory.find((c) => c.command === 'push');
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('falls back to the old behaviour when the remote cannot be resolved', async () => {
+      // A detached HEAD, or a repo git cannot open: the resolve command fails.
+      // The operation must still run (the backend reports the real problem) —
+      // it must not be silently swallowed here.
+      mockInvoke = (command) => {
+        if (command === 'get_pull_remote') return Promise.reject(new Error('not on a branch'));
+        if (command === 'get_remotes') {
+          return Promise.resolve([{ name: 'origin', url: ALLOWED_URL, pushUrl: null }]);
+        }
+        return Promise.resolve(null);
+      };
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'pull');
+      expect(call, 'pull still runs').to.not.be.undefined;
+      expect((call!.args as Record<string, unknown>).remote).to.equal(undefined);
+    });
+  });
+
   describe('credentials reach the operations that need them', () => {
     it('pushTag forwards a resolved token, like push does', async () => {
       mockInvoke = (command: string) => {

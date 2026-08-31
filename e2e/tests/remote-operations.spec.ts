@@ -11,7 +11,7 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository, defaultMockData, withConflicts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
-import { startCommandCapture, findCommand, injectCommandError, waitForCommand } from '../fixtures/test-helpers';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
 // Helper function to create branches with ahead/behind status
@@ -391,6 +391,10 @@ test.describe('Fetch Operation', () => {
 
     const fetchCommands = await findCommand(page, 'fetch');
     expect(fetchCommands.length).toBeGreaterThan(0);
+    // Whatever the repo resolved is what the backend must be told to fetch —
+    // an unresolved remote leaves the backend to guess a second time, against
+    // config the network gate never saw.
+    expect((fetchCommands[0].args as { remote?: string }).remote).toBe('origin');
 
     // After fetch completes, the app should refresh remote status to update badges
     await waitForCommand(page, 'get_remote_status');
@@ -411,6 +415,82 @@ test.describe('Fetch Operation', () => {
     await expect(toast).toContainText(/error|fail|unable/i);
 
     // Fetch button should be re-enabled so user can retry
+    await expect(fetchButton).toBeEnabled();
+  });
+});
+
+// ============================================================================
+// Remote selection — fetch/pull/push must target the remote the repo resolves,
+// not a hard-coded "origin". In the ordinary fork layout (origin = your fork,
+// the branch tracking a canonical remote elsewhere) those are different hosts.
+// ============================================================================
+
+test.describe('Remote selection for fetch/pull/push', () => {
+  /** origin is the fork; the checked-out branch tracks `upstream`. */
+  const forkRemotes = {
+    remotes: [
+      { name: 'origin', url: 'https://github.com/me/repo.git', pushUrl: null },
+      { name: 'upstream', url: 'https://gitlab.example.test/acme/repo.git', pushUrl: null },
+    ],
+  } as Partial<typeof defaultMockData>;
+
+  test('fetch targets the branch upstream, not origin', async ({ page }) => {
+    await setupOpenRepository(page, forkRemotes);
+    await startCommandCaptureWithMocks(page, { get_fetch_remote: 'upstream', fetch: null });
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    const [call] = await findCommand(page, 'fetch');
+    expect((call.args as { remote?: string }).remote).toBe('upstream');
+
+    // And the operation completes visibly: status is re-read and the button
+    // comes back, rather than the app hanging on a remote it never resolved.
+    await waitForCommand(page, 'get_remote_status');
+    await expect(fetchButton).toBeEnabled();
+  });
+
+  test('pull targets the branch upstream, not origin', async ({ page }) => {
+    await setupOpenRepository(page, forkRemotes);
+    await startCommandCaptureWithMocks(page, { get_pull_remote: 'upstream', pull: null });
+
+    const pullButton = page.getByRole('button', { name: /Pull/i });
+    await pullButton.click();
+    await waitForCommand(page, 'pull');
+
+    const [call] = await findCommand(page, 'pull');
+    expect((call.args as { remote?: string }).remote).toBe('upstream');
+    await expect(pullButton).toBeEnabled();
+  });
+
+  test('push targets the resolved push remote, not origin', async ({ page }) => {
+    await setupOpenRepository(page, forkRemotes);
+    await startCommandCaptureWithMocks(page, { get_push_remote: 'upstream', push: null });
+
+    const pushButton = page.getByRole('button', { name: /^Push/i });
+    await pushButton.click();
+    await waitForCommand(page, 'push');
+
+    const [call] = await findCommand(page, 'push');
+    expect((call.args as { remote?: string }).remote).toBe('upstream');
+    await expect(pushButton).toBeEnabled();
+  });
+
+  test('a fetch whose remote cannot be resolved still runs and reports', async ({ page }) => {
+    // A detached HEAD, or a repo with no remote at all: resolution fails. The
+    // fetch must still reach the backend so the REAL error is what the user
+    // sees — not a silent no-op here.
+    await setupOpenRepository(page, forkRemotes);
+    await startCommandCapture(page);
+    await injectCommandError(page, 'get_fetch_remote', 'Remote not found: origin');
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    const [call] = await findCommand(page, 'fetch');
+    expect((call.args as { remote?: string }).remote).toBeUndefined();
     await expect(fetchButton).toBeEnabled();
   });
 });

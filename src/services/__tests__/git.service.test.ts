@@ -4,6 +4,8 @@ import {
   isClosingKeyword,
   getAdoToken,
   fetch as gitFetch,
+  pull as gitPull,
+  push as gitPush,
   resetAdoGitCredentialSyncCache,
 } from '../git.service.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
@@ -511,7 +513,7 @@ describe('git.service - getRepoToken keyring sync (via fetch)', () => {
 
 describe('git.service - getRepoToken repo-aware account resolution', () => {
   const keyring = new Map<string, string>();
-  /** The token `fetch` actually sent to the backend — i.e. the one that authenticates. */
+  /** The token fetch/pull/push actually sent to the backend — i.e. the one that authenticates. */
   let fetchToken: string | undefined;
   /** Args the backend resolver was invoked with, or null when it was never called. */
   let resolverArgs: Record<string, unknown> | null;
@@ -550,6 +552,9 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     preferredAccount?: IntegrationAccount | null | 'throw';
     /** The remote `fetch` resolves when the caller names none. */
     fetchRemote?: string;
+    /** The remote `pull` / `push` resolve when the caller names none. */
+    pullRemote?: string;
+    pushRemote?: string;
   }
 
   function installMock(opts: MockOptions) {
@@ -560,6 +565,8 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       // this unmocked sent every assertion below down a branch the real
       // toolbar and background fetches no longer use.
       if (command === 'get_fetch_remote') return opts.fetchRemote ?? 'origin';
+      if (command === 'get_pull_remote') return opts.pullRemote ?? 'origin';
+      if (command === 'get_push_remote') return opts.pushRemote ?? 'origin';
       if (command === 'detect_github_repo') return opts.detectGitHub ?? null;
       if (command === 'detect_ado_repo') return opts.detectAdo ?? null;
       if (command === 'detect_gitlab_repo') return opts.detectGitLab ?? null;
@@ -578,7 +585,10 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
       if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
       if (command === 'store_git_credentials') { credWrites.push(a!.url as string); return null; }
-      if (command === 'fetch') { fetchToken = a?.token as string | undefined; return null; }
+      if (command === 'fetch' || command === 'pull' || command === 'push') {
+        fetchToken = a?.token as string | undefined;
+        return null;
+      }
       return null;
     };
   }
@@ -723,6 +733,67 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
 
     expect(fetchToken, 'an ADO token must not be offered to github.com').to.be.undefined;
+  });
+
+  /**
+   * The fork layout the app cannot avoid: `origin` is your GitHub fork, the
+   * branch tracks `upstream` on an unrelated host. Neither pull nor push has a
+   * remote selector, so both resolve the remote themselves — and the token
+   * must follow that remote, not origin.
+   */
+  const FORK_REMOTES = [
+    { name: 'origin', url: GH_URL, pushUrl: null },
+    { name: 'upstream', url: 'https://git.other.test/acme/app.git', pushUrl: null },
+  ];
+
+  it("withholds origin's token from a pull that follows the branch's upstream", async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO, // matches `origin` only
+      remotes: FORK_REMOTES,
+      pullRemote: 'upstream',
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitPull({ path: '/repo', silent: true });
+
+    expect(fetchToken, "a GitHub PAT must not be sent to git.other.test").to.be.undefined;
+  });
+
+  it("withholds origin's token from a push aimed at another host", async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      remotes: FORK_REMOTES,
+      pushRemote: 'upstream',
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitPush({ path: '/repo', silent: true });
+
+    expect(fetchToken, "a GitHub PAT must not be sent to git.other.test").to.be.undefined;
+  });
+
+  it('still authenticates a pull to the resolved remote on the same host', async () => {
+    const { work } = setupGitHubAccounts();
+    installMock({
+      detectGitHub: { owner: 'acme', repo: 'upstream', remoteName: 'upstream' },
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: 'https://github.com/acme/upstream.git', pushUrl: null },
+      ],
+      pullRemote: 'upstream',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitPull({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'scoping must not cost the credential its legitimate use').to.equal(
+      'work-tok',
+    );
   });
 
   it('still resolves by account URL patterns when the profile lookup fails', async () => {

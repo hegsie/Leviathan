@@ -514,6 +514,43 @@ describe('app-shell multi-repo behavior', () => {
       ).to.be.undefined;
       expect(lifecycleOrder()).to.deep.equal(['stop_auto_fetch']);
     });
+
+    it('stays quiet when a superseded fetch-remote restart fails', async () => {
+      // The restart's own resolution is several IPC round trips long, and the
+      // user can close the tab (or a newer start can be issued) inside that
+      // window. Reporting the failure then toasts about a repo that is already
+      // gone and tears down a loop the supersession owns — so the failure
+      // branch has to check the sequence exactly as the success branch does.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        // The supersession has to land WHILE the restart is resolving, which
+        // is the only window that can go wrong: `get_remotes` is one of the
+        // round trips `startAutoFetch` makes before it reaches the backend.
+        // Returning nothing then fails that restart.
+        mockResponses.get_remotes = () => {
+          (el as any).stopAutoFetchLogged('/repo/one');
+          return [];
+        };
+
+        (el as any).startAutoFetchLogged('/repo/one', 5, true);
+
+        await waitForCommand('stop_auto_fetch');
+        await new Promise((r) => setTimeout(r, 20));
+
+        expect(
+          uiStore.getState().toasts.filter((t) => t.message.includes('auto-fetch failed')),
+          'a superseded restart must not report its failure'
+        ).to.have.length(0);
+        expect(
+          lifecycleOrder(),
+          'only the supersession stops the loop — the dead restart must not stop it again'
+        ).to.deep.equal(['stop_auto_fetch']);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
   });
 
   describe('background autofetch results update tab badge data', () => {

@@ -519,6 +519,15 @@ function createMockHandler(mocks: typeof defaultMockData) {
       case 'get_remotes':
         return mocks.remotes;
 
+      // The remote a fetch/pull/push resolves to before the network gate runs.
+      // Unmocked these fell through to the default arm's `null`, so every
+      // remote operation silently ran the "could not resolve" fallback and no
+      // test ever saw the remote the app actually picked.
+      case 'get_fetch_remote':
+      case 'get_pull_remote':
+      case 'get_push_remote':
+        return mocks.remotes[0]?.name ?? 'origin';
+
       case 'fetch':
         return null;
       case 'push': {
@@ -841,6 +850,10 @@ export async function setupTauriMocks(
             return state.tags;
           case 'get_remotes':
             return state.remotes;
+          case 'get_fetch_remote':
+          case 'get_pull_remote':
+          case 'get_push_remote':
+            return state.remotes[0]?.name ?? 'origin';
           case 'get_profiles':
             return [
               { id: 'default', name: 'Default', gitName: 'Test User', gitEmail: 'test@example.com' },
