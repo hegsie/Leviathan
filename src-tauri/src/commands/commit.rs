@@ -1144,6 +1144,25 @@ async fn edit_commit_date_with_rebase(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // A non-zero exit is not always "the rebase never started". A merge
+        // target is linearized rather than listed, so git replays the merged-in
+        // side onto the first parent — and that replay can CONFLICT, stopping
+        // the rebase on a detached HEAD with a conflicted index: exactly the
+        // state the restore below exists to prevent, reached through the one
+        // exit that never ran it. Undo it, the way the amend failure does.
+        // Guarding on the state leaves the common "rebase refused to start on a
+        // dirty tree" case, which has nothing to abort, untouched; the caller
+        // has already refused to get this far unless the repository was Clean,
+        // so a rebase in progress here can only be the one started above.
+        let rebase_in_progress = git2::Repository::open(Path::new(path))
+            .map(|r| r.state() != git2::RepositoryState::Clean)
+            .unwrap_or(false);
+        if rebase_in_progress {
+            let _ = crate::utils::create_command("git")
+                .current_dir(path)
+                .args(["rebase", "--abort"])
+                .output();
+        }
         return Err(LeviathanError::OperationFailed(format!(
             "Rebase failed: {}",
             stderr
@@ -3518,6 +3537,92 @@ mod tests {
                 .iter()
                 .all(|s| s.status() == git2::Status::CURRENT),
             "the working tree must be left clean"
+        );
+    }
+
+    /// The merge test above gives the side branch a file of its own, so the
+    /// linearizing replay can never conflict and `git rebase -i` always exits
+    /// 0. Give the side branch the SAME file the first-parent line writes and
+    /// the replay conflicts: git stops mid-rebase on a detached HEAD with a
+    /// conflicted index and exits non-zero, taking the one exit that runs
+    /// before any of the restore logic. Returning there without aborting left
+    /// the user in exactly the state the restore exists to prevent.
+    #[tokio::test]
+    async fn test_edit_commit_date_on_a_conflicting_merge_commit_aborts_the_rebase() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("a.txt", "a")]);
+
+        // Built through git2 so the side commit never touches the working tree,
+        // and writing m.txt — the same file `main work` adds below — so that
+        // replaying it onto the first parent is an add/add conflict.
+        let side = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let base = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let blob = git_repo.blob(b"from the side\n").unwrap();
+            let mut builder = git_repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+            builder.insert("m.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            git_repo
+                .commit(None, &sig, &sig, "side work", &tree, &[&base])
+                .unwrap()
+        };
+        repo.create_commit("main work", &[("m.txt", "from the first parent\n")]);
+        let merge = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let other = git_repo.find_commit(side).unwrap();
+            let tree = head.tree().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    "Merge side",
+                    &tree,
+                    &[&head, &other],
+                )
+                .unwrap()
+        };
+        repo.create_commit("descendant", &[("d.txt", "d")]);
+        let before = repo.head_oid();
+
+        let err = edit_commit_date(
+            repo.path_str(),
+            merge.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await
+        .expect_err("a rebase that stopped on a conflict is not a date edit");
+
+        assert!(err.to_string().contains("Rebase failed"), "{err}");
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "a rebase that failed must not be left in progress"
+        );
+        assert_eq!(
+            git_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            before,
+            "a refused date edit must leave the branch tip where it was"
+        );
+        assert!(
+            history(&repo).contains(&"Merge side".to_string()),
+            "the merge commit must still be on the branch: {:?}",
+            history(&repo)
+        );
+        assert!(
+            git_repo
+                .statuses(None)
+                .unwrap()
+                .iter()
+                .all(|s| s.status() == git2::Status::CURRENT),
+            "the working tree must be left clean, with no conflict markers"
         );
     }
 
