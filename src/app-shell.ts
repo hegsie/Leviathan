@@ -2473,8 +2473,16 @@ export class AppShell extends LitElement {
     try {
       const remoteResult = await gitService.getPushRemote(repoPath);
       if (!remoteResult.success || !remoteResult.data) {
+        // A repo with no remote cannot push a tag anywhere. The resolver falls
+        // back to the literal `origin`, so its answer — "Remote not found:
+        // origin" — names a remote the user never configured, which reads as a
+        // bug rather than as missing setup. Translated exactly as the tag list
+        // translates it, so both tag-push surfaces say the same thing.
+        const remotes = await gitService.getRemotes(repoPath);
         showToast(
-          `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+          remotes.success && (remotes.data?.length ?? 0) === 0
+            ? 'No remotes configured. Add a remote before pushing tags.'
+            : `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
           'error',
         );
         return;
