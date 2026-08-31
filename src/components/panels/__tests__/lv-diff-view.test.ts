@@ -593,8 +593,10 @@ describe('lv-diff-view', () => {
       // context, but the pane still shows the file the stage was applied to.
       const full = view.handleLoadFullDiff();
       stage.resolve(undefined);
-      expect(await apply, 'the stage was applied').to.be.true;
+      // The apply now re-fetches once it lands, so the reload has to be able to
+      // answer that request too.
       reload.resolve(makeDiffFile());
+      expect(await apply, 'the stage was applied').to.be.true;
       await full;
       await flushAsyncUpdates(el);
 
@@ -626,8 +628,8 @@ describe('lv-diff-view', () => {
       const apply = view.handleStageHunk(view.diff.hunks[0], new Event('click'));
       const full = view.handleLoadFullDiff();
       stage.resolve(undefined);
-      await apply;
       reload.resolve(makeDiffFile());
+      await apply;
       await full;
       await flushAsyncUpdates(el);
 
@@ -635,6 +637,104 @@ describe('lv-diff-view', () => {
         view.selectedLines.size,
         'line indexes invalidated by the hunk stage survived into the renumbered diff',
       ).to.equal(0);
+    });
+
+    it('re-fetches after a hunk stage that raced a same-file reload', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const view = el as unknown as {
+        diff: DiffFile | null;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+        handleLoadFullDiff: () => Promise<void>;
+      };
+      const stage = deferred<unknown>();
+      const staleReload = deferred<DiffFile>();
+      const staleRequested = deferred<void>();
+      const preApply = makeDiffFile({ hunks: [makeDiffHunk({ header: '@@ pre-apply @@' })] });
+      const postApply = makeDiffFile({ hunks: [makeDiffHunk({ header: '@@ post-apply @@' })] });
+      let diffCalls = 0;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') {
+          diffCalls++;
+          // The first reload asked for the diff before the stage landed, so it
+          // can only answer with the pre-apply content.
+          if (diffCalls === 1) {
+            staleRequested.resolve(undefined);
+            return staleReload.promise;
+          }
+          return postApply;
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const hunk = view.diff!.hunks[0];
+      const apply = view.handleStageHunk(hunk, new Event('click'));
+      const full = view.handleLoadFullDiff();
+      await staleRequested.promise;
+      stage.resolve(undefined);
+      await apply;
+      staleReload.resolve(preApply);
+      await full;
+      await settleAsyncUpdates(el);
+
+      expect(
+        view.diff?.hunks[0]?.header,
+        'the pre-apply diff a racing reload had already asked for was left in the pane',
+      ).to.equal('@@ post-apply @@');
+    });
+
+    it('clears the pane when a stage that raced a same-file reload emptied the file', async () => {
+      const el = await renderDiffView({ file: makeStatusEntry({ isStaged: false }) });
+      const view = el as unknown as {
+        diff: DiffFile | null;
+        handleStageHunk: (hunk: DiffHunk, event: Event) => Promise<void>;
+        handleLoadFullDiff: () => Promise<void>;
+      };
+      const stage = deferred<unknown>();
+      const staleReload = deferred<DiffFile>();
+      const staleRequested = deferred<void>();
+      let cleared = 0;
+      el.addEventListener('file-cleared', () => cleared++);
+      let diffCalls = 0;
+
+      mockInvoke = async (command: string) => {
+        if (command === 'stage_hunk') return stage.promise;
+        if (command === 'get_file_diff') {
+          diffCalls++;
+          if (diffCalls === 1) {
+            staleRequested.resolve(undefined);
+            return staleReload.promise;
+          }
+          // The stage took the file's last unstaged hunk, so there is no
+          // unstaged diff left for the backend to answer with.
+          throw {
+            code: 'COMMAND_ERROR',
+            message: "File 'src/main.ts' not found in diff. Staged: false. Found 0 files: []",
+          };
+        }
+        if (command === 'get_diff_tool') return { tool: null };
+        return null;
+      };
+
+      const hunk = view.diff!.hunks[0];
+      const apply = view.handleStageHunk(hunk, new Event('click'));
+      const full = view.handleLoadFullDiff();
+      await staleRequested.promise;
+      stage.resolve(undefined);
+      await apply;
+      staleReload.resolve(makeDiffFile());
+      await full;
+      await settleAsyncUpdates(el);
+
+      expect(cleared, 'a fully applied file left the pane bound after a racing reload').to.equal(1);
+      expect(el.file, 'the fully applied file stayed bound to the pane').to.be.null;
+      expect(view.diff, 'the emptied diff stayed painted in the pane').to.be.null;
+      expect(
+        el.shadowRoot!.textContent,
+        'the backend\'s "not found in diff" text was painted into the pane',
+      ).to.not.contain('not found in diff');
     });
 
     it('keeps a selection made in another file after an apply to the previous one', async () => {

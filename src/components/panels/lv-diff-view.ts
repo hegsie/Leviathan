@@ -1190,10 +1190,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    *
    * Deliberately weaker than `isSameWorkingDiffContext`: it ignores the loaded
    * diff, so it stays true while a reload for the SAME file is still in flight
-   * (the "Load full diff" link can start one mid-apply, and it leaves no loaded
-   * context behind). The apply itself invalidated every positional
-   * `${hunkIndex}-${lineIndex}` key, so the selection must be dropped in that
-   * case too - whichever diff lands renumbers them.
+   * (the "Load full diff" link is not disabled during an apply, so it can start
+   * one mid-apply, and it leaves no loaded context behind). That in-flight
+   * reload asked for the diff BEFORE the apply landed, so gating on the loaded
+   * context would both keep the invalidated positional
+   * `${hunkIndex}-${lineIndex}` keys and let the pre-apply content settle with
+   * nothing left to correct it - `status-changed` only re-binds the file when
+   * its status or conflicted flag changed, which a partial apply does not do.
+   * Re-running `loadWorkingDiff()` bumps `diffRequestId`, so the newer fetch
+   * discards the superseded one.
    */
   private isStillOnAppliedFile(context: {
     repositoryPath: string;
@@ -1996,8 +2001,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           bubbles: true,
           composed: true,
         }));
-        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
-        if (this.isSameWorkingDiffContext(context)) {
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
@@ -2036,8 +2041,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           bubbles: true,
           composed: true,
         }));
-        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
-        if (this.isSameWorkingDiffContext(context)) {
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
@@ -2075,8 +2080,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         // Reload diff - if file is fully staged, clear the view
-        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
-        if (this.isSameWorkingDiffContext(context)) {
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
@@ -2113,8 +2118,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         // Reload diff - if nothing is left staged for this file, clear the view
-        if (this.isStillOnAppliedFile(context)) this.selectedLines = new Set();
-        if (this.isSameWorkingDiffContext(context)) {
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
           await this.loadWorkingDiff();
           this.clearIfFullyApplied(context);
         }
