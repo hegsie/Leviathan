@@ -237,6 +237,29 @@ Pre-built binaries are available from the [Releases](https://github.com/hegsie/L
 | Linux | `.deb` or `.AppImage` |
 | Arch Linux | [AUR](https://aur.archlinux.org/packages/leviathan-bin) |
 
+### Package Managers
+
+New releases are published to package managers automatically (see
+[docs/packaging.md](docs/packaging.md) for how this works).
+
+#### Windows (winget)
+
+```powershell
+winget install hegsie.Leviathan
+```
+
+#### Windows (Scoop)
+
+```powershell
+scoop install https://raw.githubusercontent.com/hegsie/Leviathan/main/packaging/scoop/leviathan.json
+```
+
+#### macOS (Homebrew, Apple Silicon)
+
+```bash
+brew install --cask hegsie/leviathan/leviathan
+```
+
 ### Arch Linux (AUR)
 
 Leviathan is available on the AUR as [`leviathan-bin`](https://aur.archlinux.org/packages/leviathan-bin), repackaged from the official `.deb` release:

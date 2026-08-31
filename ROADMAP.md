@@ -233,6 +233,8 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 - ✅ **Auto-updates** — Tauri updater with signing key, background download with install prompt
 
+- ✅ **Package manager delivery** — winget, Homebrew cask (Apple Silicon tap), and Scoop manifest published automatically on each release; community-maintained AUR package. Future candidates: Chocolatey, Flathub, Snapcraft
+
 ---
 
 ### AI & Machine Learning Features
