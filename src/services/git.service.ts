@@ -55,6 +55,11 @@ async function checkNetworkAllowed(
    * "Offline mode is enabled" on the user for every commit, stage and
    * checkout. The refusal still happens — it just doesn't shout. */
   silent = false,
+  /** The URL the caller already resolved for `remote`. The prune-all path holds
+   * every remote's URL from the single `get_remotes` it makes; without this the
+   * allowlist check would resolve each bare name over IPC again, one round trip
+   * per remote for a value already in hand. */
+  resolvedUrl?: string,
 ): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
 
@@ -70,7 +75,8 @@ async function checkNetworkAllowed(
   // An allowlist that cannot see the URL must refuse, not wave the operation
   // through: silently allowing is the failure mode that made this setting
   // decorative.
-  const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
+  const url =
+    resolvedUrl ?? (repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null));
   // Try the string as it stands, then as an https URL. Branching on '@'
   // instead broke the bare `git@host` form the SSH connection test hands over:
   // `cloneUrlHost`'s scheme-less branch only matches the scp shape
@@ -139,6 +145,13 @@ export async function fetchInBackground(
   });
 }
 
+/** One remote in a multi-remote gate check: its name, and its URL when the
+ * caller already has one to hand. */
+interface NetworkRemoteTarget {
+  name?: string;
+  url?: string;
+}
+
 /**
  * Check if a network operation is allowed based on security settings.
  * Returns false if the operation should be blocked.
@@ -149,17 +162,19 @@ async function checkNetworkPermission(
   remote?: string,
   /** An operation that touches SEVERAL remotes in one gesture — the prune-all
    * path. Every remote is checked against the allowlist, and the user is asked
-   * once for the whole set rather than once per remote. */
-  remotes?: string[],
+   * once for the whole set rather than once per remote. The name labels the
+   * confirm; the URL, when the caller already resolved one, spares the
+   * allowlist check a `get_remotes` round trip per remote. */
+  remotes?: NetworkRemoteTarget[],
 ): Promise<boolean> {
-  for (const target of remotes ?? [remote]) {
-    if (await checkNetworkAllowed(repoPath, target)) return false;
+  for (const target of remotes ?? [{ name: remote }]) {
+    if (await checkNetworkAllowed(repoPath, target.name, false, target.url)) return false;
   }
 
   if (settingsStore.getState().confirmNetworkOps) {
     // A declined confirm is the user's own decision, not a failure — callers
     // distinguish it from a block so they don't report it back as a red error.
-    const label = remotes ? remotes.join(', ') : remote;
+    const label = remotes ? remotes.map((t) => t.name).join(', ') : remote;
     const ok = await showConfirm(
       'Network Operation',
       `Allow ${operation}${label ? ` to ${label}` : ''}?`,
@@ -7438,8 +7453,9 @@ export async function pruneRemoteTrackingBranches(
   }
 
   let targets: string[];
-  // The listed remotes already carry their URLs, so the token loop below reads
-  // them from here instead of resolving each one over IPC again.
+  // The listed remotes already carry their URLs, so the allowlist gate and the
+  // token loop below both read them from here instead of resolving each one
+  // over IPC again.
   const urlByName = new Map<string, string>();
   if (remote) {
     targets = [remote];
@@ -7466,7 +7482,10 @@ export async function pruneRemoteTrackingBranches(
     'prune remote-tracking branches',
     repoPath,
     undefined,
-    targets,
+    // Hand the gate the URLs already read above. Bare names would send the
+    // allowlist check back through `resolveRemoteUrl`, which re-reads the whole
+    // remote list once per remote.
+    targets.map((name) => ({ name, url: urlByName.get(name) })),
   )) {
     return blockedResult();
   }

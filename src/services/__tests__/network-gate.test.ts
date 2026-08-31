@@ -334,6 +334,44 @@ describe('network security gate', () => {
       ).to.equal(true);
     });
 
+    it('checks the allowlist from the list it already read, not one fetch per remote', async () => {
+      // The gate resolves a remote NAME to a URL by re-reading the remote list,
+      // so gating N remotes by name cost N extra round trips on top of the one
+      // enumeration — for URLs the prune already had in hand.
+      mockTwoRemotes('https://github.com/x/y.git', 'https://github.com/z/y.git');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pruneRemoteTrackingBranches('/repo');
+
+      expect(result.success, 'both remotes are allowlisted').to.equal(true);
+      expect(
+        invokeHistory.filter((c) => c.command === 'get_remotes').length,
+        'the remote list is read once, not once per remote gated',
+      ).to.equal(1);
+    });
+
+    it('still resolves a remote whose URL the listing did not carry', async () => {
+      // A listing entry with no URL leaves nothing to hand the gate, so it must
+      // fall back to resolving that name — failing closed instead of skipping
+      // the allowlist check.
+      mockInvoke = (command: string) => {
+        if (command === 'get_remotes') {
+          return Promise.resolve([{ name: 'origin', url: '', fetchUrl: '', pushUrl: null }]);
+        }
+        return Promise.resolve(null);
+      };
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pruneRemoteTrackingBranches('/repo');
+
+      expect(result.success, 'an unresolvable remote is refused, not waved through').to.equal(
+        false,
+      );
+      expect(
+        invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches'),
+      ).to.equal(false);
+    });
+
     it('never prompts for a repo that has no remotes at all', async () => {
       mockInvoke = (command: string) => {
         if (command === 'get_remotes') return Promise.resolve([]);
