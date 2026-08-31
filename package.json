@@ -43,7 +43,7 @@
     "@web/dev-server-esbuild": "^2.0.0",
     "@web/test-runner": "^1.0.0",
     "@web/test-runner-playwright": "^1.0.0",
-    "eslint": "^10.8.0",
+    "eslint": "^10.9.1",
     "globals": "^17.11.0",
     "playwright-core": "1.62.1",
     "prettier": "^3.9.6",
