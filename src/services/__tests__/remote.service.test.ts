@@ -761,6 +761,45 @@ describe('git.service - Remote operations', () => {
       );
     });
 
+    it('sends no token for a plaintext http remote, account or not', async () => {
+      // A self-hosted GitLab account reached over http:// resolves through the
+      // account tier, which used to hand the token straight over — and the
+      // backend scopes a credential helper to `http://` just as happily as to
+      // `https://`, so the OAuth token would go out as a Basic password in
+      // clear. The tokenless fallback tier already refused this URL; both tiers
+      // must agree.
+      const gitlab = account('gitlab', 'gl-1', 'http://gitlab.internal');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-secret');
+      mockRepo([{ name: 'origin', url: 'http://gitlab.internal/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune itself still runs, just unauthenticated').to.deep.equal([
+        'origin',
+      ]);
+      expect(args.tokens, 'a token must never ride a plaintext transport').to.deep.equal({});
+    });
+
+    it('still sends the token for an https remote on the same self-hosted host', async () => {
+      // The guard is about the transport, not the host: the very same account
+      // over https:// must keep authenticating, or the fix would break every
+      // self-hosted prune it is meant to leave alone.
+      const gitlab = account('gitlab', 'gl-1', 'https://gitlab.internal');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-secret');
+      mockRepo([{ name: 'origin', url: 'https://gitlab.internal/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens).to.deep.equal({
+        origin: 'gl-secret',
+      });
+    });
+
     it('propagates a failure to list the remotes', async () => {
       mockInvoke = async (command) => {
         if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };

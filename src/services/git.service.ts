@@ -7487,7 +7487,12 @@ export async function pruneRemoteTrackingBranches(
     }
 
     let token: string | undefined;
-    if (remoteUrl && integrationType) {
+    // A token must never ride a plaintext transport: the backend scopes it with
+    // an `http://` credential helper just as readily as an `https://` one, so
+    // an `http://` remote would put it on the wire in clear. `getCloneToken`
+    // already refuses those URLs; the account tier hands the token over itself,
+    // so it has to make the same check rather than inherit it.
+    if (remoteUrl && cloneUrlIsCredentialSafe(remoteUrl) && integrationType) {
       const { account, repoSpecific } = await resolveRepoAccount(
         repoPath,
         integrationType,
@@ -7516,7 +7521,7 @@ export async function pruneRemoteTrackingBranches(
       if (!token && !repoSpecific) {
         token = await getCloneToken(remoteUrl);
       }
-    } else if (remoteUrl) {
+    } else if (remoteUrl && cloneUrlIsCredentialSafe(remoteUrl)) {
       token = await getCloneToken(remoteUrl);
     }
     if (token) tokens[target] = token;
