@@ -872,6 +872,11 @@ export class LvGitHubDialog extends LitElement {
         if (state.status === 'error') {
           this.error = state.error ?? 'GitHub sign-in failed';
           showToast(this.error, 'error');
+          // The flow is over and can no longer emit `oauth-complete`, so release
+          // the pinned target — otherwise a later completion would be attributed
+          // to whichever account was selected when this failed flow started.
+          this.oauthTargetAccountId = undefined;
+          this.oauthTargetWasAddingAccount = undefined;
         }
       }
     });
@@ -1378,13 +1383,9 @@ export class LvGitHubDialog extends LitElement {
     this.error = null;
     this.oauthTargetAccountId = this.selectedAccountId;
     this.oauthTargetWasAddingAccount = this.isAddingAccount;
-    try {
-      await oauthService.startOAuth('github', clientId);
-    } catch (error) {
-      this.oauthTargetAccountId = undefined;
-      this.oauthTargetWasAddingAccount = undefined;
-      throw error;
-    }
+    // `startOAuth` never rejects — it reports failure through the OAuth state
+    // subscriber — so the pinned target is cleared there, not here.
+    await oauthService.startOAuth('github', clientId);
   }
 
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {

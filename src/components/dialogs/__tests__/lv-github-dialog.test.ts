@@ -1095,6 +1095,83 @@ describe('lv-github-dialog', () => {
       const toasts = uiStore.getState().toasts;
       expect(toasts.some((t) => t.type === 'error'), 'error toast shown').to.be.true;
     });
+
+    it('releases the pinned OAuth target when the flow fails to start', async () => {
+      // `handleStartOAuth` pins the account the flow was started for so a late
+      // completion is attributed to it rather than to whatever is selected when
+      // the callback lands. A flow that never starts can never complete, so the
+      // pin must be released — otherwise the next completion (a re-try started
+      // elsewhere, or a stale callback) would be written to the wrong account.
+      connectionResponse = mockConnectedStatus;
+      const otherAccount = createTestAccount({
+        id: 'gh-acc-2',
+        name: 'Personal GitHub',
+        integrationType: 'github',
+      });
+      unifiedProfileStore.getState().setAccounts([mockAccount, otherAccount]);
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_unified_profiles_config') {
+          return {
+            version: 3,
+            profiles: [],
+            accounts: [mockAccount, otherAccount],
+            repositoryAssignments: {},
+          };
+        }
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return previous(command, args);
+      };
+
+      const el = await fixture<LvGitHubDialog>(html`
+        <lv-github-dialog .open=${true}></lv-github-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as {
+        oauthTargetAccountId: string | null | undefined;
+        oauthTargetWasAddingAccount: boolean | undefined;
+        selectedAccountId: string | null;
+        isAddingAccount: boolean;
+        handleStartOAuth(): Promise<void>;
+        handleOAuthComplete(event: CustomEvent): Promise<void>;
+      };
+      internals.selectedAccountId = 'gh-acc-1';
+      internals.isAddingAccount = false;
+
+      // Sign-in fails to start: `startOAuth` resolves and reports the failure
+      // through the OAuth state subscriber rather than rejecting.
+      await internals.handleStartOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released after failed start').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+
+      // The user now picks a different account; a completion arriving afterwards
+      // must land on that account, not on the abandoned flow's target.
+      internals.selectedAccountId = 'gh-acc-2';
+      invokeHistory.length = 0;
+      await internals.handleOAuthComplete(new CustomEvent('oauth-complete', {
+        detail: {
+          provider: 'github',
+          tokens: { accessToken: 'late-token', refreshToken: 'refresh', expiresIn: 3600 },
+        },
+      }));
+
+      expect(keyringStore.get('github_token_gh-acc-2')).to.equal('late-token');
+      const writtenKeys = invokeHistory
+        .filter((h) => h.command === 'store_keyring_token')
+        .map((h) => (h.args as Record<string, string>).key);
+      expect(writtenKeys, 'token written for the current selection').to.include(
+        'github_token_gh-acc-2'
+      );
+      expect(
+        writtenKeys.some((k) => k.startsWith('github_token_gh-acc-1')),
+        'abandoned target not written'
+      ).to.be.false;
+    });
   });
 
   describe('Add account guard', () => {
@@ -1251,6 +1328,10 @@ describe('lv-github-dialog', () => {
       await verificationStarted;
       internals.selectedAccountId = null;
       internals.isAddingAccount = true;
+      // loadInitialData's connection check already marked gh-acc-1 connected —
+      // clear it so the final assertion proves handleOAuthComplete set it for
+      // the OAuth target, not for the newer (mid-flight) selection.
+      unifiedProfileStore.getState().setAccountConnectionStatus('gh-acc-1', 'disconnected');
       releaseVerification();
       await completion;
 
