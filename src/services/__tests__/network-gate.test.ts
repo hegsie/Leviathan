@@ -96,11 +96,25 @@ const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Prom
   },
 ];
 
+/** A plain https remote, so nothing is refused for a reason other than the gate. */
+const ALLOWED_URL = 'https://github.com/example/repo.git';
+
 describe('network security gate', () => {
   beforeEach(() => {
     invokeHistory.length = 0;
+    // Enough for every gated operation to REACH the gate. `startAutoFetch`
+    // resolves the fetch remote and then its URL before checking anything; a
+    // mock that answers only `get_fetch_remote` makes it bail with
+    // REMOTE_NOT_FOUND first, which passes the assertions below with the gate
+    // deleted.
     mockInvoke = (command) =>
-      Promise.resolve(command === 'get_fetch_remote' ? 'origin' : null);
+      Promise.resolve(
+        command === 'get_fetch_remote'
+          ? 'origin'
+          : command === 'get_remotes'
+            ? [{ name: 'origin', url: ALLOWED_URL, fetchUrl: ALLOWED_URL, pushUrl: ALLOWED_URL }]
+            : null,
+      );
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
 
@@ -113,9 +127,13 @@ describe('network security gate', () => {
       it(`blocks ${op.name}`, async () => {
         settingsStore.setState({ offlineMode: true });
 
-        const result = (await op.run()) as { success: boolean };
+        const result = (await op.run()) as { success: boolean; error?: { code?: string } };
 
         expect(result.success, `${op.name} should be refused`).to.equal(false);
+        // Not just "some failure": the refusal must be the GATE's. Without
+        // this an unrelated early return (a remote that cannot be resolved,
+        // say) satisfies the test while offline mode goes unchecked.
+        expect(result.error?.code, `${op.name} must be refused BY THE GATE`).to.equal('BLOCKED');
         expect(
           invokeHistory.some((c) => c.command === op.command),
           `${op.name} must not reach ${op.command}`,

@@ -410,6 +410,44 @@ mod tests {
         assert_eq!(error, FETCH_REMOTE_CHANGED);
     }
 
+    /// The frontend restarts the loop after a fetch-remote change and then
+    /// triggers it, so the badge refreshes now instead of a full interval
+    /// later. A trigger for a repo with no loop must report that rather than
+    /// pretend it worked — the command turns that `false` into the error the
+    /// caller logs.
+    #[tokio::test]
+    async fn test_trigger_wakes_a_parked_loop_and_reports_unknown_repos() {
+        let mut service = AutoFetchService::new();
+        assert!(
+            !service.trigger("/repo/one"),
+            "a repo with no loop has nothing to wake"
+        );
+
+        let trigger = Arc::new(Notify::new());
+        let waiter = Arc::clone(&trigger);
+        // Stands in for the loop's `select!` arm: parked until the trigger fires.
+        let task = tokio::spawn(async move { waiter.notified().await });
+        service
+            .repos
+            .insert("/repo/one".to_string(), RepoFetchState { task, trigger });
+
+        assert!(service.trigger("/repo/one"), "a running loop is woken");
+
+        // `notify_one` stores a permit when nobody is waiting yet, so a trigger
+        // issued right after `start` — before the task has reached its first
+        // await — is not lost.
+        let state = service.repos.remove("/repo/one").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), state.task)
+            .await
+            .expect("the parked loop must wake on a trigger")
+            .expect("the loop task must not panic");
+
+        assert!(
+            !service.trigger("/repo/one"),
+            "a stopped loop is no longer triggerable"
+        );
+    }
+
     #[test]
     fn test_stagger_offset_is_deterministic() {
         let interval = Duration::from_secs(300);

@@ -1120,6 +1120,16 @@ export class AppShell extends LitElement {
         const r = await gitService.startAutoFetch(path, intervalMinutes);
         if (!r.success) {
           log.warn('Failed to start auto-fetch for', path, r.error?.message);
+          // `immediate` means this is the restart after the backend reported
+          // FETCH_REMOTE_CHANGED. That loop is still alive and still parked on
+          // its timer, so a failed restart leaves it re-reporting the same
+          // change every interval while the ahead/behind badge stays frozen —
+          // and, without this, saying nothing at all. Clear the dead loop and
+          // tell the user their counts are stale.
+          if (immediate) {
+            this.reportAutoFetchFailure(path, r.error?.message);
+            await gitService.stopAutoFetch(path);
+          }
           return;
         }
         if (this.autoFetchStartSeq.get(path) !== sequence) {

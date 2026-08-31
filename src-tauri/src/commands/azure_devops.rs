@@ -1469,6 +1469,33 @@ mod tests {
         assert_eq!(ado_pr_status_param(None), None);
     }
 
+    /// Credential selection is scoped to the remote the operation actually
+    /// targets, so detection must answer for THAT remote — not for whichever
+    /// one happens to sort first. Without the filter a fetch of `upstream`
+    /// resolved `origin`'s organization, and with it the wrong account.
+    #[tokio::test]
+    async fn test_detect_ado_repo_targets_requested_remote() {
+        use crate::test_utils::TestRepo;
+
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote(
+            "origin",
+            "https://dev.azure.com/personalorg/Proj/_git/frontend",
+        );
+        repo.add_remote(
+            "upstream",
+            "https://dev.azure.com/workorg/Proj/_git/frontend",
+        );
+
+        let detected = detect_ado_repo(repo.path_str(), Some("upstream".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.organization, "workorg");
+        assert_eq!(detected.remote_name, "upstream");
+    }
+
     #[test]
     fn test_parse_ado_url_https_standard() {
         let url = "https://dev.azure.com/mycompany/MyProject/_git/frontend";

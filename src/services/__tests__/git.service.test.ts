@@ -548,11 +548,18 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     assignedProfile?: { id: string } | null | 'throw';
     /** What the backend resolver returns; 'throw' → the command fails. */
     preferredAccount?: IntegrationAccount | null | 'throw';
+    /** The remote `fetch` resolves when the caller names none. */
+    fetchRemote?: string;
   }
 
   function installMock(opts: MockOptions) {
     mockInvoke = async (command: string, args?: unknown) => {
       const a = args as Record<string, unknown> | undefined;
+      // `fetch` resolves the repo's fetch remote before picking a credential,
+      // and only takes the remote-scoped token path when it has one. Leaving
+      // this unmocked sent every assertion below down a branch the real
+      // toolbar and background fetches no longer use.
+      if (command === 'get_fetch_remote') return opts.fetchRemote ?? 'origin';
       if (command === 'detect_github_repo') return opts.detectGitHub ?? null;
       if (command === 'detect_ado_repo') return opts.detectAdo ?? null;
       if (command === 'detect_gitlab_repo') return opts.detectGitLab ?? null;
@@ -668,6 +675,54 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       repoUrl: upstreamUrl,
     });
     expect(fetchToken).to.equal('work-tok');
+  });
+
+  it("withholds the token when the fetch remote is on a different host from the account's", async () => {
+    // A fork setup: `origin` is the GitHub repo the account belongs to,
+    // `upstream` lives somewhere else entirely. Nothing about `upstream`
+    // resolves to an account, so the lookup falls back to the repo's default
+    // remote — and that token must not follow the fetch to another host.
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO, // matches `origin` only
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: 'https://git.other.test/acme/app.git', pushUrl: null },
+      ],
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(fetchToken, "origin's token must not authenticate to another host").to.be.undefined;
+  });
+
+  it('withholds a host-agnostic token too when the fetch remote host differs', async () => {
+    // The Azure DevOps branch resolves no credential host, so only the
+    // source-host === target-host comparison stands between an ADO token and
+    // an unrelated remote.
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'workorg'),
+      id: 'ado-work',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([work]);
+    keyring.clear();
+    seedToken('azure-devops', 'ado-work', 'ado-tok');
+    installMock({
+      detectAdo: { organization: 'workorg', project: 'p', repository: 'repo', remoteName: 'origin' },
+      remotes: [
+        { name: 'origin', url: 'https://dev.azure.com/workorg/p/_git/repo', pushUrl: null },
+        { name: 'upstream', url: 'https://github.com/acme/app.git', pushUrl: null },
+      ],
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(fetchToken, 'an ADO token must not be offered to github.com').to.be.undefined;
   });
 
   it('still resolves by account URL patterns when the profile lookup fails', async () => {

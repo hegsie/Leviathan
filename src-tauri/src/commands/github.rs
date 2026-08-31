@@ -2579,6 +2579,27 @@ mod tests {
         );
     }
 
+    /// Credential selection is scoped to the remote the operation actually
+    /// targets, so detection must answer for THAT remote — not for whichever
+    /// one happens to sort first. Without the filter a fetch of `upstream`
+    /// resolved `origin`'s account.
+    #[tokio::test]
+    async fn test_detect_github_repo_targets_requested_remote() {
+        use crate::test_utils::TestRepo;
+
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://github.com/personal/repo.git");
+        repo.add_remote("upstream", "https://github.com/work/repo.git");
+
+        let detected = detect_github_repo(repo.path_str(), Some("upstream".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.owner, "work");
+        assert_eq!(detected.remote_name, "upstream");
+    }
+
     // ========================================================================
     // GitHub URL Parsing Tests
     // ========================================================================

@@ -216,10 +216,13 @@ describe('app-shell multi-repo behavior', () => {
   /** start_auto_fetch now resolves a credential token first, so the invoke
    * lands a microtask later than a bare `setTimeout(0)` observes. */
   const waitForCommand = async (command: string): Promise<{ command: string; args: any } | undefined> => {
-    for (let i = 0; i < 50; i++) {
+    // Generous, because it returns the instant the call lands: the whole
+    // budget is only ever spent on a genuine failure. A tight one flaked when
+    // the full suite ran the browser under load.
+    for (let i = 0; i < 200; i++) {
       const call = invokeCallArgs.find((c) => c.command === command);
       if (call) return call;
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     }
     return undefined;
   };
@@ -336,19 +339,180 @@ describe('app-shell multi-repo behavior', () => {
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
         repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
-        await new Promise((r) => setTimeout(r, 0));
+        // Wait for the START to land, not a fixed macrotask: stops are queued
+        // behind the in-flight start for the same repo, and that start resolves
+        // a remote, a URL and a credential first. A `setTimeout(0)` here beat
+        // the stop to the assertion whenever the machine was loaded.
+        await waitForCommand('start_auto_fetch');
         invokeCallArgs.length = 0;
 
         repositoryStore.getState().removeRepository('/repo/one');
-        await new Promise((r) => setTimeout(r, 0));
 
-        const stopCall = invokeCallArgs.find((c) => c.command === 'stop_auto_fetch');
+        const stopCall = await waitForCommand('stop_auto_fetch');
         expect(stopCall).to.not.be.undefined;
         expect(stopCall!.args.path).to.equal('/repo/one');
       } finally {
         el.remove();
         settingsStore.setState({ autoFetchInterval: 0 });
       }
+    });
+
+    /** Lifecycle commands in the order the backend saw them. */
+    const lifecycleOrder = () =>
+      invokeCallArgs
+        .filter((c) =>
+          ['start_auto_fetch', 'stop_auto_fetch', 'trigger_auto_fetch'].includes(c.command)
+        )
+        .map((c) => c.command);
+
+    it('restarts every open repo when the remote allowlist changes', async () => {
+      // The allowlist decides which remotes the loop may reach, and the loop
+      // is a Tokio task with no re-check — so a running loop must be torn down
+      // and re-approved, not left running under the old decision.
+      settingsStore.setState({ autoFetchInterval: 5, remoteAllowlist: [] });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await waitForCommand('start_auto_fetch');
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ remoteAllowlist: ['github.com'] });
+        await waitForCommand('start_auto_fetch');
+
+        expect(lifecycleOrder()).to.deep.equal(['stop_auto_fetch', 'start_auto_fetch']);
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, remoteAllowlist: [] });
+      }
+    });
+
+    it('restarts and immediately triggers a fetch when the fetch remote changed', async () => {
+      // A branch switch can move the fetch destination. The backend refuses to
+      // reuse credentials authorized for the old remote and reports
+      // FETCH_REMOTE_CHANGED; the frontend must re-run permission and token
+      // resolution and then fetch NOW, or the badge stays stale for a full
+      // interval.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/one',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+
+        const trigger = await waitForCommand('trigger_auto_fetch');
+        expect(trigger!.args.path).to.equal('/repo/one');
+        expect(lifecycleOrder()).to.deep.equal(['start_auto_fetch', 'trigger_auto_fetch']);
+        expect(uiStore.getState().toasts, 'a remote change is not a failure to report').to.have
+          .length(0);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('reports and clears the loop when the fetch-remote restart fails', async () => {
+      // The backend keeps its loop parked on the timer after
+      // FETCH_REMOTE_CHANGED. If the restart cannot re-approve it — here the
+      // branch's upstream remote is gone — the old loop would re-report the
+      // same change every interval, forever, with the badge frozen and nothing
+      // shown to the user.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      mockResponses.get_remotes = () => [];
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/one',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+
+        const stopCall = await waitForCommand('stop_auto_fetch');
+        expect(stopCall, 'the loop that cannot be restarted is torn down').to.not.be.undefined;
+        expect(stopCall!.args.path).to.equal('/repo/one');
+        expect(
+          invokeCallArgs.find((c) => c.command === 'start_auto_fetch'),
+          'the refused start never reached the backend'
+        ).to.be.undefined;
+
+        const toast = uiStore.getState().toasts.find((t) => t.message.includes('auto-fetch failed'));
+        expect(toast, 'the user is told the ahead/behind counts are stale').to.not.be.undefined;
+        expect(toast!.message).to.contain('one');
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('does not restart a fetch-remote change for a repo that is no longer open', async () => {
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/closed',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+        await new Promise((r) => setTimeout(r, 20));
+
+        expect(lifecycleOrder(), 'a closed repo has no loop to revive').to.deep.equal([]);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('does not restart a fetch-remote change while offline, or with no interval', async () => {
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      const event = {
+        repoPath: '/repo/one',
+        success: false,
+        ahead: 0,
+        behind: 0,
+        message: 'FETCH_REMOTE_CHANGED',
+      };
+      try {
+        settingsStore.setState({ autoFetchInterval: 5, offlineMode: true });
+        (el as any).handleAutoFetchCompleted(event);
+        await new Promise((r) => setTimeout(r, 20));
+        expect(lifecycleOrder(), 'offline mode must not start a fetch loop').to.deep.equal([]);
+
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+        (el as any).handleAutoFetchCompleted(event);
+        await new Promise((r) => setTimeout(r, 20));
+        expect(lifecycleOrder(), 'auto-fetch turned off must stay off').to.deep.equal([]);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+      }
+    });
+
+    it('a stop issued before a start resolves leaves the repo stopped', async () => {
+      // `startAutoFetch` resolves the remote, its URL and a credential before
+      // it reaches the backend. A stop that lands inside that window — closing
+      // a tab, or going offline — must supersede it, not be overtaken by a
+      // start that was already obsolete when it was issued.
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+
+      (el as any).startAutoFetchLogged('/repo/one', 5);
+      (el as any).stopAutoFetchLogged('/repo/one');
+
+      await waitForCommand('stop_auto_fetch');
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(
+        invokeCallArgs.find((c) => c.command === 'start_auto_fetch'),
+        'the superseded start must never reach the backend'
+      ).to.be.undefined;
+      expect(lifecycleOrder()).to.deep.equal(['stop_auto_fetch']);
     });
   });
 
