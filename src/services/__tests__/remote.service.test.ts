@@ -800,6 +800,55 @@ describe('git.service - Remote operations', () => {
       });
     });
 
+    it("ignores a preferred GitLab account from a DIFFERENT instance", async () => {
+      // Two GitLab accounts, neither pinned to this repo by a url pattern or a
+      // profile default. The backend resolver's last tier is the GLOBAL default
+      // — the gitlab.com account — and it reports that as a match, so trusting
+      // it would ship a gitlab.com PAT to an unrelated self-hosted host (which
+      // could replay it against gitlab.com) AND still fail to authenticate
+      // there, which is the very failure this path exists to fix.
+      const dotCom = { ...account('gitlab', 'gl-com', 'https://gitlab.com'), isDefault: true };
+      const selfHosted = {
+        ...account('gitlab', 'gl-self', 'https://git.acme.dev'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([dotCom, selfHosted]);
+      preferredAccount = dotCom;
+      keyring.set('gitlab_token_gl-com', 'gl-com-pat');
+      keyring.set('gitlab_token_gl-self', 'gl-self-pat');
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const { tokens } = lastInvokedArgs as { tokens: Record<string, string> };
+      expect(tokens.origin, "the host's own account must answer for it").to.equal('gl-self-pat');
+      expect(
+        Object.values(tokens),
+        "another instance's credential must never reach this host",
+      ).to.not.contain('gl-com-pat');
+    });
+
+    it("sends no token when no GitLab account serves the remote's host", async () => {
+      // Same host mismatch, but the self-hosted account has nothing stored.
+      // Falling through to the global default's token would be exactly the leak
+      // above; an unauthenticated prune is the correct outcome.
+      const dotCom = { ...account('gitlab', 'gl-com', 'https://gitlab.com'), isDefault: true };
+      const selfHosted = {
+        ...account('gitlab', 'gl-self', 'https://git.acme.dev'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([dotCom, selfHosted]);
+      preferredAccount = dotCom;
+      keyring.set('gitlab_token_gl-com', 'gl-com-pat');
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune still runs, just unauthenticated').to.deep.equal(['origin']);
+      expect(args.tokens, "the default account's token must not stand in").to.deep.equal({});
+    });
+
     it('propagates a failure to list the remotes', async () => {
       mockInvoke = async (command) => {
         if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };

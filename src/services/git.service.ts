@@ -7511,6 +7511,11 @@ export async function pruneRemoteTrackingBranches(
     }
 
     let token: string | undefined;
+    // Set when the resolver named a GitLab account belonging to some OTHER
+    // instance than this remote's host — see the gitlab arm below. Such an
+    // answer is no answer at all for this host, so the host-matching fallback
+    // must still get its turn.
+    let wrongInstance = false;
     // A token must never ride a plaintext transport: the backend scopes it with
     // an `http://` credential helper just as readily as an `https://` one, so
     // an `http://` remote would put it on the wire in clear. `getCloneToken`
@@ -7531,18 +7536,26 @@ export async function pruneRemoteTrackingBranches(
           token =
             await getFreshAccountToken('azure-devops', account.id, 'azure') ?? undefined;
         } else if (integrationType === 'gitlab') {
-          token =
-            await getFreshAccountToken(
-              'gitlab',
-              account.id,
-              'gitlab',
-              account.config.type === 'gitlab' ? account.config.instanceUrl : undefined,
-            ) ?? undefined;
+          // GitLab is the one provider whose host varies per account, and the
+          // resolver's last tier is the GLOBAL default — reported as a match
+          // like any other. Trusting it here would hand, say, a gitlab.com PAT
+          // to an unrelated self-hosted server that has never seen it, and the
+          // prune would still fail to authenticate there. Only the account that
+          // serves THIS host may answer; otherwise leave the token unset and
+          // let `getCloneToken` below pick by host.
+          const instanceUrl =
+            account.config.type === 'gitlab' ? account.config.instanceUrl : undefined;
+          if (instanceUrl && cloneUrlHost(instanceUrl) === host) {
+            token =
+              await getFreshAccountToken('gitlab', account.id, 'gitlab', instanceUrl) ?? undefined;
+          } else {
+            wrongInstance = true;
+          }
         } else {
           token = await AccountCredentials.getToken('github', account.id) ?? undefined;
         }
       }
-      if (!token && !repoSpecific) {
+      if (!token && (!repoSpecific || wrongInstance)) {
         token = await getCloneToken(remoteUrl);
       }
     } else if (remoteUrl && cloneUrlIsCredentialSafe(remoteUrl)) {
