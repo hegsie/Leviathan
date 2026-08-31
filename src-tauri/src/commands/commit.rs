@@ -916,6 +916,14 @@ pub async fn get_commit_message(path: String, oid: String) -> Result<String> {
 /// to set `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`.
 ///
 /// Dates should be in ISO 8601 format (e.g., "2024-01-15T10:30:00Z") or unix timestamps.
+///
+/// NOTE: no UI path reaches this command today — there is no date-editing
+/// dialog, and `gitService.editCommitDate` has no call site outside its own
+/// definition. It is not exposed as an AI tool either. It stays registered, and
+/// its wrapper stays exported, for callers that invoke it directly — so its
+/// tests, including those covering the non-HEAD rebase below, are backend
+/// coverage only: passing tests here do not mean any date edit a user can
+/// actually trigger is covered, because there is none.
 #[command]
 pub async fn edit_commit_date(
     path: String,
@@ -1113,11 +1121,23 @@ async fn edit_commit_date_with_rebase(
     // the cleanup left it behind in the user's repository.
     let sequence_editor = crate::utils::todo_action_editor_command(short_oid, "edit");
 
-    // Start the rebase
+    // Start the rebase. `rebase.autostash` is pinned OFF — not for the todo's
+    // shape, but because the recovery path below hard-resets the branch. With
+    // autostash on, a dirty tree does not stop the rebase: git stashes it,
+    // replays the range, exits 0 with a Clean state (so the recovery path is
+    // taken), and pops the stash back into the working tree an instant before
+    // the `reset --hard` wipes it — uncommitted tracked work destroyed, and
+    // reported as "Nothing was changed", recoverable only through
+    // `git fsck --lost-found`. `rebase.autoStash` is a setting the app itself
+    // offers in its Settings tab, so this is a configuration users have. Off,
+    // rebase refuses a dirty tree up front, nothing has been rewritten when the
+    // failure is reported, and the reset below can only ever run on a tree with
+    // nothing to lose.
     let output = crate::utils::create_command("git")
         .current_dir(path)
         .env("GIT_SEQUENCE_EDITOR", &sequence_editor)
         .args(crate::utils::TODO_FORMAT_ARGS)
+        .args(["-c", "rebase.autostash=false"])
         .args(["rebase", "-i", &parent_oid_str])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to start rebase: {}", e)))?;
@@ -1149,7 +1169,8 @@ async fn edit_commit_date_with_rebase(
         // rewritten branch and only the reflog to get it back. Put the branch
         // where it was before reporting the failure, so a date edit that did
         // not happen changes nothing. The working tree is necessarily clean
-        // because rebase refuses to start otherwise.
+        // because rebase refuses to start otherwise — which is only true
+        // because the invocation above pins `rebase.autostash=false`.
         let restored = crate::utils::create_command("git")
             .current_dir(path)
             .args(["reset", "--hard", &pre_rebase_head])
@@ -3497,6 +3518,97 @@ mod tests {
                 .iter()
                 .all(|s| s.status() == git2::Status::CURRENT),
             "the working tree must be left clean"
+        );
+    }
+
+    /// The recovery path above hard-resets the branch on the premise that a
+    /// rebase refuses to start on a dirty tree. `rebase.autoStash=true` — a
+    /// setting the app offers in its own Settings tab — breaks that premise:
+    /// git stashes the dirty tree, replays the range, exits 0 in a Clean state
+    /// so the recovery path IS taken, and pops the stash back into the working
+    /// tree an instant before the `reset --hard` destroys it. The autostash
+    /// commit is unreferenced after a successful pop, so the user's uncommitted
+    /// work was gone from everywhere but `git fsck --lost-found` — while the
+    /// error said "Nothing was changed".
+    #[tokio::test]
+    async fn test_edit_commit_date_refusal_does_not_destroy_an_autostashed_working_tree() {
+        let repo = TestRepo::with_initial_commit();
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("rebase.autoStash", true)
+            .unwrap();
+        repo.create_commit("base", &[("a.txt", "a")]);
+
+        // Built through git2 alone so the side commit never touches the working
+        // tree, matching the merge-commit case above.
+        let side = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let base = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let blob = git_repo.blob(b"s").unwrap();
+            let mut builder = git_repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+            builder.insert("s.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            git_repo
+                .commit(None, &sig, &sig, "side work", &tree, &[&base])
+                .unwrap()
+        };
+        repo.create_commit("main work", &[("m.txt", "m")]);
+        let merge = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let other = git_repo.find_commit(side).unwrap();
+            let tree = head.tree().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    "Merge side",
+                    &tree,
+                    &[&head, &other],
+                )
+                .unwrap()
+        };
+        repo.create_commit("descendant", &[("d.txt", "d")]);
+        let before = repo.head_oid();
+
+        // Uncommitted work on a TRACKED file — the only thing a `reset --hard`
+        // can destroy without a trace.
+        repo.create_file("a.txt", "a\nPRECIOUS UNCOMMITTED WORK\n");
+
+        let err = edit_commit_date(
+            repo.path_str(),
+            merge.to_string(),
+            None,
+            Some("2020-06-15T12:00:00Z".to_string()),
+        )
+        .await
+        .expect_err("a date edit on a merge commit must still be refused");
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("a.txt")).unwrap(),
+            "a\nPRECIOUS UNCOMMITTED WORK\n",
+            "a refused date edit must never destroy uncommitted work: {err}"
+        );
+        assert_eq!(
+            repo.head_oid(),
+            before,
+            "the branch tip must be where it was"
+        );
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "no rebase may be left in progress"
+        );
+        assert!(
+            history(&repo).contains(&"Merge side".to_string()),
+            "the merge commit must still be on the branch: {:?}",
+            history(&repo)
         );
     }
 
