@@ -1084,8 +1084,11 @@ async fn edit_commit_date_with_rebase(
     author_date: Option<&str>,
     committer_date: Option<&str>,
 ) -> Result<AmendResult> {
-    // Find the parent of the target commit for the rebase base
-    let parent_oid_str = {
+    // Find the parent of the target commit for the rebase base. The tip is read
+    // here too, so a rebase that has to be undone below is put back to the
+    // commit THIS call started from rather than to ORIG_HEAD, which any earlier
+    // operation in the repository may have left pointing somewhere else.
+    let (parent_oid_str, pre_rebase_head) = {
         let repo = git2::Repository::open(Path::new(path))?;
         let target_oid = git2::Oid::from_str(oid)
             .map_err(|_| LeviathanError::CommitNotFound(oid.to_string()))?;
@@ -1096,7 +1099,8 @@ async fn edit_commit_date_with_rebase(
         let parent = target_commit.parent(0).map_err(|_| {
             LeviathanError::OperationFailed("Cannot edit date of root commit".to_string())
         })?;
-        parent.id().to_string()
+        let head = repo.head()?.peel_to_commit()?.id().to_string();
+        (parent.id().to_string(), head)
     };
 
     let short_oid = &oid[..std::cmp::min(7, oid.len())];
@@ -1133,13 +1137,33 @@ async fn edit_commit_date_with_rebase(
     // completion and leaves the DESCENDANT at HEAD. The amend below would then
     // redate that descendant and report success for a commit the user never
     // named. A paused rebase is the only state in which it is the right commit.
-    {
+    let rebase_is_paused = {
         let repo = git2::Repository::open(Path::new(path))?;
-        if repo.state() == git2::RepositoryState::Clean {
-            return Err(LeviathanError::OperationFailed(
-                "Rebase did not stop at the target commit".to_string(),
-            ));
-        }
+        repo.state() != git2::RepositoryState::Clean
+    };
+    if !rebase_is_paused {
+        // Refusing here is not enough on its own: the replay has ALREADY run.
+        // For a merge target git linearizes the range — the merge commit is
+        // gone from the branch and the merged-in side is replayed onto the
+        // first parent — so an error on its own would leave the user with a
+        // rewritten branch and only the reflog to get it back. Put the branch
+        // where it was before reporting the failure, so a date edit that did
+        // not happen changes nothing. The working tree is necessarily clean
+        // because rebase refuses to start otherwise.
+        let restored = crate::utils::create_command("git")
+            .current_dir(path)
+            .args(["reset", "--hard", &pre_rebase_head])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        return Err(LeviathanError::OperationFailed(if restored {
+            "Rebase did not stop at the target commit — is it a merge commit? Nothing was changed."
+                .to_string()
+        } else {
+            "Rebase did not stop at the target commit, and the branch could not be put back — \
+             recover the previous tip from the reflog"
+                .to_string()
+        }));
     }
 
     // Now amend the commit with the new date(s)
@@ -1223,6 +1247,13 @@ async fn edit_commit_date_with_rebase(
 /// Reword a commit that is not HEAD by performing an interactive rebase
 ///
 /// This uses git CLI under the hood as git2 doesn't support interactive rebase well.
+///
+/// NOTE: no UI path reaches this command today — `handleRewordCommit` in
+/// `app-shell.ts` sends a non-HEAD reword through `lv-interactive-rebase-dialog`
+/// and `execute_interactive_rebase` instead. It stays registered, and its
+/// `gitService.rewordCommit` wrapper stays exported, for callers that invoke it
+/// directly — so its tests are backend coverage only: passing tests here do not
+/// mean the reword a user can actually trigger is covered.
 #[command]
 pub async fn reword_commit(path: String, oid: String, message: String) -> Result<AmendResult> {
     // Use a closure to ensure git2 objects are dropped before any .await
@@ -1251,6 +1282,22 @@ pub async fn reword_commit(path: String, oid: String, message: String) -> Result
         // For non-HEAD commits, we need to use git rebase
         // Find the parent of the target commit to use as the base
         let parent_oid = if !is_head {
+            // A merge commit never survives that rebase. `rebase -i <merge>^1`
+            // linearizes the range instead of listing the merge, so there is no
+            // `pick <oid>` for the sequence editor to turn into `reword`: git
+            // replays the side branch onto the first parent, exits 0, and the
+            // message is never touched. The loop below would then find no
+            // commit carrying the new message, keep its HEAD seed, and report
+            // success — for a reword that did not happen on a branch whose
+            // merge commit had just been destroyed. Refuse before anything is
+            // rewritten, matching the frontend's own refusal in
+            // `isMergeCommit`. (The `is_head` path amends in place and keeps
+            // every parent, so it stays allowed.)
+            if target_commit.parent_count() > 1 {
+                return Err(LeviathanError::OperationFailed(
+                    "Cannot reword a merge commit".to_string(),
+                ));
+            }
             Some(
                 target_commit
                     .parent(0)
@@ -3024,6 +3071,154 @@ mod tests {
         assert!(err.contains("Cannot reword root commit"), "{err}");
     }
 
+    /// `rebase -i <merge>^1` linearizes the merge away instead of listing it, so
+    /// the sequence editor finds no `pick <oid>` to turn into `reword`: git
+    /// replays the side branch onto the first parent and exits 0 with the
+    /// message untouched. The message-matching walk below then finds nothing,
+    /// keeps its HEAD seed and reports `success: true` — a reword that never
+    /// happened, naming an unrelated commit, on a branch whose merge commit has
+    /// just been destroyed. Refuse before anything is rewritten.
+    #[tokio::test]
+    async fn test_reword_merge_commit_is_rejected_without_rewriting_the_branch() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("a.txt", "a")]);
+
+        // Built through git2 alone so the side commit never touches the working
+        // tree, matching the shape a real merged-in branch has here.
+        let side = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let base = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let blob = git_repo.blob(b"s").unwrap();
+            let mut builder = git_repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+            builder.insert("s.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            git_repo
+                .commit(None, &sig, &sig, "side work", &tree, &[&base])
+                .unwrap()
+        };
+        repo.create_commit("main work", &[("m.txt", "m")]);
+        let merge = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let other = git_repo.find_commit(side).unwrap();
+            let tree = head.tree().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    "Merge side",
+                    &tree,
+                    &[&head, &other],
+                )
+                .unwrap()
+        };
+        repo.create_commit("descendant", &[("d.txt", "d")]);
+        let before = repo.head_oid();
+
+        let err = reword_commit(
+            repo.path_str(),
+            merge.to_string(),
+            "Renamed merge".to_string(),
+        )
+        .await
+        .expect_err("a merge commit cannot be reworded by rebase");
+
+        assert!(
+            err.to_string().contains("Cannot reword a merge commit"),
+            "{err}"
+        );
+
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            before,
+            "a refused reword must leave the branch tip where it was"
+        );
+        assert_eq!(
+            git_repo
+                .find_commit(merge)
+                .unwrap()
+                .message()
+                .unwrap()
+                .trim(),
+            "Merge side",
+            "the merge commit's message must be untouched"
+        );
+        assert!(
+            history(&repo).contains(&"Merge side".to_string()),
+            "the merge commit must still be on the branch: {:?}",
+            history(&repo)
+        );
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "no rebase may be left in progress"
+        );
+    }
+
+    /// The merge refusal is about the rebase, so it must not spill onto the HEAD
+    /// path: that one amends in place and `Commit::amend` carries both parents
+    /// over, which is a perfectly good way to rename a merge.
+    #[tokio::test]
+    async fn test_reword_merge_commit_at_head_still_works() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("a.txt", "a")]);
+
+        let side = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let base = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let blob = git_repo.blob(b"s").unwrap();
+            let mut builder = git_repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+            builder.insert("s.txt", blob, 0o100644).unwrap();
+            let tree_oid = builder.write().unwrap();
+            let tree = git_repo.find_tree(tree_oid).unwrap();
+            git_repo
+                .commit(None, &sig, &sig, "side work", &tree, &[&base])
+                .unwrap()
+        };
+        repo.create_commit("main work", &[("m.txt", "m")]);
+        let merge = {
+            let git_repo = repo.repo();
+            let sig = git_repo.signature().unwrap();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let other = git_repo.find_commit(side).unwrap();
+            let tree = head.tree().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    "Merge side",
+                    &tree,
+                    &[&head, &other],
+                )
+                .unwrap()
+        };
+
+        let result = reword_commit(
+            repo.path_str(),
+            merge.to_string(),
+            "Merge side branch".to_string(),
+        )
+        .await
+        .expect("a merge commit at HEAD is reworded by amend, not by rebase");
+
+        let git_repo = repo.repo();
+        let new_head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(new_head.id().to_string(), result.new_oid);
+        assert_eq!(new_head.message().unwrap().trim(), "Merge side branch");
+        assert_eq!(
+            new_head.parent_count(),
+            2,
+            "the amended merge must keep both parents"
+        );
+    }
+
     /// Editing the date of a commit below HEAD is the other half of the
     /// sequence-editor path: the todo entry for that ONE commit has to become
     /// `edit` so the rebase stops there. If it does not, the rebase runs to
@@ -3252,6 +3447,7 @@ mod tests {
                 .unwrap()
         };
         repo.create_commit("descendant", &[("d.txt", "d")]);
+        let before = repo.head_oid();
 
         let err = edit_commit_date(
             repo.path_str(),
@@ -3266,6 +3462,41 @@ mod tests {
             err.to_string()
                 .contains("Rebase did not stop at the target commit"),
             "{err}"
+        );
+
+        // The error is only half the job: git had already replayed the range by
+        // the time it was raised, linearizing the merge away and rewriting the
+        // side branch. A refused date edit has to leave the branch exactly as
+        // it found it, not hand the user a rewritten history plus a message.
+        let git_repo = repo.repo();
+        assert_eq!(
+            git_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            before,
+            "a refused date edit must leave the branch tip where it was"
+        );
+        let merge_commit = git_repo.find_commit(merge).unwrap();
+        assert_eq!(
+            merge_commit.parent_count(),
+            2,
+            "the merge commit itself must survive"
+        );
+        assert!(
+            history(&repo).contains(&"Merge side".to_string()),
+            "the merge commit must still be on the branch, not only in the reflog: {:?}",
+            history(&repo)
+        );
+        assert_eq!(
+            git_repo.state(),
+            git2::RepositoryState::Clean,
+            "no rebase may be left in progress"
+        );
+        assert!(
+            git_repo
+                .statuses(None)
+                .unwrap()
+                .iter()
+                .all(|s| s.status() == git2::Status::CURRENT),
+            "the working tree must be left clean"
         );
     }
 
