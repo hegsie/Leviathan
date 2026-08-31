@@ -12,6 +12,13 @@ use crate::models::Stash;
 #[serde(rename_all = "camelCase")]
 pub struct StashShowResult {
     pub index: u32,
+    /// The stash commit this result describes.
+    ///
+    /// Echoed so the caller can prove the preview belongs to the entry it
+    /// asked for: `index` is a POSITION that shifts whenever any stash is
+    /// created or dropped, and the caller resolves the index in a separate
+    /// round trip. lv-stash-list compares this against the row's oid and
+    /// refuses to render a mismatched preview.
     pub oid: String,
     pub message: String,
     pub files: Vec<StashFile>,
