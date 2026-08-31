@@ -40,6 +40,7 @@ import {
   isNetworkGateRefusal,
   fetchInBackground,
   checkoutWithAutoStash,
+  testSshConnection,
 } from '../git.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 
@@ -238,6 +239,40 @@ describe('network security gate', () => {
 
       expect(result.success, 'an ssh remote on an allowed host').to.not.equal(false);
       expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(true);
+    });
+
+    // Settings > SSH > Test Connection hands the gate whatever the user typed,
+    // and the backend accepts `git@host` as readily as a bare host. Deriving
+    // the host from the string as-is returns nothing for that form, so it used
+    // to be refused while `github.com`, `git@github.com:22` and
+    // `ssh://git@github.com` all went through — an arbitrary-looking refusal.
+    it('allows a bare "git@host" SSH target on an allowed domain', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      await testSshConnection('git@github.com');
+
+      expect(
+        invokeHistory.some((c) => c.command === 'test_ssh_connection'),
+        'git@github.com is github.com',
+      ).to.equal(true);
+    });
+
+    it('still blocks a bare "git@host" SSH target off the allowlist', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await testSshConnection('git@evil.test');
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'test_ssh_connection')).to.equal(false);
+    });
+
+    it('reads the host, not the user, of a "host@host" SSH target', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await testSshConnection('github.com@evil.test');
+
+      expect(result.success, 'the host is evil.test; github.com is only the user').to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'test_ssh_connection')).to.equal(false);
     });
 
     it('leaves everything alone when no allowlist is configured', async () => {

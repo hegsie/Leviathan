@@ -71,9 +71,14 @@ async function checkNetworkAllowed(
   // through: silently allowing is the failure mode that made this setting
   // decorative.
   const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
-  const host = url
-    ? cloneUrlHost(url.includes('://') || url.includes('@') ? url : `https://${url}`)
-    : null;
+  // Try the string as it stands, then as an https URL. Branching on '@'
+  // instead broke the bare `git@host` form the SSH connection test hands over:
+  // `cloneUrlHost`'s scheme-less branch only matches the scp shape
+  // `user@host:path`, so `git@github.com` resolved to nothing and was refused
+  // while `github.com`, `git@github.com:22` and `ssh://git@github.com` were
+  // all allowed. Parsing `https://git@github.com` yields `github.com`, and the
+  // fallback only ever runs where the direct parse already yielded nothing.
+  const host = url ? (cloneUrlHost(url) ?? cloneUrlHost(`https://${url}`)) : null;
   // Entries are domains (the settings field says so, and offers "github.com,
   // gitlab.com"), so they are compared against the URL's HOST. A substring
   // match over the whole URL — what this used to do — let a look-alike host
