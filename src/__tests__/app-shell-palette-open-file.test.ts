@@ -71,7 +71,9 @@ describe('app-shell command palette: open file in editor', () => {
 
   async function openFile(el: AppShell, path: string): Promise<void> {
     await (el as any).handleOpenFileFromPalette(
-      new CustomEvent('open-file', { detail: { path } }),
+      new CustomEvent('open-file', {
+        detail: { path, repositoryPath: '/repo/one' },
+      }),
     );
   }
 

@@ -211,3 +211,90 @@ test.describe('Export / Import dialog', () => {
       .toContain('feature/test');
   });
 });
+
+/**
+ * The dialog pins the repository it was opened for, so a tab switch behind an
+ * open dialog must not swap the refs under the user's cursor — the next
+ * Export would otherwise run a name from the newly active repo against the
+ * pinned one.
+ */
+test.describe('Export / Import dialog - repository pinning', () => {
+  const OTHER_REPO = '/work/other-repo';
+  const OTHER_BRANCHES = [
+    {
+      name: 'other-main',
+      shorthand: 'other-main',
+      isHead: true,
+      isRemote: false,
+      upstream: null,
+      targetOid: 'e'.repeat(40),
+      isStale: false,
+    },
+  ];
+
+  /** get_branches answers per repository so the two tabs cannot be confused. */
+  async function mockBranchesPerRepo(
+    page: Page,
+    byPath: Record<string, unknown>,
+  ): Promise<void> {
+    await page.evaluate((map) => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const original = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command === 'get_branches') {
+          const path = (args as { path?: string } | undefined)?.path ?? '';
+          if (path in map) return map[path];
+        }
+        return original(command, args);
+      };
+    }, byPath);
+  }
+
+  async function addRepo(page: Page, path: string, name: string): Promise<void> {
+    await page.evaluate(
+      ({ path, name }) => {
+        const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+          repositoryStore: { getState: () => { addRepository: (repo: unknown) => void } };
+        };
+        stores.repositoryStore.getState().addRepository({
+          path,
+          name,
+          isValid: true,
+          isBare: false,
+          headRef: 'other-main',
+          state: 'clean',
+          isShallow: false,
+          isPartialClone: false,
+          cloneFilter: null,
+        });
+      },
+      { path, name },
+    );
+  }
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  test('keeps the pinned repository refs when the active tab changes', async ({ page }) => {
+    await setupMocks(page);
+    await mockBranchesPerRepo(page, { [OTHER_REPO]: OTHER_BRANCHES });
+    await openViaCommandPalette(page, 'Export archive');
+    await expect(page.locator(`${dialog} lv-modal[open]`)).toBeVisible();
+    await expect(page.locator(`${dialog} #archive-ref option[value="feature/test"]`)).toHaveCount(1);
+
+    await addRepo(page, OTHER_REPO, 'other-repo');
+
+    // The other repo is active AND its branches have replaced the sidebar's —
+    // so the dialog's bound `branches` really did change underneath it.
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute('title', OTHER_REPO);
+    await expect(page.locator('lv-branch-list .branch-item.active')).toContainText('other-main');
+
+    // …and the dialog still offers the repository it was opened for.
+    await expect(page.locator(`${dialog} lv-modal[open]`)).toBeVisible();
+    await expect(page.locator(`${dialog} #archive-ref option[value="feature/test"]`)).toHaveCount(1);
+    await expect(page.locator(`${dialog} #archive-ref option[value="other-main"]`)).toHaveCount(0);
+  });
+});

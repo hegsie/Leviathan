@@ -1236,7 +1236,9 @@ describe('app-shell destructive guards', () => {
       invokeCallArgs.length = 0;
 
       await (el as any).handleCheckoutBranch(
-        new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
+        new CustomEvent('checkout-branch', {
+          detail: { branch: 'feature', repositoryPath: '/repo/one' },
+        }),
       );
 
       expect(
@@ -1250,7 +1252,9 @@ describe('app-shell destructive guards', () => {
       const el = shellOnRepo();
 
       await (el as any).handleCheckoutBranch(
-        new CustomEvent('checkout-branch', { detail: { branch: 'feature' } }),
+        new CustomEvent('checkout-branch', {
+          detail: { branch: 'feature', repositoryPath: '/repo/one' },
+        }),
       );
 
       expect(isRefOpRunning('/repo/one')).to.equal(false);
