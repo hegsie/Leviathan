@@ -1047,6 +1047,37 @@ mod tests {
         assert!(response.failures.is_empty(), "{:?}", response.failures);
     }
 
+    /// A repository that cannot be searched must not cost the workspace the
+    /// matches from the ones that can be. The broken repository comes first, so
+    /// abandoning the loop on the first failure is caught here too.
+    #[test]
+    fn test_search_repositories_keeps_matches_when_one_repository_fails() {
+        let good = TestRepo::with_initial_commit();
+        good.create_commit("Add matches", &[("a.txt", "match\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: "/definitely/not/here".to_string(),
+                name: "gone".to_string(),
+            },
+            WorkspaceRepository {
+                path: good.path_str(),
+                name: "alpha".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 50);
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].repo_name, "alpha");
+        assert_eq!(
+            response.failures,
+            vec![
+                "Failed to search repository \"gone\": repository path does not exist".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn test_workspace_grep_stops_at_result_limit() {
         let repo = TestRepo::with_initial_commit();
