@@ -2200,6 +2200,10 @@ export class AppShell extends LitElement {
     // per-repo lock in the backend. The sidebar has always guarded its own
     // checkout with the flag it shares with merge/rebase/rename.
     const refName = this.refContextMenu.refName;
+    const checkoutRef =
+      this.refContextMenu.refType === 'tag'
+        ? this.refContextMenu.fullName || `refs/tags/${refName}`
+        : refName;
     const repoPath = this.activeRepository.repository.path;
     if (!this.claimRefOperation(repoPath)) return;
     const refType = this.refContextMenu.refType;
@@ -2222,7 +2226,7 @@ export class AppShell extends LitElement {
     }
 
     try {
-      const result = await gitService.checkoutWithAutoStash(repoPath, refName);
+      const result = await gitService.checkoutWithAutoStash(repoPath, checkoutRef);
 
       if (result.success && result.data?.success) {
         this.handleAutoStashToast(result.data, refName, repoPath);
