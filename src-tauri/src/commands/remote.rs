@@ -804,21 +804,38 @@ pub(crate) fn pull_branch(
         // RebaseConflict because the UI surfaces a "resolve
         // conflicts" flow that needs the rebase state intact.
         let mut commit_count = 0;
+        let mut skipped_count = 0usize;
         let rebase_result = (|| -> Result<()> {
             while let Some(op) = rebase_obj.next() {
-                let _op = op?;
+                let op = op?;
                 if repo.index()?.has_conflicts() {
                     return Err(LeviathanError::RebaseConflict);
                 }
                 let signature = repo.signature()?;
-                rebase_obj.commit(None, &signature, None)?;
-                commit_count += 1;
+                if crate::commands::merge::commit_or_skip_empty(
+                    &repo,
+                    &mut rebase_obj,
+                    &signature,
+                    Some(op.id()),
+                )?
+                .is_some()
+                {
+                    commit_count += 1;
+                } else {
+                    skipped_count += 1;
+                }
             }
+            crate::commands::merge::ensure_libgit2_rewritten_file(&repo)?;
             rebase_obj.finish(Some(&repo.signature()?))?;
             Ok(())
         })();
         match rebase_result {
             Err(LeviathanError::RebaseConflict) => {
+                // Paused, not finished: this call reports a conflict, never a
+                // count, so the commits already dropped here would go
+                // unreported. Hand them to the continue_rebase that finishes
+                // this rebase, which adds its own and reports the total.
+                crate::commands::merge::append_skipped(&repo, skipped_count);
                 return Err(LeviathanError::RebaseConflict);
             }
             Err(e) => {
@@ -827,7 +844,20 @@ pub(crate) fn pull_branch(
             }
             Ok(()) => {}
         }
-        message = format!("Rebased {} commit(s)", commit_count);
+        // A skipped commit is a local commit that silently disappears from the
+        // branch, so say so. `git rebase` prints "warning: skipped previously
+        // applied commit ..." on stderr; there is no stderr here, and without
+        // this the flagship case this fix unblocks (every local commit already
+        // upstream) reports the bare "Rebased 0 commit(s)" while the branch
+        // moves and the user's commits are gone.
+        message = if skipped_count > 0 {
+            format!(
+                "Rebased {} commit(s), skipped {} already applied upstream",
+                commit_count, skipped_count
+            )
+        } else {
+            format!("Rebased {} commit(s)", commit_count)
+        };
     } else {
         let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
@@ -2266,6 +2296,183 @@ mod tests {
 
         assert_eq!(message, "Fast-forward merge completed");
         assert_eq!(local.head_oid(), upstream.head_oid());
+    }
+
+    // ---- pull's rebase arm ----
+
+    fn pull_rebase(local: &TestRepo, branch: &str) -> Result<(String, String)> {
+        pull_branch(
+            &local.path_str(),
+            Some("origin".to_string()),
+            Some(branch.to_string()),
+            Some(true),
+            None,
+            None,
+        )
+    }
+
+    /// The bug, on the path most users hit it: your patch landed upstream, so
+    /// replaying your own copy of it produces nothing and libgit2 reports
+    /// GIT_EAPPLIED. The pull used to abort the whole rebase with "this patch
+    /// has already been applied"; it must skip that one commit and keep the
+    /// rest.
+    #[test]
+    fn test_pull_rebase_skips_a_local_commit_already_applied_upstream() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        // The same patch as a distinct local commit, plus work only we have.
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+        local.create_commit("local only", &[("local.txt", "local\n")]);
+
+        let (_, message) = pull_rebase(&local, &branch)
+            .expect("an already-applied local commit must be skipped, not abort the pull");
+
+        assert_eq!(
+            message,
+            "Rebased 1 commit(s), skipped 1 already applied upstream"
+        );
+        let repo = local.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "local only");
+        assert_eq!(head.parent(0).unwrap().id(), upstream.head_oid());
+        assert_eq!(
+            std::fs::read_to_string(local.path.join("shared.txt")).unwrap(),
+            "shared\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.path.join("local.txt")).unwrap(),
+            "local\n"
+        );
+    }
+
+    /// Every local commit already upstream: the branch still moves to the
+    /// remote tip, so the message must not be the bare "Rebased 0 commit(s)" —
+    /// in a GUI it is the only feedback the user gets for commits disappearing
+    /// from their branch.
+    #[test]
+    fn test_pull_rebase_reports_when_every_local_commit_was_already_upstream() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+
+        let (_, message) =
+            pull_rebase(&local, &branch).expect("a fully already-applied pull must succeed");
+
+        assert_eq!(
+            message,
+            "Rebased 0 commit(s), skipped 1 already applied upstream"
+        );
+        assert_eq!(local.head_oid(), upstream.head_oid());
+        assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// A pull --rebase that stops on a conflict reports RebaseConflict, not a
+    /// message — so the commits it already dropped had nowhere to go. They are
+    /// handed to the continue_rebase that finishes the rebase, which reports
+    /// the total to the conflict dialog.
+    #[tokio::test]
+    async fn test_pull_rebase_carries_its_skips_across_a_conflict() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        upstream.create_commit("upstream edits contested", &[("contested.txt", "theirs\n")]);
+        // The same patch as a distinct local commit — dropped before the stop.
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+        local.create_commit("local edits contested", &[("contested.txt", "ours\n")]);
+
+        let err = pull_rebase(&local, &branch).expect_err("the pull must stop on the conflict");
+        assert!(matches!(err, LeviathanError::RebaseConflict), "{:?}", err);
+
+        crate::commands::merge::resolve_conflict(
+            local.path_str(),
+            "contested.txt".to_string(),
+            "resolved\n".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = crate::commands::merge::continue_rebase(local.path_str())
+            .await
+            .expect("the resolved pull must finish");
+
+        assert_eq!(
+            skipped, 1,
+            "the commit the pull dropped before the conflict must still be reported"
+        );
+        assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// The other arm of the same libgit2 error: a commit that was ALREADY
+    /// empty before the pull is not an already-applied patch, and git keeps
+    /// it. It must be recreated on the rebased HEAD and counted as rebased.
+    #[test]
+    fn test_pull_rebase_preserves_a_local_commit_that_started_empty() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("upstream change", &[("up.txt", "up\n")]);
+        let empty_oid = {
+            let repo = local.repo();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = head.tree().unwrap();
+            let signature = repo.signature().unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Intentional empty marker",
+                &tree,
+                &[&head],
+            )
+            .unwrap()
+        };
+        local.create_commit("local follow-up", &[("local.txt", "local\n")]);
+
+        let (_, message) = pull_rebase(&local, &branch)
+            .expect("a commit that started empty must survive the pull");
+
+        assert_eq!(message, "Rebased 2 commit(s)");
+        let repo = local.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "local follow-up");
+        let empty = head.parent(0).unwrap();
+        assert_ne!(
+            empty.id(),
+            empty_oid,
+            "the empty commit must be replayed onto the upstream tip"
+        );
+        assert_eq!(empty.message().unwrap(), "Intentional empty marker");
+        assert_eq!(empty.tree_id(), empty.parent(0).unwrap().tree_id());
+        assert_eq!(empty.parent(0).unwrap().id(), upstream.head_oid());
+    }
+
+    /// Skipping empty patches must not swallow a real conflict: that one still
+    /// stops the loop and leaves the rebase state in place for the UI's
+    /// resolve flow.
+    #[test]
+    fn test_pull_rebase_conflict_keeps_the_rebase_state() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("upstream edit", &[("conflict.txt", "upstream\n")]);
+        local.create_commit("local edit", &[("conflict.txt", "local\n")]);
+
+        let err = pull_rebase(&local, &branch)
+            .expect_err("a conflicting rebase pull must report the conflict");
+
+        assert!(
+            matches!(err, LeviathanError::RebaseConflict),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(local.repo().state(), git2::RepositoryState::RebaseMerge);
     }
 
     // ---- pull strategy comes from git config ----

@@ -5,6 +5,7 @@ import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
 import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
+import { rebasedOntoMessage } from './utils/rebase-messages.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
@@ -2358,7 +2359,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       this.refreshConflictDialogRepo(repoPath);
-      showToast(`Rebased onto ${refName}`, 'success');
+      showToast(rebasedOntoMessage(refName, result.data), 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
