@@ -78,6 +78,9 @@ function defaultMockInvoke(command: string): Promise<unknown> {
   if (command === 'get_tag_sort_mode') {
     return Promise.resolve('name');
   }
+  if (command === 'get_push_remote') {
+    return Promise.resolve('origin');
+  }
   return Promise.resolve(null);
 }
 

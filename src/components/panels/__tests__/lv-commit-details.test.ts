@@ -311,4 +311,103 @@ describe('lv-commit-details', () => {
       }
     });
   });
+
+  /**
+   * lv-right-panel keeps ONE lv-commit-details across tabs and only rebinds
+   * `.repositoryPath`/`.commit`. A Ctrl+digit switch produces no document
+   * click, and app-shell clears the selected commit — so the panel falls back
+   * to its empty state and the menu merely LOOKS closed while still armed with
+   * repo A's file. Selecting any commit in repo B brought it straight back, and
+   * Restore/Open then joined repo B's path with repo A's file.
+   */
+  describe('file context menu across a repository switch', () => {
+    const otherCommit: Commit = { ...mockCommit, oid: 'fed987cba654', shortId: 'fed987c' };
+
+    /** Let the un-awaited work `updated()` kicks off settle. */
+    async function flush(el: LvCommitDetails): Promise<void> {
+      for (let i = 0; i < 5; i++) {
+        await el.updateComplete;
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      await el.updateComplete;
+    }
+
+    function menuCount(el: LvCommitDetails): number {
+      return el.shadowRoot!.querySelectorAll('.context-menu').length;
+    }
+
+    /** The state the menu entries actually read at click time. */
+    function menuState(el: LvCommitDetails): { visible: boolean; file: { path: string } | null } {
+      return (el as unknown as { contextMenu: { visible: boolean; file: { path: string } | null } })
+        .contextMenu;
+    }
+
+    async function mountedWithOpenMenu(): Promise<LvCommitDetails> {
+      mockFiles = [{ path: 'src/main.ts', status: 'modified', additions: 2, deletions: 1 }];
+      const el = await fixture<LvCommitDetails>(
+        html`<lv-commit-details
+          .repositoryPath=${'/repo/a'}
+          .commit=${mockCommit}
+        ></lv-commit-details>`,
+      );
+      await flush(el);
+
+      const row = el.shadowRoot!.querySelector('.file-item[title="src/main.ts"]');
+      expect(row, 'no file row to right-click').to.not.be.null;
+      row!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      await el.updateComplete;
+
+      expect(menuCount(el), 'the menu opens on right-click').to.equal(1);
+      expect(menuState(el).visible).to.be.true;
+      return el;
+    }
+
+    it('disarms the menu on the switch, so selecting a commit in the new repo does not bring it back', async () => {
+      const el = await mountedWithOpenMenu();
+
+      // Exactly what a Ctrl+digit switch does: app-shell clears the selection
+      // and lv-right-panel rebinds the path on the SAME element. No click.
+      el.commit = null;
+      el.repositoryPath = '/repo/b';
+      await flush(el);
+
+      // The empty state hides the menu node either way, so assert on the state
+      // the entries read — that is what tells the two cases apart.
+      expect(menuState(el).visible, 'the switch disarms the menu').to.be.false;
+
+      // Selecting a commit in the new repo re-renders the full panel.
+      el.commit = otherCommit;
+      await flush(el);
+
+      expect(menuCount(el), "repo A's menu must not return over repo B").to.equal(0);
+    });
+
+    it('leaves the menu alone on a re-render that does not change the repository', async () => {
+      const el = await mountedWithOpenMenu();
+
+      // A real re-render with `changedProperties.has('repositoryPath')` false:
+      // the guard must key off a repo CHANGE, not off any update cycle, or a
+      // routine refresh yanks the menu out from under the user's click.
+      el.githubOwner = 'hegsie';
+      await flush(el);
+
+      expect(menuCount(el), 'an unrelated re-render keeps the menu').to.equal(1);
+      expect(menuState(el).visible).to.be.true;
+      expect(menuState(el).file?.path).to.equal('src/main.ts');
+    });
+
+    it('disarms the menu even when the new repository fails to load its files', async () => {
+      const el = await mountedWithOpenMenu();
+
+      // The close must land before any await, or a failed load leaves the menu
+      // armed behind an error state and it reappears on the next good render.
+      failingCommands.add('get_commit_files');
+      el.commit = otherCommit;
+      el.repositoryPath = '/repo/b';
+      await flush(el);
+
+      expect(menuState(el).visible, 'a failed load still disarms the menu').to.be.false;
+      expect(menuCount(el), 'no menu is rendered over the error state').to.equal(0);
+    });
+  });
 });
