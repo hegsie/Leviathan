@@ -678,12 +678,13 @@ describe('git.service - Remote operations', () => {
     }
 
     function account(
-      integrationType: 'github' | 'gitlab',
+      integrationType: 'github' | 'gitlab' | 'azure-devops',
       id: string,
-      instanceUrl?: string,
+      /** GitLab instance URL, or Azure DevOps organization. */
+      instanceOrOrg?: string,
     ): IntegrationAccount {
       return {
-        ...createEmptyIntegrationAccount(integrationType, instanceUrl),
+        ...createEmptyIntegrationAccount(integrationType, instanceOrOrg),
         id,
         name: id,
         isDefault: true,
@@ -841,6 +842,69 @@ describe('git.service - Remote operations', () => {
       preferredAccount = dotCom;
       keyring.set('gitlab_token_gl-com', 'gl-com-pat');
       mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune still runs, just unauthenticated').to.deep.equal(['origin']);
+      expect(args.tokens, "the default account's token must not stand in").to.deep.equal({});
+    });
+
+    it("ignores a preferred Azure DevOps account from a DIFFERENT organization", async () => {
+      // Every ADO account is scoped to one organization, and a
+      // `{org}.visualstudio.com` host is per organization — so the resolver's
+      // global-default last tier can hand back `contoso` for a `fabrikam`
+      // remote. Trusting it would scope contoso's PAT to fabrikam's host and
+      // still fail to authenticate there.
+      const contoso = { ...account('azure-devops', 'ado-contoso', 'contoso'), isDefault: true };
+      const fabrikam = {
+        ...account('azure-devops', 'ado-fabrikam', 'fabrikam'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([contoso, fabrikam]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      keyring.set('azure-devops_token_ado-fabrikam', 'fabrikam-pat');
+      mockRepo([{ name: 'origin', url: 'https://fabrikam.visualstudio.com/proj/_git/repo' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const { tokens } = lastInvokedArgs as { tokens: Record<string, string> };
+      expect(tokens.origin, "the organization's own account must answer for it").to.equal(
+        'fabrikam-pat',
+      );
+      expect(
+        Object.values(tokens),
+        "another organization's credential must never reach this host",
+      ).to.not.contain('contoso-pat');
+    });
+
+    it('still sends the token when the preferred ADO account owns the organization', async () => {
+      // The guard is about the organization, not about ADO: the matching
+      // account must keep authenticating, or every ADO prune would go out
+      // unauthenticated. `dev.azure.com` names the org in the path.
+      const contoso = account('azure-devops', 'ado-contoso', 'Contoso');
+      unifiedProfileStore.getState().setAccounts([contoso]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      mockRepo([{ name: 'origin', url: 'https://dev.azure.com/contoso/proj/_git/repo' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens).to.deep.equal({
+        origin: 'contoso-pat',
+      });
+    });
+
+    it("sends no token when no ADO account owns the remote's organization", async () => {
+      // Same organization mismatch, but nothing else serves fabrikam. Falling
+      // through to the default account's token would be exactly the leak above;
+      // an unauthenticated prune is the correct outcome.
+      const contoso = { ...account('azure-devops', 'ado-contoso', 'contoso'), isDefault: true };
+      unifiedProfileStore.getState().setAccounts([contoso]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      mockRepo([{ name: 'origin', url: 'https://dev.azure.com/fabrikam/proj/_git/repo' }]);
 
       await pruneRemoteTrackingBranches('/test/repo');
 

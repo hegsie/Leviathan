@@ -7494,6 +7494,8 @@ export async function pruneRemoteTrackingBranches(
     const remoteUrl = urlByName.get(target) ?? await resolveRemoteUrl(repoPath, target);
     const host = remoteUrl ? cloneUrlHost(remoteUrl) : null;
     let integrationType: IntegrationType | undefined;
+    /** The Azure DevOps organization this remote names — see the ado arm below. */
+    let adoOrg: string | undefined;
     if (host === 'github.com' || host?.endsWith('.github.com')) {
       integrationType = 'github';
     } else if (
@@ -7502,6 +7504,7 @@ export async function pruneRemoteTrackingBranches(
       host?.endsWith('.visualstudio.com')
     ) {
       integrationType = 'azure-devops';
+      adoOrg = remoteUrl && host ? adoUrlOrganization(remoteUrl, host) : undefined;
     } else if (
       host === 'gitlab.com' ||
       host?.endsWith('.gitlab.com') ||
@@ -7511,10 +7514,10 @@ export async function pruneRemoteTrackingBranches(
     }
 
     let token: string | undefined;
-    // Set when the resolver named a GitLab account belonging to some OTHER
-    // instance than this remote's host — see the gitlab arm below. Such an
-    // answer is no answer at all for this host, so the host-matching fallback
-    // must still get its turn.
+    // Set when the resolver named an account scoped to some OTHER GitLab
+    // instance, or some OTHER Azure DevOps organization, than this remote's —
+    // see the two arms below. Such an answer is no answer at all for this
+    // remote, so the host-matching fallback must still get its turn.
     let wrongInstance = false;
     // A token must never ride a plaintext transport: the backend scopes it with
     // an `http://` credential helper just as readily as an `https://` one, so
@@ -7533,8 +7536,23 @@ export async function pruneRemoteTrackingBranches(
           './credential.service.ts'
         );
         if (integrationType === 'azure-devops') {
-          token =
-            await getFreshAccountToken('azure-devops', account.id, 'azure') ?? undefined;
+          // Every ADO account is scoped to exactly one organization, and a
+          // `{org}.visualstudio.com` host varies per organization just as a
+          // GitLab instance host varies per account — so the same hazard as
+          // the gitlab arm below applies. The resolver's last tier is the
+          // GLOBAL default, reported as a match like any other; trusting it
+          // would scope one org's PAT to another org's host and still fail to
+          // authenticate there. Only the account for THIS organization may
+          // answer; otherwise leave the token unset and let `getCloneToken`
+          // below pick by organization.
+          const accountOrg =
+            account.config.type === 'azure-devops' ? account.config.organization : undefined;
+          if (accountOrg && adoOrg && accountOrg.toLowerCase() === adoOrg.toLowerCase()) {
+            token =
+              await getFreshAccountToken('azure-devops', account.id, 'azure') ?? undefined;
+          } else {
+            wrongInstance = true;
+          }
         } else if (integrationType === 'gitlab') {
           // GitLab is the one provider whose host varies per account, and the
           // resolver's last tier is the GLOBAL default — reported as a match
