@@ -1487,10 +1487,26 @@ export class LvConflictResolutionDialog extends LitElement {
    */
   private async completeGitflowFinish(ctx: GitflowFinishContext): Promise<boolean> {
     // Squash feature: commitMerge already made the single-parent squash commit on
-    // develop. The backend finish is NOT idempotent for squash — a squash commit
-    // never makes the feature an ancestor of develop, so re-invoking it would
-    // re-merge the same divergence forever. Just delete the feature branch here.
+    // develop. Re-invoking the backend finish would re-merge the same divergence —
+    // a squash commit never makes the feature an ancestor of develop — so the
+    // remaining branch deletion is done here instead.
     if (ctx.kind === 'feature' && this.squashMerge) {
+      // The backend only records a completion marker for squash commits IT
+      // created, and this one was created here. Record it BEFORE the optional
+      // delete: if the delete is blocked (e.g. a preventDeletion rule) the
+      // feature stays listed as active, and the user's next "Squash and Finish"
+      // must find the marker and do cleanup only — without it the finish
+      // re-conflicts and resolving mints a SECOND squash commit on develop.
+      const recorded = await gitService.gitFlowRecordSquashFinish(this.repositoryPath, ctx.name);
+      if (!recorded.success) {
+        // The squash commit has landed either way, so this is not a failure of
+        // the finish — but an unrecorded squash makes a retry duplicate it, so
+        // the user has to be told rather than finding out on the retry.
+        showToast(
+          `${recorded.error?.message ?? 'Failed to record the completed squash'} — the squash commit landed; do not re-run the squash finish for "${ctx.name}"`,
+          'warning',
+        );
+      }
       if (ctx.deleteBranch) {
         const del = await gitService.deleteBranch(this.repositoryPath, ctx.branchName, true);
         if (!del.success) {

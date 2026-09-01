@@ -1,6 +1,6 @@
 //! Merge and rebase command handlers
 
-use std::path::Path;
+use std::{io::Write, path::Path};
 use tauri::command;
 
 use super::path_utils::validate_path_within_repo;
@@ -701,7 +701,6 @@ fn append_rewritten(repo: &git2::Repository, pairs: &[String]) {
     if pairs.is_empty() {
         return;
     }
-    use std::io::Write;
     let path = rewritten_list_path(repo);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -1218,50 +1217,26 @@ pub async fn execute_interactive_rebase(
     // CLI-invoking command never added to that list.
     crate::utils::reject_flag_like(&onto, "Rebase target")?;
 
-    // Unique names per call, like apply_patch_to_index. The fixed
-    // /tmp/leviathan-rebase-todo these replace meant two rebases running at
+    // A unique name per call, like apply_patch_to_index. The fixed
+    // /tmp/leviathan-rebase-todo it replaces meant two rebases running at
     // once would read each other's plan — one repo silently rewritten with the
     // other's drops — and the predictable path in a world-writable directory
     // was a symlink target for anyone on the machine.
-    //
-    // into_temp_path() closes the file handle while keeping the path (and its
-    // delete-on-drop). The script MUST be closed before git execs it: on Linux
-    // exec of a file that any process still holds open for writing fails with
-    // ETXTBSY, and NamedTempFile holds exactly such a handle for its whole
-    // scope. Since git runs GIT_SEQUENCE_EDITOR for every `rebase -i`, that
-    // made every interactive rebase fail with "cannot exec ...: Text file busy"
-    // — not just the squash path this was found through.
-    let todo_path = tempfile::Builder::new()
+    let mut todo_file = tempfile::Builder::new()
         .prefix("leviathan-rebase-todo-")
-        .tempfile()?
-        .into_temp_path();
-    std::fs::write(&todo_path, &todo)?;
+        .tempfile()?;
+    todo_file.write_all(todo.as_bytes())?;
+    todo_file.flush()?;
 
-    // Create a script that outputs the todo file content
-    let script_path = tempfile::Builder::new()
-        .prefix("leviathan-rebase-editor-")
-        .tempfile()?
-        .into_temp_path();
-
-    #[cfg(target_os = "windows")]
-    {
-        let script_content = format!("@echo off\r\ntype \"{}\" > \"%1\"", todo_path.display());
-        std::fs::write(&script_path, script_content)?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let script_content = format!("#!/bin/sh\ncat \"{}\" > \"$1\"", todo_path.display());
-        std::fs::write(&script_path, &script_content)?;
-        // Make the script executable
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
-    }
+    // Git evaluates GIT_SEQUENCE_EDITOR through a shell and appends the actual
+    // todo path as its final argument. A direct copy command avoids the
+    // platform-specific script execution and cmd.exe quoting pitfalls.
+    let sequence_editor = crate::utils::copy_file_editor_command(todo_file.path());
 
     // Run git rebase -i with our custom editor
     let output = create_command("git")
         .current_dir(&path)
-        .env("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap_or(""))
+        .env("GIT_SEQUENCE_EDITOR", sequence_editor)
         // GIT_SEQUENCE_EDITOR only supplies the todo list. A `squash` (or
         // `reword`) line then opens GIT_EDITOR for the combined message, and
         // this is the one rebase in the app whose todo the USER composes, so it
@@ -1281,11 +1256,6 @@ pub async fn execute_interactive_rebase(
         .args(["rebase", "-i", &onto])
         .output()
         .map_err(|e| LeviathanError::OperationFailed(e.to_string()))?;
-
-    // TempPath removes the file on drop; dropping here keeps the cleanup
-    // adjacent to the run it belongs to.
-    drop(todo_path);
-    drop(script_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2835,7 +2805,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn test_interactive_rebase_can_squash_without_an_editor() {
         // GIT_SEQUENCE_EDITOR only supplies the todo; a `squash` line then opens
         // GIT_EDITOR for the combined message. This is the one rebase whose todo
@@ -2934,7 +2903,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn test_interactive_rebase_can_be_aborted() {
         // libgit2 refuses to OPEN an interactive rebase ("interactive rebase is
         // not supported"), so open_rebase failed for every rebase started
@@ -3281,14 +3249,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn test_interactive_rebase_runs_at_all() {
         // The plainest possible plan: reorder nothing, drop nothing, squash
-        // nothing. It failed too — git runs GIT_SEQUENCE_EDITOR for every
-        // `rebase -i`, and the script was still held open for writing by the
-        // NamedTempFile that created it, so exec'ing it returned ETXTBSY. This
-        // test exists so the general case is pinned, not just the squash that
-        // led here.
+        // nothing. It failed too. Git runs GIT_SEQUENCE_EDITOR for every
+        // `rebase -i` and evaluates it through a shell with the real todo path
+        // appended, so the editor is a quoted `cp` and no temp file is ever
+        // exec'd — which is why the todo handle can stay open for the whole
+        // run. This test pins the general execution path, not just the squash
+        // that led here.
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();
         repo.create_commit("first", &[("a.txt", "a")]);
@@ -3317,7 +3285,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn test_interactive_rebase_can_drop() {
         let repo = TestRepo::with_initial_commit();
         let base = repo.head_oid().to_string();
