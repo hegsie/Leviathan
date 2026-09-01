@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
 
       - name: Merge whatever the policy allows
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           # A PAT or App token is only needed if the repository later gates
           # merges behind rules the built-in token cannot satisfy.

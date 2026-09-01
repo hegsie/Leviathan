@@ -1917,6 +1917,48 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('context-menu operation pinning', () => {
+    it('closes commit and ref context menus when the active repository changes', async () => {
+      // Append BEFORE adding repos so connectedCallback's restore pass sees an
+      // empty persistedOpenRepos and returns early — otherwise its async prune
+      // writes drive the store subscription and land the element on /repo/b
+      // before the switch below, making it a no-op.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // addRepository activates by default, so /repo/b is active here; pin
+        // back to /repo/a so the switch below is a real A -> B transition.
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+        expect((el as any).activeRepository?.repository.path).to.equal('/repo/a');
+
+        (el as any).contextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          commit: { oid: 'commit-from-a', summary: 'A commit', shortId: 'commit-f' },
+        };
+        (el as any).refContextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          refName: 'branch-from-a',
+          fullName: 'refs/heads/branch-from-a',
+          refType: 'localBranch',
+          isHead: false,
+        };
+
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        expect((el as any).contextMenu.visible).to.be.false;
+        expect((el as any).refContextMenu.visible).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('handleResetToCommit hard-resets the origin repo, not the tab switched to during the confirm', async () => {
       // A hard reset discards uncommitted work — it must never run against a
       // repo the user did not confirm. The confirm await yields; a mid-confirm
@@ -1933,6 +1975,9 @@ describe('app-shell multi-repo behavior', () => {
       };
 
       let resolveConfirm: (v: unknown) => void = () => {};
+      // showConfirm() goes through @tauri-apps/plugin-dialog's confirm(), which
+      // is a wrapper over the message command — there is no dedicated
+      // `plugin:dialog|confirm` IPC command to mock.
       mockResponses['plugin:dialog|message'] = () =>
         new Promise((res) => {
           resolveConfirm = res;

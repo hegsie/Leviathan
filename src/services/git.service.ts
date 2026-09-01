@@ -37,6 +37,19 @@ async function resolveRemoteUrl(repoPath: string, remote?: string): Promise<stri
   return match?.url ?? null;
 }
 
+async function resolveRemotePushUrl(repoPath: string, remote?: string): Promise<string | null> {
+  if (remote && /^([a-z][a-z0-9+.-]*:\/\/|[^@/]+@[^:/]+:|ssh:\/\/)/i.test(remote)) {
+    return remote;
+  }
+  const result = await invokeCommand<Remote[]>("get_remotes", { path: repoPath });
+  if (!result.success || !result.data) return null;
+  const wanted = remote ?? 'origin';
+  const match =
+    result.data.find((r) => r.name === wanted) ??
+    (remote === undefined ? result.data[0] : undefined);
+  return match?.pushUrl ?? match?.url ?? null;
+}
+
 /**
  * Hard blocks only: offline mode and the remote allowlist. No confirm prompt.
  *
@@ -55,6 +68,7 @@ async function checkNetworkAllowed(
    * "Offline mode is enabled" on the user for every commit, stage and
    * checkout. The refusal still happens — it just doesn't shout. */
   silent = false,
+  resolvedUrl?: string | null,
 ): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
 
@@ -70,7 +84,8 @@ async function checkNetworkAllowed(
   // An allowlist that cannot see the URL must refuse, not wave the operation
   // through: silently allowing is the failure mode that made this setting
   // decorative.
-  const url = repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null);
+  const url =
+    resolvedUrl ?? (repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null));
   const host = url
     ? cloneUrlHost(url.includes("://") || url.includes("@") ? url : `https://${url}`)
     : null;
@@ -141,8 +156,9 @@ async function checkNetworkPermission(
   operation: string,
   repoPath: string | null,
   remote?: string,
+  resolvedUrl?: string | null,
 ): Promise<boolean> {
-  if (await checkNetworkAllowed(repoPath, remote)) return false;
+  if (await checkNetworkAllowed(repoPath, remote, false, resolvedUrl)) return false;
 
   if (settingsStore.getState().confirmNetworkOps) {
     // A declined confirm is the user's own decision, not a failure — callers
@@ -1471,6 +1487,12 @@ interface ResolvedRepoToken {
   remoteName?: string;
   credentialHost?: string;
   refused?: boolean;
+  /**
+   * The account the token belongs to, when one resolved it. Absent for the
+   * legacy single-token fallbacks, which have no account to speak of.
+   */
+  accountId?: string;
+  integrationType?: IntegrationType;
 }
 
 /**
@@ -1502,7 +1524,15 @@ async function resolveRepoToken(
       );
       if (account) {
         const token = await AccountCredentials.getToken("github", account.id);
-        if (token) return { token, remoteName: resolvedRemote, credentialHost: "github.com" };
+        if (token) {
+          return {
+            token,
+            remoteName: resolvedRemote,
+            credentialHost: "github.com",
+            accountId: account.id,
+            integrationType: "github",
+          };
+        }
         // This repo resolves to THIS account, but its keyring entry is gone. Every
         // fallback below re-resolves the global default, so continuing would push
         // as a different identity. Fail instead and let the user reconnect it.
@@ -1548,7 +1578,12 @@ async function resolveRepoToken(
           if (accountOrg && accountOrg === adoRepoResult.data.organization) {
             await syncAdoGitCredentials(adoRepoResult.data.organization, token);
           }
-          return { token, remoteName: resolvedRemote };
+          return {
+            token,
+            remoteName: resolvedRemote,
+            accountId: account.id,
+            integrationType: "azure-devops",
+          };
         }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
@@ -1581,7 +1616,13 @@ async function resolveRepoToken(
             ? cloneUrlHost(account.config.instanceUrl)
             : null;
         if (token && credentialHost) {
-          return { token, remoteName: resolvedRemote, credentialHost };
+          return {
+            token,
+            remoteName: resolvedRemote,
+            credentialHost,
+            accountId: account.id,
+            integrationType: "gitlab",
+          };
         }
         // See the GitHub branch: a repo-specific account with no usable token
         // must not silently borrow the global default's.
@@ -1644,6 +1685,95 @@ async function getRemoteToken(
     cloneUrlIsCredentialSafe(targetUrl)
     ? resolved.token
     : undefined;
+}
+
+/**
+ * Does the account an UNFILTERED lookup landed on also own `pushUrl`?
+ *
+ * The unfiltered fallback resolves the account for whichever remote the
+ * provider detectors found first, which is routinely NOT the remote being
+ * pushed to. Same host is not the same identity: two github.com remotes
+ * (`origin` = the company repo, `personal-fork` = your own) belong to
+ * different accounts, and an account's `urlPatterns` are matched per URL. So
+ * ask the resolver who owns the push URL and only lend the token when the
+ * answer is the same account.
+ *
+ * A lookup that cannot answer withholds the token, which is exactly what the
+ * remote-scoped lookup did before this fallback existed.
+ */
+async function fallbackAccountOwnsPushUrl(
+  repoPath: string,
+  integrationType: IntegrationType,
+  accountId: string,
+  pushUrl: string,
+): Promise<boolean> {
+  try {
+    // Dynamic import for the same cycle reason as resolveRepoAccount's.
+    const { getAssignedUnifiedProfile, fetchRepositoryPreferredAccount } = await import(
+      "./unified-profile.service.ts"
+    );
+    const profile = await getAssignedUnifiedProfile(repoPath).catch(() => null);
+    const account = await fetchRepositoryPreferredAccount(
+      profile?.id ?? "",
+      integrationType,
+      pushUrl,
+    );
+    return !!account && account.id === accountId;
+  } catch (err) {
+    console.error("Failed to resolve the push URL's account:", err);
+    return false;
+  }
+}
+
+async function getPushUrlToken(
+  repoPath: string,
+  remoteName: string,
+  pushUrl: string,
+): Promise<string | undefined> {
+  let resolved = await resolveRepoToken(repoPath, remoteName);
+  // The provider detectors report the FIRST remote they recognise, so a push to
+  // any other remote never matches the name filter and resolves nothing. Retry
+  // unfiltered so those pushes still get a credential — guarded below, because
+  // an unfiltered answer is about a different remote.
+  let unfiltered = false;
+  if (!resolved.token && !resolved.refused) {
+    resolved = await resolveRepoToken(repoPath);
+    unfiltered = true;
+  }
+  if (!resolved.token || resolved.refused || !resolved.remoteName) return undefined;
+
+  const fetchUrl = await resolveRemoteUrl(repoPath, resolved.remoteName);
+  const fetchHost = fetchUrl ? cloneUrlHost(fetchUrl) : null;
+  const pushHost = cloneUrlHost(pushUrl);
+  // The plaintext gate applies to the UNFILTERED answer only. A remote-name
+  // match resolved the token for the very remote being pushed to, which is
+  // exactly what `push`, `fetch` and `pull` do with no transport check — gating
+  // it here would break Push Tag and Delete tag on remote on a self-hosted
+  // `http://` remote while the toolbar Push kept working, with nothing telling
+  // the user why. The unfiltered fallback lends a token resolved for a
+  // DIFFERENT remote, so it stays off cleartext transports.
+  if (
+    !fetchHost ||
+    !pushHost ||
+    fetchHost !== pushHost ||
+    (unfiltered && !cloneUrlIsCredentialSafe(pushUrl))
+  ) {
+    return undefined;
+  }
+  if (
+    unfiltered &&
+    resolved.accountId &&
+    resolved.integrationType &&
+    !(await fallbackAccountOwnsPushUrl(
+      repoPath,
+      resolved.integrationType,
+      resolved.accountId,
+      pushUrl,
+    ))
+  ) {
+    return undefined;
+  }
+  return resolved.token;
 }
 
 /**
@@ -2054,7 +2184,8 @@ export async function deleteTag(
 export async function pushTag(
   args: PushTagCommand,
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('push tag', args.path, args.remote)) {
+  const pushUrl = args.remote ? await resolveRemotePushUrl(args.path, args.remote) : null;
+  if (!await checkNetworkPermission('push tag', args.path, args.remote, pushUrl)) {
     return blockedResult();
   }
 
@@ -2063,13 +2194,32 @@ export async function pushTag(
   // remote the toolbar Push worked and "Push tag" failed with "No valid
   // credentials found".
   if (!args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    let token: string | undefined;
+    if (args.remote && pushUrl) {
+      token = await getPushUrlToken(args.path, args.remote, pushUrl);
+    } else {
+      // No push URL to scope against — `get_remotes` failed, or the remote is
+      // not in the list. Dropping the credential here would fail the push with
+      // "No valid credentials found"; fall back to the remote-scoped lookup,
+      // which never needed the URL to reach a token.
+      token = await getRepoToken(args.path, args.remote);
+    }
     if (token) {
       args.token = token;
     }
   }
 
   return invokeCommand<void>("push_tag", args);
+}
+
+export async function getPushRemote(
+  path: string,
+  remote?: string,
+): Promise<CommandResult<string>> {
+  return invokeCommand<string>("get_push_remote", {
+    path,
+    ...(remote ? { remote } : {}),
+  });
 }
 
 /**
@@ -2082,14 +2232,24 @@ export async function pushTag(
 export async function deleteRemoteTag(
   args: DeleteRemoteTagCommand,
 ): Promise<CommandResult<void>> {
-  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote)) {
+  const pushUrl = args.remote ? await resolveRemotePushUrl(args.path, args.remote) : null;
+  if (!await checkNetworkPermission('delete remote tag', args.path, args.remote, pushUrl)) {
     return blockedResult();
   }
 
   // Same credential plumbing push_tag needs: without a token this fails with
   // "No valid credentials found" on a token-authenticated HTTPS remote.
   if (!args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    let token: string | undefined;
+    if (args.remote && pushUrl) {
+      token = await getPushUrlToken(args.path, args.remote, pushUrl);
+    } else {
+      // No push URL to scope against — `get_remotes` failed, or the remote is
+      // not in the list. Dropping the credential here would fail the push with
+      // "No valid credentials found"; fall back to the remote-scoped lookup,
+      // which never needed the URL to reach a token.
+      token = await getRepoToken(args.path, args.remote);
+    }
     if (token) {
       args.token = token;
     }
@@ -5631,6 +5791,21 @@ export async function gitFlowFinishFeature(
     deleteBranch,
     squash,
   });
+}
+
+/**
+ * Record that a squash finish's commit has landed on develop.
+ *
+ * A squash finish whose merge conflicted is committed by the conflict-resolution
+ * flow, not by `gitflow_finish_feature`, so the backend has no record of it. The
+ * marker written here makes a later retry (after e.g. a blocked branch delete)
+ * do the pending cleanup only instead of re-merging into a second squash commit.
+ */
+export async function gitFlowRecordSquashFinish(
+  repoPath: string,
+  name: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("gitflow_record_squash_finish", { path: repoPath, name });
 }
 
 export async function gitFlowStartRelease(
