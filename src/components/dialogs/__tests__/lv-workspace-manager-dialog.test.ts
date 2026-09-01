@@ -737,6 +737,48 @@ describe('lv-workspace-manager-dialog', () => {
       );
     });
 
+    it('stays silent when the dialog is closed before the search resolves', async () => {
+      setupDefaultMocks();
+      const el = await renderDialog();
+
+      // Hold the search open so the dialog can be closed while it is in flight.
+      const base = mockInvoke;
+      let releaseSearch: (response: WorkspaceSearchResponse) => void = () => {};
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'search_workspace') {
+          return new Promise<unknown>((resolve) => {
+            releaseSearch = resolve as (response: WorkspaceSearchResponse) => void;
+          });
+        }
+        return base(command, args);
+      };
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'test';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      (el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      uiStore.setState({ toasts: [] });
+      el.close();
+      await el.updateComplete;
+
+      releaseSearch({
+        results: [],
+        failures: [
+          'Failed to search repository "beta": repository path does not exist',
+          'Failed to search repository "gamma": not a git repository',
+        ],
+      });
+      await tick(el, 100);
+
+      // A toast saying "see the details below" would point at a panel that is
+      // no longer on screen.
+      expect(uiStore.getState().toasts).to.have.length(0);
+      expect(el.shadowRoot!.querySelector('.search-failures')).to.be.null;
+    });
+
     it('clears a stale failure banner and query when the dialog is reopened', async () => {
       setupDefaultMocks({
         searchFailures: ['Failed to search repository "beta": repository path does not exist'],

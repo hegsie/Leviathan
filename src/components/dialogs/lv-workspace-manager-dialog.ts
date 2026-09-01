@@ -1130,7 +1130,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
       200,
     );
 
+    // A dialog closed mid-search has no failure panel left on screen, so a
+    // toast pointing at "the details below" would be a dead end.
     if (
+      !this.open ||
       requestId !== this.searchRequestId ||
       this.searchQuery !== query ||
       this.selectedWorkspace?.id !== ws.id

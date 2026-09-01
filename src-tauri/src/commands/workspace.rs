@@ -192,8 +192,9 @@ fn search_repository(
 }
 
 /// Search every repository in turn, collecting matches and per-repository
-/// failures. Repositories left unsearched because the global match limit was
-/// reached are reported too, so a truncated list never reads as a complete one.
+/// failures. Both ways of hitting the global match limit are reported —
+/// repositories left unsearched, and matches dropped inside the repository that
+/// consumed the limit — so a truncated list never reads as a complete one.
 fn search_repositories(
     repositories: &[WorkspaceRepository],
     query: &str,
@@ -204,6 +205,8 @@ fn search_repositories(
 ) -> WorkspaceSearchResponse {
     let mut results: Vec<WorkspaceSearchResult> = Vec::new();
     let mut failures = Vec::new();
+    let mut skipped_repositories = false;
+    let mut truncated_matches = false;
 
     for (index, repo_entry) in repositories.iter().enumerate() {
         if results.len() as u32 >= max_results {
@@ -218,17 +221,21 @@ fn search_repositories(
                     "repositories were"
                 }
             ));
+            skipped_repositories = true;
             break;
         }
 
         let remaining = max_results.saturating_sub(results.len() as u32) as usize;
-        let matches = match search_repository(
+        // Ask for one more match than can be kept: a repository holding more
+        // than the limit is otherwise indistinguishable from one holding
+        // exactly the limit, and its dropped matches would go unreported.
+        let mut matches = match search_repository(
             repo_entry,
             query,
             case_sensitive,
             use_regex,
             file_pattern,
-            remaining,
+            remaining + 1,
         ) {
             Ok(matches) => matches,
             Err(failure) => {
@@ -236,6 +243,11 @@ fn search_repositories(
                 continue;
             }
         };
+
+        if matches.len() > remaining {
+            matches.truncate(remaining);
+            truncated_matches = true;
+        }
 
         for (file_path, line_number, line_content) in matches {
             let (match_start, match_end) =
@@ -251,6 +263,15 @@ fn search_repositories(
                 match_end,
             });
         }
+    }
+
+    // The repository that consumed the limit had more to give. Only say so when
+    // no repository was skipped, otherwise the skipped line already reports it.
+    if truncated_matches && !skipped_repositories {
+        failures.push(format!(
+            "Stopped at the {}-match limit; more matches were not shown",
+            max_results
+        ));
     }
 
     WorkspaceSearchResponse { results, failures }
@@ -931,6 +952,75 @@ mod tests {
             response.failures,
             vec!["Stopped at the 2-match limit; 1 repository was not searched".to_string()]
         );
+    }
+
+    /// The limit is just as often consumed inside the only repository, where no
+    /// repository is left to report as skipped. That truncation must still be
+    /// announced, or 200 of 500 matches read as all of them.
+    #[test]
+    fn test_search_repositories_reports_matches_dropped_by_the_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add matches", &[("a.txt", "match\nmatch\nmatch\n")]);
+
+        let repositories = vec![WorkspaceRepository {
+            path: repo.path_str(),
+            name: "alpha".to_string(),
+        }];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(
+            response.failures,
+            vec!["Stopped at the 2-match limit; more matches were not shown".to_string()]
+        );
+    }
+
+    /// The last repository in the list is the same case: the loop ends instead
+    /// of taking the skipped-repository branch.
+    #[test]
+    fn test_search_repositories_reports_matches_dropped_by_the_last_repository() {
+        let first = TestRepo::with_initial_commit();
+        first.create_commit("Add matches", &[("a.txt", "match\n")]);
+        let second = TestRepo::with_initial_commit();
+        second.create_commit("Add matches", &[("b.txt", "match\nmatch\nmatch\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: first.path_str(),
+                name: "alpha".to_string(),
+            },
+            WorkspaceRepository {
+                path: second.path_str(),
+                name: "beta".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(
+            response.failures,
+            vec!["Stopped at the 2-match limit; more matches were not shown".to_string()]
+        );
+    }
+
+    /// Filling the limit exactly is not truncation: a complete list must not be
+    /// labelled as cut short.
+    #[test]
+    fn test_search_repositories_stays_silent_when_matches_exactly_fill_the_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add matches", &[("a.txt", "match\nmatch\n")]);
+
+        let repositories = vec![WorkspaceRepository {
+            path: repo.path_str(),
+            name: "alpha".to_string(),
+        }];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert!(response.failures.is_empty(), "{:?}", response.failures);
     }
 
     #[test]
