@@ -1610,10 +1610,11 @@ export async function previewRebase(
   return invokeCommand<RebasePreview>("preview_rebase", { path, onto });
 }
 
+/** Resolves with how many commits the rebase dropped as already applied. */
 export async function continueRebase(
   args: ContinueRebaseCommand,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("continue_rebase", args);
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>("continue_rebase", args);
 }
 
 export async function abortRebase(

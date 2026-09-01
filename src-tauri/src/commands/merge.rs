@@ -686,6 +686,10 @@ pub async fn rebase(path: String, onto: String) -> Result<usize> {
         // continue_rebase eventually completes this rebase, so the hook
         // describes the whole thing rather than only the last leg.
         append_rewritten(&repo, &rewritten);
+        // Same reasoning for the skip count. This invocation returns
+        // RebaseConflict, so the commits it has already dropped never reach the
+        // UI; continue_rebase adds its own skips and reports the total.
+        append_skipped(&repo, skipped);
     }
 
     match result {
@@ -739,6 +743,46 @@ fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .map(|l| l.to_string())
         .collect()
+}
+
+/// Where the running skip total of a paused rebase is kept.
+///
+/// Same `<gitdir>/rebase-merge/` lifecycle as `rewritten_list_path`: git
+/// removes the directory when the rebase finishes or is aborted, so the file is
+/// scoped to exactly one rebase and needs no separate cleanup.
+fn skipped_count_path(repo: &git2::Repository) -> std::path::PathBuf {
+    repo.path().join("rebase-merge").join("leviathan-skipped")
+}
+
+/// Add the skips of one leg to the running total, so a conflict pause does not
+/// lose them.
+///
+/// A commit dropped as already-applied is a local commit that disappears from
+/// the branch, and the completion toast is the only place the user can learn
+/// that. A rebase that pauses returns RebaseConflict — not a count — so every
+/// commit it dropped before the conflict would go unreported unless it is
+/// carried across the pause to whichever `continue_rebase` finishes the rebase.
+pub(crate) fn append_skipped(repo: &git2::Repository, skipped: usize) {
+    if skipped == 0 {
+        return;
+    }
+    let path = skipped_count_path(repo);
+    let running = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let _ = std::fs::write(&path, (running + skipped).to_string());
+}
+
+/// Read and clear the skips persisted by earlier passes of this rebase.
+fn take_skipped(repo: &git2::Repository) -> usize {
+    let path = skipped_count_path(repo);
+    let total = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let _ = std::fs::remove_file(&path);
+    total
 }
 
 /// Join a command's stdout and stderr into one searchable block.
@@ -933,8 +977,15 @@ pub async fn preview_rebase(
 }
 
 /// Continue a paused rebase
+///
+/// Returns how many commits this rebase dropped because their patch is already
+/// present on the target — the skips of every leg, not just this one. Same
+/// contract as `rebase`, and for the same reason: those are local commits that
+/// disappear from the branch with nothing on stderr to say so. The CLI branch
+/// below drives `git rebase --continue`, which reports no such count, so it
+/// yields 0.
 #[command]
-pub async fn continue_rebase(path: String) -> Result<()> {
+pub async fn continue_rebase(path: String) -> Result<usize> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Interactive rebases are driven by the git CLI (`git rebase -i`, see
@@ -944,7 +995,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     // Rebases started through libgit2 (the `rebase` command) have no todo
     // file and are continued through libgit2 below.
     if repo.path().join("rebase-merge/git-rebase-todo").exists() {
-        return continue_rebase_cli(&path);
+        return continue_rebase_cli(&path).map(|()| 0);
     }
 
     let signature = repo.signature()?;
@@ -957,6 +1008,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     // the user hit a conflict. Seeded from the pairs earlier passes persisted,
     // so commits replayed before each pause are not dropped.
     let mut rewritten: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
 
     // Commit the current (just-resolved) operation; a patch that became
     // empty after resolution is skipped like `git rebase --skip` would.
@@ -968,6 +1020,10 @@ pub async fn continue_rebase(path: String) -> Result<()> {
         if let Some(old_oid) = resumed_old {
             rewritten.push(format!("{} {}", old_oid, new_oid));
         }
+    } else {
+        // Resolving the conflict to exactly the target's content leaves an
+        // empty patch, so this commit is dropped too — counted like any other.
+        skipped += 1;
     }
 
     // Continue with remaining operations
@@ -976,14 +1032,18 @@ pub async fn continue_rebase(path: String) -> Result<()> {
 
         if repo.index()?.has_conflicts() {
             // Paused again. Persist this leg so the eventual completion still
-            // sees every commit replayed across all of them.
+            // sees every commit replayed — and every commit dropped — across
+            // all of them.
             append_rewritten(&repo, &rewritten);
+            append_skipped(&repo, skipped);
             return Err(LeviathanError::RebaseConflict);
         }
 
         if let Some(new_oid) = commit_or_skip_empty(&repo, &mut rebase, &signature, Some(old_oid))?
         {
             rewritten.push(format!("{} {}", old_oid, new_oid));
+        } else {
+            skipped += 1;
         }
     }
 
@@ -991,6 +1051,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
     // lives in.
     let mut all_rewritten = take_rewritten(&repo);
     all_rewritten.extend(rewritten);
+    let all_skipped = take_skipped(&repo) + skipped;
 
     ensure_libgit2_rewritten_file(&repo)?;
     rebase.finish(Some(&signature))?;
@@ -1004,7 +1065,7 @@ pub async fn continue_rebase(path: String) -> Result<()> {
         );
     }
 
-    Ok(())
+    Ok(all_skipped)
 }
 
 /// Commit the current rebase operation, treating an empty patch
@@ -6550,8 +6611,11 @@ mod tests {
         .await
         .unwrap();
 
-        let result = continue_rebase(repo.path_str()).await;
-        assert!(result.is_ok(), "continue_rebase failed: {:?}", result.err());
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("continue_rebase must succeed");
+        // Nothing disappeared from the branch, so nothing to report.
+        assert_eq!(skipped, 0);
         let git_repo = repo.repo();
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
@@ -6579,12 +6643,12 @@ mod tests {
         .await
         .unwrap();
 
-        let result = continue_rebase(repo.path_str()).await;
-        assert!(
-            result.is_ok(),
-            "continue_rebase should skip the empty commit: {:?}",
-            result.err()
-        );
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("continue_rebase should skip the empty commit, not fail");
+        // The resolved commit vanished from the branch — the continue is the
+        // only surface that can say so.
+        assert_eq!(skipped, 1);
         let git_repo = repo.repo();
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
@@ -6643,6 +6707,118 @@ mod tests {
         assert_eq!(
             empty.parent(0).unwrap().message().unwrap(),
             "Feature change"
+        );
+    }
+
+    /// A rebase that pauses returns RebaseConflict, not a count — so every
+    /// commit it dropped before the conflict had no way to reach the UI. The
+    /// count is carried across the pause and reported by the continue, exactly
+    /// as the `<old> <new>` pairs already are.
+    #[tokio::test]
+    async fn test_continue_rebase_reports_skips_from_before_the_pause() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+
+        repo.checkout_branch("feature");
+        // Dropped by rebase() BEFORE the conflict below.
+        repo.create_commit("Feature adds cross", &[("cross.txt", "cross\n")]);
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main adds cross", &[("cross.txt", "cross\n")]);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+
+        repo.checkout_branch("feature");
+        let result = rebase(repo.path_str(), initial_branch).await;
+        assert!(matches!(result, Err(LeviathanError::RebaseConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("continue must finish the paused rebase");
+
+        assert_eq!(
+            skipped, 1,
+            "the commit dropped before the pause must still be reported"
+        );
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+    }
+
+    /// The other half: commits dropped by the continue's own
+    /// remaining-operations loop, after the conflict was resolved.
+    #[tokio::test]
+    async fn test_continue_rebase_counts_the_commits_it_drops_itself() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+
+        repo.checkout_branch("feature");
+        repo.create_commit("Feature change", &[("shared.txt", "feature content")]);
+        // Replayed AFTER the conflict, by continue_rebase's own loop.
+        repo.create_commit("Feature adds cross", &[("cross.txt", "cross\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("shared.txt", "main content")]);
+        repo.create_commit("Main adds cross", &[("cross.txt", "cross\n")]);
+
+        repo.checkout_branch("feature");
+        let result = rebase(repo.path_str(), initial_branch).await;
+        assert!(matches!(result, Err(LeviathanError::RebaseConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("continue must finish the paused rebase");
+
+        assert_eq!(skipped, 1);
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "Feature change");
+    }
+
+    /// The running total survives more than one pause, and the file it lives
+    /// in goes away with the rebase state.
+    #[test]
+    fn test_skipped_count_accumulates_across_legs_and_is_cleared() {
+        let repo = TestRepo::with_initial_commit();
+        let git_repo = repo.repo();
+        std::fs::create_dir_all(git_repo.path().join("rebase-merge")).unwrap();
+
+        assert_eq!(take_skipped(&git_repo), 0, "no file means nothing skipped");
+
+        append_skipped(&git_repo, 0);
+        assert!(
+            !skipped_count_path(&git_repo).exists(),
+            "zero must not create a file"
+        );
+
+        append_skipped(&git_repo, 2);
+        append_skipped(&git_repo, 3);
+        assert_eq!(take_skipped(&git_repo), 5);
+        assert!(
+            !skipped_count_path(&git_repo).exists(),
+            "taking the count clears it"
         );
     }
 

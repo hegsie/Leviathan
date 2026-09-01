@@ -54,6 +54,18 @@ function defaultMockInvoke(command: string): Promise<unknown> {
     return Promise.resolve('Ok');
   }
   if (command === 'rebase') return Promise.resolve(skipped);
+  // The drop-onto-a-non-HEAD-branch arm checks the target out first; without
+  // this it takes the checkout-failed branch and never reaches the rebase.
+  if (command === 'checkout_with_autostash') {
+    return Promise.resolve({
+      success: true,
+      stashed: false,
+      stashApplied: false,
+      stashConflict: false,
+      stashOid: null,
+      message: 'ok',
+    });
+  }
   if (command === 'get_branches') return Promise.resolve([]);
   if (command === 'get_remotes') return Promise.resolve([]);
   if (command === 'get_hidden_branches') return Promise.resolve([]);
@@ -106,7 +118,9 @@ describe('lv-branch-list rebase skip reporting', () => {
     await rebaseFromContextMenu(el, makeBranch('main'));
 
     expect(invokeCalls.some((c) => c.command === 'rebase'), 'rebase ran').to.be.true;
-    expect(successToast()).to.equal('Rebased onto main, skipped 2 already applied upstream');
+    expect(successToast()).to.equal(
+      'Rebased onto main, skipped 2 commit(s) already applied upstream'
+    );
   });
 
   it('keeps the plain success when nothing was skipped', async () => {
@@ -128,7 +142,7 @@ describe('lv-branch-list rebase skip reporting', () => {
     await rebaseFromContextMenu(el, makeBranch('origin/main'));
 
     expect(successToast()).to.equal(
-      'Rebased onto origin/main, skipped 3 already applied upstream'
+      'Rebased onto origin/main, skipped 3 commit(s) already applied upstream'
     );
   });
 
@@ -145,7 +159,31 @@ describe('lv-branch-list rebase skip reporting', () => {
 
     expect(invokeCalls.some((c) => c.command === 'rebase'), 'rebase ran').to.be.true;
     expect(successToast()).to.equal(
-      'Rebased onto feature/source, skipped 1 already applied upstream'
+      'Rebased onto feature/source, skipped 1 commit(s) already applied upstream'
+    );
+  });
+
+  // The third Rebase gesture: dropping onto a branch that is NOT HEAD checks
+  // that branch out first and rebases afterwards, through a separate arm with
+  // its own success toast.
+  it('names the dropped commits after an alt-drag rebase onto a non-HEAD branch', async () => {
+    const el = await createComponent();
+    skipped = 2;
+
+    const source = makeBranch('feature/source');
+    (el as unknown as { draggingBranch: unknown }).draggingBranch = source;
+
+    await (
+      el as unknown as { handleDrop: (e: DragEvent, b: unknown) => Promise<void> }
+    ).handleDrop(fakeDragEvent(true), makeBranch('other', /* isHead */ false));
+
+    expect(
+      invokeCalls.some((c) => c.command === 'checkout_with_autostash'),
+      'the target branch is checked out first'
+    ).to.be.true;
+    expect(invokeCalls.some((c) => c.command === 'rebase'), 'rebase ran').to.be.true;
+    expect(successToast()).to.equal(
+      'Rebased onto feature/source, skipped 2 commit(s) already applied upstream'
     );
   });
 });

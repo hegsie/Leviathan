@@ -794,7 +794,7 @@ pub(crate) fn pull_branch(
         // RebaseConflict because the UI surfaces a "resolve
         // conflicts" flow that needs the rebase state intact.
         let mut commit_count = 0;
-        let mut skipped_count = 0;
+        let mut skipped_count = 0usize;
         let rebase_result = (|| -> Result<()> {
             while let Some(op) = rebase_obj.next() {
                 let op = op?;
@@ -821,6 +821,11 @@ pub(crate) fn pull_branch(
         })();
         match rebase_result {
             Err(LeviathanError::RebaseConflict) => {
+                // Paused, not finished: this call reports a conflict, never a
+                // count, so the commits already dropped here would go
+                // unreported. Hand them to the continue_rebase that finishes
+                // this rebase, which adds its own and reports the total.
+                crate::commands::merge::append_skipped(&repo, skipped_count);
                 return Err(LeviathanError::RebaseConflict);
             }
             Err(e) => {
@@ -2355,6 +2360,45 @@ mod tests {
             "Rebased 0 commit(s), skipped 1 already applied upstream"
         );
         assert_eq!(local.head_oid(), upstream.head_oid());
+        assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// A pull --rebase that stops on a conflict reports RebaseConflict, not a
+    /// message — so the commits it already dropped had nowhere to go. They are
+    /// handed to the continue_rebase that finishes the rebase, which reports
+    /// the total to the conflict dialog.
+    #[tokio::test]
+    async fn test_pull_rebase_carries_its_skips_across_a_conflict() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        upstream.create_commit("upstream edits contested", &[("contested.txt", "theirs\n")]);
+        // The same patch as a distinct local commit — dropped before the stop.
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+        local.create_commit("local edits contested", &[("contested.txt", "ours\n")]);
+
+        let err = pull_rebase(&local, &branch).expect_err("the pull must stop on the conflict");
+        assert!(matches!(err, LeviathanError::RebaseConflict), "{:?}", err);
+
+        crate::commands::merge::resolve_conflict(
+            local.path_str(),
+            "contested.txt".to_string(),
+            "resolved\n".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = crate::commands::merge::continue_rebase(local.path_str())
+            .await
+            .expect("the resolved pull must finish");
+
+        assert_eq!(
+            skipped, 1,
+            "the commit the pull dropped before the conflict must still be reported"
+        );
         assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
     }
 

@@ -341,7 +341,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
 
       const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
       expect(toast?.message).to.equal(
-        'Rebased onto main, skipped 2 already applied upstream'
+        'Rebased onto main, skipped 2 commit(s) already applied upstream'
       );
     });
 

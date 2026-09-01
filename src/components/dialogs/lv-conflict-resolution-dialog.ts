@@ -23,7 +23,7 @@ import { containsDeepActiveElement } from '../../utils/focus.ts';
 // and report the refusal, so the operation stays serialized; only the
 // affordance stays live.
 import { tryAcquireRefOp, releaseRefOp } from '../../utils/ref-lock.ts';
-import { REBASE_PAUSED_MESSAGE } from '../../utils/rebase-messages.ts';
+import { REBASE_PAUSED_MESSAGE, skippedCommitsSuffix } from '../../utils/rebase-messages.ts';
 
 /**
  * Context threaded through a conflicted git-flow finish so the dialog can COMPLETE
@@ -1310,6 +1310,12 @@ export class LvConflictResolutionDialog extends LitElement {
 
     try {
       let result;
+      // A rebase that finishes here may have dropped commits whose patch is
+      // already on the target — across every leg, not just this one. The
+      // backend carries the running total over each conflict pause; this is
+      // the only surface that can report it, so the completion toast says so
+      // in the same words the four direct-rebase toasts use.
+      let completionSuffix = '';
       switch (this.operationType) {
         case 'rebase':
           result = await gitService.continueRebase({ path: this.repositoryPath });
@@ -1346,6 +1352,7 @@ export class LvConflictResolutionDialog extends LitElement {
             showToast(result.error?.message ?? 'Failed to continue rebase', 'error');
             return;
           }
+          completionSuffix = skippedCommitsSuffix(result.data);
           break;
         case 'cherry-pick':
           result = await gitService.continueCherryPick({ path: this.repositoryPath });
@@ -1465,7 +1472,7 @@ export class LvConflictResolutionDialog extends LitElement {
       // commit was created — the same gesture that, had it failed, produces a
       // red toast. (The paused-rebase branch above returns before this and
       // carries its own, different message.)
-      showToast(`${this.getOperationTitle()} completed`, 'success');
+      showToast(`${this.getOperationTitle()} completed${completionSuffix}`, 'success');
       this.dispatchEvent(
         new CustomEvent('operation-completed', {
           bubbles: true,
