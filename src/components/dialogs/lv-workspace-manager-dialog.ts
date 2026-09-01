@@ -651,7 +651,8 @@ export class LvWorkspaceManagerDialog extends LitElement {
 
       .search-failures {
         padding: var(--spacing-sm);
-        border: 1px solid color-mix(in srgb, var(--color-error) 40%, transparent);
+        border: 1px solid var(--color-error);
+        background: var(--color-error-bg, rgba(239, 83, 80, 0.1));
         border-radius: var(--radius-sm);
         color: var(--color-error);
         font-size: var(--font-size-xs);
@@ -721,6 +722,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProps.has('open') && this.open) {
+      // A stale failure banner from a previous session must not reappear as if
+      // it described a fresh search.
+      this.resetSearchState();
       await this.loadWorkspaces();
     }
   }
@@ -744,15 +748,19 @@ export class LvWorkspaceManagerDialog extends LitElement {
     }
   }
 
-  private selectWorkspace(id: string): void {
-    this.selectedWorkspaceId = id;
-    this.repoStatuses = new Map();
+  private resetSearchState(): void {
     this.searchQuery = '';
     this.searchResults = [];
     this.searchFailures = [];
     this.searchCompleted = false;
     this.searching = false;
     this.searchRequestId++;
+  }
+
+  private selectWorkspace(id: string): void {
+    this.selectedWorkspaceId = id;
+    this.repoStatuses = new Map();
+    this.resetSearchState();
     this.syncEditorFields();
     this.refreshStatus();
   }
@@ -1131,13 +1139,18 @@ export class LvWorkspaceManagerDialog extends LitElement {
     }
 
     if (result.success && result.data) {
-      this.searchResults = result.data.results;
-      this.searchFailures = result.data.failures;
+      this.searchResults = result.data.results ?? [];
+      this.searchFailures = result.data.failures ?? [];
       this.searchCompleted = true;
-      if (result.data.failures.length > 0) {
+      if (this.searchFailures.length > 0) {
+        // The toast renders as plain text, so newlines collapse: summarise here
+        // and leave the per-repository detail to the .search-failures panel,
+        // which stays on screen.
         showToast(
-          result.data.failures.join('\n'),
-          result.data.results.length > 0 ? 'warning' : 'error',
+          this.searchFailures.length === 1
+            ? this.searchFailures[0]
+            : `Search completed with ${this.searchFailures.length} problems — see the details below`,
+          this.searchResults.length > 0 ? 'warning' : 'error',
         );
       }
     } else {

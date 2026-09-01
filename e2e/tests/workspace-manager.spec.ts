@@ -41,7 +41,7 @@ test.describe('Workspace Manager - open-repo-file handler', () => {
 
     await injectCommandMock(page, {
       get_workspaces: [],
-      search_workspace: [],
+      search_workspace: { results: [], failures: [] },
     });
   });
 
@@ -130,7 +130,7 @@ test.describe('Workspace Manager - repo status chips', () => {
           lastOpened: null,
         },
       ],
-      search_workspace: [],
+      search_workspace: { results: [], failures: [] },
       validate_workspace_repositories: [
         {
           path: '/repos/alpha',
@@ -170,5 +170,91 @@ test.describe('Workspace Manager - repo status chips', () => {
     // with no ahead/behind, which is what git reports for it.
     await expect(dialog.locator('.repo-branch.detached')).toHaveText('detached HEAD');
     await expect(dialog.locator('.repo-ahead-behind')).toHaveCount(1);
+  });
+});
+
+test.describe('Workspace Manager - partial search failures', () => {
+  test('shows matches from the repos that worked alongside the ones that could not be searched', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_workspaces: [
+        {
+          id: 'ws-1',
+          name: 'Alpha Workspace',
+          description: '',
+          color: '#4fc3f7',
+          repositories: [
+            { path: '/repos/alpha', name: 'alpha' },
+            { path: '/repos/beta', name: 'beta' },
+          ],
+          createdAt: '2024-01-01T00:00:00Z',
+          lastOpened: null,
+        },
+      ],
+      validate_workspace_repositories: [],
+      search_workspace: {
+        results: [
+          {
+            repoName: 'alpha',
+            repoPath: '/repos/alpha',
+            filePath: 'src/main.ts',
+            lineNumber: 42,
+            lineContent: 'const needle = true',
+            matchStart: 6,
+            matchEnd: 12,
+          },
+        ],
+        failures: ['Failed to search repository "beta": repository path does not exist'],
+      },
+    });
+
+    await openWorkspaceManager(page);
+
+    const dialog = page.locator('lv-workspace-manager-dialog');
+    await dialog.locator('.search-input').fill('needle');
+    await dialog.locator('.search-btn').click();
+
+    // The matches that were found are still shown...
+    await expect(dialog.locator('.search-result-item')).toHaveCount(1);
+    // ...and the repository that could not be searched is named, not silently dropped.
+    await expect(dialog.locator('.search-failures')).toContainText('beta');
+  });
+
+  test('clears a stale failure banner when the dialog is reopened', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_workspaces: [
+        {
+          id: 'ws-1',
+          name: 'Alpha Workspace',
+          description: '',
+          color: '#4fc3f7',
+          repositories: [{ path: '/repos/alpha', name: 'alpha' }],
+          createdAt: '2024-01-01T00:00:00Z',
+          lastOpened: null,
+        },
+      ],
+      validate_workspace_repositories: [],
+      search_workspace: {
+        results: [],
+        failures: ['Failed to search repository "alpha": repository path does not exist'],
+      },
+    });
+
+    await openWorkspaceManager(page);
+
+    const dialog = page.locator('lv-workspace-manager-dialog');
+    await dialog.locator('.search-input').fill('needle');
+    await dialog.locator('.search-btn').click();
+    await expect(dialog.locator('.search-failures')).toContainText('alpha');
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('lv-workspace-manager-dialog[open]')).not.toBeVisible();
+
+    await openWorkspaceManager(page);
+    await expect(dialog.locator('.search-failures')).toHaveCount(0);
+    await expect(dialog.locator('.search-input')).toHaveValue('');
   });
 });
