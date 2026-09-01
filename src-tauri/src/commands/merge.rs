@@ -982,8 +982,9 @@ pub async fn preview_rebase(
 /// present on the target — the skips of every leg, not just this one. Same
 /// contract as `rebase`, and for the same reason: those are local commits that
 /// disappear from the branch with nothing on stderr to say so. The CLI branch
-/// below drives `git rebase --continue`, which reports no such count, so it
-/// yields 0.
+/// below reports the same count, and for the same reason: the drops there are
+/// performed by `continue_rebase_cli` itself, and git names none of them
+/// anywhere the user can see.
 #[command]
 pub async fn continue_rebase(path: String) -> Result<usize> {
     let repo = git2::Repository::open(Path::new(&path))?;
@@ -995,7 +996,7 @@ pub async fn continue_rebase(path: String) -> Result<usize> {
     // Rebases started through libgit2 (the `rebase` command) have no todo
     // file and are continued through libgit2 below.
     if repo.path().join("rebase-merge/git-rebase-todo").exists() {
-        return continue_rebase_cli(&path).map(|()| 0);
+        return continue_rebase_cli(&path);
     }
 
     let signature = repo.signature()?;
@@ -1194,9 +1195,77 @@ pub(crate) fn ensure_libgit2_rewritten_file(repo: &git2::Repository) -> Result<(
     Ok(())
 }
 
+/// Does continuing this rebase drop the commit it is stopped on?
+///
+/// `git rebase --continue` DROPS a pending commit whose patch came back empty
+/// — already applied on the target, or resolved to the target's content — and
+/// says nothing about it on either stream. It only stops and asks for
+/// `git rebase --skip` when a LATER commit comes back empty, so the one it is
+/// stopped on right now never appears in git's output at all and has to be
+/// read off the rebase state instead. Three conditions, all needed:
+///
+///  - no `amend` marker: git writes it when it stopped at an `edit` line AFTER
+///    applying the commit, and continuing from there drops nothing;
+///  - the last command in `done` is one that adds a commit: a `break` (or
+///    `exec`) stop also leaves a clean index matching HEAD and drops nothing,
+///    while `squash`/`fixup` fold INTO HEAD, so a HEAD-to-index diff does not
+///    describe their patch;
+///  - no conflicts, and the index holds nothing over HEAD — which is what "the
+///    pending patch is empty" means.
+fn pending_operation_is_empty(repo: &git2::Repository) -> bool {
+    let state_dir = repo.path().join("rebase-merge");
+    if state_dir.join("amend").exists() {
+        return false;
+    }
+
+    let done = std::fs::read_to_string(state_dir.join("done")).unwrap_or_default();
+    let adds_a_commit = done
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .and_then(|line| line.split_whitespace().next())
+        .is_some_and(|command| matches!(command, "pick" | "p" | "reword" | "r" | "edit" | "e"));
+    if !adds_a_commit {
+        return false;
+    }
+
+    let Ok(index) = repo.index() else {
+        return false;
+    };
+    if index.has_conflicts() {
+        return false;
+    }
+    let Ok(head_tree) = repo
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .and_then(|commit| commit.tree())
+    else {
+        return false;
+    };
+    repo.diff_tree_to_index(Some(&head_tree), Some(&index), None)
+        .map(|diff| diff.deltas().len() == 0)
+        .unwrap_or(false)
+}
+
 /// Continue a CLI-initiated (interactive) rebase via `git rebase --continue`,
 /// advancing past patches that became empty with `git rebase --skip`.
-fn continue_rebase_cli(path: &str) -> Result<()> {
+///
+/// Returns how many commits this leg dropped, plus the ones earlier legs of
+/// the same rebase persisted. The count is this function's to report, not
+/// git's: the drops are performed here — by the `--skip` loop below, and by
+/// the `--continue` that silently drops the commit it was stopped on — and a
+/// dropped commit is a local commit that disappears from the branch with
+/// nothing on either stream to say so. The running total has to be read before
+/// the final `git rebase --continue`, which removes the `rebase-merge`
+/// directory it lives in.
+fn continue_rebase_cli(path: &str) -> Result<usize> {
+    let repo = git2::Repository::open(Path::new(path))?;
+    // Skips the earlier legs of this rebase persisted.
+    let carried = take_skipped(&repo);
+    // The commit this rebase is stopped on, when continuing would drop it.
+    let pending = usize::from(pending_operation_is_empty(&repo));
+    // Skips made by this leg's own `git rebase --skip` calls.
+    let mut skipped = 0usize;
     let mut args: Vec<&str> = vec!["rebase", "--continue"];
     loop {
         let output = create_command("git")
@@ -1220,13 +1289,15 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
             // dialog with no message and left the repo mid-rebase on a
             // detached HEAD, where the most obvious remaining button was the
             // one that throws the rebase away.
-            let git_dir = git2::Repository::open(Path::new(path))?
-                .path()
-                .to_path_buf();
+            let git_dir = repo.path().to_path_buf();
             if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+                // Carry the skips across the pause, exactly as the libgit2 arm
+                // does: whichever continue finishes the rebase is the only
+                // surface that can report them.
+                append_skipped(&repo, carried + pending + skipped);
                 return Err(LeviathanError::RebasePaused);
             }
-            return Ok(());
+            return Ok(carried + pending + skipped);
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1239,12 +1310,23 @@ fn continue_rebase_cli(path: &str) -> Result<()> {
             && (combined.contains("No changes") || combined.contains("nothing to commit"))
         {
             args = vec!["rebase", "--skip"];
+            skipped += 1;
             continue;
         }
 
         if combined.contains("CONFLICT") || combined.contains("conflict") {
+            // A conflict is raised by a LATER commit, so the pending one was
+            // dealt with — dropped or committed — before git got there.
+            append_skipped(&repo, carried + pending + skipped);
             return Err(LeviathanError::RebaseConflict);
         }
+        // A hard failure can leave the same commit pending, and the next
+        // Continue reads it off the rebase state again — so counting it here
+        // would report it twice. Anything this leg skipped did move past it.
+        append_skipped(
+            &repo,
+            carried + skipped + if skipped > 0 { pending } else { 0 },
+        );
         return Err(LeviathanError::OperationFailed(
             if stderr.trim().is_empty() {
                 stdout.to_string()
@@ -6795,6 +6877,223 @@ mod tests {
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(head.message().unwrap(), "Feature change");
+    }
+
+    /// The CLI (interactive) arm of `continue_rebase` is the arm that performs
+    /// the skips — `git rebase --continue` drops the commit it is stopped on,
+    /// and the loop's own `git rebase --skip` drops the ones after it — so it
+    /// has to report them. It returned a hard-coded 0, and the dialog it feeds
+    /// is the same conflict dialog an interactive-rebase conflict opens: the
+    /// identical gesture (resolve, click Continue) said a bare "Rebase
+    /// completed" while a local commit disappeared from the branch.
+    #[tokio::test]
+    async fn test_continue_rebase_counts_skips_on_the_interactive_arm() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        setup_conflicting_branches(&repo);
+        repo.checkout_branch("feature");
+
+        // A CLI interactive rebase (todo file on disk) whose single pick
+        // conflicts.
+        let todo = format!("pick {}\n", repo.head_oid());
+        let started = execute_interactive_rebase(repo.path_str(), initial_branch, todo).await;
+        assert!(started.is_err(), "the pick must stop on the conflict");
+
+        let git_dir = repo.repo().path().to_path_buf();
+        if !git_dir.join("rebase-merge/git-rebase-todo").exists() {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        }
+
+        // Resolving to exactly the target's content empties the patch, so the
+        // continue drops the commit.
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "main content".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("the interactive continue must finish, not fail");
+        assert_eq!(
+            skipped, 1,
+            "the commit the continue dropped must be reported"
+        );
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            git_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .message()
+                .unwrap(),
+            "Main change",
+            "the dropped commit really is gone from the branch"
+        );
+    }
+
+    /// Both halves of the interactive arm's count in one rebase: the commit
+    /// `git rebase --continue` drops without a word, AND the one it stops on
+    /// and hands to the loop's `git rebase --skip`. Counting only the second
+    /// (or neither) under-reports commits that have left the branch.
+    #[tokio::test]
+    async fn test_interactive_continue_counts_both_the_silent_and_the_skipped_drop() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+
+        repo.checkout_branch("feature");
+        let one = repo.create_commit("Feature one", &[("one.txt", "one\n")]);
+        let two = repo.create_commit("Feature two", &[("two.txt", "two\n")]);
+
+        // The same two changes land on the target independently, so both picks
+        // come back empty.
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main one", &[("one.txt", "one\n")]);
+        repo.create_commit("Main two", &[("two.txt", "two\n")]);
+
+        repo.checkout_branch("feature");
+        let todo = format!("pick {}\npick {}\n", one, two);
+        let started = execute_interactive_rebase(repo.path_str(), initial_branch, todo).await;
+        assert!(started.is_err(), "the first pick comes back empty");
+
+        let git_dir = repo.repo().path().to_path_buf();
+        if !git_dir.join("rebase-merge/git-rebase-todo").exists() {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        }
+
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("the interactive continue must finish, not fail");
+        assert_eq!(
+            skipped, 2,
+            "both dropped commits must be reported, not just the one git asked to skip"
+        );
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            git_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .message()
+                .unwrap(),
+            "Main two",
+            "neither commit survived the rebase"
+        );
+    }
+
+    /// And the interactive arm's skips survive its own pauses, as the libgit2
+    /// arm's already do: a rebase that drops a commit and then stops at an
+    /// `edit` line returns RebasePaused — not a count — so the drop would go
+    /// unreported unless it is carried to whichever continue finishes.
+    #[tokio::test]
+    async fn test_interactive_continue_carries_skips_across_a_pause() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+
+        repo.checkout_branch("feature");
+        let dropped = repo.create_commit("Feature one", &[("one.txt", "one\n")]);
+        let kept = repo.create_commit("Feature extra", &[("extra.txt", "extra\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main one", &[("one.txt", "one\n")]);
+
+        repo.checkout_branch("feature");
+        let todo = format!("pick {}\nedit {}\n", dropped, kept);
+        let started = execute_interactive_rebase(repo.path_str(), initial_branch, todo).await;
+        assert!(started.is_err(), "the first pick comes back empty");
+
+        let git_dir = repo.repo().path().to_path_buf();
+        if !git_dir.join("rebase-merge/git-rebase-todo").exists() {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        }
+
+        // First leg: drops the emptied commit, then stops at the `edit`.
+        let paused = continue_rebase(repo.path_str())
+            .await
+            .expect_err("the rebase stops at the edit line");
+        assert!(
+            paused.to_string().contains("paused"),
+            "the pause must be reported: {}",
+            paused
+        );
+
+        // Second leg: finishes, and still knows about the earlier drop. An
+        // `edit` stop has applied its commit already, so continuing from one
+        // must not be counted as a drop of its own.
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("the second continue must finish the rebase");
+        assert_eq!(
+            skipped, 1,
+            "the commit dropped before the pause must still be reported, and only it"
+        );
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "Feature extra");
+        assert_eq!(
+            head.parent(0).unwrap().message().unwrap(),
+            "Main one",
+            "the dropped commit is not between them"
+        );
+    }
+
+    /// A rebase that drops nothing must still report nothing: `break` and
+    /// `edit` stops leave the same clean index matching HEAD that an emptied
+    /// patch does, and counting those would invent skips the user never had.
+    #[tokio::test]
+    async fn test_interactive_continue_reports_no_skips_for_a_break_stop() {
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        repo.create_commit("Add shared", &[("shared.txt", "base")]);
+        repo.create_branch("feature");
+
+        repo.checkout_branch("feature");
+        let only = repo.create_commit("Feature only", &[("only.txt", "only\n")]);
+
+        repo.checkout_branch(&initial_branch);
+        repo.create_commit("Main change", &[("main.txt", "main\n")]);
+
+        repo.checkout_branch("feature");
+        let todo = format!("break\npick {}\n", only);
+        let started = execute_interactive_rebase(repo.path_str(), initial_branch, todo).await;
+        let Ok(outcome) = started else {
+            // The CLI rebase could not start in this environment; nothing to assert.
+            return;
+        };
+        assert!(outcome.paused, "the rebase must stop at the break");
+
+        let skipped = continue_rebase(repo.path_str())
+            .await
+            .expect("continuing past a break must finish the rebase");
+        assert_eq!(skipped, 0, "a break drops nothing");
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        assert_eq!(
+            git_repo
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .message()
+                .unwrap(),
+            "Feature only",
+            "and the commit is still on the branch"
+        );
     }
 
     /// The running total survives more than one pause, and the file it lives
