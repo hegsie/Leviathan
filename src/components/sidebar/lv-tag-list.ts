@@ -499,6 +499,11 @@ export class LvTagList extends LitElement {
 
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
+      // A menu entry acts on the tag it was opened over, but resolves the repo
+      // from `this.repositoryPath` at click time — and a keyboard tab switch
+      // produces neither a document click nor Escape, so the menu would survive
+      // the rebind and delete repo A's `v1.0.0` inside repo B.
+      this.contextMenu = { ...this.contextMenu, visible: false };
       // Drop the previous repo's remotes before the reload: they must never
       // label the new repo's menu.
       this.remotes = null;
@@ -850,8 +855,9 @@ export class LvTagList extends LitElement {
    * Push the right-clicked tag.
    *
    * `remote` is the destination the user picked in the menu. When it is
-   * undefined the arg is left off the command entirely so the backend resolves
-   * the destination the same way `push` does.
+   * undefined the destination is resolved up front via `get_push_remote`, so
+   * the success toast and the force-push retry can both name where the tag
+   * actually went.
    */
   private async handlePushTag(remote?: string): Promise<void> {
     const tag = this.contextMenu.tag;
@@ -906,20 +912,30 @@ export class LvTagList extends LitElement {
     // slow) network push, which rebinds this.repositoryPath.
     const repoPath = this.repositoryPath;
     try {
+      if (!destination) {
+        const remoteResult = await gitService.getPushRemote(repoPath);
+        if (!remoteResult.success || !remoteResult.data) {
+          showToast(
+            `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+            'error',
+          );
+          return;
+        }
+        destination = remoteResult.data;
+      }
       const result = await gitService.pushTag({
         path: repoPath,
         name: tag.name,
-        // Omitted, not undefined: the backend resolver only runs when the key
-        // is absent, and git.service's allowlist/token lookups key off it too.
-        ...(destination ? { remote: destination } : {}),
+        // Always explicit: the destination was resolved above, so the toast,
+        // the force retry and git.service's allowlist/token lookups all key off
+        // the same remote.
+        remote: destination,
       });
 
       if (result.success) {
         await this.loadTags();
         showToast(
-          destination
-            ? `Pushed tag ${tag.name} to ${destination}`
-            : `Pushed tag ${tag.name} to remote`,
+          `Pushed tag ${tag.name} to ${destination}`,
           'success',
         );
         this.dispatchEvent(new CustomEvent('tags-changed', {
