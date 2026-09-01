@@ -561,9 +561,14 @@ async fn commit_merge_signed(path: &str, message: &str, is_squash: bool) -> Resu
     Ok(())
 }
 
-/// Rebase current branch onto another
+/// Rebase current branch onto another.
+///
+/// Returns how many commits were skipped because their patch is already
+/// present on `onto`. Those are local commits that disappear from the branch,
+/// and `git rebase` warns about each one on stderr — there is no stderr here,
+/// so the count is handed to the UI to say so instead.
 #[command]
-pub async fn rebase(path: String, onto: String) -> Result<()> {
+pub async fn rebase(path: String, onto: String) -> Result<usize> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
     // Like canonical `git rebase`, refuse up front if another operation is in
@@ -637,6 +642,7 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
     // rebase state intact; the user can call abort_rebase explicitly.
     // post-rewrite reads `<old-sha> <new-sha>` lines, one per replayed commit.
     let mut rewritten: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
     let result = (|| -> Result<()> {
         while let Some(op) = rebase.next() {
             let op = op?;
@@ -654,6 +660,8 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
                 commit_or_skip_empty(&repo, &mut rebase, &signature, Some(old_oid))?
             {
                 rewritten.push(format!("{} {}", old_oid, new_oid));
+            } else {
+                skipped += 1;
             }
         }
 
@@ -686,7 +694,7 @@ pub async fn rebase(path: String, onto: String) -> Result<()> {
             let _ = rebase.abort();
             Err(e)
         }
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(skipped),
     }
 }
 
@@ -2869,10 +2877,13 @@ mod tests {
         let main_oid = repo.head_oid();
 
         repo.checkout_branch("feature");
-        rebase(repo.path_str(), initial_branch)
+        let skipped = rebase(repo.path_str(), initial_branch)
             .await
             .expect("an already-applied patch must be skipped, not abort the rebase");
 
+        // The dropped commit is the only signal the UI has that a local commit
+        // vanished from the branch.
+        assert_eq!(skipped, 1);
         let git_repo = repo.repo();
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         let head = git_repo.head().unwrap().peel_to_commit().unwrap();
@@ -2913,10 +2924,13 @@ mod tests {
                 .set_str("notes.rewriteRef", "refs/notes/commits")
                 .unwrap();
         }
-        super::rebase(repo.path_str(), initial_branch)
+        let skipped = super::rebase(repo.path_str(), initial_branch)
             .await
             .unwrap();
 
+        // Every commit on `feature` is gone and the branch now equals `main` —
+        // the case that most needs reporting.
+        assert_eq!(skipped, 1);
         assert_eq!(repo.repo().state(), git2::RepositoryState::Clean);
         assert_eq!(repo.head_oid(), main_oid);
     }
@@ -2951,10 +2965,12 @@ mod tests {
         let main_oid = repo.head_oid();
 
         repo.checkout_branch("feature");
-        rebase(repo.path_str(), initial_branch)
+        let skipped = rebase(repo.path_str(), initial_branch)
             .await
             .expect("a commit that started empty must be preserved");
 
+        // Preserved, not skipped — nothing disappeared, so nothing to report.
+        assert_eq!(skipped, 0);
         let git_repo = repo.repo();
         let follow_up = git_repo.head().unwrap().peel_to_commit().unwrap();
         let empty = follow_up.parent(0).unwrap();
@@ -6573,6 +6589,61 @@ mod tests {
         assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
         let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
         assert_eq!(content, "main content");
+    }
+
+    #[tokio::test]
+    async fn test_continue_rebase_preserves_a_commit_that_started_empty() {
+        // The other arm of GIT_EAPPLIED, on the continue path: a commit that
+        // was ALREADY empty before the rebase is not an already-applied patch,
+        // and git keeps it. Placed AFTER the conflicting commit so it is
+        // replayed by continue_rebase's remaining-operations loop.
+        let repo = TestRepo::with_initial_commit();
+        let initial_branch = repo.current_branch();
+        setup_conflicting_branches(&repo);
+
+        repo.checkout_branch("feature");
+        {
+            let git_repo = repo.repo();
+            let head = git_repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = head.tree().unwrap();
+            let signature = git_repo.signature().unwrap();
+            git_repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "Intentional empty marker",
+                    &tree,
+                    &[&head],
+                )
+                .unwrap();
+        }
+
+        let result = rebase(repo.path_str(), initial_branch.clone()).await;
+        assert!(matches!(result, Err(LeviathanError::RebaseConflict)));
+
+        resolve_conflict(
+            repo.path_str(),
+            "shared.txt".to_string(),
+            "resolved".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        continue_rebase(repo.path_str())
+            .await
+            .expect("a commit that started empty must survive the continue");
+
+        let git_repo = repo.repo();
+        assert_eq!(git_repo.state(), git2::RepositoryState::Clean);
+        let empty = git_repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(empty.message().unwrap(), "Intentional empty marker");
+        assert_eq!(empty.tree_id(), empty.parent(0).unwrap().tree_id());
+        assert_eq!(
+            empty.parent(0).unwrap().message().unwrap(),
+            "Feature change"
+        );
     }
 
     #[test]

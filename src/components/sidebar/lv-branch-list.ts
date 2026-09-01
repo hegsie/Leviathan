@@ -14,6 +14,7 @@ import '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { LvBranchCleanupDialog } from '../dialogs/lv-branch-cleanup-dialog.ts';
 import type { Branch } from '../../types/git.types.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import { rebasedOntoMessage } from '../../utils/rebase-messages.ts';
 import {
   tryAcquireRefOpOrWarn,
   releaseRefOp,
@@ -1458,7 +1459,7 @@ export class LvBranchList extends LitElement {
 
       if (result.success) {
         await this.loadBranches();
-        showToast(`Rebased onto ${branch.shorthand}`, 'success');
+        showToast(rebasedOntoMessage(branch.shorthand, result.data), 'success');
         this.dispatchBranchesChanged(repoPath);
       } else if (result.error?.code === 'REBASE_CONFLICT') {
         // Open the conflict-resolution dialog (same flow as the drag-drop path)
@@ -1913,7 +1914,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          showToast(`Rebased onto ${sourceBranch.shorthand}`, 'success');
+          showToast(rebasedOntoMessage(sourceBranch.shorthand, result.data), 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {
@@ -2021,7 +2022,7 @@ export class LvBranchList extends LitElement {
 
         if (result.success) {
           await this.loadBranches();
-          showToast(`Rebased onto ${sourceBranch.shorthand}`, 'success');
+          showToast(rebasedOntoMessage(sourceBranch.shorthand, result.data), 'success');
           this.dispatchBranchesChanged(repoPath);
         } else if (result.error?.code === 'REBASE_CONFLICT') {
           this.dispatchEvent(new CustomEvent('open-conflict-dialog', {

@@ -1581,10 +1581,14 @@ export async function commitMerge(
 /**
  * Rebase operations
  */
+/**
+ * Resolves with the number of commits the rebase skipped because their patch
+ * was already applied on the target — see `rebasedOntoMessage`.
+ */
 export async function rebase(
   args: RebaseCommand,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("rebase", args);
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>("rebase", args);
 }
 
 export interface RebasePreview {
