@@ -611,6 +611,47 @@ pub async fn gitflow_finish_feature(
     })
 }
 
+/// Record that a squash finish's commit has landed on develop.
+///
+/// A squash finish whose merge CONFLICTS returns `MergeConflict` before
+/// `gitflow_finish_feature` ever reaches its own recorder — the squash commit
+/// is then created by the conflict-resolution flow instead. Without a marker
+/// for that commit, a retry after a failed branch delete finds neither an
+/// ancestry match nor a marker, re-merges the same divergence, and mints a
+/// SECOND squash commit. The conflict flow therefore records the marker itself
+/// once its commit has landed and before it attempts the branch delete.
+#[command]
+pub async fn gitflow_record_squash_finish(path: String, name: String) -> Result<()> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let config = repo.config()?;
+
+    let develop = config
+        .get_string("gitflow.branch.develop")
+        .unwrap_or_else(|_| "develop".to_string());
+    let prefix = config
+        .get_string("gitflow.prefix.feature")
+        .unwrap_or_else(|_| "feature/".to_string());
+    let branch_name = format!("{}{}", prefix, name);
+
+    let feature_commit = repo
+        .find_branch(&branch_name, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(branch_name.clone()))?
+        .get()
+        .peel_to_commit()?;
+    let develop_commit = repo
+        .find_branch(&develop, git2::BranchType::Local)
+        .map_err(|_| LeviathanError::BranchNotFound(develop.clone()))?
+        .get()
+        .peel_to_commit()?;
+
+    record_completed_squash(
+        &repo,
+        &branch_name,
+        feature_commit.id(),
+        develop_commit.id(),
+    )
+}
+
 /// Start a git flow release branch
 #[command]
 pub async fn gitflow_start_release(path: String, version: String) -> Result<Branch> {
@@ -1233,8 +1274,8 @@ mod tests {
     }
 
     /// A delete failure must never fail the whole finish: the merge is already
-    /// committed, and a squash retry is not idempotent — it would mint a second
-    /// squash commit every time the user retried.
+    /// committed, and a squash finish records a completion marker so a retry
+    /// only attempts the pending branch cleanup.
     #[tokio::test]
     async fn test_gitflow_finish_feature_survives_unreadable_branch_rules() {
         let repo = TestRepo::with_initial_commit();
@@ -1999,6 +2040,136 @@ mod tests {
             vec!["1"],
             "cleanup retry must not rerun post-merge"
         );
+    }
+
+    /// The marker is what makes a retry safe when develop has since moved to
+    /// content that CONFLICTS with the feature — `merge_commits` then produces a
+    /// conflicted index that has no tree to compare, so the check must answer
+    /// "already finished" from the marker alone.
+    #[tokio::test]
+    async fn test_finish_feature_squash_retry_with_conflicting_develop_only_cleans_up() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "diverge-retry".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("README.md", "# Feature\n")]);
+        gitflow_finish_feature(
+            repo.path_str(),
+            "diverge-retry".to_string(),
+            Some(false),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        // Develop moves on to content that conflicts with the feature tip.
+        repo.create_commit("Diverge", &[("README.md", "# Diverged\n")]);
+        let diverged_tip = repo.head_oid();
+
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "diverge-retry".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .expect("a finished squash must not re-conflict on retry");
+
+        assert_eq!(
+            repo.head_oid(),
+            diverged_tip,
+            "retry must not commit anything on top of the diverged develop"
+        );
+        assert!(result.branch_deleted);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("README.md")).unwrap(),
+            "# Diverged\n",
+            "the retry must not resurrect the squashed content"
+        );
+    }
+
+    /// A squash finish whose merge conflicts is committed by the
+    /// conflict-resolution flow, not by `gitflow_finish_feature`. Without the
+    /// marker that flow records, a retry after a blocked branch delete
+    /// re-conflicts and mints a SECOND squash commit on develop.
+    #[tokio::test]
+    async fn test_record_squash_finish_lets_a_conflicted_squash_retry_clean_up_only() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        gitflow_start_feature(repo.path_str(), "conflicted".to_string())
+            .await
+            .unwrap();
+        repo.create_commit("Feature work", &[("README.md", "# Feature\n")]);
+        repo.checkout_branch("develop");
+        repo.create_commit("Develop work", &[("README.md", "# Develop\n")]);
+
+        assert!(
+            matches!(
+                gitflow_finish_feature(
+                    repo.path_str(),
+                    "conflicted".to_string(),
+                    Some(true),
+                    Some(true),
+                )
+                .await,
+                Err(LeviathanError::MergeConflict)
+            ),
+            "the squash merge must conflict before any commit is made"
+        );
+
+        // What the conflict-resolution dialog does: resolve, commit the squash
+        // as a single parent, then record the completion.
+        repo.create_file("README.md", "# Resolved\n");
+        repo.stage_file("README.md");
+        crate::commands::merge::commit_merge(repo.path_str(), None, Some(true))
+            .await
+            .unwrap();
+        gitflow_record_squash_finish(repo.path_str(), "conflicted".to_string())
+            .await
+            .unwrap();
+        let squash_tip = repo.head_oid();
+
+        // The delete was blocked (e.g. a preventDeletion rule), so the user
+        // retries the whole finish from the Git Flow panel.
+        let result = gitflow_finish_feature(
+            repo.path_str(),
+            "conflicted".to_string(),
+            Some(true),
+            Some(true),
+        )
+        .await
+        .expect("the recorded squash must make the retry cleanup-only");
+
+        assert_eq!(
+            repo.head_oid(),
+            squash_tip,
+            "retry must not mint a second squash commit"
+        );
+        assert!(result.branch_deleted);
+        assert_eq!(
+            std::fs::read_to_string(repo.path.join("README.md")).unwrap(),
+            "# Resolved\n",
+            "the retry must leave the resolved content alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_record_squash_finish_rejects_an_unknown_feature() {
+        let repo = TestRepo::with_initial_commit();
+        init_gitflow(repo.path_str(), None, None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let result = gitflow_record_squash_finish(repo.path_str(), "missing".to_string()).await;
+
+        assert!(matches!(result, Err(LeviathanError::BranchNotFound(_))));
     }
 
     #[tokio::test]

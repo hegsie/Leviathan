@@ -5508,6 +5508,21 @@ export async function gitFlowFinishFeature(
   });
 }
 
+/**
+ * Record that a squash finish's commit has landed on develop.
+ *
+ * A squash finish whose merge conflicted is committed by the conflict-resolution
+ * flow, not by `gitflow_finish_feature`, so the backend has no record of it. The
+ * marker written here makes a later retry (after e.g. a blocked branch delete)
+ * do the pending cleanup only instead of re-merging into a second squash commit.
+ */
+export async function gitFlowRecordSquashFinish(
+  repoPath: string,
+  name: string,
+): Promise<CommandResult<void>> {
+  return invokeCommand<void>("gitflow_record_squash_finish", { path: repoPath, name });
+}
+
 export async function gitFlowStartRelease(
   repoPath: string,
   version: string,
