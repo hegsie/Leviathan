@@ -254,6 +254,24 @@ fn remote_url(repo: &git2::Repository, remote_name: &str) -> Option<String> {
         .and_then(|remote| remote.url().ok().map(str::to_owned))
 }
 
+/// The app-managed token for one remote, or `None` when the map holds none for
+/// it.
+///
+/// The map is keyed by remote NAME because each remote is resolved
+/// independently: a token belongs to the host ITS remote points at, so handing
+/// `origin` a token keyed to `upstream` would offer one provider's credential
+/// to another provider's host. Any remote the map does not name simply gets no
+/// credential.
+fn token_for<'a>(
+    tokens: &'a Option<HashMap<String, String>>,
+    remote_name: &str,
+) -> Option<&'a str> {
+    tokens
+        .as_ref()
+        .and_then(|values| values.get(remote_name))
+        .map(String::as_str)
+}
+
 /// One `git remote prune` invocation, with the app's token attached as a
 /// url-scoped credential helper when there is one for this remote.
 ///
@@ -302,10 +320,7 @@ pub async fn prune_remote_tracking_branches(
 
     for remote_name in remotes {
         let remote_url = remote_url(&git2::Repository::open(&path)?, &remote_name);
-        let token = tokens
-            .as_ref()
-            .and_then(|values| values.get(&remote_name))
-            .map(String::as_str);
+        let token = token_for(&tokens, &remote_name);
 
         // First, do a dry-run to see what would be pruned
         let dry_run_output = prune_command(&path, &remote_name, remote_url.as_deref(), token, true)
@@ -884,13 +899,16 @@ mod tests {
         );
     }
 
-    /// A token is looked up per remote name. One keyed to a remote that is not
-    /// being pruned belongs to nothing here and must simply be ignored.
+    /// A tokens map naming only OTHER remotes must not get in the way of the
+    /// prune it is not for. End to end over a local remote, which carries no
+    /// credential either way — the keying itself is covered by
+    /// `test_token_for_is_keyed_by_remote_name`.
     #[tokio::test]
-    async fn test_prune_remote_tracking_branches_ignores_a_token_for_another_remote() {
+    async fn test_prune_remote_tracking_branches_with_a_token_for_another_remote() {
         let repo = TestRepo::with_initial_commit();
         let remote_repo = TestRepo::with_initial_commit();
         repo.add_remote("origin", &remote_repo.path_str());
+        repo.create_remote_branch("gone", repo.head_oid());
 
         let tokens = HashMap::from([("upstream".to_string(), "tok".to_string())]);
         let result = prune_remote_tracking_branches(
@@ -900,7 +918,72 @@ mod tests {
         )
         .await;
 
-        assert!(result.expect("prune succeeded").success);
+        let prune_result = result.expect("prune succeeded");
+        assert!(prune_result.success);
+        assert!(
+            prune_result
+                .branches_pruned
+                .iter()
+                .any(|b| b == "origin/gone"),
+            "expected origin/gone to be pruned, got {:?}",
+            prune_result.branches_pruned
+        );
+    }
+
+    /// The lookup is by remote NAME, not "any token in the map": a token keyed
+    /// to `upstream` is scoped to `upstream`'s host, so offering it while
+    /// pruning `origin` would hand one provider's credential to another.
+    #[test]
+    fn test_token_for_is_keyed_by_remote_name() {
+        let tokens = Some(HashMap::from([("upstream".to_string(), "tok".to_string())]));
+
+        assert_eq!(token_for(&tokens, "upstream"), Some("tok"));
+        assert_eq!(
+            token_for(&tokens, "origin"),
+            None,
+            "a token keyed to another remote must not be handed to origin"
+        );
+        assert_eq!(token_for(&None, "origin"), None);
+    }
+
+    /// Lookup and injection together, over an https url that CAN carry a
+    /// credential: with a token for `upstream` only, `origin` must be given
+    /// none while `upstream` gets it.
+    #[test]
+    fn test_prune_command_injects_only_the_matching_remotes_token() {
+        let tokens = Some(HashMap::from([(
+            "upstream".to_string(),
+            "ghp_secret".to_string(),
+        )]));
+
+        let envs_for = |remote_name: &str| -> HashMap<String, String> {
+            prune_command(
+                "/repo",
+                remote_name,
+                Some("https://github.com/acme/repo.git"),
+                token_for(&tokens, remote_name),
+                false,
+            )
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect()
+        };
+
+        assert!(
+            !envs_for("origin").contains_key("LEVIATHAN_GIT_TOKEN"),
+            "origin has no token in the map and must be offered none"
+        );
+        assert_eq!(
+            envs_for("upstream")
+                .get("LEVIATHAN_GIT_TOKEN")
+                .map(String::as_str),
+            Some("ghp_secret")
+        );
     }
 
     /// The token is scoped to the remote's URL, so reading that URL back off the
