@@ -2,9 +2,11 @@
 
 pub mod cli_safety;
 mod command;
+mod editor_command;
 
 pub use cli_safety::reject_flag_like;
 pub use command::{apply_token_credential_helper, create_command};
+pub use editor_command::{copy_file_editor_command, todo_action_editor_command, TODO_FORMAT_ARGS};
 
 /// True once `deadline` has passed. `None` means no deadline.
 ///
