@@ -694,6 +694,7 @@ pub fn run() {
             commands::gitflow::init_gitflow,
             commands::gitflow::gitflow_start_feature,
             commands::gitflow::gitflow_finish_feature,
+            commands::gitflow::gitflow_record_squash_finish,
             commands::gitflow::gitflow_start_release,
             commands::gitflow::gitflow_finish_release,
             commands::gitflow::gitflow_start_hotfix,

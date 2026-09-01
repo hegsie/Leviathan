@@ -2664,8 +2664,70 @@ describe('lv-conflict-resolution-dialog', () => {
       expect((delCall!.args as Record<string, unknown>).name).to.equal('feature/x');
       expect((delCall!.args as Record<string, unknown>).force).to.equal(true);
       expect(invokeHistory.some(h => h.command === 'gitflow_finish_feature'), 'finish NOT re-invoked for squash').to.be.false;
+
+      // The squash commit was made here, so the backend must be told about it —
+      // BEFORE the optional delete, since a blocked delete leaves the feature
+      // listed and the user's retry has to find the marker.
+      const recordIndex = invokeHistory.findIndex(h => h.command === 'gitflow_record_squash_finish');
+      expect(recordIndex, 'gitflow_record_squash_finish called').to.be.greaterThan(-1);
+      expect((invokeHistory[recordIndex].args as Record<string, unknown>).name).to.equal('x');
+      const deleteIndex = invokeHistory.findIndex(h => h.command === 'delete_branch');
+      expect(recordIndex, 'squash recorded before the delete attempt').to.be.lessThan(deleteIndex);
+
       expect(completedFired).to.be.true;
       expect(el.open).to.be.false;
+    });
+
+    it('records the completed squash even when the branch delete is blocked', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'blocked', branchName: 'feature/blocked', deleteBranch: true },
+        true, // squashMerge
+      );
+
+      mockInvoke = async (command: string) => {
+        if (command === 'delete_branch') {
+          throw { code: 'OPERATION_FAILED', message: 'Branch rule prevents deletion' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(
+        invokeHistory.some(h => h.command === 'gitflow_record_squash_finish'),
+        'squash recorded despite the blocked delete',
+      ).to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn, 'blocked delete warned about').to.not.be.undefined;
+      expect(warn!.message).to.contain('Branch rule prevents deletion');
+      expect(el.open, 'a blocked delete still completes the finish').to.be.false;
+    });
+
+    it('warns when the completed squash could not be recorded', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'unrecorded', branchName: 'feature/unrecorded', deleteBranch: false },
+        true, // squashMerge
+      );
+
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_record_squash_finish') {
+          throw { code: 'OPERATION_FAILED', message: 'marker directory is read-only' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+
+      clearToasts();
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn, 'unrecorded squash warned about').to.not.be.undefined;
+      expect(warn!.message).to.contain('marker directory is read-only');
+      expect(warn!.message).to.contain('unrecorded');
+      expect(el.open, 'the squash commit landed, so the dialog still completes').to.be.false;
     });
 
     it('re-invokes gitflow_finish_feature (not delete) for a NON-squash feature finish', async () => {
