@@ -802,5 +802,81 @@ describe('lv-oidc-dialog', () => {
       expect(uiStore.getState().toasts.some((t) => t.type === 'error'), 'error toast shown').to.be
         .true;
     });
+
+    it('cleans up the written token when the account is deleted and a later step throws', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      // The token write and the post-write existence check both succeed; the
+      // account is then deleted and the very next await rejects, so the throw
+      // jumps past every in-try guard straight to the catch.
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'update_global_account_cached_user') {
+          unifiedProfileStore.getState().setAccounts([]);
+          throw new Error('Profile store write failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      await internals.handleOAuthComplete(completeEvent('oidc-access-late-fail', ISSUER));
+      await el.updateComplete;
+
+      expect(
+        keyringStore.has('oidc_token_oidc-acc-1'),
+        'no orphaned keyring entry for the deleted account'
+      ).to.be.false;
+      expect(
+        keyringStore.has('oidc_token_oidc-acc-1_oauth'),
+        'no orphaned OAuth blob for the deleted account'
+      ).to.be.false;
+      expect(internals.error, 'failure surfaced to the user').to.equal(
+        'Profile store write failed'
+      );
+    });
+
+    it('keeps the stored token when a later step throws but the account still exists', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'update_global_account_cached_user') {
+          throw new Error('Profile store write failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      await internals.handleOAuthComplete(completeEvent('oidc-access-keep', ISSUER));
+      await el.updateComplete;
+
+      // The cleanup is scoped to accounts that no longer exist — a live account
+      // must keep the token it just signed in with.
+      expect(
+        keyringStore.get('oidc_token_oidc-acc-1'),
+        'the surviving account keeps its token'
+      ).to.equal('oidc-access-keep');
+      expect(internals.error, 'failure surfaced to the user').to.equal(
+        'Profile store write failed'
+      );
+    });
   });
 });

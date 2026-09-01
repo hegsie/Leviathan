@@ -1116,6 +1116,10 @@ describe('lv-gitlab-dialog', () => {
       await gate.started;
       internals.selectedAccountId = null;
       internals.isAddingAccount = true;
+      // loadInitialData's connection check already marked gl-acc-1 connected —
+      // clear it so the final assertion proves handleOAuthComplete set it for
+      // the OAuth target, not for the newer (mid-flight) selection.
+      unifiedProfileStore.getState().setAccountConnectionStatus('gl-acc-1', 'disconnected');
       gate.release();
       await completion;
 

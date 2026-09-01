@@ -698,6 +698,9 @@ export class LvOidcDialog extends LitElement {
         showToast('Connected Enterprise SSO account', 'success');
       }
     } catch (err) {
+      if (targetAccountId && !targetAccountExists()) {
+        await credentialService.deleteAccountToken('oidc', targetAccountId);
+      }
       this.error = err instanceof Error ? err.message : 'Failed to complete sign in';
     } finally {
       this.isLoading = false;
