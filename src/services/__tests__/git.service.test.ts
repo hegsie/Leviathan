@@ -3,6 +3,8 @@ import {
   parseIssueReferences,
   isClosingKeyword,
   getAdoToken,
+  getGitHubToken,
+  getGitLabToken,
   fetch as gitFetch,
   resetAdoGitCredentialSyncCache,
 } from '../git.service.ts';
@@ -379,7 +381,7 @@ describe('git.service - Tauri command invocations', () => {
   });
 });
 
-describe('git.service - getAdoToken refresh wiring', () => {
+describe('git.service - provider token refresh wiring', () => {
   const keyring = new Map<string, string>();
 
   afterEach(() => {
@@ -421,6 +423,73 @@ describe('git.service - getAdoToken refresh wiring', () => {
     expect(result.success).to.be.true;
     expect(result.data, 'returns the refreshed token').to.equal('new-access');
     expect(refreshCalled, 'refresh grant was used').to.be.true;
+  });
+
+  it('refreshes an expiring OAuth token for the default GitHub account', async () => {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('github'),
+      id: 'gh-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+    const key = 'github_token_gh-1';
+    keyring.clear();
+    keyring.set(key, 'old-access');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'old-access',
+      refreshToken: 'r1',
+      expiresAt: Date.now() + 1000,
+    }));
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') {
+        return { accessToken: 'new-access', refreshToken: 'r2', expiresIn: 3600 };
+      }
+      return null;
+    };
+
+    const result = await getGitHubToken();
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.equal('new-access');
+  });
+
+  it('refreshes an expiring OAuth token for the default GitLab account', async () => {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab', 'https://gitlab.example.com'),
+      id: 'gl-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+    const key = 'gitlab_token_gl-1';
+    keyring.clear();
+    keyring.set(key, 'old-access');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'old-access',
+      refreshToken: 'r1',
+      expiresAt: Date.now() + 1000,
+    }));
+    let refreshArgs: Record<string, unknown> | undefined;
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') {
+        refreshArgs = a;
+        return { accessToken: 'new-access', refreshToken: 'r2', expiresIn: 3600 };
+      }
+      return null;
+    };
+
+    const result = await getGitLabToken();
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.equal('new-access');
+    expect(refreshArgs?.instanceUrl).to.equal('https://gitlab.example.com');
   });
 });
 
@@ -547,6 +616,11 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     assignedProfile?: { id: string } | null | 'throw';
     /** What the backend resolver returns; 'throw' → the command fails. */
     preferredAccount?: IntegrationAccount | null | 'throw';
+    oauthRefresh?: {
+      accessToken: string;
+      refreshToken?: string;
+      expiresIn?: number;
+    };
   }
 
   function installMock(opts: MockOptions) {
@@ -569,6 +643,7 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       }
       if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
       if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') return opts.oauthRefresh ?? null;
       if (command === 'store_git_credentials') { credWrites.push(a!.url as string); return null; }
       if (command === 'fetch') { fetchToken = a?.token as string | undefined; return null; }
       return null;
@@ -722,6 +797,61 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     await gitFetch({ path: '/repo', silent: true });
 
     expect(fetchToken).to.equal('gl-work-tok');
+  });
+
+  it('refreshes an expiring GitHub OAuth token before a repository fetch', async () => {
+    const { work } = setupGitHubAccounts();
+    const key = 'github_token_gh-work';
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'expired-gh-token',
+      refreshToken: 'gh-refresh',
+      expiresAt: Date.now() + 1000,
+    }));
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+      oauthRefresh: {
+        accessToken: 'fresh-gh-token',
+        refreshToken: 'rotated-gh-refresh',
+        expiresIn: 3600,
+      },
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('fresh-gh-token');
+  });
+
+  it('refreshes an expiring GitLab OAuth token before a repository fetch', async () => {
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab'),
+      id: 'gl-work',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([work]);
+    keyring.clear();
+    const key = 'gitlab_token_gl-work';
+    keyring.set(key, 'expired-gl-token');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'expired-gl-token',
+      refreshToken: 'gl-refresh',
+      expiresAt: Date.now() + 1000,
+    }));
+    installMock({
+      detectGitLab: { projectId: '1', projectPath: 'acme/app', remoteName: 'origin' },
+      remoteUrl: 'https://gitlab.example.com/acme/app.git',
+      preferredAccount: work,
+      oauthRefresh: {
+        accessToken: 'fresh-gl-token',
+        refreshToken: 'rotated-gl-refresh',
+        expiresIn: 3600,
+      },
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('fresh-gl-token');
   });
 
   it('keeps using the global default when nothing repo-specific matches', async () => {

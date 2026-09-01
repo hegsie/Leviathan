@@ -538,4 +538,345 @@ describe('lv-oidc-dialog', () => {
       expect(elState.selectedAccountId).to.equal(null);
     });
   });
+
+  // The browser round-trip is asynchronous and the account selector renders
+  // OUTSIDE the pending block, so it stays clickable throughout. The flow must
+  // stay bound to the account it started on instead of writing the new token
+  // onto whatever is selected when the callback lands.
+  describe('OAuth target pinning (regression)', () => {
+    interface OidcDialogInternals {
+      oauthTargetAccountId: string | null | undefined;
+      oauthTargetWasAddingAccount: boolean | undefined;
+      oauthTargetIssuerUrl: string | undefined;
+      oauthTargetClientId: string | undefined;
+      selectedAccountId: string | null;
+      isAddingAccount: boolean;
+      issuerUrlInput: string;
+      clientIdInput: string;
+      error: string | null;
+      oauthState: { status: string };
+      handleStartOAuth(): Promise<void>;
+      handleCancelOAuth(): void;
+      handleOAuthComplete(event: CustomEvent): Promise<void>;
+    }
+
+    const SECOND_ISSUER = 'https://sso.other.example.com';
+
+    const secondAccount = createTestAccount({
+      id: 'oidc-acc-2',
+      name: 'Other SSO',
+      integrationType: 'oidc',
+      config: { type: 'oidc', issuerUrl: SECOND_ISSUER, clientId: 'other-client' },
+      isDefault: false,
+    });
+
+    function completeEvent(accessToken: string, issuerUrl?: string): CustomEvent {
+      return new CustomEvent('oauth-complete', {
+        detail: {
+          provider: 'oidc',
+          tokens: {
+            accessToken,
+            refreshToken: 'r-1',
+            expiresIn: 3600,
+            idToken: 'header.payload.sig',
+          },
+          instanceUrl: issuerUrl,
+        },
+      });
+    }
+
+    /**
+     * Hold `decode_oidc_id_token` open so the test can mutate the dialog's
+     * selection while an OAuth completion is still in flight.
+     */
+    function gateDecode(): { started: Promise<void>; release: () => void } {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'decode_oidc_id_token') {
+          markStarted();
+          await gate;
+        }
+        return previous(command, args);
+      };
+      return { started, release };
+    }
+
+    it('pins the selected account, issuer and client when the sign-in flow starts', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.issuerUrlInput = ISSUER;
+      internals.clientIdInput = 'acme-client';
+
+      await internals.handleStartOAuth();
+
+      expect(internals.oauthTargetAccountId, 'account pinned at start').to.equal('oidc-acc-1');
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pinned at start').to.be.false;
+      expect(internals.oauthTargetIssuerUrl, 'issuer pinned at start').to.equal(ISSUER);
+      expect(internals.oauthTargetClientId, 'client id pinned at start').to.equal('acme-client');
+    });
+
+    it('releases the pinned target when the sign-in flow fails to start', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.issuerUrlInput = ISSUER;
+      internals.clientIdInput = 'acme-client';
+      // A pin left over from an earlier attempt must not survive a flow that
+      // never started — a later completion would otherwise be attributed to it.
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      // `startOAuth` never rejects — it reports the failure through the OAuth
+      // state subscriber, which is where the pin is released.
+      await internals.handleStartOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetIssuerUrl, 'issuer pin released').to.be.undefined;
+      expect(internals.oauthTargetClientId, 'client id pin released').to.be.undefined;
+    });
+
+    it('releases the pinned target and clears the spinner when the user cancels', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+      internals.oauthState = { status: 'pending' };
+      internals.error = 'stale';
+
+      internals.handleCancelOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released on cancel').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetIssuerUrl, 'issuer pin released').to.be.undefined;
+      expect(internals.oauthTargetClientId, 'client id pin released').to.be.undefined;
+      expect(internals.oauthState.status, 'form no longer stuck pending').to.equal('idle');
+      expect(internals.error, 'stale error cleared').to.equal(null);
+      // The form is usable again instead of showing the pending spinner.
+      expect(el.shadowRoot!.querySelector('.oauth-pending')).to.be.null;
+      expect(el.shadowRoot!.querySelector('.token-form')).to.not.be.null;
+    });
+
+    it('writes the token to the account the flow started on, not a later selection', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount, secondAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      const gate = gateDecode();
+      const completion = internals.handleOAuthComplete(
+        completeEvent('oidc-access-pinned', ISSUER)
+      );
+      await gate.started;
+      // The user switches to the other SSO account while the browser
+      // round-trip is still outstanding.
+      internals.selectedAccountId = 'oidc-acc-2';
+      internals.issuerUrlInput = SECOND_ISSUER;
+      internals.clientIdInput = 'other-client';
+      gate.release();
+      await completion;
+      await el.updateComplete;
+
+      expect(keyringStore.get('oidc_token_oidc-acc-1')).to.equal('oidc-access-pinned');
+      expect(
+        keyringStore.has('oidc_token_oidc-acc-2'),
+        'the newly selected account is not overwritten'
+      ).to.be.false;
+      // The cachedUser of the account the user switched TO must be untouched.
+      const cachedUserCalls = invokeHistory.filter(
+        (h) => h.command === 'update_global_account_cached_user'
+      );
+      expect(
+        cachedUserCalls.every(
+          (h) => (h.args as Record<string, string>).accountId !== 'oidc-acc-2'
+        ),
+        'the newly selected account keeps its identity'
+      ).to.be.true;
+      expect(internals.selectedAccountId, 'newer selection preserved').to.equal('oidc-acc-2');
+    });
+
+    it('does not rewrite the pinned account config from a mid-flow form change', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount, secondAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      invokeHistory.length = 0;
+      const gate = gateDecode();
+      // No instanceUrl on the callback: the issuer must come from the pin, not
+      // from whatever the mid-flow switch left in the form.
+      const completion = internals.handleOAuthComplete(completeEvent('oidc-access-cfg'));
+      await gate.started;
+      // The user switches account AND retypes the issuer while the round-trip
+      // is outstanding. Reading the form live here would persist this typo onto
+      // the account they switched to.
+      internals.selectedAccountId = 'oidc-acc-2';
+      internals.issuerUrlInput = 'https://typo.example.com';
+      internals.clientIdInput = 'typo-client';
+      gate.release();
+      await completion;
+      await el.updateComplete;
+
+      // The pinned account's issuer/clientId were already correct, so nothing
+      // should have been rewritten — on either account.
+      const rewrites = invokeHistory.filter((h) => h.command === 'save_global_account');
+      expect(rewrites, 'no account config rewritten from the stale form').to.have.lengthOf(0);
+      expect(keyringStore.get('oidc_token_oidc-acc-1')).to.equal('oidc-access-cfg');
+    });
+
+    it('refuses to write when the pinned account was deleted mid-flow', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      // The account is gone by the time the callback lands.
+      unifiedProfileStore.getState().setAccounts([]);
+      uiStore.getState().toasts.length = 0;
+      invokeHistory.length = 0;
+
+      await internals.handleOAuthComplete(completeEvent('oidc-access-orphan', ISSUER));
+      await el.updateComplete;
+
+      expect(keyringStore.has('oidc_token_oidc-acc-1'), 'no orphaned keyring entry').to.be.false;
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'no surprise replacement account created'
+      ).to.be.false;
+      expect(internals.error, 'user told why').to.include('removed before sign-in completed');
+      expect(uiStore.getState().toasts.some((t) => t.type === 'error'), 'error toast shown').to.be
+        .true;
+    });
+
+    it('cleans up the written token when the account is deleted and a later step throws', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      // The token write and the post-write existence check both succeed; the
+      // account is then deleted and the very next await rejects, so the throw
+      // jumps past every in-try guard straight to the catch.
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'update_global_account_cached_user') {
+          unifiedProfileStore.getState().setAccounts([]);
+          throw new Error('Profile store write failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      await internals.handleOAuthComplete(completeEvent('oidc-access-late-fail', ISSUER));
+      await el.updateComplete;
+
+      expect(
+        keyringStore.has('oidc_token_oidc-acc-1'),
+        'no orphaned keyring entry for the deleted account'
+      ).to.be.false;
+      expect(
+        keyringStore.has('oidc_token_oidc-acc-1_oauth'),
+        'no orphaned OAuth blob for the deleted account'
+      ).to.be.false;
+      expect(internals.error, 'failure surfaced to the user').to.equal(
+        'Profile store write failed'
+      );
+    });
+
+    it('keeps the stored token when a later step throws but the account still exists', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvOidcDialog>(html`<lv-oidc-dialog .open=${true}></lv-oidc-dialog>`);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'update_global_account_cached_user') {
+          throw new Error('Profile store write failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as OidcDialogInternals;
+      internals.selectedAccountId = 'oidc-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'oidc-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetIssuerUrl = ISSUER;
+      internals.oauthTargetClientId = 'acme-client';
+
+      await internals.handleOAuthComplete(completeEvent('oidc-access-keep', ISSUER));
+      await el.updateComplete;
+
+      // The cleanup is scoped to accounts that no longer exist — a live account
+      // must keep the token it just signed in with.
+      expect(
+        keyringStore.get('oidc_token_oidc-acc-1'),
+        'the surviving account keeps its token'
+      ).to.equal('oidc-access-keep');
+      expect(internals.error, 'failure surfaced to the user').to.equal(
+        'Profile store write failed'
+      );
+    });
+  });
 });

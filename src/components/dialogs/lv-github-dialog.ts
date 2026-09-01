@@ -825,6 +825,8 @@ export class LvGitHubDialog extends LitElement {
   // re-selecting an existing account on a background emit, which would route the
   // token onto the wrong account.
   private isAddingAccount = false;
+  private oauthTargetAccountId: string | null | undefined;
+  private oauthTargetWasAddingAccount: boolean | undefined;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
 
   // Multi-account support (global accounts)
@@ -870,6 +872,11 @@ export class LvGitHubDialog extends LitElement {
         if (state.status === 'error') {
           this.error = state.error ?? 'GitHub sign-in failed';
           showToast(this.error, 'error');
+          // The flow is over and can no longer emit `oauth-complete`, so release
+          // the pinned target — otherwise a later completion would be attributed
+          // to whichever account was selected when this failed flow started.
+          this.oauthTargetAccountId = undefined;
+          this.oauthTargetWasAddingAccount = undefined;
         }
       }
     });
@@ -1084,7 +1091,11 @@ export class LvGitHubDialog extends LitElement {
    */
   private async getSelectedAccountToken(): Promise<string | null> {
     if (this.selectedAccountId) {
-      return credentialService.getAccountToken('github', this.selectedAccountId);
+      return credentialService.getFreshAccountToken(
+        'github',
+        this.selectedAccountId,
+        'github'
+      );
     }
     return null;
   }
@@ -1370,7 +1381,27 @@ export class LvGitHubDialog extends LitElement {
     }
 
     this.error = null;
+    this.oauthTargetAccountId = this.selectedAccountId;
+    this.oauthTargetWasAddingAccount = this.isAddingAccount;
+    // `startOAuth` never rejects — it reports failure through the OAuth state
+    // subscriber — so the pinned target is cleared there, not here.
     await oauthService.startOAuth('github', clientId);
+  }
+
+  /**
+   * Abandon a sign-in that is waiting on the browser. Scoped to 'github' so a
+   * sign-in pending in another provider's dialog is left alone. The local state
+   * is set explicitly rather than relying on the service's notification, so the
+   * form can never stay stuck if there is no pending entry to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('github');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
   }
 
   private async handleOAuthComplete(event: CustomEvent<{ provider: string; tokens: OAuthTokenResponse }>): Promise<void> {
@@ -1387,9 +1418,25 @@ export class LvGitHubDialog extends LitElement {
     // auth — don't throw it away), but the dialog's inline status is invisible
     // when closed, so remember this to surface a toast instead.
     const wasOpen = this.open;
+    const targetAccountId =
+      this.oauthTargetAccountId !== undefined
+        ? this.oauthTargetAccountId
+        : this.selectedAccountId;
+    const targetWasAddingAccount =
+      this.oauthTargetWasAddingAccount ?? this.isAddingAccount;
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
 
     this.isLoading = true;
     this.error = null;
+    const targetAccountExists = (): boolean =>
+      !targetAccountId ||
+      getAccountsByType('github').some((account) => account.id === targetAccountId);
+    const selectionChangedDuringOAuth = (): boolean =>
+      this.selectedAccountId !== targetAccountId ||
+      this.isAddingAccount !== targetWasAddingAccount;
+    let applyOAuthResultToSelection = false;
+    let connectedAccountId: string | undefined;
 
     try {
       // IMPORTANT: Ensure profiles are loaded before trying to save the account
@@ -1397,6 +1444,11 @@ export class LvGitHubDialog extends LitElement {
       await unifiedProfileService.loadUnifiedProfiles();
       if (wasOpen && this.repositoryPath) {
         await unifiedProfileService.loadUnifiedProfileForRepository(this.repositoryPath);
+      }
+      if (!targetAccountExists()) {
+        this.error = 'The GitHub account was removed before sign-in completed. Please sign in again.';
+        showToast(this.error, 'error');
+        return;
       }
 
       // Verify the token works
@@ -1409,6 +1461,11 @@ export class LvGitHubDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
+      if (!targetAccountExists()) {
+        this.error = 'The GitHub account was removed before sign-in completed. Please sign in again.';
+        showToast(this.error, 'error');
+        return;
+      }
 
       // Create or update global account with OAuth token
       log.debug('Creating/updating account', {
@@ -1416,20 +1473,37 @@ export class LvGitHubDialog extends LitElement {
         existingAccountsCount: this.accounts.length,
       });
 
-      if (this.selectedAccountId) {
-        log.debug('Storing token for existing account', { accountId: this.selectedAccountId });
-        await credentialService.storeAccountToken('github', this.selectedAccountId, tokens.accessToken);
+      if (targetAccountId) {
+        log.debug('Storing token for existing account', { accountId: targetAccountId });
+        await credentialService.storeAccountOAuthToken(
+          'github',
+          targetAccountId,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn,
+        );
+        if (!targetAccountExists()) {
+          await credentialService.deleteAccountToken('github', targetAccountId);
+          this.error = 'The GitHub account was removed before sign-in completed. Please sign in again.';
+          showToast(this.error, 'error');
+          return;
+        }
         // Refresh cachedUser so the profile card shows the current avatar/username
         // immediately rather than a stale one until the 5-min validation. Mirrors
         // the PAT path's mapping; every other provider/path already does this.
         if (user) {
-          await unifiedProfileService.updateGlobalAccountCachedUser(this.selectedAccountId, {
+          await unifiedProfileService.updateGlobalAccountCachedUser(targetAccountId, {
             username: user.login,
             displayName: user.name ?? null,
             email: user.email ?? null,
             avatarUrl: user.avatarUrl ?? null,
           });
         }
+        applyOAuthResultToSelection = !selectionChangedDuringOAuth();
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = targetAccountId;
+        }
+        connectedAccountId = targetAccountId;
       } else {
         // Create a new global account
         log.debug('Creating new global account');
@@ -1450,15 +1524,41 @@ export class LvGitHubDialog extends LitElement {
         log.debug('New account', { id: newAccount.id, name: newAccount.name });
         const savedAccount = await unifiedProfileService.saveGlobalAccount(newAccount);
         log.debug('Saved account', { id: savedAccount.id });
-        await credentialService.storeAccountToken('github', savedAccount.id, tokens.accessToken);
-        this.selectedAccountId = savedAccount.id;
-        // The new account now exists and is selected — the add flow is complete.
-        this.isAddingAccount = false;
-
+        await credentialService.storeAccountOAuthToken(
+          'github',
+          savedAccount.id,
+          tokens.accessToken,
+          tokens.refreshToken,
+          tokens.expiresIn,
+        );
         // Refresh accounts list from store after adding new account
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('github');
         log.debug('Refreshed accounts list', { count: this.accounts.length });
+        applyOAuthResultToSelection =
+          (this.selectedAccountId === targetAccountId ||
+            this.selectedAccountId === savedAccount.id) &&
+          this.isAddingAccount === targetWasAddingAccount;
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = savedAccount.id;
+          // The new account now exists and is selected — the add flow is complete.
+          this.isAddingAccount = false;
+        }
+        connectedAccountId = savedAccount.id;
+      }
+
+      if (connectedAccountId) {
+        unifiedProfileStore
+          .getState()
+          .setAccountConnectionStatus(connectedAccountId, 'connected');
+      }
+      if (!applyOAuthResultToSelection) {
+        this.oauthState = { status: 'idle' };
+        showToast(
+          user?.login ? `Connected GitHub account @${user.login}` : 'Connected GitHub account',
+          'success'
+        );
+        return;
       }
 
       this.connectionStatus = verifyResult.data;
@@ -1485,6 +1585,9 @@ export class LvGitHubDialog extends LitElement {
         ]);
       }
     } catch (err) {
+      if (targetAccountId && !targetAccountExists()) {
+        await credentialService.deleteAccountToken('github', targetAccountId);
+      }
       this.error = err instanceof Error ? err.message : 'OAuth authentication failed';
     } finally {
       this.isLoading = false;
@@ -2098,7 +2201,7 @@ export class LvGitHubDialog extends LitElement {
                 <div class="oauth-spinner"></div>
                 <p>${this.oauthState.status === 'exchanging' ? 'Completing sign in...' : 'Waiting for authorization...'}</p>
                 <p class="oauth-hint">Complete the sign in in your browser</p>
-                <button class="btn" @click=${() => oauthService.cancelOAuth()}>Cancel</button>
+                <button class="btn" @click=${this.handleCancelOAuth}>Cancel</button>
               </div>
             ` : html`
               <button

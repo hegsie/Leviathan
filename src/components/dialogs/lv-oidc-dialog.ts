@@ -274,6 +274,16 @@ export class LvOidcDialog extends LitElement {
    */
   private isAddingAccount = false;
 
+  // The browser round-trip is asynchronous and the account selector stays
+  // interactive throughout it, so the account/issuer/client the flow started on
+  // are pinned here. Without them a mid-flow account switch would write this
+  // flow's tokens onto whatever account happened to be selected when the
+  // callback landed, destroying that account's credentials.
+  private oauthTargetAccountId: string | null | undefined;
+  private oauthTargetWasAddingAccount: boolean | undefined;
+  private oauthTargetIssuerUrl: string | undefined;
+  private oauthTargetClientId: string | undefined;
+
   private unsubscribeStore?: () => void;
   private oauthStateUnsubscribe?: () => void;
   private boundOAuthComplete = this.handleOAuthComplete.bind(this);
@@ -289,6 +299,10 @@ export class LvOidcDialog extends LitElement {
         if (state.status === 'error') {
           this.error = state.error ?? 'Enterprise SSO sign-in failed';
           showToast(this.error, 'error');
+          // The flow is over and can no longer emit `oauth-complete`, so release
+          // the pinned target — otherwise a later completion would be attributed
+          // to whichever account was selected when this failed flow started.
+          this.clearOAuthTarget();
         }
       }
     });
@@ -460,7 +474,35 @@ export class LvOidcDialog extends LitElement {
     }
 
     this.error = null;
+    this.oauthTargetAccountId = this.selectedAccountId;
+    this.oauthTargetWasAddingAccount = this.isAddingAccount;
+    this.oauthTargetIssuerUrl = issuerUrl;
+    this.oauthTargetClientId = clientId;
+    // `startOAuth` never rejects — it reports failure through the OAuth state
+    // subscriber — so the pinned target is cleared there, not here.
     await oauthService.startOAuth('oidc', clientId, issuerUrl);
+  }
+
+  private clearOAuthTarget(): void {
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
+    this.oauthTargetIssuerUrl = undefined;
+    this.oauthTargetClientId = undefined;
+  }
+
+  /**
+   * Abandon a sign-in that is waiting on the browser. Scoped to 'oidc' so a
+   * sign-in pending in another provider's dialog is left alone. The local state
+   * is set explicitly rather than relying on the service's notification, so the
+   * form can never stay stuck if there is no pending entry to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('oidc');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.clearOAuthTarget();
   }
 
   private async handleOAuthComplete(
@@ -470,14 +512,44 @@ export class LvOidcDialog extends LitElement {
     if (provider !== 'oidc') return;
 
     const wasOpen = this.open;
+    // The selector stays interactive during the browser round-trip, so bind
+    // this completion to what the flow started on rather than reading the live
+    // selection/form here.
+    const targetAccountId =
+      this.oauthTargetAccountId !== undefined
+        ? this.oauthTargetAccountId
+        : this.selectedAccountId;
+    const targetWasAddingAccount =
+      this.oauthTargetWasAddingAccount ?? this.isAddingAccount;
+    const targetIssuerUrl = this.oauthTargetIssuerUrl;
+    const targetClientId = this.oauthTargetClientId;
+    this.clearOAuthTarget();
+
     this.isLoading = true;
     this.error = null;
 
+    const targetAccountExists = (): boolean =>
+      !targetAccountId ||
+      getAccountsByType('oidc').some((account) => account.id === targetAccountId);
+    const selectionChangedDuringOAuth = (): boolean =>
+      this.selectedAccountId !== targetAccountId ||
+      this.isAddingAccount !== targetWasAddingAccount;
+    let applyOAuthResultToSelection = false;
+    let connectedAccountId: string | undefined;
+
     try {
       await unifiedProfileService.loadUnifiedProfiles();
+      if (!targetAccountExists()) {
+        this.error =
+          'The Enterprise SSO account was removed before sign-in completed. Please sign in again.';
+        showToast(this.error, 'error');
+        return;
+      }
 
-      const issuerUrl = instanceUrl || this.issuerUrlInput.trim();
-      const clientId = this.clientIdInput.trim();
+      // The callback's issuer wins; otherwise use the one the flow started
+      // with, not whatever a mid-flow account switch left in the form.
+      const issuerUrl = instanceUrl || targetIssuerUrl || this.issuerUrlInput.trim();
+      const clientId = targetClientId ?? this.clientIdInput.trim();
 
       // Optionally decode the ID token for user identity. The access token
       // response carries an id_token for OIDC; fall back gracefully if absent.
@@ -506,9 +578,9 @@ export class LvOidcDialog extends LitElement {
       // When the user explicitly chose "Add account", never match an existing
       // same-issuer account — that would clobber it instead of creating the new
       // account they asked for (the common two-identities-on-one-SSO case).
-      const existingAccount = this.selectedAccountId
-        ? getAccountById(this.selectedAccountId)
-        : this.isAddingAccount
+      const existingAccount = targetAccountId
+        ? getAccountById(targetAccountId)
+        : targetWasAddingAccount
           ? undefined
           : this.accounts.find(
               (a) => a.config.type === 'oidc' && a.config.issuerUrl === issuerUrl
@@ -535,10 +607,23 @@ export class LvOidcDialog extends LitElement {
           tokens.refreshToken,
           tokens.expiresIn
         );
+        if (!targetAccountExists()) {
+          // Deleted while the token was being written — don't leave an orphaned
+          // keyring entry behind for an account that no longer exists.
+          await credentialService.deleteAccountToken('oidc', existingAccount.id);
+          this.error =
+            'The Enterprise SSO account was removed before sign-in completed. Please sign in again.';
+          showToast(this.error, 'error');
+          return;
+        }
         if (cachedUser) {
           await unifiedProfileService.updateGlobalAccountCachedUser(existingAccount.id, cachedUser);
         }
-        this.selectedAccountId = existingAccount.id;
+        applyOAuthResultToSelection = !selectionChangedDuringOAuth();
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = existingAccount.id;
+        }
+        connectedAccountId = existingAccount.id;
       } else {
         const { createEmptyIntegrationAccount, generateId } = await import(
           '../../types/unified-profile.types.ts'
@@ -565,17 +650,42 @@ export class LvOidcDialog extends LitElement {
           tokens.refreshToken,
           tokens.expiresIn
         );
-        this.selectedAccountId = savedAccount.id;
 
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('oidc');
+        applyOAuthResultToSelection =
+          (this.selectedAccountId === targetAccountId ||
+            this.selectedAccountId === savedAccount.id) &&
+          this.isAddingAccount === targetWasAddingAccount;
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = savedAccount.id;
+        }
+        connectedAccountId = savedAccount.id;
+      }
+
+      if (connectedAccountId) {
+        unifiedProfileStore
+          .getState()
+          .setAccountConnectionStatus(connectedAccountId, 'connected');
+      }
+      if (!applyOAuthResultToSelection) {
+        // The user moved on to a different account mid-flow — the token landed
+        // where it belongs, but the visible form now describes another account,
+        // so only release the spinner and confirm with a toast.
+        this.oauthState = { status: 'idle' };
+        showToast(
+          user?.preferredUsername
+            ? `Connected Enterprise SSO (${user.preferredUsername})`
+            : 'Connected Enterprise SSO account',
+          'success'
+        );
+        return;
       }
 
       this.isAddingAccount = false;
       this.connected = true;
       this.connectedUser = user;
       this.oauthState = { status: 'idle' };
-      this.syncSharedConnectionStatus(true);
 
       if (!wasOpen) {
         showToast(
@@ -588,6 +698,9 @@ export class LvOidcDialog extends LitElement {
         showToast('Connected Enterprise SSO account', 'success');
       }
     } catch (err) {
+      if (targetAccountId && !targetAccountExists()) {
+        await credentialService.deleteAccountToken('oidc', targetAccountId);
+      }
       this.error = err instanceof Error ? err.message : 'Failed to complete sign in';
     } finally {
       this.isLoading = false;
@@ -739,7 +852,7 @@ export class LvOidcDialog extends LitElement {
               : 'Waiting for authorization...'}
           </p>
           <p class="help-text">Complete the sign in in your browser</p>
-          <button class="btn" @click=${() => oauthService.cancelOAuth('oidc')}>Cancel</button>
+          <button class="btn" @click=${this.handleCancelOAuth}>Cancel</button>
         </div>
       `;
     }

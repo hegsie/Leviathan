@@ -179,7 +179,9 @@ function setupMockInvoke(): void {
       };
     }
     if (command === 'load_unified_profile_for_repository') return null;
-    if (command === 'save_global_account') return params;
+    // The backend echoes the saved account, not the command payload — the
+    // caller reads `savedAccount.id` from it.
+    if (command === 'save_global_account') return (params as { account: unknown }).account;
     if (command === 'update_global_account_cached_user') return null;
 
     // Bitbucket-specific commands
@@ -970,6 +972,10 @@ describe('lv-bitbucket-dialog', () => {
       const account = (saveCall!.args as Record<string, unknown>).account as IntegrationAccount;
       expect(account.id).to.not.equal('bb-acc-existing');
       expect((account.config as Record<string, unknown>).type).to.equal('bitbucket');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus[account.id]?.status,
+        'the newly created account shows as connected immediately'
+      ).to.equal('connected');
     });
   });
 
@@ -1287,6 +1293,235 @@ describe('lv-bitbucket-dialog', () => {
       expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'no spinner remains').to.not.exist;
       expect(el.shadowRoot!.querySelector('.oauth-status.error'), 'a failed release is not user-facing').to.not.exist;
       expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+  });
+
+  // The browser round-trip is asynchronous: the user can switch accounts (or
+  // start "Add account", or delete the account) between clicking "Sign in with
+  // Bitbucket" and the callback landing. The flow must stay bound to the account
+  // it started on instead of writing the new token onto whatever is selected then.
+  describe('OAuth target pinning (regression)', () => {
+    interface BitbucketDialogInternals {
+      oauthTargetAccountId: string | null | undefined;
+      oauthTargetWasAddingAccount: boolean | undefined;
+      selectedAccountId: string | null;
+      isAddingAccount: boolean;
+      oauthToken: string | null;
+      error: string | null;
+      handleStartOAuth(): Promise<void>;
+      handleCancelOAuth(): void;
+      handleOAuthComplete(tokens: {
+        accessToken: string;
+        refreshToken?: string;
+        expiresIn?: number;
+      }): Promise<void>;
+    }
+
+    const secondAccount = createTestAccount({
+      id: 'bb-acc-2',
+      name: 'Personal Bitbucket',
+      integrationType: 'bitbucket',
+      config: { type: 'bitbucket', workspace: 'other-workspace' },
+      isDefault: false,
+    });
+
+    /**
+     * Hold `check_bitbucket_connection_with_token` open so the test can mutate
+     * the dialog's selection while an OAuth completion is still in flight.
+     */
+    function gateVerification(): { started: Promise<void>; release: () => void } {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'check_bitbucket_connection_with_token') {
+          markStarted();
+          await gate;
+        }
+        return previous(command, args);
+      };
+      return { started, release };
+    }
+
+    it('pins the selected account when the sign-in flow starts', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return { authorizeUrl: 'https://bitbucket.org/site/oauth2/authorize', state: 'bb-st' };
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as BitbucketDialogInternals;
+      internals.selectedAccountId = 'bb-acc-1';
+      internals.isAddingAccount = false;
+
+      await internals.handleStartOAuth();
+
+      expect(internals.oauthTargetAccountId, 'account pinned at start').to.equal('bb-acc-1');
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pinned at start').to.be.false;
+    });
+
+    it('releases the pinned target when the sign-in flow fails to start', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as BitbucketDialogInternals;
+      internals.selectedAccountId = 'bb-acc-1';
+      internals.isAddingAccount = false;
+      // A pin left over from an earlier attempt must not survive a flow that
+      // never started — a later completion would otherwise be attributed to it.
+      internals.oauthTargetAccountId = 'bb-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+
+      await internals.handleStartOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+    });
+
+    it('releases the pinned target when the user cancels a pending sign-in', async () => {
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as BitbucketDialogInternals;
+      internals.oauthTargetAccountId = 'bb-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+
+      internals.handleCancelOAuth();
+
+      expect(internals.oauthTargetAccountId, 'pin released on cancel').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+    });
+
+    it('writes the token to the account the flow started on, not a later selection', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount, secondAccount]);
+      // Keep both accounts visible to any profile reload the flow triggers,
+      // otherwise the store subscription re-derives the selection.
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'get_unified_profiles_config') {
+          return {
+            version: 3,
+            profiles: [],
+            accounts: [mockAccount, secondAccount],
+            repositoryAssignments: {},
+          };
+        }
+        return previous(command, args);
+      };
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as BitbucketDialogInternals;
+      internals.selectedAccountId = 'bb-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'bb-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthToken = null;
+
+      const gate = gateVerification();
+      const completion = internals.handleOAuthComplete({
+        accessToken: 'bbp_reauth',
+        refreshToken: 'r-1',
+        expiresIn: 3600,
+      });
+      await gate.started;
+      // The user switches to a different account while the browser round-trip
+      // is still outstanding.
+      internals.selectedAccountId = 'bb-acc-2';
+      // The connection check on open already marked bb-acc-1 connected — clear
+      // it so the final assertion proves handleOAuthComplete set it for the
+      // OAuth target, not for the newer (mid-flight) selection.
+      unifiedProfileStore.getState().setAccountConnectionStatus('bb-acc-1', 'disconnected');
+      gate.release();
+      await completion;
+
+      expect(keyringStore.get('bitbucket_token_bb-acc-1')).to.equal('bbp_reauth');
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['bb-acc-1']?.status,
+        'the signed-in account shows as connected without waiting for a re-check'
+      ).to.equal('connected');
+      expect(
+        keyringStore.has('bitbucket_token_bb-acc-2'),
+        'the newly selected account is not overwritten'
+      ).to.be.false;
+      expect(internals.selectedAccountId, 'newer selection preserved').to.equal('bb-acc-2');
+      expect(
+        internals.oauthToken,
+        'the other account’s token must not be used for API calls'
+      ).to.be.null;
+    });
+
+    it('does not recreate an account deleted during the OAuth round-trip', async () => {
+      connectionResponse = mockConnectedStatus;
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as BitbucketDialogInternals;
+      internals.selectedAccountId = 'bb-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'bb-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+
+      const gate = gateVerification();
+      invokeHistory.length = 0;
+      const completion = internals.handleOAuthComplete({
+        accessToken: 'orphan-token',
+        refreshToken: 'r-2',
+        expiresIn: 3600,
+      });
+      await gate.started;
+      // The account is deleted from the profile manager mid-flow.
+      unifiedProfileStore.getState().setAccounts([]);
+      keyringStore.delete('bitbucket_token_bb-acc-1');
+      gate.release();
+      await completion;
+
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'a deleted account is not resurrected as a new one'
+      ).to.be.false;
+      expect(
+        keyringStore.has('bitbucket_token_bb-acc-1'),
+        'no orphaned credential remains'
+      ).to.be.false;
+      expect(internals.error).to.match(/account was removed/i);
     });
   });
 

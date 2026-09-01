@@ -254,6 +254,27 @@ describe('unified-profile.service - refreshAccountCachedUser', () => {
     ).to.equal('connected');
   });
 
+  it('refreshes an expiring GitHub OAuth token before validating the account', async () => {
+    const account = createTestAccount({
+      id: 'gh-oauth-1',
+      name: 'OAuth GitHub',
+      integrationType: 'github',
+    });
+    unifiedProfileStore.getState().setAccounts([account]);
+    setExpiringOAuthToken('github', 'gh-oauth-1', 'stale-access');
+    refreshResponse = { accessToken: 'fresh-access', refreshToken: 'r2', expiresIn: 3600 };
+
+    const result = await refreshAccountCachedUser(account);
+
+    const check = invokeHistory.find((h) => h.command === 'check_github_connection');
+    expect(check, 'the account was validated').to.not.be.undefined;
+    expect((check!.args as { token: string }).token).to.equal('fresh-access');
+    expect(result).to.not.be.null;
+    expect(
+      unifiedProfileStore.getState().accountConnectionStatus['gh-oauth-1']?.status
+    ).to.equal('connected');
+  });
+
   it('refreshes an expiring Bitbucket OAuth token before validating the account', async () => {
     const account = createTestAccount({
       id: 'bb-oauth-1',
