@@ -51,6 +51,20 @@ function createCandidate(
   };
 }
 
+/**
+ * The prune step lists the repo's remotes so it can route per-remote
+ * credentials, so every mock that reaches a delete/prune run must answer
+ * `get_remotes` — otherwise the prune fails before it is ever invoked.
+ *
+ * Two of them on purpose: the dialog prunes ALL remotes (it names none), so a
+ * single-remote fixture would not notice the enumeration dropping every remote
+ * but the first.
+ */
+const REMOTES = [
+  { name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null },
+  { name: 'upstream', url: 'https://github.com/upstream/repo.git', pushUrl: null },
+];
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function clearHistory(): void {
   invokeHistory.length = 0;
@@ -81,6 +95,8 @@ async function renderAndOpen(
     switch (command) {
       case 'get_cleanup_candidates':
         return candidates;
+      case 'get_remotes':
+        return REMOTES;
       case 'delete_branch':
         return undefined;
       case 'prune_remote_tracking_branches':
@@ -675,6 +691,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -747,6 +764,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let deleteCalls = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'delete_branch') {
           deleteCalls++;
@@ -793,6 +811,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -847,6 +866,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
 
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Ok';
         if (command === 'delete_branch') return undefined;
         if (command === 'prune_remote_tracking_branches') {
@@ -892,6 +912,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           return confirms === 1 ? 'Ok' : 'Cancel';
@@ -943,6 +964,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       let confirms = 0;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') {
           confirms++;
           // Confirm the delete, decline the force escalation.
@@ -992,6 +1014,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
 
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         if (command === 'plugin:dialog|message') return 'Cancel';
         if (command === 'delete_branch') {
           throw {
@@ -1132,6 +1155,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     it('exposes its pinned repo only while open, for host self-close', async () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return REMOTES;
         return null;
       };
       const el = await fixture<LvBranchCleanupDialog>(
@@ -1190,6 +1214,69 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
 
       const pruneCalls = findCommands('prune_remote_tracking_branches');
       expect(pruneCalls.length).to.equal(1);
+      // The dialog names no remote, so every remote in the repo must be sent —
+      // dropping one leaves its stale tracking refs behind while the dialog
+      // still reports "remotes pruned".
+      expect((pruneCalls[0].args as { remotes: string[] }).remotes).to.deep.equal([
+        'origin',
+        'upstream',
+      ]);
+    });
+
+    it('prunes nothing, and reports nothing, when the repo has no remotes', async () => {
+      const el = await renderAndOpen([mergedSafe]);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') return [];
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'delete_branch') return undefined;
+        return null;
+      };
+
+      uiStore.setState({ toasts: [] });
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      expect(findCommands('prune_remote_tracking_branches').length).to.equal(0);
+      const messages = uiStore.getState().toasts.map((t) => t.message);
+      expect(
+        messages.some((m) => /Failed to prune remote branches/i.test(m)),
+        'a repo with no remotes has nothing to prune — that is not a failure',
+      ).to.be.false;
+      expect(
+        messages.some((m) => /remotes pruned/i.test(m)),
+        'and nothing was pruned, so it must not say so',
+      ).to.be.false;
+    });
+
+    it('reports a failure to list the remotes instead of claiming success', async () => {
+      const el = await renderAndOpen([mergedSafe]);
+
+      mockInvoke = async (command: string) => {
+        if (command === 'get_cleanup_candidates') return [];
+        if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'delete_branch') return undefined;
+        return null;
+      };
+
+      uiStore.setState({ toasts: [] });
+      clearHistory();
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      expect(findCommands('prune_remote_tracking_branches').length).to.equal(0);
+      const messages = uiStore.getState().toasts.map((t) => t.message);
+      expect(
+        messages.some((m) => /Failed to prune remote branches/i.test(m)),
+        'the prune could not run, so it must be reported',
+      ).to.be.true;
+      expect(
+        messages.some((m) => /remotes pruned/i.test(m)),
+        'must not claim a prune that did not happen',
+      ).to.be.false;
     });
   });
 

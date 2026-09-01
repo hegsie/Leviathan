@@ -303,7 +303,7 @@ describe('lv-remote-dialog actions', () => {
       expect(pruneCalls.length).to.equal(1);
       expect(pruneCalls[0].args).to.deep.include({
         path: REPO_PATH,
-        remote: 'origin',
+        remotes: ['origin'],
       });
     });
 
