@@ -579,6 +579,12 @@ export class LvGitLabDialog extends LitElement {
         height: 20px;
       }
 
+      .oauth-cancel {
+        width: 100%;
+        justify-content: center;
+        margin-top: var(--spacing-sm);
+      }
+
       .oauth-spinner {
         width: 20px;
         height: 20px;
@@ -1281,6 +1287,24 @@ export class LvGitLabDialog extends LitElement {
   }
 
   /**
+   * Abandon a sign-in that is waiting on the browser. Without this the whole
+   * connect form stays disabled until the backend loopback wait times out. The
+   * local state is set explicitly rather than relying on the service's
+   * notification, so the form can never stay stuck if there is no pending entry
+   * to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('gitlab');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
+    this.oauthTargetInstanceUrl = undefined;
+  }
+
+  /**
    * Handle OAuth completion
    */
   private async handleOAuthComplete(tokens: OAuthTokenResponse, instanceUrl?: string): Promise<void> {
@@ -1713,6 +1737,10 @@ export class LvGitLabDialog extends LitElement {
               <span>Sign in with GitLab</span>
             `}
           </button>
+
+          ${isOAuthPending ? html`
+            <button class="btn oauth-cancel" @click=${this.handleCancelOAuth}>Cancel</button>
+          ` : ''}
 
           ${this.oauthState.status === 'error' ? html`
             <div class="oauth-status error">${this.oauthState.error}</div>

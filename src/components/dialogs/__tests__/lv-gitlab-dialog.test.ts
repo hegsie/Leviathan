@@ -950,6 +950,7 @@ describe('lv-gitlab-dialog', () => {
       instanceUrlInput: string;
       error: string | null;
       handleStartOAuth(): Promise<void>;
+      handleCancelOAuth(): void;
       handleOAuthComplete(
         tokens: { accessToken: string; refreshToken?: string; expiresIn?: number },
         instanceUrl?: string
@@ -1166,6 +1167,130 @@ describe('lv-gitlab-dialog', () => {
         'no orphaned credential remains'
       ).to.be.false;
       expect(internals.error).to.match(/account was removed/i);
+    });
+
+    it('releases the pinned target when the user cancels a pending sign-in', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      internals.handleCancelOAuth();
+
+      expect(internals.oauthTargetAccountId, 'pin released on cancel').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetInstanceUrl, 'instance pin released').to.be.undefined;
+    });
+  });
+
+  // Without a Cancel affordance a user who closes the browser tab without
+  // authorizing is stuck: the sign-in button, the instance-URL input, the
+  // auth-method toggles AND the PAT save button are all disabled until the
+  // backend loopback wait times out (~5 minutes).
+  describe('Cancelling a pending OAuth sign-in', () => {
+    /** Starts a GitLab sign-in that hangs waiting for the browser callback. */
+    async function startPendingSignIn(options: { cancelFails?: boolean } = {}) {
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return {
+            authorizeUrl: 'https://gitlab.com/oauth/authorize',
+            state: 'gl-state-1',
+            loopbackPort: 8086,
+          };
+        }
+        // Never resolves: the flow stays pending, as it does while the user is
+        // in the browser.
+        if (command === 'oauth_wait_for_callback') return new Promise(() => {});
+        if (command === 'oauth_cancel_flow' && options.cancelFails) {
+          throw new Error('No server found for port 8086');
+        }
+        return previousMock(command, args);
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await el.updateComplete;
+
+      await oauthService.startOAuth('gitlab', 'test-client-id');
+      await el.updateComplete;
+      return el;
+    }
+
+    afterEach(() => {
+      oauthService.cancelOAuth();
+    });
+
+    it('offers a Cancel button while pending and returns the form to idle', async () => {
+      const el = await startPendingSignIn();
+
+      const signInButton = el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement;
+      expect(signInButton.disabled, 'sign in is disabled while pending').to.be.true;
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton, 'a pending sign-in must offer a way out').to.exist;
+
+      invokeHistory.length = 0;
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el as unknown as { oauthState: { status: string } }).oauthState.status).to.equal(
+        'idle'
+      );
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(
+        el.shadowRoot!.querySelector('.oauth-cancel'),
+        'cancel disappears once idle'
+      ).to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'spinner is gone').to.not.exist;
+
+      const release = invokeHistory.find((h) => h.command === 'oauth_cancel_flow');
+      expect(release, 'the backend loopback server is released').to.exist;
+      expect(release!.args).to.deep.equal({ port: 8086 });
+    });
+
+    it('returns the dialog to idle even when the backend release fails', async () => {
+      const el = await startPendingSignIn({ cancelFails: true });
+
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton).to.exist;
+
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be
+        .false;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'no spinner remains').to.not.exist;
+      expect(
+        el.shadowRoot!.querySelector('.oauth-status.error'),
+        'a failed release is not user-facing'
+      ).to.not.exist;
+      expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+
+    it('leaves a sign-in pending in another provider dialog alone', async () => {
+      const el = await startPendingSignIn();
+
+      oauthService.cancelOAuth();
+      await oauthService.startOAuth('bitbucket', 'bb-client');
+      await oauthService.startOAuth('gitlab', 'gl-client');
+
+      (el as unknown as { handleCancelOAuth(): void }).handleCancelOAuth();
+
+      expect(
+        oauthService.getPendingProvider(),
+        'a sign-in pending in another provider dialog is left alone'
+      ).to.equal('bitbucket');
+      oauthService.cancelOAuth();
     });
   });
 
