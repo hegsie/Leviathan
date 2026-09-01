@@ -33,6 +33,7 @@ function makeTag(name = 'v1.0.0') {
 function defaultMockInvoke(command: string): Promise<unknown> {
   if (command === 'get_tags') return Promise.resolve([]);
   if (command === 'get_tag_sort_mode') return Promise.resolve('name');
+  if (command === 'get_push_remote') return Promise.resolve('origin');
   // Confirmation dialogs return the clicked button label; 'Ok' = confirmed.
   if (command === 'plugin:dialog|message') return Promise.resolve('Ok');
   return Promise.resolve(null);
@@ -50,6 +51,7 @@ function deleteFlowMock(options: {
   answers?: string[];
   deleteRemoteTag?: () => Promise<unknown>;
   getRemotes?: () => Promise<unknown>;
+  getPushRemote?: () => Promise<unknown>;
 }) {
   const dialogMessages: string[] = [];
   const invokes: Array<{ command: string; args?: unknown }> = [];
@@ -64,6 +66,9 @@ function deleteFlowMock(options: {
     }
     if (command === 'get_remotes') {
       return options.getRemotes ? options.getRemotes() : Promise.resolve(options.remotes ?? []);
+    }
+    if (command === 'get_push_remote' && options.getPushRemote) {
+      return options.getPushRemote();
     }
     if (command === 'delete_tag') return Promise.resolve(null);
     if (command === 'delete_remote_tag') {
@@ -140,7 +145,7 @@ describe('lv-tag-list feedback', () => {
 
     const successToast = uiStore.getState().toasts.find(t => t.type === 'success');
     expect(successToast, 'a success toast should be shown').to.not.be.undefined;
-    expect(successToast!.message).to.equal('Pushed tag v2.0.0 to remote');
+    expect(successToast!.message).to.equal('Pushed tag v2.0.0 to origin');
   });
 
   it('deleting a tag confirms the destructive operation happened', async () => {
@@ -268,6 +273,55 @@ describe('lv-tag-list feedback', () => {
     expect(warning!.message).to.contain('v3.0.0');
     expect(warning!.message).to.contain('remote');
     expect(flow.invokes.filter((i) => i.command === 'delete_remote_tag')).to.have.length(0);
+  });
+
+  it('an unresolvable push destination still offers the follow-up on a known remote', async () => {
+    // `resolve_push_remote` answers from config and falls back to the literal
+    // "origin", so a stale `remote.pushDefault` fails `get_push_remote` on a
+    // repo that plainly has remotes. The remote list was read a moment ago —
+    // dropping the follow-up would leave NO surface for deleting the remote
+    // tag, and the next fetch would restore it.
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      remotes: ORIGIN,
+      answers: ['Ok', 'Ok'],
+      getPushRemote: () =>
+        Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: gone' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v4.0.0');
+
+    const remoteDeletes = flow.invokes.filter((i) => i.command === 'delete_remote_tag');
+    expect(remoteDeletes, 'the remote copy is still deletable').to.have.length(1);
+    expect((remoteDeletes[0].args as { remote: string }).remote).to.equal('origin');
+    expect(flow.dialogMessages[1], 'and the confirm names where it goes').to.contain('origin');
+    expect(uiStore.getState().toasts.find((t) => t.type === 'warning'), 'no dead end').to.be
+      .undefined;
+  });
+
+  it('falls back to the first remote when none is named origin', async () => {
+    // Two remotes, no `origin`, and a detached HEAD (which checking out a tag
+    // puts you in) leaves `resolve_push_remote` guessing "origin" — a name
+    // `find_remote` rejects. The first configured remote is the same pick this
+    // followed before `get_push_remote` existed.
+    const el = await createComponent();
+    const flow = deleteFlowMock({
+      remotes: [
+        { name: 'upstream', url: 'https://example.test/u.git', pushUrl: null },
+        { name: 'fork', url: 'https://example.test/f.git', pushUrl: null },
+      ],
+      answers: ['Ok', 'Ok'],
+      getPushRemote: () =>
+        Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' }),
+    });
+    mockInvoke = flow.mock;
+
+    await runDeleteTag(el, 'v5.0.0');
+
+    const remoteDeletes = flow.invokes.filter((i) => i.command === 'delete_remote_tag');
+    expect(remoteDeletes).to.have.length(1);
+    expect((remoteDeletes[0].args as { remote: string }).remote).to.equal('upstream');
   });
 
   it('a failed remote delete is reported to the user', async () => {

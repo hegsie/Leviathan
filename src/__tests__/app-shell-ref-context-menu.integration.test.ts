@@ -108,6 +108,8 @@ function setupDefaultMocks(): void {
         return null;
       case 'push_tag':
         return null;
+      case 'get_push_remote':
+        return 'origin';
       case 'get_branches':
         return [];
       case 'get_remotes':
@@ -575,7 +577,94 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(calls[0].args).to.deep.include({
         path: REPO_PATH,
         name: 'v2.0.0',
+        remote: 'origin',
       });
+    });
+
+    it('reports an unresolvable destination instead of pushing blind', async () => {
+      // The toast and the Force Push Tag suggestion both name the destination,
+      // so a push that could not resolve one must stop rather than let the
+      // backend pick a remote the user is never told about.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: upstream' });
+        }
+        // Remotes exist — the configured push remote just is not one of them.
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'origin', url: 'https://example.test/r.git', pushUrl: null },
+          ]);
+        }
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: upstream');
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
+    });
+
+    it('names missing setup, not a phantom remote, when the repo has none', async () => {
+      // The resolver falls back to the literal `origin`, so a fresh `git init`
+      // repo fails with "Remote not found: origin" — a remote the user never
+      // configured. The tag list translates that into setup guidance; this
+      // surface must say the same thing rather than read as a bug.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' });
+        }
+        if (command === 'get_remotes') return Promise.resolve([]);
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.equal(
+        'No remotes configured. Add a remote before pushing tags.',
+      );
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
+    });
+
+    it('falls back to the resolver error when the remote list cannot be read', async () => {
+      // No answer about the remote count means no basis for the setup wording;
+      // the resolver's own message is still better than silence.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' });
+        }
+        if (command === 'get_remotes') {
+          return Promise.reject({ code: 'GIT_ERROR', message: 'could not read config' });
+        }
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: origin');
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
     });
   });
 
