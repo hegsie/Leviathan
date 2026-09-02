@@ -21,6 +21,26 @@ const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 /// `src/services/credential.service.ts`.
 const APP_PASSWORD_PREFIX: &str = "bbapp:";
 
+/// Default page size for the pull-request and issue listings.
+///
+/// Kept in sync with BITBUCKET_LIST_PAGE_SIZE in lv-bitbucket-dialog.ts, which
+/// discloses it to the user.
+const LIST_DEFAULT_PAGELEN: u32 = 30;
+
+/// Default page size for the pipeline listing.
+///
+/// Kept in sync with BITBUCKET_PIPELINE_PAGE_SIZE in lv-bitbucket-dialog.ts.
+const PIPELINES_DEFAULT_PAGELEN: u32 = 20;
+
+/// Build the `pagelen=<n>` query fragment for a listing.
+///
+/// The dialog discloses the page size it asked for ("Showing the first N ...").
+/// Taking the size from the caller keeps the number the request caps at and the
+/// number the hint quotes the same value, instead of two literals that drift.
+fn pagelen_query_param(pagelen: Option<u32>, default_pagelen: u32) -> String {
+    format!("pagelen={}", pagelen.unwrap_or(default_pagelen))
+}
+
 // ============================================================================
 // Credential Management (handled by frontend credential service via OS keyring - these are stubs)
 // ============================================================================
@@ -417,6 +437,7 @@ pub async fn list_bitbucket_pull_requests(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    pagelen: Option<u32>,
     token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
@@ -429,8 +450,12 @@ pub async fn list_bitbucket_pull_requests(
 
     let state_param = state.unwrap_or_else(|| "OPEN".to_string());
     let url = format!(
-        "{}/repositories/{}/{}/pullrequests?state={}&pagelen=30",
-        BITBUCKET_API_BASE, workspace, repo_slug, state_param
+        "{}/repositories/{}/{}/pullrequests?state={}&{}",
+        BITBUCKET_API_BASE,
+        workspace,
+        repo_slug,
+        state_param,
+        pagelen_query_param(pagelen, LIST_DEFAULT_PAGELEN)
     );
 
     tracing::debug!(
@@ -800,6 +825,7 @@ pub async fn list_bitbucket_issues(
     workspace: String,
     repo_slug: String,
     state: Option<String>,
+    pagelen: Option<u32>,
     token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
@@ -811,8 +837,11 @@ pub async fn list_bitbucket_issues(
     )?;
 
     let mut url = format!(
-        "{}/repositories/{}/{}/issues?pagelen=30",
-        BITBUCKET_API_BASE, workspace, repo_slug
+        "{}/repositories/{}/{}/issues?{}",
+        BITBUCKET_API_BASE,
+        workspace,
+        repo_slug,
+        pagelen_query_param(pagelen, LIST_DEFAULT_PAGELEN)
     );
 
     if let Some(state_str) = state {
@@ -1077,6 +1106,7 @@ fn build_create_issue_body(input: &CreateBitbucketIssueInput) -> serde_json::Val
 pub async fn list_bitbucket_pipelines(
     workspace: String,
     repo_slug: String,
+    pagelen: Option<u32>,
     token: Option<String>,
     username: Option<String>,
     app_password: Option<String>,
@@ -1088,8 +1118,11 @@ pub async fn list_bitbucket_pipelines(
     )?;
 
     let url = format!(
-        "{}/repositories/{}/{}/pipelines/?pagelen=20&sort=-created_on",
-        BITBUCKET_API_BASE, workspace, repo_slug
+        "{}/repositories/{}/{}/pipelines/?{}&sort=-created_on",
+        BITBUCKET_API_BASE,
+        workspace,
+        repo_slug,
+        pagelen_query_param(pagelen, PIPELINES_DEFAULT_PAGELEN)
     );
 
     let client = reqwest::Client::new();
@@ -1189,6 +1222,17 @@ pub async fn list_bitbucket_pipelines(
 mod tests {
     use super::*;
     use crate::test_utils::TestRepo;
+
+    #[test]
+    fn test_pagelen_query_param() {
+        // The caller's page size wins, so the size requested is the size the
+        // dialog discloses.
+        assert_eq!(pagelen_query_param(Some(30), 30), "pagelen=30");
+        assert_eq!(pagelen_query_param(Some(5), 30), "pagelen=5");
+        // No caller size falls back to this file's default.
+        assert_eq!(pagelen_query_param(None, 30), "pagelen=30");
+        assert_eq!(pagelen_query_param(None, 20), "pagelen=20");
+    }
 
     // ========================================================================
     // parse_bitbucket_url Tests

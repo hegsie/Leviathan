@@ -4512,6 +4512,7 @@ export async function listAdoPullRequests(
   project: string,
   repository: string,
   status?: string,
+  top?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPullRequest[]>> {
   return invokeProviderCommand<AdoPullRequest[]>("list_ado_pull_requests", {
@@ -4519,6 +4520,7 @@ export async function listAdoPullRequests(
     project,
     repository,
     status,
+    top,
     token,
   });
 }
@@ -4575,12 +4577,14 @@ export async function queryAdoWorkItems(
   organization: string,
   project: string,
   state?: string,
+  limit?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
   return invokeProviderCommand<AdoWorkItem[]>("query_ado_work_items", {
     organization,
     project,
     state,
+    limit,
     token,
   });
 }
@@ -4801,12 +4805,14 @@ export async function listGitLabMergeRequests(
   instanceUrl: string,
   projectPath: string,
   state?: string,
+  perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<GitLabMergeRequest[]>> {
   return invokeProviderCommand<GitLabMergeRequest[]>("list_gitlab_merge_requests", {
     instanceUrl,
     projectPath,
     state,
+    perPage,
     token,
   });
 }
@@ -4846,6 +4852,7 @@ export async function listGitLabIssues(
   projectPath: string,
   state?: string,
   labels?: string,
+  perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<GitLabIssue[]>> {
   return invokeProviderCommand<GitLabIssue[]>("list_gitlab_issues", {
@@ -4853,6 +4860,7 @@ export async function listGitLabIssues(
     projectPath,
     state,
     labels,
+    perPage,
     token,
   });
 }
@@ -4877,12 +4885,14 @@ export async function listGitLabPipelines(
   instanceUrl: string,
   projectPath: string,
   status?: string,
+  perPage?: number,
   token?: string | null,
 ): Promise<CommandResult<GitLabPipeline[]>> {
   return invokeProviderCommand<GitLabPipeline[]>("list_gitlab_pipelines", {
     instanceUrl,
     projectPath,
     status,
+    perPage,
     token,
   });
 }
@@ -5060,12 +5070,14 @@ export async function listBitbucketPullRequests(
   workspace: string,
   repoSlug: string,
   state?: string,
+  pagelen?: number,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPullRequest[]>> {
   return invokeProviderCommand<BitbucketPullRequest[]>("list_bitbucket_pull_requests", {
     workspace,
     repoSlug,
     state,
+    pagelen,
     token,
   });
 }
@@ -5104,12 +5116,14 @@ export async function listBitbucketIssues(
   workspace: string,
   repoSlug: string,
   state?: string,
+  pagelen?: number,
   token?: string | null,
 ): Promise<CommandResult<BitbucketIssue[]>> {
   return invokeProviderCommand<BitbucketIssue[]>("list_bitbucket_issues", {
     workspace,
     repoSlug,
     state,
+    pagelen,
     token,
   });
 }
@@ -5140,11 +5154,13 @@ export async function createBitbucketIssue(
 export async function listBitbucketPipelines(
   workspace: string,
   repoSlug: string,
+  pagelen?: number,
   token?: string | null,
 ): Promise<CommandResult<BitbucketPipeline[]>> {
   return invokeProviderCommand<BitbucketPipeline[]>("list_bitbucket_pipelines", {
     workspace,
     repoSlug,
+    pagelen,
     token,
   });
 }

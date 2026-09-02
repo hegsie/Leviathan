@@ -1,5 +1,10 @@
 import { test, expect } from '@playwright/test';
-import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  setupOpenRepository,
+  setupProfilesAndAccounts,
+  type MockIntegrationAccount,
+  type MockUnifiedProfile,
+} from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import {
@@ -270,5 +275,111 @@ test.describe('Bitbucket Dialog - Cancelling a pending OAuth sign-in', () => {
     // And the form is usable again.
     await expect(dialogs.bitbucket.oauthCancelButton).toHaveCount(0);
     await expect(dialogs.bitbucket.oauthSignInButton).toBeEnabled();
+  });
+});
+
+
+/**
+ * The pull-request listing is capped at one page by the backend (`pagelen=30`).
+ * The tab must say so and hand the user a link that opens the same filtered list
+ * in Bitbucket - through the shell, not by navigating the webview.
+ */
+test.describe('Bitbucket Dialog - Capped list disclosure', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  const cappedProfile: MockUnifiedProfile = {
+    id: 'profile-1',
+    name: 'Default',
+    gitName: 'Test User',
+    gitEmail: 'test@example.com',
+    signingKey: null,
+    urlPatterns: [],
+    isDefault: true,
+    color: '#0052cc',
+    defaultAccounts: { bitbucket: 'bb-acc-1' },
+  };
+
+  const cappedAccount: MockIntegrationAccount = {
+    id: 'bb-acc-1',
+    name: 'Bitbucket (bbuser)',
+    integrationType: 'bitbucket',
+    config: { type: 'bitbucket' },
+    color: '#0052cc',
+    cachedUser: { username: 'bbuser', displayName: 'BB User', avatarUrl: null },
+    urlPatterns: [],
+    isDefault: true,
+  };
+
+  const makePr = (n: number) => ({
+    id: n,
+    title: `Capped PR ${n}`,
+    description: null,
+    state: 'OPEN',
+    author: { uuid: '{u1}', displayName: 'BB User', nickname: 'bbuser', avatarUrl: '' },
+    createdOn: '2025-01-15T10:00:00Z',
+    sourceBranch: `feature/${n}`,
+    destinationBranch: 'main',
+    url: `https://bitbucket.org/acme/widgets/pull-requests/${n}`,
+  });
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      { profiles: [cappedProfile], accounts: [cappedAccount], connectedAccounts: ['bb-acc-1'] },
+      { remotes: [{ name: 'origin', url: 'https://bitbucket.org/acme/widgets.git', pushUrl: null }] },
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      detect_bitbucket_repo: { workspace: 'acme', repoSlug: 'widgets', remoteName: 'origin' },
+      check_bitbucket_connection: {
+        connected: true,
+        user: { uuid: '{u1}', displayName: 'BB User', nickname: 'bbuser', avatarUrl: '' },
+      },
+      check_bitbucket_connection_with_token: {
+        connected: true,
+        user: { uuid: '{u1}', displayName: 'BB User', nickname: 'bbuser', avatarUrl: '' },
+      },
+      list_bitbucket_pull_requests: Array.from({ length: 30 }, (_, index) => makePr(index + 1)),
+      // The hint's link must reach the browser, not navigate the webview away.
+      'plugin:shell|open': null,
+    });
+  });
+
+  test('discloses the capped pull request list and opens Bitbucket for the rest', async ({ page }) => {
+    await app.executeCommand('Bitbucket');
+    await expect(dialogs.bitbucket.dialog).toBeVisible();
+    await dialogs.bitbucket.pullRequestsTab.click();
+
+    await expect(page.locator('lv-bitbucket-dialog .pr-item')).toHaveCount(30);
+
+    const hint = page.locator('lv-bitbucket-dialog .capped-list-hint');
+    await expect(hint).toContainText('more may exist');
+    await expect(hint).toContainText('30');
+
+    await hint.locator('a').click();
+
+    await waitForCommand(page, 'plugin:shell|open');
+    const opens = await findCommand(page, 'plugin:shell|open');
+    expect((opens[0].args as { path: string }).path).toBe(
+      'https://bitbucket.org/acme/widgets/pull-requests?state=OPEN',
+    );
+
+    // The dialog stays put - the link opened externally.
+    await expect(dialogs.bitbucket.dialog).toBeVisible();
+  });
+
+  test('shows no cap disclosure when the pull request list is short', async ({ page }) => {
+    await injectCommandMock(page, { list_bitbucket_pull_requests: [makePr(1)] });
+
+    await app.executeCommand('Bitbucket');
+    await expect(dialogs.bitbucket.dialog).toBeVisible();
+    await dialogs.bitbucket.pullRequestsTab.click();
+
+    await expect(page.locator('lv-bitbucket-dialog .pr-item')).toHaveCount(1);
+    await expect(page.locator('lv-bitbucket-dialog .capped-list-hint')).toHaveCount(0);
   });
 });

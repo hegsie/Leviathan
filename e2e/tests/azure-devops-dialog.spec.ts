@@ -645,3 +645,333 @@ test.describe('Azure DevOps Dialog - Pipelines scoping', () => {
     await expect(page.locator('.pipeline-item').first()).toContainText('CI Pipeline');
   });
 });
+
+
+/**
+ * Both Azure DevOps listings are capped: the dialog asks for an explicit page
+ * size and the tab must disclose it, with a link that opens the matching Azure
+ * DevOps list through the shell rather than navigating the webview.
+ */
+test.describe('Azure DevOps Dialog - Capped list disclosure', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  const makeRun = (n: number) => ({
+    id: n,
+    name: `Capped run ${n}`,
+    state: 'completed',
+    result: 'succeeded',
+    sourceBranch: 'main',
+    createdDate: '2025-01-15T10:00:00Z',
+    finishedDate: '2025-01-15T10:05:00Z',
+    url: `https://dev.azure.com/testorg/testproject/_build/results?buildId=${n}`,
+  });
+
+  const makePr = (n: number) => ({
+    pullRequestId: n,
+    title: `Capped PR ${n}`,
+    description: null,
+    status: 'active',
+    createdBy: { id: 'user-1', displayName: 'Test User', uniqueName: 'test@example.com' },
+    creationDate: '2025-01-15T10:00:00Z',
+    sourceRefName: `refs/heads/feature/${n}`,
+    targetRefName: 'refs/heads/main',
+    isDraft: false,
+    url: `https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/${n}`,
+  });
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      {
+        profiles: [
+          {
+            id: 'default',
+            name: 'Default',
+            gitName: 'Test User',
+            gitEmail: 'test@example.com',
+            signingKey: null,
+            urlPatterns: [],
+            isDefault: true,
+            color: '#3b82f6',
+            defaultAccounts: { 'azure-devops': 'ado-account-1' },
+          },
+        ],
+        accounts: [
+          {
+            id: 'ado-account-1',
+            name: 'My Azure DevOps',
+            integrationType: 'azure-devops',
+            config: { type: 'pat', organization: 'testorg' },
+            color: null,
+            cachedUser: { username: 'testuser', displayName: 'Test User', avatarUrl: null },
+            urlPatterns: ['dev.azure.com/testorg'],
+            isDefault: false,
+          },
+        ],
+        connectedAccounts: ['ado-account-1'],
+      },
+      {
+        remotes: [
+          { name: 'origin', url: 'https://dev.azure.com/testorg/testproject/_git/testrepo', pushUrl: null },
+        ],
+      },
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      detect_ado_repo: {
+        organization: 'testorg',
+        project: 'testproject',
+        repository: 'testrepo',
+        remoteName: 'origin',
+      },
+      check_ado_connection: {
+        connected: true,
+        user: {
+          id: 'user-1',
+          displayName: 'Test User',
+          uniqueName: 'test@example.com',
+          imageUrl: null,
+        },
+        organization: 'testorg',
+      },
+      query_ado_work_items: [],
+      // The hint's link must reach the browser, not navigate the webview away.
+      'plugin:shell|open': null,
+    });
+  });
+
+  test('discloses the capped pipeline run list and opens the runs view', async ({ page }) => {
+    // Serve exactly the page size the dialog asked for, so the hint can only
+    // render if the requested cap and the disclosed cap are the same number.
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command !== 'list_ado_pipeline_runs') return originalInvoke(command, args);
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) captured.push({ command, args });
+        const top = Number((args as { top?: number })?.top ?? 0);
+        return Array.from({ length: top }, (_, i) => ({
+          id: i + 1,
+          name: `Capped run ${i + 1}`,
+          state: 'completed',
+          result: 'succeeded',
+          sourceBranch: 'main',
+          createdDate: '2025-01-15T10:00:00Z',
+          finishedDate: '2025-01-15T10:05:00Z',
+          url: `https://dev.azure.com/testorg/testproject/_build/results?buildId=${i + 1}`,
+        }));
+      };
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await dialogs.azureDevOps.pipelinesTab.click();
+
+    await waitForCommand(page, 'list_ado_pipeline_runs');
+    const runCalls = await findCommand(page, 'list_ado_pipeline_runs');
+    const requestedTop = (runCalls[0].args as { top: number }).top;
+    await expect(page.locator('lv-azure-devops-dialog .pipeline-item')).toHaveCount(requestedTop);
+
+    const hint = page.locator('lv-azure-devops-dialog .capped-list-hint');
+    await expect(hint).toContainText('more may exist');
+    await expect(hint).toContainText(String(requestedTop));
+
+    await hint.locator('a').click();
+
+    await waitForCommand(page, 'plugin:shell|open');
+    const opens = await findCommand(page, 'plugin:shell|open');
+    expect((opens[0].args as { path: string }).path).toBe(
+      'https://dev.azure.com/testorg/testproject/_build?view=runs',
+    );
+
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+  });
+
+  test('discloses the capped pull request list and opens the PR list', async ({ page }) => {
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command !== 'list_ado_pull_requests') return originalInvoke(command, args);
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) captured.push({ command, args });
+        const top = Number((args as { top?: number })?.top ?? 0);
+        return Array.from({ length: top }, (_, i) => ({
+          pullRequestId: i + 1,
+          title: `Capped PR ${i + 1}`,
+          description: null,
+          status: 'active',
+          createdBy: { id: 'user-1', displayName: 'Test User', uniqueName: 'test@example.com' },
+          creationDate: '2025-01-15T10:00:00Z',
+          sourceRefName: `refs/heads/feature/${i + 1}`,
+          targetRefName: 'refs/heads/main',
+          isDraft: false,
+          url: `https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/${i + 1}`,
+        }));
+      };
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await dialogs.azureDevOps.pullRequestsTab.click();
+
+    await waitForCommand(page, 'list_ado_pull_requests');
+    const prCalls = await findCommand(page, 'list_ado_pull_requests');
+    // Without an explicit $top the Azure DevOps server default silently caps the
+    // list and the dialog has no number to disclose.
+    const requestedTop = (prCalls[0].args as { top: number }).top;
+    expect(requestedTop).toBeGreaterThan(0);
+    await expect(page.locator('lv-azure-devops-dialog .pr-item')).toHaveCount(requestedTop);
+
+    const hint = page.locator('lv-azure-devops-dialog .capped-list-hint');
+    await expect(hint).toContainText('more may exist');
+    await expect(hint).toContainText(String(requestedTop));
+
+    await hint.locator('a').click();
+
+    await waitForCommand(page, 'plugin:shell|open');
+    const opens = await findCommand(page, 'plugin:shell|open');
+    // The link has to open the same list the hint is attached to; the Azure
+    // DevOps PR page selects that list with `_a`.
+    expect((opens[0].args as { path: string }).path).toBe(
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=active',
+    );
+
+    // Switching the filter must move the link with it, otherwise the "full list"
+    // link lands on a different list than the one on screen.
+    await page.locator('lv-azure-devops-dialog .filter-select').selectOption('abandoned');
+    await expect(hint.locator('a')).toHaveAttribute(
+      'href',
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=abandoned',
+    );
+    await hint.locator('a').click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'plugin:shell|open')).length)
+      .toBeGreaterThan(1);
+    const filteredOpens = await findCommand(page, 'plugin:shell|open');
+    expect((filteredOpens[1].args as { path: string }).path).toBe(
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=abandoned',
+    );
+  });
+
+  // Azure DevOps defaults `searchCriteria.status` to `active`, so the "All"
+  // filter has to send `all` explicitly — omitting it renders the Active list
+  // again with completed and abandoned pull requests silently missing.
+  test('requests every state when the All pull request filter is selected', async ({ page }) => {
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command !== 'list_ado_pull_requests') return originalInvoke(command, args);
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) captured.push({ command, args });
+        // Stand in for the API: `all` returns every state, anything else returns
+        // just that one.
+        const status = (args as { status?: string })?.status ?? 'active';
+        const states = status === 'all' ? ['active', 'completed', 'abandoned'] : [status];
+        return states.map((state, i) => ({
+          pullRequestId: i + 1,
+          title: `${state} PR`,
+          description: null,
+          status: state,
+          createdBy: { id: 'user-1', displayName: 'Test User', uniqueName: 'test@example.com' },
+          creationDate: '2025-01-15T10:00:00Z',
+          sourceRefName: `refs/heads/feature/${i + 1}`,
+          targetRefName: 'refs/heads/main',
+          isDraft: false,
+          url: `https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequest/${i + 1}`,
+        }));
+      };
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await dialogs.azureDevOps.pullRequestsTab.click();
+    await expect(page.locator('lv-azure-devops-dialog .pr-item')).toHaveCount(1);
+
+    await page.locator('lv-azure-devops-dialog .filter-select').selectOption('all');
+    await expect(page.locator('lv-azure-devops-dialog .pr-item')).toHaveCount(3);
+    await expect(page.locator('lv-azure-devops-dialog .pr-list')).toContainText('completed PR');
+    await expect(page.locator('lv-azure-devops-dialog .pr-list')).toContainText('abandoned PR');
+
+    const prCalls = await findCommand(page, 'list_ado_pull_requests');
+    expect((prCalls[prCalls.length - 1].args as { status?: string }).status).toBe('all');
+  });
+
+  // The work-item cap is disclosed from the same constant the request asks for,
+  // so serving exactly the requested `limit` is the only way the hint can match.
+  test('discloses the capped work item list from the size it requested', async ({ page }) => {
+    await page.evaluate(() => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command !== 'query_ado_work_items') return originalInvoke(command, args);
+        const captured = (window as unknown as {
+          __INVOKED_COMMANDS__?: { command: string; args: unknown }[];
+        }).__INVOKED_COMMANDS__;
+        if (captured) captured.push({ command, args });
+        const limit = Number((args as { limit?: number })?.limit ?? 0);
+        return Array.from({ length: limit }, (_, i) => ({
+          id: i + 1,
+          title: `Capped work item ${i + 1}`,
+          workItemType: 'Task',
+          state: 'Active',
+          assignedTo: null,
+          createdDate: '2025-01-15T10:00:00Z',
+          url: `https://dev.azure.com/testorg/_workitems/edit/${i + 1}`,
+        }));
+      };
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+    await dialogs.azureDevOps.workItemsTab.click();
+
+    await waitForCommand(page, 'query_ado_work_items');
+    const workItemCalls = await findCommand(page, 'query_ado_work_items');
+    const requestedLimit = (workItemCalls[0].args as { limit: number }).limit;
+    expect(requestedLimit).toBeGreaterThan(0);
+    await expect(page.locator('lv-azure-devops-dialog .work-item')).toHaveCount(requestedLimit);
+
+    const hint = page.locator('lv-azure-devops-dialog .capped-list-hint');
+    await expect(hint).toContainText(String(requestedLimit));
+  });
+
+  test('shows no cap disclosure when the lists are short', async ({ page }) => {
+    await injectCommandMock(page, {
+      list_ado_pipeline_runs: [makeRun(1)],
+      list_ado_pull_requests: [makePr(1)],
+    });
+
+    await app.executeCommand('Azure DevOps');
+    await expect(dialogs.azureDevOps.dialog).toBeVisible();
+
+    await dialogs.azureDevOps.pullRequestsTab.click();
+    await expect(page.locator('lv-azure-devops-dialog .pr-item')).toHaveCount(1);
+    await expect(page.locator('lv-azure-devops-dialog .capped-list-hint')).toHaveCount(0);
+
+    await dialogs.azureDevOps.pipelinesTab.click();
+    await expect(page.locator('lv-azure-devops-dialog .pipeline-item')).toHaveCount(1);
+    await expect(page.locator('lv-azure-devops-dialog .capped-list-hint')).toHaveCount(0);
+  });
+});

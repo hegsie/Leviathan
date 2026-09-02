@@ -295,3 +295,110 @@ test.describe('GitLab Dialog - OAuth token refresh', () => {
     await expect(dialogs2.gitlab.connectionStatus).toContainText('gluser');
   });
 });
+
+
+/**
+ * The merge-request listing is capped at one page by the backend (`per_page=30`).
+ * The tab must say so and hand the user a link that opens the same filtered list
+ * in GitLab - through the shell, not by navigating the webview.
+ */
+test.describe('GitLab Dialog - Capped list disclosure', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  const cappedProfile: MockUnifiedProfile = {
+    id: 'profile-1',
+    name: 'Default',
+    gitName: 'Test User',
+    gitEmail: 'test@example.com',
+    signingKey: null,
+    urlPatterns: [],
+    isDefault: true,
+    color: '#4f46e5',
+    defaultAccounts: { gitlab: 'gl-acc-1' },
+  };
+
+  const cappedAccount: MockIntegrationAccount = {
+    id: 'gl-acc-1',
+    name: 'GitLab (gluser)',
+    integrationType: 'gitlab',
+    config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+    color: '#4f46e5',
+    cachedUser: { username: 'gluser', displayName: 'GL User', avatarUrl: null },
+    urlPatterns: [],
+    isDefault: true,
+  };
+
+  const makeMr = (n: number) => ({
+    iid: n,
+    title: `Capped MR ${n}`,
+    description: null,
+    state: 'opened',
+    author: { id: 1, username: 'gluser', name: 'GL User', avatarUrl: '', webUrl: '' },
+    createdAt: '2025-01-15T10:00:00Z',
+    sourceBranch: `feature/${n}`,
+    targetBranch: 'main',
+    draft: false,
+    webUrl: `https://gitlab.com/acme/widgets/-/merge_requests/${n}`,
+  });
+
+  test.beforeEach(async ({ page }) => {
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+
+    await setupProfilesAndAccounts(
+      page,
+      { profiles: [cappedProfile], accounts: [cappedAccount], connectedAccounts: ['gl-acc-1'] },
+      { remotes: [{ name: 'origin', url: 'https://gitlab.com/acme/widgets.git', pushUrl: null }] },
+    );
+
+    await startCommandCaptureWithMocks(page, {
+      detect_gitlab_repo: {
+        instanceUrl: 'https://gitlab.com',
+        projectPath: 'acme/widgets',
+        remoteName: 'origin',
+      },
+      check_gitlab_connection: {
+        connected: true,
+        user: { username: 'gluser', name: 'GL User', avatarUrl: '' },
+      },
+      list_gitlab_merge_requests: Array.from({ length: 30 }, (_, index) => makeMr(index + 1)),
+      // The hint's link must reach the browser, not navigate the webview away.
+      'plugin:shell|open': null,
+    });
+  });
+
+  test('discloses the capped merge request list and opens GitLab for the rest', async ({ page }) => {
+    await app.executeCommand('GitLab');
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+    await dialogs.gitlab.mergeRequestsTab.click();
+
+    await expect(page.locator('lv-gitlab-dialog .mr-item')).toHaveCount(30);
+
+    const hint = page.locator('lv-gitlab-dialog .capped-list-hint');
+    await expect(hint).toContainText('more may exist');
+    await expect(hint).toContainText('30');
+
+    await hint.locator('a').click();
+
+    await waitForCommand(page, 'plugin:shell|open');
+    const opens = await findCommand(page, 'plugin:shell|open');
+    expect((opens[0].args as { path: string }).path).toBe(
+      'https://gitlab.com/acme/widgets/-/merge_requests?state=opened',
+    );
+
+    // The dialog stays put - the link opened externally.
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+  });
+
+  test('shows no cap disclosure when the merge request list is short', async ({ page }) => {
+    await injectCommandMock(page, { list_gitlab_merge_requests: [makeMr(1)] });
+
+    await app.executeCommand('GitLab');
+    await expect(dialogs.gitlab.dialog).toBeVisible();
+    await dialogs.gitlab.mergeRequestsTab.click();
+
+    await expect(page.locator('lv-gitlab-dialog .mr-item')).toHaveCount(1);
+    await expect(page.locator('lv-gitlab-dialog .capped-list-hint')).toHaveCount(0);
+  });
+});

@@ -207,6 +207,26 @@ fn state_query_param(state: Option<&str>) -> String {
     }
 }
 
+/// Default page size for the merge-request and issue listings.
+///
+/// Kept in sync with GITLAB_LIST_PAGE_SIZE in lv-gitlab-dialog.ts, which
+/// discloses it to the user.
+const LIST_DEFAULT_PER_PAGE: u32 = 30;
+
+/// Default page size for the pipeline listing.
+///
+/// Kept in sync with GITLAB_PIPELINE_PAGE_SIZE in lv-gitlab-dialog.ts.
+const PIPELINES_DEFAULT_PER_PAGE: u32 = 20;
+
+/// Build the `per_page=<n>` query fragment for a listing.
+///
+/// The dialog discloses the page size it asked for ("Showing the first N ...").
+/// Taking the size from the caller keeps the number the request caps at and the
+/// number the hint quotes the same value, instead of two literals that drift.
+fn per_page_query_param(per_page: Option<u32>, default_per_page: u32) -> String {
+    format!("per_page={}", per_page.unwrap_or(default_per_page))
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -385,17 +405,19 @@ pub async fn list_gitlab_merge_requests(
     instance_url: String,
     project_path: String,
     state: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabMergeRequest>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = format!(
-        "{}?per_page=30{}",
+        "{}?{}{}",
         build_api_url(
             &instance_url,
             &format!("projects/{}/merge_requests", encoded_path)
         ),
+        per_page_query_param(per_page, LIST_DEFAULT_PER_PAGE),
         state_query_param(state.as_deref())
     );
 
@@ -646,14 +668,16 @@ pub async fn list_gitlab_issues(
     project_path: String,
     state: Option<String>,
     labels: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabIssue>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let mut url = format!(
-        "{}?per_page=30{}",
+        "{}?{}{}",
         build_api_url(&instance_url, &format!("projects/{}/issues", encoded_path)),
+        per_page_query_param(per_page, LIST_DEFAULT_PER_PAGE),
         state_query_param(state.as_deref())
     );
 
@@ -836,17 +860,19 @@ pub async fn list_gitlab_pipelines(
     instance_url: String,
     project_path: String,
     status: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabPipeline>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let mut url = format!(
-        "{}?per_page=20&order_by=updated_at&sort=desc",
+        "{}?{}&order_by=updated_at&sort=desc",
         build_api_url(
             &instance_url,
             &format!("projects/{}/pipelines", encoded_path)
-        )
+        ),
+        per_page_query_param(per_page, PIPELINES_DEFAULT_PER_PAGE)
     );
 
     if let Some(status_str) = status {
@@ -958,6 +984,17 @@ mod tests {
             build_api_url("https://gitlab.example.com", "projects/123"),
             "https://gitlab.example.com/api/v4/projects/123"
         );
+    }
+
+    #[test]
+    fn test_per_page_query_param() {
+        // The caller's page size wins, so the size requested is the size the
+        // dialog discloses.
+        assert_eq!(per_page_query_param(Some(30), 30), "per_page=30");
+        assert_eq!(per_page_query_param(Some(5), 30), "per_page=5");
+        // No caller size falls back to this file's default.
+        assert_eq!(per_page_query_param(None, 30), "per_page=30");
+        assert_eq!(per_page_query_param(None, 20), "per_page=20");
     }
 
     #[test]
@@ -1138,6 +1175,7 @@ mod tests {
             "user/repo".to_string(),
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1163,6 +1201,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1173,6 +1212,7 @@ mod tests {
         let result = list_gitlab_pipelines(
             "https://gitlab.com".to_string(),
             "user/repo".to_string(),
+            None,
             None,
             None,
         )

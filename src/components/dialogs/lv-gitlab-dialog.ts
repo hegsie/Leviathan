@@ -32,6 +32,15 @@ import './lv-account-selector.ts';
 
 const log = loggers.gitlab;
 
+/**
+ * Page sizes this dialog asks for when listing merge requests, issues and
+ * pipelines. Each is passed straight into the listing call as `perPage`, so the
+ * number the request caps at and the number the "capped" hint discloses are the
+ * same constant — never a literal at the call site or in commands/gitlab.rs.
+ */
+const GITLAB_LIST_PAGE_SIZE = 30;
+const GITLAB_PIPELINE_PAGE_SIZE = 20;
+
 type TabType = 'connection' | 'merge-requests' | 'issues' | 'pipelines' | 'create-mr' | 'create-issue';
 
 @customElement('lv-gitlab-dialog')
@@ -1020,6 +1029,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         this.mrFilter === 'all' ? undefined : this.mrFilter,
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1045,6 +1055,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.projectPath,
         this.issueFilter === 'all' ? undefined : this.issueFilter,
         undefined, // labels
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1067,6 +1078,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         undefined, // status
+        GITLAB_PIPELINE_PAGE_SIZE,
         token
       );
 
@@ -1841,6 +1853,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.mergeRequests.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'merge requests',
+        'merge_requests',
+        this.mrFilter,
+      )}
     `;
   }
 
@@ -1898,6 +1917,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.issues.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'issues',
+        'issues',
+        this.issueFilter,
+      )}
     `;
   }
 
@@ -1938,6 +1964,34 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.pipelines.length,
+        GITLAB_PIPELINE_PAGE_SIZE,
+        'pipelines',
+        'pipelines',
+      )}
+    `;
+  }
+
+  private renderCappedListHint(
+    count: number,
+    limit: number,
+    label: string,
+    route: string,
+    state?: string,
+  ) {
+    if (count < limit || !this.detectedRepo) return nothing;
+    const base = this.detectedRepo.instanceUrl.replace(/\/$/, '');
+    const query = state ? `?state=${encodeURIComponent(state)}` : '';
+    return html`
+      <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+        Showing the first ${limit} ${label}; more may exist.
+        <a
+          class="help-link"
+          href="${base}/${this.detectedRepo.projectPath}/-/${route}${query}"
+          @click=${handleExternalLink}
+        >Open in GitLab</a> for the full list.
+      </p>
     `;
   }
 

@@ -35,11 +35,21 @@ import './lv-account-selector.ts';
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
 /**
- * Max work items the backend returns for the "My Work Items" list (kept in sync
- * with WORK_ITEMS_LIMIT in commands/azure_devops.rs). When the list is exactly
- * this long, more may exist and the tab shows a "capped" hint.
+ * Page size this dialog asks for when listing work items. Passed straight into
+ * the listing call as `limit`, so the number the request caps at and the number
+ * the "capped" hint discloses are the same constant. When the list is exactly
+ * this long, more may exist and the tab shows the hint.
  */
 const WORK_ITEMS_PAGE_SIZE = 50;
+
+/**
+ * Page size this dialog asks for when listing pipeline runs and pull requests.
+ * Both are passed straight into the listing call as `top`, so the number the
+ * request caps at and the number the "capped" hint discloses are the same
+ * constant — never a literal at the call site.
+ */
+const PIPELINE_RUNS_PAGE_SIZE = 20;
+const PULL_REQUESTS_PAGE_SIZE = 100;
 
 /** Shown when a PAT connect succeeded but writing the keyring git credential did not. */
 const GIT_CRED_WRITE_FAILED_TOAST =
@@ -1118,7 +1128,12 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        this.prFilter === 'all' ? undefined : this.prFilter,
+        // Always send the filter: Azure DevOps defaults `searchCriteria.status`
+        // to `active`, so omitting it for "All" would return the Active list
+        // again and silently drop completed and abandoned pull requests. `all`
+        // is a valid PullRequestStatus, so it goes over the wire like the rest.
+        this.prFilter,
+        PULL_REQUESTS_PAGE_SIZE,
         token
       );
 
@@ -1147,6 +1162,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.workItemFilter || undefined,
+        WORK_ITEMS_PAGE_SIZE,
         token
       );
 
@@ -1173,7 +1189,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        20,
+        PIPELINE_RUNS_PAGE_SIZE,
         token
       );
 
@@ -2095,6 +2111,13 @@ export class LvAzureDevOpsDialog extends LitElement {
       `;
     }
 
+    // The Azure DevOps PR page opens on its Active tab, so a bare link would send
+    // someone reading the Completed or Abandoned list to a different list than the
+    // one the hint promises to complete. `_a` selects that page's own tabs and
+    // takes the filter values verbatim; "All" has no tab of its own, so it stays
+    // on the default view.
+    const prListQuery = this.prFilter === 'all' ? '' : `?_a=${this.prFilter}`;
+
     return html`
       <div class="filter-row">
         <select class="filter-select" @change=${this.handlePrFilterChange}>
@@ -2137,6 +2160,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.pullRequests.length >= PULL_REQUESTS_PAGE_SIZE ? html`
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+          Showing the first ${PULL_REQUESTS_PAGE_SIZE} pull requests; more may exist.
+          <a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_git/${this.detectedRepo.repository}/pullrequests${prListQuery}"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.
+        </p>
+      ` : nothing}
     `;
   }
 
@@ -2205,7 +2238,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         `)}
       </div>
       ${this.workItems.length >= WORK_ITEMS_PAGE_SIZE ? html`
-        <p class="help-text" style="text-align:center;padding-top:8px">
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
           Showing your ${WORK_ITEMS_PAGE_SIZE} most recent.
           ${this.detectedRepo ? html`<a
             class="help-link"
@@ -2269,6 +2302,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.pipelineRuns.length >= PIPELINE_RUNS_PAGE_SIZE ? html`
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+          Showing the ${PIPELINE_RUNS_PAGE_SIZE} most recent pipeline runs; more may exist.
+          <a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_build?view=runs"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.
+        </p>
+      ` : nothing}
     `;
   }
 
