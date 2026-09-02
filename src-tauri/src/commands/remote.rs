@@ -193,11 +193,16 @@ pub async fn fetch(
         Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
     };
 
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name_owned = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name_owned)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
+    drop(repo);
+
     let repo_path = path.clone();
     let deadline = network_deadline(timeout_secs);
     let path_clone = path.clone();
     let prune_val = prune.unwrap_or(false);
-    let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
     let remote_name_for_event = remote_name_owned.clone();
 
     // git2 fetch is blocking network I/O; offload to a blocking thread so
@@ -277,6 +282,38 @@ pub async fn fetch(
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_fetch_remote(repo: &git2::Repository, requested: Option<String>) -> String {
+    if let Some(remote) = requested {
+        return remote;
+    }
+    let from_upstream = repo
+        .head()
+        .ok()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.name().ok().map(str::to_owned))
+        .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+        .and_then(|name| name.as_str().ok().map(str::to_owned))
+        .filter(|name| name != "." && repo.find_remote(name).is_ok());
+    if let Some(remote) = from_upstream {
+        return remote;
+    }
+    match repo.remotes() {
+        Ok(names) if names.len() == 1 => {
+            names.get(0).ok().flatten().unwrap_or("origin").to_string()
+        }
+        _ => "origin".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_fetch_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
 }
 
 /// The message and IPC error code for a failure reported through an EVENT
@@ -513,6 +550,87 @@ fn pull_should_rebase(repo: &git2::Repository, branch_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The branch a pull will merge into, and its full refname.
+///
+/// On a detached HEAD, shorthand() is the literal "HEAD" — so this used to
+/// resolve origin/HEAD (a symref that DOES exist in a normal clone),
+/// fast-forward-check-out its tree, and only then fail looking up
+/// "refs/heads/HEAD". The tree ended up holding origin/main's content while
+/// HEAD still pointed at the tag, so every diverging file showed as an
+/// uncommitted change. git refuses to pull with no upstream; so do we. merge()
+/// gets this right by using head.name() rather than rebuilding it.
+///
+/// Shared with `get_pull_remote` so the remote the frontend's network gate is
+/// evaluated against comes from exactly the ref the pull itself will use.
+pub(crate) fn resolve_pull_branch(
+    repo: &git2::Repository,
+    branch_for_task: Option<&str>,
+) -> Result<(String, String)> {
+    if let Some(b) = branch_for_task {
+        return Ok((b.to_string(), format!("refs/heads/{}", b)));
+    }
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(LeviathanError::OperationFailed(
+            "You are not currently on a branch. Check out a branch before \
+             pulling, or say which branch to pull."
+                .to_string(),
+        ));
+    }
+    let refname = head
+        .name()
+        .map_err(|_| LeviathanError::InvalidReference)?
+        .to_string();
+    Ok((head.shorthand().unwrap_or("main").to_string(), refname))
+}
+
+/// Which remote a pull will contact when the caller named none.
+///
+/// The remote half of `resolve_pull_target`, split out so `get_pull_remote` can
+/// answer the same question WITHOUT touching the network. The frontend's
+/// offline/allowlist gate and its credential scoping both need the remote a
+/// pull will actually reach: assuming "origin" evaluated the allowlist against
+/// the wrong host and offered origin's token to an unrelated one.
+pub(crate) fn resolve_pull_remote(
+    repo: &git2::Repository,
+    requested_remote: Option<String>,
+    head_refname: &str,
+) -> String {
+    match requested_remote {
+        Some(r) => r,
+        None => repo
+            .branch_upstream_remote(head_refname)
+            .ok()
+            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
+            .unwrap_or_else(|| "origin".to_string()),
+    }
+}
+
+/// The remote a pull would contact, without performing it.
+#[tauri::command]
+pub async fn get_pull_remote(
+    path: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let (_, head_refname) = resolve_pull_branch(&repo, branch.as_deref())?;
+    let remote_name = resolve_pull_remote(&repo, remote, &head_refname);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
+}
+
+/// The remote a push would target, without performing it.
+#[tauri::command]
+pub async fn get_push_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_push_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
+}
+
 /// Which remote to fetch, and which remote-tracking ref to merge, for a pull.
 ///
 /// Asks git rather than rebuilding "<remote>/<shorthand>". The rebuilt form was
@@ -534,14 +652,7 @@ pub(crate) fn resolve_pull_target(
         .and_then(|b| b.upstream().ok())
         .and_then(|u| u.get().name().ok().map(|n| n.to_string()));
 
-    let remote = match requested_remote {
-        Some(r) => r,
-        None => repo
-            .branch_upstream_remote(head_refname)
-            .ok()
-            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
-            .unwrap_or_else(|| "origin".to_string()),
-    };
+    let remote = resolve_pull_remote(repo, requested_remote, head_refname);
 
     let remote_ref = upstream_ref
         .as_deref()
@@ -595,15 +706,6 @@ pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<Str
         }
         _ => "origin".to_string(),
     }
-}
-
-#[tauri::command]
-pub async fn get_push_remote(path: String, remote: Option<String>) -> Result<String> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let remote_name = resolve_push_remote(&repo, remote);
-    repo.find_remote(&remote_name)
-        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
-    Ok(remote_name)
 }
 
 /// The merge-and-commit body of a non-fast-forward `pull`.
@@ -717,31 +819,7 @@ pub(crate) fn pull_branch(
 
     let repo = git2::Repository::open(Path::new(path_for_task))?;
 
-    // On a detached HEAD, shorthand() is the literal "HEAD" — so
-    // this used to resolve origin/HEAD (a symref that DOES exist in
-    // a normal clone), fast-forward-check-out its tree, and only
-    // then fail looking up "refs/heads/HEAD". The tree ended up
-    // holding origin/main's content while HEAD still pointed at the
-    // tag, so every diverging file showed as an uncommitted change.
-    // git refuses to pull with no upstream; so do we. merge() gets
-    // this right by using head.name() rather than rebuilding it.
-    let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
-        (b.clone(), format!("refs/heads/{}", b))
-    } else {
-        let head = repo.head()?;
-        if !head.is_branch() {
-            return Err(LeviathanError::OperationFailed(
-                "You are not currently on a branch. Check out a branch before \
-                 pulling, or say which branch to pull."
-                    .to_string(),
-            ));
-        }
-        let refname = head
-            .name()
-            .map_err(|_| LeviathanError::InvalidReference)?
-            .to_string();
-        (head.shorthand().unwrap_or("main").to_string(), refname)
-    };
+    let (branch_name, head_refname) = resolve_pull_branch(&repo, branch_for_task.as_deref())?;
 
     // Honour the repository's own pull strategy when the caller
     // did not force one. Defaulting to merge meant a user with
@@ -2837,6 +2915,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_checked_out_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let branch = repo_dir.current_branch();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        repo_dir.add_remote("upstream", "https://example.test/upstream.git");
+        let repo = repo_dir.repo();
+        let mut config = repo.config().unwrap();
+        config
+            .set_str(&format!("branch.{}.remote", branch), "upstream")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo, None), "upstream");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_only_configured_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_local_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), ".")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "origin");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_missing_upstream_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "deleted")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
+    }
+
     #[tokio::test]
     async fn test_get_push_remote_returns_the_resolved_destination() {
         let repo_dir = TestRepo::with_initial_commit();
@@ -2962,6 +3101,147 @@ mod tests {
             &format!("refs/heads/{}", branch),
         );
         assert_eq!(remote, "chosen");
+    }
+
+    // ---- get_pull_remote / get_push_remote ----
+    //
+    // The frontend's offline/allowlist gate and its credential scoping both
+    // have to know which remote an operation will REACH before it runs. They
+    // used to assume "origin"; in the ordinary fork layout that checked the
+    // allowlist against the fork's host and offered the fork's token to the
+    // upstream's. These commands answer the same question the pull/push paths
+    // answer, without touching the network.
+
+    /// A repo with two remotes whose branch tracks the NON-origin one.
+    #[cfg(unix)]
+    fn repo_tracking_upstream() -> (TestRepo, String) {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        repo_dir.add_remote("upstream", "https://gitlab.example.test/acme/app.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "upstream")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
+            )
+            .unwrap();
+        drop(config);
+        (repo_dir, branch)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_follows_the_branch_upstream() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let remote = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(remote, "upstream", "a pull follows the branch's upstream");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_falls_back_to_origin() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let remote = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(remote, "origin");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_honours_an_explicit_remote() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let remote = get_pull_remote(
+            repo_dir.path.to_string_lossy().to_string(),
+            Some("origin".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote, "origin");
+    }
+
+    /// A configured upstream whose remote was deleted must be reported, not
+    /// silently downgraded to origin — the gate would then approve a host the
+    /// pull is never going to reach anyway.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_rejects_a_missing_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "deleted")
+            .unwrap();
+        drop(config);
+
+        let err = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LeviathanError::RemoteNotFound(name) if name == "deleted"));
+    }
+
+    /// Detached HEAD: `pull_branch` refuses outright, so this must too rather
+    /// than inventing a remote for an operation that cannot run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_refuses_a_detached_head() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let oid = repo_dir.head_oid();
+        repo_dir.repo().set_head_detached(oid).unwrap();
+
+        assert!(
+            get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Push follows remote.pushDefault ahead of the branch's upstream — the
+    /// fork case where a pull and a push reach DIFFERENT hosts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_push_remote_honours_push_default() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let mut config = repo_dir.repo().config().unwrap();
+        config.set_str("remote.pushDefault", "origin").unwrap();
+        drop(config);
+
+        let path = repo_dir.path.to_string_lossy().to_string();
+        assert_eq!(
+            get_push_remote(path.clone(), None).await.unwrap(),
+            "origin",
+            "a push follows pushDefault"
+        );
+        assert_eq!(
+            get_pull_remote(path, None, None).await.unwrap(),
+            "upstream",
+            "while the pull still follows the upstream"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_push_remote_rejects_a_missing_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let mut config = repo_dir.repo().config().unwrap();
+        config.set_str("remote.pushDefault", "gone").unwrap();
+        drop(config);
+
+        let err = get_push_remote(repo_dir.path.to_string_lossy().to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LeviathanError::RemoteNotFound(name) if name == "gone"));
     }
 
     // ---- pull's normal-merge arm (merge_fetched_commit) ----

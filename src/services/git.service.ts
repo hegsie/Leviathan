@@ -137,10 +137,15 @@ async function checkNetworkAllowed(
 export async function fetchInBackground(
   repoPath: string,
 ): Promise<CommandResult<void>> {
-  if (await checkNetworkAllowed(repoPath, undefined, true)) {
+  const resolved = await invokeCommand<string>('get_fetch_remote', { path: repoPath });
+  if (!resolved.success || !resolved.data) {
+    return { success: false, error: resolved.error };
+  }
+  const remote = resolved.data;
+  if (await checkNetworkAllowed(repoPath, remote, true)) {
     return blockedResult();
   }
-  const token = await getRepoToken(repoPath);
+  const token = await getRemoteToken(repoPath, remote);
 
   // Same timeout its sibling `fetch` applies. Without it the backend's
   // `timeout_secs: None` branch awaits forever, so a hung remote left one
@@ -149,6 +154,7 @@ export async function fetchInBackground(
   const timeoutSecs = settingsStore.getState().networkOperationTimeout;
   return invokeCommand<void>("fetch", {
     path: repoPath,
+    remote,
     token,
     // Suppresses the backend's success event, which
     // setupRemoteOperationListeners toasts. Without it this "silent" fetch
@@ -1192,13 +1198,21 @@ export async function setRemoteUrl(
 export async function fetch(
   args?: FetchCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  if (args?.path && !args.remote) {
+    const resolved = await invokeCommand<string>('get_fetch_remote', { path: args.path });
+    if (resolved.success && resolved.data) {
+      args.remote = resolved.data;
+    }
+  }
   if (!await checkNetworkPermission('fetch', args?.path ?? null, args?.remote)) {
     return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    const token = args.remote
+      ? await getRemoteToken(args.path, args.remote)
+      : await getRepoToken(args.path);
     if (token) {
       args.token = token;
     }
@@ -1227,13 +1241,28 @@ export async function fetch(
 export async function pull(
   args?: PullCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  // Same reason `fetch` resolves first: no pull surface in the app names a
+  // remote, and the backend pulls from the branch's UPSTREAM. Gating on the
+  // "origin" fallback checked the allowlist against the wrong host and handed
+  // origin's token to whatever host the upstream actually lives on.
+  if (args?.path && !args.remote) {
+    const resolved = await invokeCommand<string>('get_pull_remote', {
+      path: args.path,
+      ...(args.branch ? { branch: args.branch } : {}),
+    });
+    if (resolved.success && resolved.data) {
+      args.remote = resolved.data;
+    }
+  }
   if (!await checkNetworkPermission('pull', args?.path ?? null, args?.remote)) {
     return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    const token = args.remote
+      ? await getRemoteToken(args.path, args.remote)
+      : await getRepoToken(args.path);
     if (token) {
       args.token = token;
     }
@@ -1262,13 +1291,25 @@ export async function pull(
 export async function push(
   args?: PushCommand & { silent?: boolean },
 ): Promise<CommandResult<void>> {
+  // No push surface names a remote either, and the backend follows
+  // branch.<n>.pushRemote / remote.pushDefault / branch.<n>.remote — none of
+  // which need be origin. Resolve it up front so the gate and the credential
+  // are scoped to the host this push will really reach.
+  if (args?.path && !args.remote) {
+    const resolved = await invokeCommand<string>('get_push_remote', { path: args.path });
+    if (resolved.success && resolved.data) {
+      args.remote = resolved.data;
+    }
+  }
   if (!await checkNetworkPermission('push', args?.path ?? null, args?.remote)) {
     return blockedResult();
   }
 
   // If no token is provided, try to find one for the repository
   if (args && !args.token) {
-    const token = await getRepoToken(args.path, args.remote);
+    const token = args.remote
+      ? await getRemoteToken(args.path, args.remote)
+      : await getRepoToken(args.path);
     if (token) {
       args.token = token;
     }
@@ -1481,6 +1522,7 @@ async function resolveRepoAccount(
 interface ResolvedRepoToken {
   token?: string;
   remoteName?: string;
+  credentialHost?: string;
   refused?: boolean;
   /**
    * The account the token belongs to, when one resolved it. Absent for the
@@ -1503,7 +1545,7 @@ async function resolveRepoToken(
   try {
     // --- Multi-account system (preferred) ---
     // GitHub
-    const ghRepoResult = await detectGitHubRepo(repoPath);
+    const ghRepoResult = await detectGitHubRepo(repoPath, remoteName);
     if (
       ghRepoResult.success &&
       ghRepoResult.data &&
@@ -1522,6 +1564,7 @@ async function resolveRepoToken(
           return {
             token,
             remoteName: resolvedRemote,
+            credentialHost: "github.com",
             accountId: account.id,
             integrationType: "github",
           };
@@ -1534,12 +1577,16 @@ async function resolveRepoToken(
       // Legacy fallback for GitHub
       const tokenResult = await getGitHubToken();
       if (tokenResult.success && tokenResult.data) {
-        return { token: tokenResult.data, remoteName: resolvedRemote };
+        return {
+          token: tokenResult.data,
+          remoteName: resolvedRemote,
+          credentialHost: "github.com",
+        };
       }
     }
 
     // Azure DevOps
-    const adoRepoResult = await detectAdoRepo(repoPath);
+    const adoRepoResult = await detectAdoRepo(repoPath, remoteName);
     if (
       adoRepoResult.success &&
       adoRepoResult.data &&
@@ -1586,7 +1633,7 @@ async function resolveRepoToken(
     }
 
     // GitLab
-    const gitlabRepoResult = await detectGitLabRepo(repoPath);
+    const gitlabRepoResult = await detectGitLabRepo(repoPath, remoteName);
     if (
       gitlabRepoResult.success &&
       gitlabRepoResult.data &&
@@ -1599,6 +1646,8 @@ async function resolveRepoToken(
         resolvedRemote,
       );
       if (account) {
+        // main refreshes an expiring OAuth access token before use; this branch
+        // additionally pins the credential host, so keep both.
         const { getFreshAccountToken } = await import("./credential.service.ts");
         const token = await getFreshAccountToken(
           "gitlab",
@@ -1606,10 +1655,15 @@ async function resolveRepoToken(
           "gitlab",
           account.config.type === "gitlab" ? account.config.instanceUrl : undefined,
         );
-        if (token) {
+        const credentialHost =
+          account.config.type === "gitlab"
+            ? cloneUrlHost(account.config.instanceUrl)
+            : null;
+        if (token && credentialHost) {
           return {
             token,
             remoteName: resolvedRemote,
+            credentialHost,
             accountId: account.id,
             integrationType: "gitlab",
           };
@@ -1619,9 +1673,16 @@ async function resolveRepoToken(
         if (repoSpecific) return { refused: true };
       }
       // Legacy fallback for GitLab
-      const tokenResult = await getGitLabToken();
-      if (tokenResult.success && tokenResult.data) {
-        return { token: tokenResult.data, remoteName: resolvedRemote };
+      const detectedHost = cloneUrlHost(gitlabRepoResult.data.instanceUrl);
+      if (detectedHost === "gitlab.com" || detectedHost?.endsWith(".gitlab.com")) {
+        const tokenResult = await getGitLabToken();
+        if (tokenResult.success && tokenResult.data) {
+          return {
+            token: tokenResult.data,
+            remoteName: resolvedRemote,
+            credentialHost: detectedHost,
+          };
+        }
       }
     }
   } catch (err) {
@@ -1642,6 +1703,32 @@ async function getRepoToken(
   remoteName?: string,
 ): Promise<string | undefined> {
   return (await resolveRepoToken(repoPath, remoteName)).token;
+}
+
+async function getRemoteToken(
+  repoPath: string,
+  remoteName: string,
+): Promise<string | undefined> {
+  let resolved = await resolveRepoToken(repoPath, remoteName);
+  if (!resolved.token && !resolved.refused) {
+    resolved = await resolveRepoToken(repoPath);
+  }
+  if (!resolved.token || resolved.refused || !resolved.remoteName) return undefined;
+
+  const [sourceUrl, targetUrl] = await Promise.all([
+    resolveRemoteUrl(repoPath, resolved.remoteName),
+    resolveRemoteUrl(repoPath, remoteName),
+  ]);
+  const sourceHost = sourceUrl ? cloneUrlHost(sourceUrl) : null;
+  const targetHost = targetUrl ? cloneUrlHost(targetUrl) : null;
+  return sourceHost &&
+    targetHost &&
+    sourceHost === targetHost &&
+    (!resolved.credentialHost || resolved.credentialHost === targetHost) &&
+    targetUrl &&
+    cloneUrlIsCredentialSafe(targetUrl)
+    ? resolved.token
+    : undefined;
 }
 
 /**
@@ -3793,9 +3880,11 @@ export async function checkGitHubConnectionWithToken(
 // Repository Detection
 export async function detectGitHubRepo(
   path: string,
+  remoteName?: string,
 ): Promise<CommandResult<DetectedGitHubRepo | null>> {
   return invokeCommand<DetectedGitHubRepo | null>("detect_github_repo", {
     path,
+    ...(remoteName ? { remoteName } : {}),
   });
 }
 
@@ -4408,8 +4497,12 @@ export async function listAdoOrganizations(
 
 export async function detectAdoRepo(
   path: string,
+  remoteName?: string,
 ): Promise<CommandResult<DetectedAdoRepo | null>> {
-  return invokeCommand<DetectedAdoRepo | null>("detect_ado_repo", { path });
+  return invokeCommand<DetectedAdoRepo | null>("detect_ado_repo", {
+    path,
+    ...(remoteName ? { remoteName } : {}),
+  });
 }
 
 // Azure DevOps Pull Requests
@@ -4694,9 +4787,11 @@ export async function checkGitLabConnectionWithToken(
 
 export async function detectGitLabRepo(
   path: string,
+  remoteName?: string,
 ): Promise<CommandResult<DetectedGitLabRepo | null>> {
   return invokeCommand<DetectedGitLabRepo | null>("detect_gitlab_repo", {
     path,
+    ...(remoteName ? { remoteName } : {}),
   });
 }
 
@@ -5215,24 +5310,46 @@ export async function startAutoFetch(
   repoPath: string,
   intervalMinutes: number,
 ): Promise<CommandResult<void>> {
+  const resolved = await invokeCommand<string>("get_fetch_remote", { path: repoPath });
+  if (!resolved.success || !resolved.data) {
+    return { success: false, error: resolved.error };
+  }
+  const remote = resolved.data;
+  const remoteUrl = await resolveRemoteUrl(repoPath, remote);
+  if (!remoteUrl) {
+    return {
+      success: false,
+      error: {
+        code: "REMOTE_NOT_FOUND",
+        message: `Could not resolve URL for remote "${remote}"`,
+      },
+    };
+  }
+
   // Hard blocks only: the background loop is not a gesture the user is standing
   // in front of, so a confirm here would be a dialog out of nowhere. Offline
   // mode and the allowlist still apply — otherwise "offline" leaks a fetch
   // every N minutes.
-  if (await checkNetworkAllowed(repoPath, undefined, true)) {
+  if (await checkNetworkAllowed(repoPath, remote, true)) {
     return blockedResult();
   }
 
   // The background loop authenticates with whatever token we hand it; without
   // one it could only ever use SSH or an OS-keyring credential, so auto-fetch
   // failed silently on token-authenticated HTTPS remotes.
-  const token = await getRepoToken(repoPath);
+  const token = await getRemoteToken(repoPath, remote);
 
   return invokeCommand<void>("start_auto_fetch", {
     path: repoPath,
     intervalMinutes,
+    remote,
+    remoteUrl,
     token,
   });
+}
+
+export async function triggerAutoFetch(repoPath: string): Promise<CommandResult<void>> {
+  return invokeCommand<void>("trigger_auto_fetch", { path: repoPath });
 }
 
 /**

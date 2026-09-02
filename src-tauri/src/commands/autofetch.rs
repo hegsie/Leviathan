@@ -11,6 +11,8 @@ pub async fn start_auto_fetch(
     state: State<'_, AutoFetchState>,
     path: String,
     interval_minutes: u32,
+    remote: String,
+    remote_url: String,
     token: Option<String>,
 ) -> Result<()> {
     if interval_minutes == 0 {
@@ -20,8 +22,20 @@ pub async fn start_auto_fetch(
     }
 
     let mut service = state.write().await;
-    service.start(path, interval_minutes, token, app);
+    service.start(path, interval_minutes, remote, remote_url, token, app);
     Ok(())
+}
+
+#[command]
+pub async fn trigger_auto_fetch(state: State<'_, AutoFetchState>, path: String) -> Result<()> {
+    let service = state.read().await;
+    if service.trigger(&path) {
+        Ok(())
+    } else {
+        Err(LeviathanError::OperationFailed(
+            "Auto-fetch is not running for this repository".to_string(),
+        ))
+    }
 }
 
 /// Stop auto-fetching for a repository

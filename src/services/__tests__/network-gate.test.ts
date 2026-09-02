@@ -97,10 +97,25 @@ const NETWORK_OPERATIONS: Array<{ name: string; command: string; run: () => Prom
   },
 ];
 
+/** A plain https remote, so nothing is refused for a reason other than the gate. */
+const ALLOWED_URL = 'https://github.com/example/repo.git';
+
 describe('network security gate', () => {
   beforeEach(() => {
     invokeHistory.length = 0;
-    mockInvoke = () => Promise.resolve(null);
+    // Enough for every gated operation to REACH the gate. `startAutoFetch`
+    // resolves the fetch remote and then its URL before checking anything; a
+    // mock that answers only `get_fetch_remote` makes it bail with
+    // REMOTE_NOT_FOUND first, which passes the assertions below with the gate
+    // deleted.
+    mockInvoke = (command) =>
+      Promise.resolve(
+        command === 'get_fetch_remote'
+          ? 'origin'
+          : command === 'get_remotes'
+            ? [{ name: 'origin', url: ALLOWED_URL, fetchUrl: ALLOWED_URL, pushUrl: ALLOWED_URL }]
+            : null,
+      );
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
 
@@ -113,9 +128,13 @@ describe('network security gate', () => {
       it(`blocks ${op.name}`, async () => {
         settingsStore.setState({ offlineMode: true });
 
-        const result = (await op.run()) as { success: boolean };
+        const result = (await op.run()) as { success: boolean; error?: { code?: string } };
 
         expect(result.success, `${op.name} should be refused`).to.equal(false);
+        // Not just "some failure": the refusal must be the GATE's. Without
+        // this an unrelated early return (a remote that cannot be resolved,
+        // say) satisfies the test while offline mode goes unchecked.
+        expect(result.error?.code, `${op.name} must be refused BY THE GATE`).to.equal('BLOCKED');
         expect(
           invokeHistory.some((c) => c.command === op.command),
           `${op.name} must not reach ${op.command}`,
@@ -511,6 +530,18 @@ describe('network security gate', () => {
       expect(invokeHistory.some((c) => c.command === 'push_tag')).to.equal(false);
     });
 
+    it('does not allow a look-alike hostname containing an allowed domain', async () => {
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await fetch({
+        path: '/repo',
+        remote: 'https://github.com.attacker.test/repo.git',
+      });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'fetch')).to.equal(false);
+    });
+
     it('allows a push tag to a remote on the list', async () => {
       settingsStore.setState({ remoteAllowlist: ['github.com'] });
 
@@ -526,6 +557,113 @@ describe('network security gate', () => {
 
       expect(result.success).to.equal(false);
       expect(invokeHistory.some((c) => c.command === 'add_submodule')).to.equal(false);
+    });
+  });
+
+  /**
+   * No pull or push surface in the app names a remote, and the backend does
+   * NOT default to origin: a pull follows the branch's upstream, and a push
+   * follows pushRemote/pushDefault/branch.<n>.remote. Gating on origin's URL
+   * therefore checked the allowlist against a host the operation never
+   * contacts — the bypass this suite exists to prevent.
+   */
+  describe('the allowlist follows the remote the operation will really contact', () => {
+    /** The ordinary fork layout: origin is your fork, the branch tracks elsewhere. */
+    const installForkLayout = (resolved: string) => {
+      mockInvoke = (command) =>
+        Promise.resolve(
+          command === 'get_pull_remote' || command === 'get_push_remote'
+            ? resolved
+            : command === 'get_remotes'
+              ? [
+                  { name: 'origin', url: 'https://github.com/me/app.git', pushUrl: null },
+                  { name: 'upstream', url: 'https://gitlab.example.com/acme/app.git', pushUrl: null },
+                ]
+              : null,
+        );
+    };
+
+    it('blocks a pull whose upstream remote is off the list', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success, 'allowlisting github.com must not permit gitlab.example.com').to.equal(
+        false,
+      );
+      expect(invokeHistory.some((c) => c.command === 'pull')).to.equal(false);
+    });
+
+    it('blocks a push whose push remote is off the list', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(false);
+      expect(invokeHistory.some((c) => c.command === 'push')).to.equal(false);
+    });
+
+    it('allows — and names — a pull to the resolved remote when it is on the list', async () => {
+      installForkLayout('origin');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'pull');
+      expect(call, 'pull reaches the backend').to.not.be.undefined;
+      // Passed on rather than dropped: the backend must act on the same remote
+      // the gate just approved, not re-resolve and possibly pick another.
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('allows — and names — a push to the resolved remote when it is on the list', async () => {
+      installForkLayout('origin');
+      settingsStore.setState({ remoteAllowlist: ['github.com'] });
+
+      const result = await push({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'push');
+      expect(call, 'push reaches the backend').to.not.be.undefined;
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('leaves an explicitly named remote alone', async () => {
+      installForkLayout('upstream');
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      await push({ path: '/repo', remote: 'origin', silent: true });
+
+      expect(
+        invokeHistory.some((c) => c.command === 'get_push_remote'),
+        'a caller that already knows the remote must not be second-guessed',
+      ).to.equal(false);
+      const call = invokeHistory.find((c) => c.command === 'push');
+      expect((call!.args as Record<string, unknown>).remote).to.equal('origin');
+    });
+
+    it('falls back to the old behaviour when the remote cannot be resolved', async () => {
+      // A detached HEAD, or a repo git cannot open: the resolve command fails.
+      // The operation must still run (the backend reports the real problem) —
+      // it must not be silently swallowed here.
+      mockInvoke = (command) => {
+        if (command === 'get_pull_remote') return Promise.reject(new Error('not on a branch'));
+        if (command === 'get_remotes') {
+          return Promise.resolve([{ name: 'origin', url: ALLOWED_URL, pushUrl: null }]);
+        }
+        return Promise.resolve(null);
+      };
+      settingsStore.setState({ remoteAllowlist: [] });
+
+      const result = await pull({ path: '/repo', silent: true });
+
+      expect(result.success).to.equal(true);
+      const call = invokeHistory.find((c) => c.command === 'pull');
+      expect(call, 'pull still runs').to.not.be.undefined;
+      expect((call!.args as Record<string, unknown>).remote).to.equal(undefined);
     });
   });
 
@@ -550,6 +688,12 @@ describe('network security gate', () => {
 
     it('startAutoFetch forwards a token so the background loop can authenticate', async () => {
       mockInvoke = (command: string) => {
+        if (command === 'get_fetch_remote') return Promise.resolve('upstream');
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'upstream', url: 'https://github.com/acme/repo.git', pushUrl: null },
+          ]);
+        }
         if (command === 'get_repo_token') return Promise.resolve('tok_abc');
         return Promise.resolve(null);
       };
@@ -562,6 +706,7 @@ describe('network security gate', () => {
         Object.prototype.hasOwnProperty.call(call!.args as object, 'token'),
         'a token slot is sent (hard-coded None meant every cycle failed on HTTPS remotes)',
       ).to.equal(true);
+      expect((call!.args as Record<string, unknown>).remote).to.equal('upstream');
     });
   });
 });

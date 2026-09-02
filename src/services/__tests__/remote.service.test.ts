@@ -274,18 +274,30 @@ describe('git.service - Remote operations', () => {
       expect(args.remote).to.equal('upstream');
     });
 
+    it('resolves an omitted remote before fetching', async () => {
+      mockInvoke = (command) =>
+        Promise.resolve(command === 'get_fetch_remote' ? 'upstream' : null);
+
+      await fetch({ path: '/test/repo', silent: true });
+
+      expect(lastInvokedCommand).to.equal('fetch');
+      expect((lastInvokedArgs as Record<string, unknown>).remote).to.equal('upstream');
+    });
+
     // The window-focus refresh runs this same backend command, and the
     // backend's success event is toasted by setupRemoteOperationListeners. So
     // with fetch-on-focus enabled, "Fetched from origin" appeared every single
     // time the user alt-tabbed back into the app — exactly the noise the
     // background fetch is documented to avoid.
     it('marks a background fetch quiet so it does not toast', async () => {
-      mockInvoke = () => Promise.resolve(null);
+      mockInvoke = (command) =>
+        Promise.resolve(command === 'get_fetch_remote' ? 'upstream' : null);
 
       await fetchInBackground('/test/repo');
       expect(lastInvokedCommand).to.equal('fetch');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.quiet, 'the background fetch must suppress the success event').to.be.true;
+      expect(args.remote).to.equal('upstream');
     });
 
     it('leaves a user-initiated fetch loud', async () => {
@@ -958,17 +970,35 @@ describe('git.service - Remote operations', () => {
 
   describe('startAutoFetch', () => {
     it('invokes start_auto_fetch command with correct arguments', async () => {
-      mockInvoke = () => Promise.resolve(null);
+      mockInvoke = (command) => {
+        if (command === 'get_fetch_remote') return Promise.resolve('upstream');
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'upstream', url: 'https://github.com/acme/repo.git', pushUrl: null },
+          ]);
+        }
+        return Promise.resolve(null);
+      };
 
       await startAutoFetch('/test/repo', 5);
       expect(lastInvokedCommand).to.equal('start_auto_fetch');
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.path).to.equal('/test/repo');
       expect(args.intervalMinutes).to.equal(5);
+      expect(args.remote).to.equal('upstream');
+      expect(args.remoteUrl).to.equal('https://github.com/acme/repo.git');
     });
 
     it('returns success when auto-fetch is started', async () => {
-      mockInvoke = () => Promise.resolve(null);
+      mockInvoke = (command) => {
+        if (command === 'get_fetch_remote') return Promise.resolve('origin');
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'origin', url: 'https://github.com/acme/repo.git', pushUrl: null },
+          ]);
+        }
+        return Promise.resolve(null);
+      };
 
       const result = await startAutoFetch('/test/repo', 10);
       expect(result.success).to.be.true;

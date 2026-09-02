@@ -970,6 +970,7 @@ export class AppShell extends LitElement {
   }
   private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
+  private lastRemoteAllowlistKey = '';
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -1071,6 +1072,8 @@ export class AppShell extends LitElement {
   // Per-path monotonic sequence for badge hydration: a superseded hydration
   // (an older watcher tick's) must not overwrite a newer one's store write.
   private badgeHydrationSeq = new Map<string, number>();
+  private autoFetchStartSeq = new Map<string, number>();
+  private autoFetchOperationChains = new Map<string, Promise<void>>();
 
   /**
    * Tear down every per-repo backend service and client-side cache for a
@@ -1105,22 +1108,92 @@ export class AppShell extends LitElement {
   // Auto-fetch start/stop are fire-and-forget, but a failure must not be
   // fully silent — log it (matching the watcher-start error handling) so a
   // repo silently not auto-fetching is diagnosable.
-  private startAutoFetchLogged(path: string, intervalMinutes: number): void {
-    gitService
-      .startAutoFetch(path, intervalMinutes)
-      .then((r) => {
-        if (!r.success) log.warn('Failed to start auto-fetch for', path, r.error?.message);
+  private startAutoFetchLogged(
+    path: string,
+    intervalMinutes: number,
+    immediate = false,
+  ): void {
+    const sequence = (this.autoFetchStartSeq.get(path) ?? 0) + 1;
+    this.autoFetchStartSeq.set(path, sequence);
+    const previous = this.autoFetchOperationChains.get(path) ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.autoFetchStartSeq.get(path) !== sequence) return;
+        const r = await gitService.startAutoFetch(path, intervalMinutes);
+        if (!r.success) {
+          log.warn('Failed to start auto-fetch for', path, r.error?.message);
+          // `immediate` means this is the restart after the backend reported
+          // FETCH_REMOTE_CHANGED. That loop is still alive and still parked on
+          // its timer, so a failed restart leaves it re-reporting the same
+          // change every interval while the ahead/behind badge stays frozen —
+          // and, without this, saying nothing at all. Clear the dead loop and
+          // tell the user their counts are stale.
+          //
+          // Only while this restart is still the current one, the same guard
+          // the success path below applies: `startAutoFetch` is several IPC
+          // round trips, and the repo can be closed — or the loop legitimately
+          // restarted — while they are in flight. Reporting a superseded
+          // restart's failure toasts about a repo the user has already shut,
+          // and stops a loop somebody else just started.
+          if (immediate && this.autoFetchStartSeq.get(path) === sequence) {
+            this.reportAutoFetchFailure(path, r.error?.message);
+            await gitService.stopAutoFetch(path);
+          }
+          return;
+        }
+        if (this.autoFetchStartSeq.get(path) !== sequence) {
+          await gitService.stopAutoFetch(path);
+        } else if (immediate) {
+          const triggered = await gitService.triggerAutoFetch(path);
+          if (!triggered.success) {
+            log.warn('Failed to trigger auto-fetch for', path, triggered.error?.message);
+          }
+        }
       })
-      .catch((err) => log.warn('Failed to start auto-fetch for', path, err));
+      .catch((err) => log.warn('Failed to start auto-fetch for', path, err))
+      .finally(() => {
+        if (this.autoFetchOperationChains.get(path) === operation) {
+          this.autoFetchOperationChains.delete(path);
+        }
+      });
+    this.autoFetchOperationChains.set(path, operation);
   }
 
   private stopAutoFetchLogged(path: string): void {
-    gitService
-      .stopAutoFetch(path)
-      .then((r) => {
+    this.autoFetchStartSeq.set(path, (this.autoFetchStartSeq.get(path) ?? 0) + 1);
+    const previous = this.autoFetchOperationChains.get(path) ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const r = await gitService.stopAutoFetch(path);
         if (!r.success) log.warn('Failed to stop auto-fetch for', path, r.error?.message);
       })
-      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err));
+      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err))
+      .finally(() => {
+        if (this.autoFetchOperationChains.get(path) === operation) {
+          this.autoFetchOperationChains.delete(path);
+        }
+      });
+    this.autoFetchOperationChains.set(path, operation);
+  }
+
+  private async ensureAutoFetchRunning(path: string): Promise<void> {
+    const initialSettings = settingsStore.getState();
+    if (initialSettings.autoFetchInterval <= 0 || initialSettings.offlineMode) return;
+    const running = await gitService.isAutoFetchRunning(path);
+    const settings = settingsStore.getState();
+    if (
+      running.success &&
+      running.data === false &&
+      settings.autoFetchInterval > 0 &&
+      !settings.offlineMode &&
+      repositoryStore
+        .getState()
+        .openRepositories.some((repo) => repo.repository.path === path)
+    ) {
+      this.startAutoFetchLogged(path, settings.autoFetchInterval);
+    }
   }
 
   /**
@@ -3938,13 +4011,14 @@ export class AppShell extends LitElement {
       return;
     }
     this.refreshInFlight = true;
+    let refreshingPath: string | null = null;
     try {
       // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
       if (this.activeRepository) {
         // Capture the path before awaiting: if the user switches tabs during the
         // IPC round-trip, updateActiveRepository would otherwise write repo A's
         // data into repo B's (now-active) tab slot, corrupting its identity.
-        const refreshingPath = this.activeRepository.repository.path;
+        refreshingPath = this.activeRepository.repository.path;
         const result = await gitService.openRepository({ path: refreshingPath });
         if (result.success && result.data) {
           if (
@@ -3969,6 +4043,9 @@ export class AppShell extends LitElement {
       window.dispatchEvent(
         new CustomEvent('repository-refresh', { detail: { source: 'app-shell' } }),
       );
+      if (refreshingPath) {
+        await this.ensureAutoFetchRunning(refreshingPath);
+      }
     } finally {
       this.refreshInFlight = false;
     }
@@ -4815,6 +4892,7 @@ export class AppShell extends LitElement {
     // reacting to unrelated changes would defer fetches indefinitely.
     this.lastAutoFetchInterval = settings.autoFetchInterval;
     this.lastOfflineMode = settings.offlineMode;
+    this.lastRemoteAllowlistKey = settings.remoteAllowlist.join('\0');
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
       // Offline mode gates the START call, but the loop it started is a Tokio
       // task with no re-check: turning offline mode on left it fetching every
@@ -4822,12 +4900,24 @@ export class AppShell extends LitElement {
       // start had been refused. Treat an offline-mode flip like an interval
       // change.
       const offlineChanged = state.offlineMode !== this.lastOfflineMode;
-      if (state.autoFetchInterval !== this.lastAutoFetchInterval || offlineChanged) {
+      const allowlistKey = state.remoteAllowlist.join('\0');
+      const allowlistChanged = allowlistKey !== this.lastRemoteAllowlistKey;
+      if (
+        state.autoFetchInterval !== this.lastAutoFetchInterval ||
+        offlineChanged ||
+        allowlistChanged
+      ) {
         this.lastAutoFetchInterval = state.autoFetchInterval;
         this.lastOfflineMode = state.offlineMode;
+        this.lastRemoteAllowlistKey = allowlistKey;
         const paths = repositoryStore
           .getState()
           .openRepositories.map((r) => r.repository.path);
+        if (allowlistChanged) {
+          for (const path of paths) {
+            this.stopAutoFetchLogged(path);
+          }
+        }
         if (state.autoFetchInterval > 0 && !state.offlineMode) {
           for (const path of paths) {
             this.startAutoFetchLogged(path, state.autoFetchInterval);
@@ -4910,6 +5000,16 @@ export class AppShell extends LitElement {
     message?: string;
   }): void => {
     if (!event.success) {
+      if (event.message === 'FETCH_REMOTE_CHANGED') {
+        const settings = settingsStore.getState();
+        const isOpen = repositoryStore
+          .getState()
+          .openRepositories.some((repo) => repo.repository.path === event.repoPath);
+        if (isOpen && settings.autoFetchInterval > 0 && !settings.offlineMode) {
+          this.startAutoFetchLogged(event.repoPath, settings.autoFetchInterval, true);
+        }
+        return;
+      }
       this.reportAutoFetchFailure(event.repoPath, event.message);
       return;
     }
