@@ -674,10 +674,11 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(findCommands('delete_branch')).to.have.length(2);
     });
 
-    it('caps the name list and keeps the loss warning ahead of it', async () => {
+    it('caps the name list, naming the risky branches first', async () => {
       // Open auto-selects every safe branch, so a long-lived repo produces a
       // confirm with dozens of refs in it. The names must not be able to push
-      // the loss warning and the final question out of a native dialog.
+      // the loss warning and the final question out of a native dialog — and
+      // the cap must only ever drop names the loss warning is NOT about.
       const candidates = [
         ...Array.from({ length: 13 }, (_, i) =>
           createCandidate(`gone/${String(i).padStart(2, '0')}`, 'gone', {
@@ -716,14 +717,25 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(body, 'beyond the cap the names collapse to a count').to.include(
         'and 5 more',
       );
-      for (const omitted of ['gone/10', 'gone/11', 'gone/12', 'gone/danger-a']) {
+      // The branches that actually lose commits must survive the cap — they
+      // are the only ones the user cannot reconstruct from the count.
+      for (const named of ['gone/danger-a', 'gone/danger-b']) {
+        expect(body, `${named} loses commits, so it must be spelled out`).to.include(
+          named,
+        );
+      }
+      expect(
+        body.indexOf('gone/danger-a') < body.indexOf('gone/00'),
+        'risky names come before the safe ones the cap may drop',
+      ).to.be.true;
+      for (const omitted of ['gone/08', 'gone/09', 'gone/10', 'gone/11', 'gone/12']) {
         expect(body, `${omitted} must not be spelled out`).to.not.include(omitted);
       }
 
       const warning = '2 have unpushed commits that will be lost';
       expect(body).to.include(warning);
       expect(
-        body.indexOf(warning) < body.indexOf('gone/00'),
+        body.indexOf(warning) < body.indexOf('gone/danger-a'),
         'the loss warning must precede the list that can grow without bound',
       ).to.be.true;
       expect(
@@ -749,6 +761,38 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       );
       expect(messages[0], 'no plural sentence for a single branch').to.not.include(
         'All selected branches',
+      );
+    });
+
+    it('describes a single risky branch in the singular', async () => {
+      // Stale branches are never auto-selected, so a one-branch risky
+      // selection is the ordinary case — the risk clause must agree with the
+      // count the rest of the message states.
+      const el = await renderAndOpen([
+        createCandidate('spike/solo', 'stale', { aheadBehind: null, upstream: null }),
+      ]);
+      const staleTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find((t) =>
+        t.textContent!.includes('Stale'),
+      );
+      staleTab!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await settle(el);
+      (el.shadowRoot!.querySelector(
+        '.branch-item input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = confirmMessages();
+      expect(messages).to.have.length(1);
+      expect(messages[0]).to.include('1 selected local branch will be deleted.');
+      expect(messages[0]).to.include(
+        'Of this branch, 1 could not be checked for unmerged work',
+      );
+      expect(messages[0], 'no plural clause for a single branch').to.not.include(
+        'Of these branches,',
       );
     });
 
@@ -1048,8 +1092,8 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       ) as HTMLInputElement).click();
       await settle(el);
 
-      // This branch is 'warning', so the risky-branch confirm fires first —
-      // accept it, then decline the escalation.
+      // The delete confirm fires for any selection — accept it, then decline
+      // the escalation.
       let confirms = 0;
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];

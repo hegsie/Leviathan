@@ -708,14 +708,24 @@ export class LvBranchCleanupDialog extends LitElement {
       // routinely dozens of refs — enough to push the loss warning and the
       // final question off the bottom of a native message dialog. The count
       // above already carries the exact scope; the names are orientation.
-      const shown = toDelete.slice(0, MAX_CONFIRM_NAMES).map((cb) => cb.branch.name);
+      //
+      // Risky branches are listed FIRST so the cap can only ever drop branches
+      // whose deletion loses nothing. Slicing `toDelete` in its own order put
+      // the auto-selected safe merged/gone branches at the front, so the very
+      // branches the loss clause is about were the ones collapsed into "and N
+      // more" — the user was told commits would be destroyed and never told
+      // which branch carried them. `risk` is exactly 'safe' | 'warning' |
+      // 'danger', so these two halves partition `toDelete` with no duplicates
+      // and `count` is unchanged.
+      const ordered = [...risky, ...toDelete.filter((cb) => cb.risk === 'safe')];
+      const shown = ordered.slice(0, MAX_CONFIRM_NAMES).map((cb) => cb.branch.name);
       const names =
         count > MAX_CONFIRM_NAMES
           ? `${shown.join(', ')}, and ${count - MAX_CONFIRM_NAMES} more`
           : shown.join(', ');
       const riskSummary =
         parts.length > 0
-          ? `\n\nOf these branches, ${parts.join(', and ')}.`
+          ? `\n\nOf ${count === 1 ? 'this branch' : 'these branches'}, ${parts.join(', and ')}.`
           : count === 1
             ? '\n\nThis branch was reported as fully merged or otherwise safe to delete.'
             : '\n\nAll selected branches were reported as fully merged or otherwise safe to delete.';
