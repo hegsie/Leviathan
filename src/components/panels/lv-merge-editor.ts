@@ -1692,6 +1692,22 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     );
   }
 
+  /**
+   * True when the output is nothing but a previous whole-file accept: no
+   * per-block pick, no hand edit and no open draft is in it, so another
+   * whole-file button loses nothing. Only acceptWholeFile produces such a
+   * segment — per-block picks and AI fills set fromConflict, hand edits set
+   * origin 'manual', and freshly parsed segments carry origin null.
+   */
+  private get outputIsWholeFileAccept(): boolean {
+    if (this.editingSegmentId !== null || this.segments.length !== 1) return false;
+    const only = this.segments[0];
+    return (
+      !only.fromConflict &&
+      (only.origin === 'ours' || only.origin === 'theirs' || only.origin === 'base')
+    );
+  }
+
   private async confirmWholeFileOverwrite(): Promise<boolean> {
     if (!this.hasUnsavedResolutions()) return true;
     this.confirmingWholeFileOverwrite = true;
@@ -1727,15 +1743,13 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       return this.handleTakeSide(origin);
     }
 
-    if (
-      this.editingSegmentId === null &&
-      this.segments.length === 1 &&
-      this.segments[0].origin === origin
-    ) {
-      return;
-    }
+    // Re-picking the side the output already holds verbatim changes nothing.
+    if (this.outputIsWholeFileAccept && this.segments[0].origin === origin) return;
 
-    if (this.hasUnsavedResolutions()) {
+    // A pure whole-file accept holds no pick and no edit to lose — the other
+    // buttons restore it in one click — so swapping sides to compare them
+    // must not raise a confirm that misdescribes the state.
+    if (!this.outputIsWholeFileAccept && this.hasUnsavedResolutions()) {
       if (!(await this.confirmWholeFileOverwrite())) return;
       // Re-check after the confirm's await — a resolve/tool session may
       // have started while it was up (same re-check as Reload and Apply),

@@ -3406,6 +3406,144 @@ describe('lv-merge-editor', () => {
       expect(internalOf(el).segments[0].origin).to.equal('ours');
     });
 
+    it('swapping between whole-file sides does not confirm — nothing is lost', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return 'Ok';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(internal.segments[0].origin).to.equal('ours');
+
+      // Comparing the sides is a browse action, not a destructive one.
+      await accept.call(el, 'theirs');
+      await el.updateComplete;
+      expect(confirmCalls, 'swapping whole-file sides must not confirm').to.equal(0);
+      expect(internal.segments).to.have.length(1);
+      expect(internal.segments[0].origin).to.equal('theirs');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.theirsContent);
+
+      await accept.call(el, 'base');
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(0);
+      expect(internal.segments[0].origin).to.equal('base');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.baseContent);
+
+      // And back — the first side is one click away, so it stays silent too.
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(0);
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.oursContent);
+    });
+
+    it('hand-editing a whole-file accept makes the next whole-file pick confirm', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = el as unknown as EditorInternal & {
+        startEditSegment: (segment: unknown) => Promise<void>;
+        applyEditSegment: () => Promise<void>;
+        editDraft: string;
+        acceptWholeFile: (origin: string) => Promise<void>;
+      };
+      await internal.acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+      await internal.startEditSegment.call(el, internal.segments[0]);
+      internal.editDraft = 'hand written';
+      await internal.applyEditSegment.call(el);
+      await el.updateComplete;
+
+      await internal.acceptWholeFile.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirmCalls, 'a typed edit is real work and must confirm').to.equal(1);
+      expect(internal.segments[0].lines).to.deep.equal(['hand written']);
+      expect(internal.segments[0].origin).to.equal('manual');
+    });
+
+    it('a per-block pick that fills the whole file still confirms and is replaced', async () => {
+      // One conflict block IS the whole file, so a per-block "Use Ours"
+      // leaves a single ours-origin segment — but its lines are the block's
+      // ours side, not the ours blob, so the toolbar button must still act.
+      setupDefaultMocks();
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        if (command === 'get_blob_content') {
+          const oid = (args as { oid: string })?.oid;
+          if (oid === 'ours-oid') return 'ours-line\ntail';
+          if (oid === 'theirs-oid') return 'theirs-line\ntail';
+          return 'base-line\ntail';
+        }
+        return baseMock(command, args);
+      };
+      workdirContent = '<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> feature';
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = {
+        ...makeConflictFile('src/test.ts'),
+        conflictHunks: [{ start: 0, separator: 2, end: 4 }],
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(internal.segments).to.have.length(1);
+
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(internal.segments[0].fromConflict).to.be.true;
+      const before = structuredClone(internal.segments);
+
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+
+      expect(confirmCalls, 'a per-block pick is real work and must confirm').to.equal(1);
+      expect(internal.segments, 'declining keeps the pick').to.deep.equal(before);
+
+      confirmAnswer = 'Ok';
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+
+      expect(confirmCalls).to.equal(2);
+      expect(internal.segments).to.have.length(1);
+      expect(internal.segments[0].fromConflict).to.be.false;
+      expect(
+        internal.segments[0].lines,
+        'the whole ours blob replaces the block-only pick'
+      ).to.deep.equal(['ours-line', 'tail']);
+    });
+
     for (const origin of ['ours', 'theirs'] as const) {
       it(`whole-file ${origin} confirms before replacing per-block resolutions`, async () => {
         setupDefaultMocks();
