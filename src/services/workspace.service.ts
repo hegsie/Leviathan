@@ -5,7 +5,11 @@
 
 import { invokeCommand } from './tauri-api.ts';
 import { showToast } from './notification.service.ts';
-import type { Workspace, WorkspaceRepoStatus, WorkspaceSearchResult } from '../types/git.types.ts';
+import type {
+  Workspace,
+  WorkspaceRepoStatus,
+  WorkspaceSearchResponse,
+} from '../types/git.types.ts';
 import type { CommandResult } from '../types/api.types.ts';
 
 export async function getWorkspaces(): Promise<CommandResult<Workspace[]>> {
@@ -72,8 +76,8 @@ export async function searchWorkspace(
   regex?: boolean,
   filePattern?: string,
   maxResults?: number,
-): Promise<CommandResult<WorkspaceSearchResult[]>> {
-  return invokeCommand<WorkspaceSearchResult[]>('search_workspace', {
+): Promise<CommandResult<WorkspaceSearchResponse>> {
+  return invokeCommand<WorkspaceSearchResponse>('search_workspace', {
     workspaceId,
     query,
     caseSensitive,

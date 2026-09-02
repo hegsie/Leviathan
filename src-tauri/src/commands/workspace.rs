@@ -2,15 +2,16 @@
 //! Manage multi-repository workspaces
 
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use chrono::Utc;
 use git2::Repository;
 use tauri::command;
 use uuid::Uuid;
 
-use crate::commands::search::find_match_position;
+use crate::commands::search::{find_match_position, read_grep_records};
 use crate::error::{LeviathanError, Result};
 use crate::models::{Workspace, WorkspaceRepoStatus, WorkspaceRepository, WorkspacesConfig};
 
@@ -25,6 +26,216 @@ pub struct WorkspaceSearchResult {
     pub line_content: String,
     pub match_start: u32,
     pub match_end: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchResponse {
+    pub results: Vec<WorkspaceSearchResult>,
+    pub failures: Vec<String>,
+}
+
+/// Run `git grep` in one repository. Errors carry only the underlying detail;
+/// the repository name is attached once, by the caller, so every entry in the
+/// user-visible failure list has the same shape.
+fn run_workspace_grep(
+    repo_entry: &WorkspaceRepository,
+    query: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+    file_pattern: Option<&str>,
+    limit: usize,
+) -> std::result::Result<Vec<(String, u32, String)>, String> {
+    let mut cmd = Command::new("git");
+    // `--no-color` because the records are parsed byte-for-byte: a user with
+    // `color.grep` (or `color.ui`) set to `always` gets SGR escapes around the
+    // path and the line number even into a pipe, and every match would then be
+    // dropped by the line-number parse rather than shown. `--no-column` for the
+    // same reason: `grep.column` adds a third NUL-delimited field, which would
+    // be read as the line content and shown with the column number and a raw
+    // NUL byte in front of the code.
+    cmd.arg("-C")
+        .arg(&repo_entry.path)
+        .arg("grep")
+        .arg("--no-color")
+        .arg("--no-column")
+        .arg("-n")
+        .arg("-z")
+        .arg("-I");
+
+    if !case_sensitive {
+        cmd.arg("-i");
+    }
+    if use_regex {
+        cmd.arg("-E");
+    } else {
+        cmd.arg("-F");
+    }
+
+    cmd.arg("-e").arg(query).arg("--");
+    if let Some(pattern) = file_pattern {
+        cmd.arg(pattern);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|error| error.to_string())?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture git grep errors".to_string())?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture git grep output".to_string())?;
+    let mut stdout = BufReader::new(stdout);
+    let records = read_grep_records(&mut stdout, limit).map_err(|error| error.to_string())?;
+
+    let reached_limit = records.len() == limit;
+    if reached_limit {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|error| error.to_string())?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    // git grep returns exit code 1 when no matches are found.
+    if !reached_limit && !status.success() && status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+        let details = if stderr.is_empty() {
+            format!("git grep exited with {}", status)
+        } else {
+            stderr
+        };
+        return Err(details);
+    }
+
+    Ok(records)
+}
+
+/// Search one repository, returning a ready-to-display failure message on
+/// error so every entry in `failures` reads the same way.
+fn search_repository(
+    repo_entry: &WorkspaceRepository,
+    query: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+    file_pattern: Option<&str>,
+    limit: usize,
+) -> std::result::Result<Vec<(String, u32, String)>, String> {
+    if !Path::new(&repo_entry.path).exists() {
+        return Err(format!(
+            "Failed to search repository \"{}\": repository path does not exist",
+            repo_entry.name
+        ));
+    }
+
+    run_workspace_grep(
+        repo_entry,
+        query,
+        case_sensitive,
+        use_regex,
+        file_pattern,
+        limit,
+    )
+    .map_err(|detail| {
+        format!(
+            "Failed to search repository \"{}\": {}",
+            repo_entry.name, detail
+        )
+    })
+}
+
+/// Search every repository in turn, collecting matches and per-repository
+/// failures. Both ways of hitting the global match limit are reported —
+/// repositories left unsearched, and matches dropped inside the repository that
+/// consumed the limit — so a truncated list never reads as a complete one.
+fn search_repositories(
+    repositories: &[WorkspaceRepository],
+    query: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+    file_pattern: Option<&str>,
+    max_results: u32,
+) -> WorkspaceSearchResponse {
+    let mut results: Vec<WorkspaceSearchResult> = Vec::new();
+    let mut failures = Vec::new();
+    let mut skipped_repositories = false;
+    let mut truncated_matches = false;
+
+    for (index, repo_entry) in repositories.iter().enumerate() {
+        if results.len() as u32 >= max_results {
+            let skipped = repositories.len() - index;
+            failures.push(format!(
+                "Stopped at the {}-match limit; {} {} not searched",
+                max_results,
+                skipped,
+                if skipped == 1 {
+                    "repository was"
+                } else {
+                    "repositories were"
+                }
+            ));
+            skipped_repositories = true;
+            break;
+        }
+
+        let remaining = max_results.saturating_sub(results.len() as u32) as usize;
+        // Ask for one more match than can be kept: a repository holding more
+        // than the limit is otherwise indistinguishable from one holding
+        // exactly the limit, and its dropped matches would go unreported.
+        let mut matches = match search_repository(
+            repo_entry,
+            query,
+            case_sensitive,
+            use_regex,
+            file_pattern,
+            remaining + 1,
+        ) {
+            Ok(matches) => matches,
+            Err(failure) => {
+                failures.push(failure);
+                continue;
+            }
+        };
+
+        if matches.len() > remaining {
+            matches.truncate(remaining);
+            truncated_matches = true;
+        }
+
+        for (file_path, line_number, line_content) in matches {
+            let (match_start, match_end) =
+                find_match_position(&line_content, query, case_sensitive);
+
+            results.push(WorkspaceSearchResult {
+                repo_name: repo_entry.name.clone(),
+                repo_path: repo_entry.path.clone(),
+                file_path,
+                line_number,
+                line_content,
+                match_start,
+                match_end,
+            });
+        }
+    }
+
+    // The repository that consumed the limit had more to give. Only say so when
+    // no repository was skipped, otherwise the skipped line already reports it.
+    if truncated_matches && !skipped_repositories {
+        failures.push(format!(
+            "Stopped at the {}-match limit; more matches were not shown",
+            max_results
+        ));
+    }
+
+    WorkspaceSearchResponse { results, failures }
 }
 
 /// Get the path to the workspaces config file
@@ -276,7 +487,7 @@ pub async fn search_workspace(
     regex: Option<bool>,
     file_pattern: Option<String>,
     max_results: Option<u32>,
-) -> Result<Vec<WorkspaceSearchResult>> {
+) -> Result<WorkspaceSearchResponse> {
     let config = load_workspaces_config()?;
     let workspace = config
         .workspaces
@@ -284,83 +495,14 @@ pub async fn search_workspace(
         .find(|w| w.id == workspace_id)
         .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
 
-    let case_sensitive = case_sensitive.unwrap_or(false);
-    let use_regex = regex.unwrap_or(false);
-    let max_results = max_results.unwrap_or(500);
-    let mut results: Vec<WorkspaceSearchResult> = Vec::new();
-
-    for repo_entry in &workspace.repositories {
-        if results.len() as u32 >= max_results {
-            break;
-        }
-
-        let repo_path = Path::new(&repo_entry.path);
-        if !repo_path.exists() {
-            continue;
-        }
-
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(&repo_entry.path).arg("grep").arg("-n");
-
-        if !case_sensitive {
-            cmd.arg("-i");
-        }
-
-        if use_regex {
-            cmd.arg("-E");
-        }
-
-        cmd.arg("--").arg(&query);
-
-        if let Some(ref pattern) = file_pattern {
-            cmd.arg(pattern);
-        }
-
-        let output = match cmd.output() {
-            Ok(o) => o,
-            Err(_) => continue,
-        };
-
-        // git grep returns exit code 1 when no matches found (not an error)
-        if !output.status.success() && output.status.code() != Some(1) {
-            continue;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        for line in stdout.lines() {
-            if results.len() as u32 >= max_results {
-                break;
-            }
-
-            let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() < 3 {
-                continue;
-            }
-
-            let file_path = parts[0].to_string();
-            let line_number: u32 = match parts[1].parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            let line_content = parts[2].to_string();
-
-            let (match_start, match_end) =
-                find_match_position(&line_content, &query, case_sensitive);
-
-            results.push(WorkspaceSearchResult {
-                repo_name: repo_entry.name.clone(),
-                repo_path: repo_entry.path.clone(),
-                file_path,
-                line_number,
-                line_content,
-                match_start,
-                match_end,
-            });
-        }
-    }
-
-    Ok(results)
+    Ok(search_repositories(
+        &workspace.repositories,
+        &query,
+        case_sensitive.unwrap_or(false),
+        regex.unwrap_or(false),
+        file_pattern.as_deref(),
+        max_results.unwrap_or(500),
+    ))
 }
 
 /// Export a workspace configuration as a JSON string
@@ -614,6 +756,380 @@ mod tests {
 
         let empty = TestRepo::new();
         assert_eq!(head_branch(&empty.repo()), (None, false));
+    }
+
+    #[test]
+    fn test_workspace_grep_treats_plain_query_as_literal_text() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add search content",
+            &[("search.txt", "literal a.b\nregex axb\n")],
+        );
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    /// `color.grep = always` makes git colour its output even into a pipe. The
+    /// records are parsed byte-for-byte, so without `--no-color` the escape
+    /// codes wrapping the line number fail to parse and every match is silently
+    /// dropped — a query that does match reads as "No results found".
+    #[test]
+    fn test_workspace_grep_ignores_forced_colour_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_str("color.grep", "always")
+            .unwrap();
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    /// `grep.column = true` adds a column field to every record, so without
+    /// `--no-column` the NUL-framed records are read one field out of step and
+    /// the column number plus a raw NUL byte are shown in front of the code.
+    #[test]
+    fn test_workspace_grep_ignores_forced_column_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("grep.column", true)
+            .unwrap();
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    /// Colour and column forced together: neither neutralising flag may undo
+    /// the other, and a query that does not match must still report nothing.
+    #[test]
+    fn test_workspace_grep_ignores_forced_colour_and_column_together() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        let git_repo = repo.repo();
+        let mut config = git_repo.config().unwrap();
+        config.set_str("color.grep", "always").unwrap();
+        config.set_bool("grep.column", true).unwrap();
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+
+        let missing = run_workspace_grep(&entry, "zzz-absent", true, false, None, 10).unwrap();
+        assert!(missing.is_empty());
+    }
+
+    /// The grep error carries only the underlying detail: the repository name
+    /// and the "Failed to search repository" wording are added once, by
+    /// `search_repository`, so the user never reads either of them twice.
+    #[test]
+    fn test_workspace_grep_returns_only_the_underlying_failure_detail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let entry = WorkspaceRepository {
+            path: dir.path().to_string_lossy().to_string(),
+            name: "broken-repo".to_string(),
+        };
+
+        let error = run_workspace_grep(&entry, "query", false, false, None, 10).unwrap_err();
+
+        assert!(
+            error.contains("not a git repository"),
+            "expected the git detail, got {error}"
+        );
+        assert!(!error.contains("Operation failed"), "got {error}");
+        assert!(
+            !error.contains("Failed to search repository"),
+            "got {error}"
+        );
+    }
+
+    /// Both kinds of failure entry read the same way, so a workspace with one
+    /// missing path and one broken repository does not show two shapes.
+    #[test]
+    fn test_search_repository_reports_a_missing_path_with_the_shared_wording() {
+        let entry = WorkspaceRepository {
+            path: "/definitely/not/here".to_string(),
+            name: "gone".to_string(),
+        };
+
+        assert_eq!(
+            search_repository(&entry, "query", false, false, None, 10).unwrap_err(),
+            "Failed to search repository \"gone\": repository path does not exist"
+        );
+    }
+
+    #[test]
+    fn test_search_repository_names_the_repository_on_a_grep_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let entry = WorkspaceRepository {
+            path: dir.path().to_string_lossy().to_string(),
+            name: "broken-repo".to_string(),
+        };
+
+        let failure = search_repository(&entry, "query", false, false, None, 10).unwrap_err();
+
+        assert!(
+            failure.starts_with("Failed to search repository \"broken-repo\": "),
+            "got {failure}"
+        );
+        assert!(!failure.contains("Operation failed"), "got {failure}");
+    }
+
+    fn read_records(bytes: &[u8], limit: usize) -> Vec<(String, u32, String)> {
+        read_grep_records(&mut std::io::Cursor::new(bytes), limit).unwrap()
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_accepts_colons_in_file_names() {
+        assert_eq!(
+            read_records(b"folder:name.txt\x0042\0matching text\n", 10),
+            vec![(
+                "folder:name.txt".to_string(),
+                42,
+                "matching text".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_accepts_newlines_in_file_names() {
+        assert_eq!(
+            read_records(b"folder\nname.txt\x007\0matching text\n", 10),
+            vec![(
+                "folder\nname.txt".to_string(),
+                7,
+                "matching text".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_respects_result_limit() {
+        assert_eq!(
+            read_records(b"a.txt\x001\0first\nb.txt\x002\0second\n", 1),
+            vec![("a.txt".to_string(), 1, "first".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_parser_strips_a_trailing_carriage_return() {
+        assert_eq!(
+            read_records(b"a.txt\x001\0first\r\n", 10),
+            vec![("a.txt".to_string(), 1, "first".to_string())]
+        );
+    }
+
+    /// A workspace search that stops at the global match limit must say which
+    /// repositories it never looked at — otherwise the truncated list reads as
+    /// "the term is not in those repositories".
+    #[test]
+    fn test_search_repositories_reports_repositories_skipped_by_the_limit() {
+        let first = TestRepo::with_initial_commit();
+        first.create_commit("Add matches", &[("a.txt", "match\nmatch\n")]);
+        let second = TestRepo::with_initial_commit();
+        second.create_commit("Add matches", &[("b.txt", "match\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: first.path_str(),
+                name: "alpha".to_string(),
+            },
+            WorkspaceRepository {
+                path: second.path_str(),
+                name: "beta".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert!(
+            response
+                .results
+                .iter()
+                .all(|result| result.repo_name == "alpha"),
+            "the limit should be consumed by the first repository"
+        );
+        assert_eq!(
+            response.failures,
+            vec!["Stopped at the 2-match limit; 1 repository was not searched".to_string()]
+        );
+    }
+
+    /// The limit is just as often consumed inside the only repository, where no
+    /// repository is left to report as skipped. That truncation must still be
+    /// announced, or 200 of 500 matches read as all of them.
+    #[test]
+    fn test_search_repositories_reports_matches_dropped_by_the_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add matches", &[("a.txt", "match\nmatch\nmatch\n")]);
+
+        let repositories = vec![WorkspaceRepository {
+            path: repo.path_str(),
+            name: "alpha".to_string(),
+        }];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(
+            response.failures,
+            vec!["Stopped at the 2-match limit; more matches were not shown".to_string()]
+        );
+    }
+
+    /// The last repository in the list is the same case: the loop ends instead
+    /// of taking the skipped-repository branch.
+    #[test]
+    fn test_search_repositories_reports_matches_dropped_by_the_last_repository() {
+        let first = TestRepo::with_initial_commit();
+        first.create_commit("Add matches", &[("a.txt", "match\n")]);
+        let second = TestRepo::with_initial_commit();
+        second.create_commit("Add matches", &[("b.txt", "match\nmatch\nmatch\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: first.path_str(),
+                name: "alpha".to_string(),
+            },
+            WorkspaceRepository {
+                path: second.path_str(),
+                name: "beta".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(
+            response.failures,
+            vec!["Stopped at the 2-match limit; more matches were not shown".to_string()]
+        );
+    }
+
+    /// Filling the limit exactly is not truncation: a complete list must not be
+    /// labelled as cut short.
+    #[test]
+    fn test_search_repositories_stays_silent_when_matches_exactly_fill_the_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add matches", &[("a.txt", "match\nmatch\n")]);
+
+        let repositories = vec![WorkspaceRepository {
+            path: repo.path_str(),
+            name: "alpha".to_string(),
+        }];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 2);
+
+        assert_eq!(response.results.len(), 2);
+        assert!(response.failures.is_empty(), "{:?}", response.failures);
+    }
+
+    #[test]
+    fn test_search_repositories_searches_every_repository_below_the_limit() {
+        let first = TestRepo::with_initial_commit();
+        first.create_commit("Add matches", &[("a.txt", "match\n")]);
+        let second = TestRepo::with_initial_commit();
+        second.create_commit("Add matches", &[("b.txt", "match\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: first.path_str(),
+                name: "alpha".to_string(),
+            },
+            WorkspaceRepository {
+                path: second.path_str(),
+                name: "beta".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 50);
+
+        assert_eq!(response.results.len(), 2);
+        assert!(response.failures.is_empty(), "{:?}", response.failures);
+    }
+
+    /// A repository that cannot be searched must not cost the workspace the
+    /// matches from the ones that can be. The broken repository comes first, so
+    /// abandoning the loop on the first failure is caught here too.
+    #[test]
+    fn test_search_repositories_keeps_matches_when_one_repository_fails() {
+        let good = TestRepo::with_initial_commit();
+        good.create_commit("Add matches", &[("a.txt", "match\n")]);
+
+        let repositories = vec![
+            WorkspaceRepository {
+                path: "/definitely/not/here".to_string(),
+                name: "gone".to_string(),
+            },
+            WorkspaceRepository {
+                path: good.path_str(),
+                name: "alpha".to_string(),
+            },
+        ];
+
+        let response = search_repositories(&repositories, "match", true, false, None, 50);
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].repo_name, "alpha");
+        assert_eq!(
+            response.failures,
+            vec![
+                "Failed to search repository \"gone\": repository path does not exist".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_workspace_grep_stops_at_result_limit() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add many matches",
+            &[("many.txt", "match\nmatch\nmatch\nmatch\n")],
+        );
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "match", true, false, None, 2).unwrap();
+
+        assert_eq!(matches.len(), 2);
     }
 
     #[test]

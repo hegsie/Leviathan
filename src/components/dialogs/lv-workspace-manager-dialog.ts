@@ -649,6 +649,15 @@ export class LvWorkspaceManagerDialog extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .search-failures {
+        padding: var(--spacing-sm);
+        border: 1px solid var(--color-error);
+        background: var(--color-error-bg, rgba(239, 83, 80, 0.1));
+        border-radius: var(--radius-sm);
+        color: var(--color-error);
+        font-size: var(--font-size-xs);
+      }
+
       .import-export-btns {
         display: flex;
         gap: var(--spacing-xs);
@@ -695,7 +704,10 @@ export class LvWorkspaceManagerDialog extends LitElement {
   // Search
   @state() private searchQuery = '';
   @state() private searchResults: WorkspaceSearchResult[] = [];
+  @state() private searchFailures: string[] = [];
+  @state() private searchCompleted = false;
   @state() private searching = false;
+  private searchRequestId = 0;
 
   // Editable fields
   @state() private editName = '';
@@ -710,6 +722,9 @@ export class LvWorkspaceManagerDialog extends LitElement {
       if (this.open) { pushOverlay(this); } else { removeOverlay(this); }
     }
     if (changedProps.has('open') && this.open) {
+      // A stale failure banner from a previous session must not reappear as if
+      // it described a fresh search.
+      this.resetSearchState();
       await this.loadWorkspaces();
     }
   }
@@ -733,9 +748,19 @@ export class LvWorkspaceManagerDialog extends LitElement {
     }
   }
 
+  private resetSearchState(): void {
+    this.searchQuery = '';
+    this.searchResults = [];
+    this.searchFailures = [];
+    this.searchCompleted = false;
+    this.searching = false;
+    this.searchRequestId++;
+  }
+
   private selectWorkspace(id: string): void {
     this.selectedWorkspaceId = id;
     this.repoStatuses = new Map();
+    this.resetSearchState();
     this.syncEditorFields();
     this.refreshStatus();
   }
@@ -1089,22 +1114,51 @@ export class LvWorkspaceManagerDialog extends LitElement {
     const ws = this.selectedWorkspace;
     if (!ws || !this.searchQuery.trim()) return;
 
+    const query = this.searchQuery;
+    const requestId = ++this.searchRequestId;
     this.searching = true;
     this.searchResults = [];
+    this.searchFailures = [];
+    this.searchCompleted = false;
 
     const result = await workspaceService.searchWorkspace(
       ws.id,
-      this.searchQuery,
+      query,
       false,
       false,
       undefined,
       200,
     );
 
+    // A dialog closed mid-search has no failure panel left on screen, so a
+    // toast pointing at "the details below" would be a dead end.
+    if (
+      !this.open ||
+      requestId !== this.searchRequestId ||
+      this.searchQuery !== query ||
+      this.selectedWorkspace?.id !== ws.id
+    ) {
+      return;
+    }
+
     if (result.success && result.data) {
-      this.searchResults = result.data;
+      this.searchResults = result.data.results ?? [];
+      this.searchFailures = result.data.failures ?? [];
+      this.searchCompleted = true;
+      if (this.searchFailures.length > 0) {
+        // The toast renders as plain text, so newlines collapse: summarise here
+        // and leave the per-repository detail to the .search-failures panel,
+        // which stays on screen.
+        showToast(
+          this.searchFailures.length === 1
+            ? this.searchFailures[0]
+            : `Search completed with ${this.searchFailures.length} problems — see the details below`,
+          this.searchResults.length > 0 ? 'warning' : 'error',
+        );
+      }
     } else {
-      showToast('Search failed', 'error');
+      showToast(result.error?.message ?? 'Search failed', 'error');
+      this.searchFailures = [result.error?.message ?? 'Search failed'];
     }
     this.searching = false;
   }
@@ -1351,6 +1405,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
                           .value=${this.searchQuery}
                           @input=${(e: InputEvent) => {
                             this.searchQuery = (e.target as HTMLInputElement).value;
+                            this.searchResults = [];
+                            this.searchFailures = [];
+                            this.searchCompleted = false;
+                            this.searching = false;
+                            this.searchRequestId++;
                           }}
                           @keydown=${(e: KeyboardEvent) => this.handleSearchKeyDown(e)}
                         />
@@ -1362,6 +1421,11 @@ export class LvWorkspaceManagerDialog extends LitElement {
                           ${this.searching ? 'Searching...' : 'Search'}
                         </button>
                       </div>
+                      ${this.searchFailures.length > 0 ? html`
+                        <div class="search-failures">
+                          ${this.searchFailures.map((failure) => html`<div>${failure}</div>`)}
+                        </div>
+                      ` : nothing}
                       ${this.searchResults.length > 0 ? html`
                         <div class="search-results">
                           ${Array.from(this.getGroupedSearchResults().entries()).map(
@@ -1387,7 +1451,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
                             `,
                           )}
                         </div>
-                      ` : this.searchQuery && !this.searching ? html`
+                      ` : this.searchCompleted && !this.searching ? html`
                         <div class="search-no-results">No results found</div>
                       ` : nothing}
                     </div>
