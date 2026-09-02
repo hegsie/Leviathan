@@ -73,7 +73,19 @@ pub async fn search_in_files(
     let max_results = max_results.unwrap_or(1000);
 
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(&path).arg("grep").arg("-n");
+    // `--no-color` and `--no-column` because the output is parsed field by
+    // field: `color.grep` (or `color.ui`) set to `always` wraps the path and
+    // the line number in SGR escapes even into a pipe, so the line-number
+    // parse fails and every match is silently dropped, and `grep.column`
+    // inserts an extra column field that would end up prefixed to the reported
+    // line content. Kept in step with the workspace grep, which parses the
+    // same records.
+    cmd.arg("-C")
+        .arg(&path)
+        .arg("grep")
+        .arg("--no-color")
+        .arg("--no-column")
+        .arg("-n");
 
     if !case_sensitive {
         cmd.arg("-i");
@@ -781,6 +793,113 @@ mod tests {
         let files = result.unwrap();
         let total: u32 = files.iter().map(|f| f.match_count).sum();
         assert_eq!(total, 1);
+    }
+
+    /// `color.grep = always` makes git colour its output even into a pipe.
+    /// The `file:line:content` records are split field by field, so without
+    /// `--no-color` the SGR escapes around the line number fail to parse and
+    /// every match is dropped — a query that does match reads as no results.
+    #[tokio::test]
+    async fn test_search_in_files_ignores_forced_colour_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_str("color.grep", "always")
+            .unwrap();
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let file = files
+            .iter()
+            .find(|f| f.file_path == "search.txt")
+            .expect("forced colour must not hide the match");
+        assert_eq!(file.match_count, 1);
+        assert_eq!(file.matches[0].line_number, 1);
+        assert_eq!(file.matches[0].line_content, "literal a.b");
+    }
+
+    /// `grep.column = true` adds a column field before the content, so without
+    /// `--no-column` the reported line content is prefixed with the column
+    /// number instead of being the matched line.
+    #[tokio::test]
+    async fn test_search_in_files_ignores_forced_column_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("grep.column", true)
+            .unwrap();
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let file = files
+            .iter()
+            .find(|f| f.file_path == "search.txt")
+            .expect("forced column must not hide the match");
+        assert_eq!(file.match_count, 1);
+        assert_eq!(file.matches[0].line_number, 1);
+        assert_eq!(file.matches[0].line_content, "literal a.b");
+    }
+
+    /// Colour and column forced together: neither neutralising flag may undo
+    /// the other, and a query that does not match must still report nothing.
+    #[tokio::test]
+    async fn test_search_in_files_ignores_forced_colour_and_column_together() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        let git_repo = repo.repo();
+        let mut config = git_repo.config().unwrap();
+        config.set_str("color.grep", "always").unwrap();
+        config.set_bool("grep.column", true).unwrap();
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let file = files
+            .iter()
+            .find(|f| f.file_path == "search.txt")
+            .expect("forced colour and column must not hide the match");
+        assert_eq!(file.matches[0].line_content, "literal a.b");
+
+        let missing = search_in_files(
+            repo.path_str(),
+            "zzz-absent".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(missing.is_empty());
     }
 
     #[tokio::test]

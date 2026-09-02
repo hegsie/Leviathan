@@ -98,11 +98,15 @@ fn run_workspace_grep(
     // `--no-color` because the records are parsed byte-for-byte: a user with
     // `color.grep` (or `color.ui`) set to `always` gets SGR escapes around the
     // path and the line number even into a pipe, and every match would then be
-    // dropped by the line-number parse rather than shown.
+    // dropped by the line-number parse rather than shown. `--no-column` for the
+    // same reason: `grep.column` adds a third NUL-delimited field, which would
+    // be read as the line content and shown with the column number and a raw
+    // NUL byte in front of the code.
     cmd.arg("-C")
         .arg(&repo_entry.path)
         .arg("grep")
         .arg("--no-color")
+        .arg("--no-column")
         .arg("-n")
         .arg("-z")
         .arg("-I");
@@ -846,6 +850,56 @@ mod tests {
             matches,
             vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
         );
+    }
+
+    /// `grep.column = true` adds a column field to every record, so without
+    /// `--no-column` the NUL-framed records are read one field out of step and
+    /// the column number plus a raw NUL byte are shown in front of the code.
+    #[test]
+    fn test_workspace_grep_ignores_forced_column_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("grep.column", true)
+            .unwrap();
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    /// Colour and column forced together: neither neutralising flag may undo
+    /// the other, and a query that does not match must still report nothing.
+    #[test]
+    fn test_workspace_grep_ignores_forced_colour_and_column_together() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        let git_repo = repo.repo();
+        let mut config = git_repo.config().unwrap();
+        config.set_str("color.grep", "always").unwrap();
+        config.set_bool("grep.column", true).unwrap();
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+
+        let missing = run_workspace_grep(&entry, "zzz-absent", true, false, None, 10).unwrap();
+        assert!(missing.is_empty());
     }
 
     /// The grep error carries only the underlying detail: the repository name
