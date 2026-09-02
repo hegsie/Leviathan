@@ -950,7 +950,12 @@ mod tests {
     /// The default `path:line:content` framing is ambiguous when the path
     /// itself contains a colon: the fields shift, the line-number parse fails
     /// and the match is dropped, so a query that does match reports nothing.
+    /// Windows cannot host the fixture — git rejects a colon as an invalid path
+    /// character, and the situation cannot arise there — so the end-to-end leg
+    /// runs on Unix only; `test_workspace_grep_parser_accepts_colons_in_file_names`
+    /// pins the parsing itself on every platform.
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "a colon is not a legal path character on Windows")]
     async fn test_search_in_files_finds_matches_in_paths_containing_a_colon() {
         let repo = TestRepo::with_initial_commit();
         repo.create_commit(
