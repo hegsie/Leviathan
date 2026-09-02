@@ -31,8 +31,12 @@ import {
   stopAutoFetch,
   isAutoFetchRunning,
   getRemoteStatus,
+  pruneRemoteTrackingBranches,
   type RemoteStatus,
 } from '../git.service.ts';
+import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
+import { createEmptyIntegrationAccount } from '../../types/unified-profile.types.ts';
+import type { IntegrationAccount } from '../../types/unified-profile.types.ts';
 import type { Remote } from '../../types/git.types.ts';
 import type { MultiPushResult } from '../../types/api.types.ts';
 
@@ -655,6 +659,312 @@ describe('git.service - Remote operations', () => {
       });
       const args = lastInvokedArgs as Record<string, unknown>;
       expect(args.token).to.equal('ghp_test_token');
+    });
+  });
+
+  describe('pruneRemoteTrackingBranches', () => {
+    const keyring = new Map<string, string>();
+    let preferredAccount: IntegrationAccount | null = null;
+
+    /** Keyring-backed invoke mock: only the seeded keys answer. */
+    function mockRepo(remotes: Array<{ name: string; url: string }>): void {
+      mockInvoke = async (command, args) => {
+        const a = args as Record<string, unknown> | undefined;
+        if (command === 'get_remotes') {
+          return remotes.map((r) => ({ ...r, pushUrl: null }));
+        }
+        if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+        if (command === 'store_keyring_token') {
+          keyring.set(a!.key as string, a!.value as string);
+          return null;
+        }
+        if (command === 'oauth_refresh_token') {
+          return { accessToken: 'gl-refreshed', refreshToken: 'r2', expiresIn: 7200 };
+        }
+        if (command === 'get_repository_preferred_account') return preferredAccount;
+        if (command === 'prune_remote_tracking_branches') {
+          return { success: true, branchesPruned: [] };
+        }
+        return null;
+      };
+    }
+
+    function account(
+      integrationType: 'github' | 'gitlab' | 'azure-devops',
+      id: string,
+      /** GitLab instance URL, or Azure DevOps organization. */
+      instanceOrOrg?: string,
+    ): IntegrationAccount {
+      return {
+        ...createEmptyIntegrationAccount(integrationType, instanceOrOrg),
+        id,
+        name: id,
+        isDefault: true,
+      };
+    }
+
+    beforeEach(() => {
+      keyring.clear();
+      preferredAccount = null;
+    });
+
+    afterEach(() => {
+      unifiedProfileStore.getState().reset();
+    });
+
+    it('forwards the app-managed token for the selected remote', async () => {
+      keyring.set('github_token', 'ghp_test');
+      mockRepo([{ name: 'origin', url: 'https://github.com/acme/repo.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo', 'origin');
+
+      expect(lastInvokedCommand).to.equal('prune_remote_tracking_branches');
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin).to.equal(
+        'ghp_test',
+      );
+    });
+
+    it('prunes EVERY remote when none is named, reading the list once', async () => {
+      keyring.set('github_token', 'ghp_test');
+      mockRepo([
+        { name: 'origin', url: 'https://github.com/acme/repo.git' },
+        { name: 'upstream', url: 'https://github.com/upstream/repo.git' },
+      ]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'a dropped remote leaves its stale refs behind').to.deep.equal([
+        'origin',
+        'upstream',
+      ]);
+      // Both remotes are on github.com, so both carry the token.
+      expect(args.tokens).to.deep.equal({ origin: 'ghp_test', upstream: 'ghp_test' });
+      // The listed remotes already carry their URLs, so re-resolving each one is
+      // a round trip per remote for a value already in hand.
+      expect(
+        invokeHistory.filter((c) => c.command === 'get_remotes').length,
+        'the remote list is read once, not once per remote',
+      ).to.equal(1);
+    });
+
+    it("uses a self-hosted GitLab account's refreshed token", async () => {
+      // The repo is pinned to this account, so there is no legacy fallback to
+      // paper over the account branch: the token can only come from there. Its
+      // OAuth bundle has already expired, so the stored access token is dead
+      // and the prune must carry the refreshed one.
+      const gitlab = account('gitlab', 'gl-1', 'https://git.acme.dev');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-stale');
+      keyring.set(
+        'gitlab_token_gl-1_oauth',
+        JSON.stringify({
+          accessToken: 'gl-stale',
+          refreshToken: 'r1',
+          expiresAt: Date.now() - 1000,
+        }),
+      );
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens.origin).to.equal(
+        'gl-refreshed',
+      );
+    });
+
+    it('sends no token for a plaintext http remote, account or not', async () => {
+      // A self-hosted GitLab account reached over http:// resolves through the
+      // account tier, which used to hand the token straight over — and the
+      // backend scopes a credential helper to `http://` just as happily as to
+      // `https://`, so the OAuth token would go out as a Basic password in
+      // clear. The tokenless fallback tier already refused this URL; both tiers
+      // must agree.
+      const gitlab = account('gitlab', 'gl-1', 'http://gitlab.internal');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-secret');
+      mockRepo([{ name: 'origin', url: 'http://gitlab.internal/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune itself still runs, just unauthenticated').to.deep.equal([
+        'origin',
+      ]);
+      expect(args.tokens, 'a token must never ride a plaintext transport').to.deep.equal({});
+    });
+
+    it('still sends the token for an https remote on the same self-hosted host', async () => {
+      // The guard is about the transport, not the host: the very same account
+      // over https:// must keep authenticating, or the fix would break every
+      // self-hosted prune it is meant to leave alone.
+      const gitlab = account('gitlab', 'gl-1', 'https://gitlab.internal');
+      unifiedProfileStore.getState().setAccounts([gitlab]);
+      preferredAccount = gitlab;
+      keyring.set('gitlab_token_gl-1', 'gl-secret');
+      mockRepo([{ name: 'origin', url: 'https://gitlab.internal/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens).to.deep.equal({
+        origin: 'gl-secret',
+      });
+    });
+
+    it("ignores a preferred GitLab account from a DIFFERENT instance", async () => {
+      // Two GitLab accounts, neither pinned to this repo by a url pattern or a
+      // profile default. The backend resolver's last tier is the GLOBAL default
+      // — the gitlab.com account — and it reports that as a match, so trusting
+      // it would ship a gitlab.com PAT to an unrelated self-hosted host (which
+      // could replay it against gitlab.com) AND still fail to authenticate
+      // there, which is the very failure this path exists to fix.
+      const dotCom = { ...account('gitlab', 'gl-com', 'https://gitlab.com'), isDefault: true };
+      const selfHosted = {
+        ...account('gitlab', 'gl-self', 'https://git.acme.dev'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([dotCom, selfHosted]);
+      preferredAccount = dotCom;
+      keyring.set('gitlab_token_gl-com', 'gl-com-pat');
+      keyring.set('gitlab_token_gl-self', 'gl-self-pat');
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const { tokens } = lastInvokedArgs as { tokens: Record<string, string> };
+      expect(tokens.origin, "the host's own account must answer for it").to.equal('gl-self-pat');
+      expect(
+        Object.values(tokens),
+        "another instance's credential must never reach this host",
+      ).to.not.contain('gl-com-pat');
+    });
+
+    it("sends no token when no GitLab account serves the remote's host", async () => {
+      // Same host mismatch, but the self-hosted account has nothing stored.
+      // Falling through to the global default's token would be exactly the leak
+      // above; an unauthenticated prune is the correct outcome.
+      const dotCom = { ...account('gitlab', 'gl-com', 'https://gitlab.com'), isDefault: true };
+      const selfHosted = {
+        ...account('gitlab', 'gl-self', 'https://git.acme.dev'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([dotCom, selfHosted]);
+      preferredAccount = dotCom;
+      keyring.set('gitlab_token_gl-com', 'gl-com-pat');
+      mockRepo([{ name: 'origin', url: 'https://git.acme.dev/group/proj.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune still runs, just unauthenticated').to.deep.equal(['origin']);
+      expect(args.tokens, "the default account's token must not stand in").to.deep.equal({});
+    });
+
+    it("ignores a preferred Azure DevOps account from a DIFFERENT organization", async () => {
+      // Every ADO account is scoped to one organization, and a
+      // `{org}.visualstudio.com` host is per organization — so the resolver's
+      // global-default last tier can hand back `contoso` for a `fabrikam`
+      // remote. Trusting it would scope contoso's PAT to fabrikam's host and
+      // still fail to authenticate there.
+      const contoso = { ...account('azure-devops', 'ado-contoso', 'contoso'), isDefault: true };
+      const fabrikam = {
+        ...account('azure-devops', 'ado-fabrikam', 'fabrikam'),
+        isDefault: false,
+      };
+      unifiedProfileStore.getState().setAccounts([contoso, fabrikam]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      keyring.set('azure-devops_token_ado-fabrikam', 'fabrikam-pat');
+      mockRepo([{ name: 'origin', url: 'https://fabrikam.visualstudio.com/proj/_git/repo' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const { tokens } = lastInvokedArgs as { tokens: Record<string, string> };
+      expect(tokens.origin, "the organization's own account must answer for it").to.equal(
+        'fabrikam-pat',
+      );
+      expect(
+        Object.values(tokens),
+        "another organization's credential must never reach this host",
+      ).to.not.contain('contoso-pat');
+    });
+
+    it('still sends the token when the preferred ADO account owns the organization', async () => {
+      // The guard is about the organization, not about ADO: the matching
+      // account must keep authenticating, or every ADO prune would go out
+      // unauthenticated. `dev.azure.com` names the org in the path.
+      const contoso = account('azure-devops', 'ado-contoso', 'Contoso');
+      unifiedProfileStore.getState().setAccounts([contoso]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      mockRepo([{ name: 'origin', url: 'https://dev.azure.com/contoso/proj/_git/repo' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect((lastInvokedArgs as { tokens: Record<string, string> }).tokens).to.deep.equal({
+        origin: 'contoso-pat',
+      });
+    });
+
+    it("sends no token when no ADO account owns the remote's organization", async () => {
+      // Same organization mismatch, but nothing else serves fabrikam. Falling
+      // through to the default account's token would be exactly the leak above;
+      // an unauthenticated prune is the correct outcome.
+      const contoso = { ...account('azure-devops', 'ado-contoso', 'contoso'), isDefault: true };
+      unifiedProfileStore.getState().setAccounts([contoso]);
+      preferredAccount = contoso;
+      keyring.set('azure-devops_token_ado-contoso', 'contoso-pat');
+      mockRepo([{ name: 'origin', url: 'https://dev.azure.com/fabrikam/proj/_git/repo' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      const args = lastInvokedArgs as { remotes: string[]; tokens: Record<string, string> };
+      expect(args.remotes, 'the prune still runs, just unauthenticated').to.deep.equal(['origin']);
+      expect(args.tokens, "the default account's token must not stand in").to.deep.equal({});
+    });
+
+    it('propagates a failure to list the remotes', async () => {
+      mockInvoke = async (command) => {
+        if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };
+        return null;
+      };
+
+      const result = await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(result.success, 'a prune that never ran is not a success').to.be.false;
+      expect(result.error?.message).to.contain('no remotes');
+      expect(invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches')).to.be
+        .false;
+    });
+
+    it('refuses when the remote list comes back unusable', async () => {
+      // A non-array payload would enumerate to nothing, and pruning "no
+      // remotes" would report success while leaving every stale ref in place.
+      mockInvoke = async () => null;
+
+      const result = await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(result.success).to.be.false;
+      expect(result.error?.code).to.equal('REMOTE_LIST_FAILED');
+      expect(invokeHistory.some((c) => c.command === 'prune_remote_tracking_branches')).to.be
+        .false;
+    });
+
+    it('sends no token when the repo-specific account has none stored', async () => {
+      // A repo pinned to an account means THAT account or nothing — falling
+      // back to the global default would authenticate as the wrong identity.
+      preferredAccount = account('github', 'gh-repo');
+      keyring.set('github_token', 'ghp_default');
+      mockRepo([{ name: 'origin', url: 'https://github.com/acme/repo.git' }]);
+
+      await pruneRemoteTrackingBranches('/test/repo');
+
+      expect(
+        (lastInvokedArgs as { tokens: Record<string, string> }).tokens,
+        "the default account's token must not stand in",
+      ).to.deep.equal({});
     });
   });
 

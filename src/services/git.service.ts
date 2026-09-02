@@ -68,6 +68,10 @@ async function checkNetworkAllowed(
    * "Offline mode is enabled" on the user for every commit, stage and
    * checkout. The refusal still happens — it just doesn't shout. */
   silent = false,
+  /** The URL the caller already resolved for `remote`. The prune-all path holds
+   * every remote's URL from the single `get_remotes` it makes; without this the
+   * allowlist check would resolve each bare name over IPC again, one round trip
+   * per remote for a value already in hand. */
   resolvedUrl?: string | null,
 ): Promise<NetworkBlockReason | null> {
   const settings = settingsStore.getState();
@@ -86,15 +90,27 @@ async function checkNetworkAllowed(
   // decorative.
   const url =
     resolvedUrl ?? (repoPath ? await resolveRemoteUrl(repoPath, remote) : (remote ?? null));
-  const host = url
-    ? cloneUrlHost(url.includes("://") || url.includes("@") ? url : `https://${url}`)
-    : null;
+  // Try the string as it stands, then as an https URL. Branching on '@'
+  // instead broke the bare `git@host` form the SSH connection test hands over:
+  // `cloneUrlHost`'s scheme-less branch only matches the scp shape
+  // `user@host:path`, so `git@github.com` resolved to nothing and was refused
+  // while `github.com`, `git@github.com:22` and `ssh://git@github.com` were
+  // all allowed. Parsing `https://git@github.com` yields `github.com`, and the
+  // fallback only ever runs where the direct parse already yielded nothing.
+  const host = url ? (cloneUrlHost(url) ?? cloneUrlHost(`https://${url}`)) : null;
+  // Entries are domains (the settings field says so, and offers "github.com,
+  // gitlab.com"), so they are compared against the URL's HOST. A substring
+  // match over the whole URL — what this used to do — let a look-alike host
+  // through, since "https://github.com.evil.test/x.git" literally contains
+  // "github.com", and let any URL merely NAMING an allowed domain in its path
+  // through too. A leading "*." is accepted and means the domain and its
+  // subdomains, which is what a bare entry already means.
   const allowed =
     !!host &&
     settings.remoteAllowlist.some((entry) => {
-      const normalized = entry.trim().toLowerCase().replace(/^\*\./, "");
+      const normalized = entry.trim().toLowerCase().replace(/^\*\./, '');
       const allowedHost =
-        cloneUrlHost(normalized.includes("://") ? normalized : `https://${normalized}`) ??
+        cloneUrlHost(normalized.includes('://') ? normalized : `https://${normalized}`) ??
         normalized;
       return host === allowedHost || host.endsWith(`.${allowedHost}`);
     });
@@ -148,6 +164,13 @@ export async function fetchInBackground(
   });
 }
 
+/** One remote in a multi-remote gate check: its name, and its URL when the
+ * caller already has one to hand. */
+interface NetworkRemoteTarget {
+  name?: string;
+  url?: string | null;
+}
+
 /**
  * Check if a network operation is allowed based on security settings.
  * Returns false if the operation should be blocked.
@@ -156,16 +179,27 @@ async function checkNetworkPermission(
   operation: string,
   repoPath: string | null,
   remote?: string,
+  /** The URL the caller already resolved for the single `remote` — the tag
+   * push and remote-tag delete paths pin their destination this way. */
   resolvedUrl?: string | null,
+  /** An operation that touches SEVERAL remotes in one gesture — the prune-all
+   * path. Every remote is checked against the allowlist, and the user is asked
+   * once for the whole set rather than once per remote. The name labels the
+   * confirm; the URL, when the caller already resolved one, spares the
+   * allowlist check a `get_remotes` round trip per remote. */
+  remotes?: NetworkRemoteTarget[],
 ): Promise<boolean> {
-  if (await checkNetworkAllowed(repoPath, remote, false, resolvedUrl)) return false;
+  for (const target of remotes ?? [{ name: remote, url: resolvedUrl }]) {
+    if (await checkNetworkAllowed(repoPath, target.name, false, target.url)) return false;
+  }
 
   if (settingsStore.getState().confirmNetworkOps) {
     // A declined confirm is the user's own decision, not a failure — callers
     // distinguish it from a block so they don't report it back as a red error.
+    const label = remotes ? remotes.map((t) => t.name).join(', ') : remote;
     const ok = await showConfirm(
       'Network Operation',
-      `Allow ${operation}${remote ? ` to ${remote}` : ''}?`,
+      `Allow ${operation}${label ? ` to ${label}` : ''}?`,
     );
     if (!ok) {
       lastNetworkBlockReason = 'declined';
@@ -1442,6 +1476,9 @@ async function resolveRepoAccount(
   repoPath: string,
   integrationType: IntegrationType,
   remoteName: string | undefined,
+  /** The remote's URL when the caller already resolved it. Saves a second
+   * `get_remotes` round trip on paths that walk every remote in the repo. */
+  knownRemoteUrl?: string | null,
 ): Promise<{ account: IntegrationAccount | undefined; repoSpecific: boolean }> {
   const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
   try {
@@ -1454,7 +1491,7 @@ async function resolveRepoAccount(
       // A failed profile lookup must not cost us the account-level urlPatterns
       // tier or the global default — resolve with no profile instead.
       getAssignedUnifiedProfile(repoPath).catch(() => null),
-      resolveRemoteUrl(repoPath, remoteName),
+      knownRemoteUrl ?? resolveRemoteUrl(repoPath, remoteName),
     ]);
     // An unknown profile id resolves to no profile on the backend, which simply
     // falls through to the remaining tiers.
@@ -1507,8 +1544,6 @@ async function resolveRepoToken(
 ): Promise<ResolvedRepoToken> {
   try {
     // --- Multi-account system (preferred) ---
-    const { AccountCredentials } = await import("./credential.service.ts");
-
     // GitHub
     const ghRepoResult = await detectGitHubRepo(repoPath, remoteName);
     if (
@@ -1523,7 +1558,8 @@ async function resolveRepoToken(
         resolvedRemote,
       );
       if (account) {
-        const token = await AccountCredentials.getToken("github", account.id);
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        const token = await getFreshAccountToken("github", account.id, "github");
         if (token) {
           return {
             token,
@@ -1610,7 +1646,15 @@ async function resolveRepoToken(
         resolvedRemote,
       );
       if (account) {
-        const token = await AccountCredentials.getToken("gitlab", account.id);
+        // main refreshes an expiring OAuth access token before use; this branch
+        // additionally pins the credential host, so keep both.
+        const { getFreshAccountToken } = await import("./credential.service.ts");
+        const token = await getFreshAccountToken(
+          "gitlab",
+          account.id,
+          "gitlab",
+          account.config.type === "gitlab" ? account.config.instanceUrl : undefined,
+        );
         const credentialHost =
           account.config.type === "gitlab"
             ? cloneUrlHost(account.config.instanceUrl)
@@ -1806,10 +1850,14 @@ export async function commitMerge(
 /**
  * Rebase operations
  */
+/**
+ * Resolves with the number of commits the rebase skipped because their patch
+ * was already applied on the target — see `rebasedOntoMessage`.
+ */
 export async function rebase(
   args: RebaseCommand,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("rebase", args);
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>("rebase", args);
 }
 
 export interface RebasePreview {
@@ -1831,10 +1879,11 @@ export async function previewRebase(
   return invokeCommand<RebasePreview>("preview_rebase", { path, onto });
 }
 
+/** Resolves with how many commits the rebase dropped as already applied. */
 export async function continueRebase(
   args: ContinueRebaseCommand,
-): Promise<CommandResult<void>> {
-  return invokeCommand<void>("continue_rebase", args);
+): Promise<CommandResult<number>> {
+  return invokeCommand<number>("continue_rebase", args);
 }
 
 export async function abortRebase(
@@ -3774,10 +3823,10 @@ export async function getGitHubToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
-    const { AccountCredentials } = await import("./credential.service.ts");
+    const { getFreshAccountToken } = await import("./credential.service.ts");
     const account = selectDefaultGlobalAccount("github");
     if (account) {
-      const token = await AccountCredentials.getToken("github", account.id);
+      const token = await getFreshAccountToken("github", account.id, "github");
       if (token) return { success: true, data: token };
     }
     // Fall back to legacy single-account credentials
@@ -4672,10 +4721,15 @@ export async function getGitLabToken(): Promise<CommandResult<string | null>> {
   try {
     // Try account-based keyring credentials first (new system)
     const { selectDefaultGlobalAccount } = await import("../stores/unified-profile.store.ts");
-    const { AccountCredentials } = await import("./credential.service.ts");
+    const { getFreshAccountToken } = await import("./credential.service.ts");
     const account = selectDefaultGlobalAccount("gitlab");
     if (account) {
-      const token = await AccountCredentials.getToken("gitlab", account.id);
+      const token = await getFreshAccountToken(
+        "gitlab",
+        account.id,
+        "gitlab",
+        account.config.type === "gitlab" ? account.config.instanceUrl : undefined,
+      );
       if (token) return { success: true, data: token };
     }
     // Fall back to legacy single-account credentials
@@ -7697,14 +7751,150 @@ export async function pruneRemoteTrackingBranches(
   repoPath: string,
   remote?: string,
 ): Promise<CommandResult<PruneResult>> {
-  // `git remote prune` queries the remote's ref list — it is `git fetch
-  // --prune` minus the object transfer, so it belongs behind the same gate.
-  if (!await checkNetworkPermission('prune remote-tracking branches', repoPath, remote)) {
+  // Offline is settled before the remote list is read, so the user hears
+  // "offline mode is enabled" rather than whatever enumerating the remotes
+  // happens to report. `checkNetworkAllowed` is called for its toast; the
+  // refusal is unconditional.
+  if (settingsStore.getState().offlineMode) {
+    await checkNetworkAllowed(repoPath, remote);
     return blockedResult();
   }
+
+  let targets: string[];
+  // The listed remotes already carry their URLs, so the allowlist gate and the
+  // token loop below both read them from here instead of resolving each one
+  // over IPC again.
+  const urlByName = new Map<string, string>();
+  if (remote) {
+    targets = [remote];
+  } else {
+    const remotes = await getRemotes(repoPath);
+    if (!remotes.success) return { success: false, error: remotes.error };
+    if (!Array.isArray(remotes.data)) {
+      return {
+        success: false,
+        error: { code: 'REMOTE_LIST_FAILED', message: 'Failed to list repository remotes' },
+      };
+    }
+    targets = remotes.data.map((item) => item.name);
+    for (const item of remotes.data) {
+      if (item.url) urlByName.set(item.name, item.url);
+    }
+  }
+  // A repo with no remotes has nothing to prune — and nothing to gate either,
+  // so it must not prompt.
+  if (targets.length === 0) {
+    return { success: true, data: { success: true, branchesPruned: [] } };
+  }
+  if (!await checkNetworkPermission(
+    'prune remote-tracking branches',
+    repoPath,
+    undefined,
+    undefined,
+    // Hand the gate the URLs already read above. Bare names would send the
+    // allowlist check back through `resolveRemoteUrl`, which re-reads the whole
+    // remote list once per remote.
+    targets.map((name) => ({ name, url: urlByName.get(name) })),
+  )) {
+    return blockedResult();
+  }
+  const tokens: Record<string, string> = {};
+  for (const target of targets) {
+    const remoteUrl = urlByName.get(target) ?? await resolveRemoteUrl(repoPath, target);
+    const host = remoteUrl ? cloneUrlHost(remoteUrl) : null;
+    let integrationType: IntegrationType | undefined;
+    /** The Azure DevOps organization this remote names — see the ado arm below. */
+    let adoOrg: string | undefined;
+    if (host === 'github.com' || host?.endsWith('.github.com')) {
+      integrationType = 'github';
+    } else if (
+      host === 'dev.azure.com' ||
+      host === 'ssh.dev.azure.com' ||
+      host?.endsWith('.visualstudio.com')
+    ) {
+      integrationType = 'azure-devops';
+      adoOrg = remoteUrl && host ? adoUrlOrganization(remoteUrl, host) : undefined;
+    } else if (
+      host === 'gitlab.com' ||
+      host?.endsWith('.gitlab.com') ||
+      (host && await findGitLabAccountForHost(host))
+    ) {
+      integrationType = 'gitlab';
+    }
+
+    let token: string | undefined;
+    // Set when the resolver named an account scoped to some OTHER GitLab
+    // instance, or some OTHER Azure DevOps organization, than this remote's —
+    // see the two arms below. Such an answer is no answer at all for this
+    // remote, so the host-matching fallback must still get its turn.
+    let wrongInstance = false;
+    // A token must never ride a plaintext transport: the backend scopes it with
+    // an `http://` credential helper just as readily as an `https://` one, so
+    // an `http://` remote would put it on the wire in clear. `getCloneToken`
+    // already refuses those URLs; the account tier hands the token over itself,
+    // so it has to make the same check rather than inherit it.
+    if (remoteUrl && cloneUrlIsCredentialSafe(remoteUrl) && integrationType) {
+      const { account, repoSpecific } = await resolveRepoAccount(
+        repoPath,
+        integrationType,
+        target,
+        remoteUrl,
+      );
+      if (account) {
+        const { AccountCredentials, getFreshAccountToken } = await import(
+          './credential.service.ts'
+        );
+        if (integrationType === 'azure-devops') {
+          // Every ADO account is scoped to exactly one organization, and a
+          // `{org}.visualstudio.com` host varies per organization just as a
+          // GitLab instance host varies per account — so the same hazard as
+          // the gitlab arm below applies. The resolver's last tier is the
+          // GLOBAL default, reported as a match like any other; trusting it
+          // would scope one org's PAT to another org's host and still fail to
+          // authenticate there. Only the account for THIS organization may
+          // answer; otherwise leave the token unset and let `getCloneToken`
+          // below pick by organization.
+          const accountOrg =
+            account.config.type === 'azure-devops' ? account.config.organization : undefined;
+          if (accountOrg && adoOrg && accountOrg.toLowerCase() === adoOrg.toLowerCase()) {
+            token =
+              await getFreshAccountToken('azure-devops', account.id, 'azure') ?? undefined;
+          } else {
+            wrongInstance = true;
+          }
+        } else if (integrationType === 'gitlab') {
+          // GitLab is the one provider whose host varies per account, and the
+          // resolver's last tier is the GLOBAL default — reported as a match
+          // like any other. Trusting it here would hand, say, a gitlab.com PAT
+          // to an unrelated self-hosted server that has never seen it, and the
+          // prune would still fail to authenticate there. Only the account that
+          // serves THIS host may answer; otherwise leave the token unset and
+          // let `getCloneToken` below pick by host.
+          const instanceUrl =
+            account.config.type === 'gitlab' ? account.config.instanceUrl : undefined;
+          if (instanceUrl && cloneUrlHost(instanceUrl) === host) {
+            token =
+              await getFreshAccountToken('gitlab', account.id, 'gitlab', instanceUrl) ?? undefined;
+          } else {
+            wrongInstance = true;
+          }
+        } else {
+          token = await AccountCredentials.getToken('github', account.id) ?? undefined;
+        }
+      }
+      if (!token && (!repoSpecific || wrongInstance)) {
+        token = await getCloneToken(remoteUrl);
+      }
+    } else if (remoteUrl && cloneUrlIsCredentialSafe(remoteUrl)) {
+      token = await getCloneToken(remoteUrl);
+    }
+    if (token) tokens[target] = token;
+  }
+
   return invokeCommand<PruneResult>("prune_remote_tracking_branches", {
     path: repoPath,
-    remote,
+    remotes: targets,
+    tokens,
   });
 }
 

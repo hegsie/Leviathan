@@ -348,6 +348,39 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(findCommands('open_repository').length).to.be.greaterThan(0);
     });
 
+    // A commit whose patch is already on `onto` is dropped by the rebase and
+    // disappears from the branch. `git rebase` warns on stderr; the toast is
+    // the only place this GUI can say it.
+    it('names the skipped commits in the success toast', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'rebase') return 2;
+        return null;
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'main');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal(
+        'Rebased onto main, skipped 2 commit(s) already applied upstream'
+      );
+    });
+
+    it('keeps the plain success toast when nothing was skipped', async () => {
+      const el = createAppShell();
+      setRefContextMenu(el, 'main');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal('Rebased onto main');
+    });
+
     it('opens conflict dialog on REBASE_CONFLICT', async () => {
       mockInvoke = async (command: string) => {
         // These handlers now confirm first, like their sidebar counterparts.
