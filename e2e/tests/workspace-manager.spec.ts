@@ -221,6 +221,37 @@ test.describe('Workspace Manager - partial search failures', () => {
     await expect(dialog.locator('.search-failures')).toContainText('beta');
   });
 
+  test('reports an empty search only once it has completed', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    await startCommandCaptureWithMocks(page, {
+      get_workspaces: [
+        {
+          id: 'ws-1',
+          name: 'Alpha Workspace',
+          description: '',
+          color: '#4fc3f7',
+          repositories: [{ path: '/repos/alpha', name: 'alpha' }],
+          createdAt: '2024-01-01T00:00:00Z',
+          lastOpened: null,
+        },
+      ],
+      validate_workspace_repositories: [],
+      search_workspace: { results: [], failures: [] },
+    });
+
+    await openWorkspaceManager(page);
+
+    const dialog = page.locator('lv-workspace-manager-dialog');
+    await dialog.locator('.search-input').fill('needle');
+    // Typing is not a search: the verdict only arrives once the search has run.
+    await expect(dialog.locator('.search-no-results')).toHaveCount(0);
+
+    await dialog.locator('.search-btn').click();
+    await expect(dialog.locator('.search-no-results')).toContainText('No results found');
+    await expect(dialog.locator('.search-failures')).toHaveCount(0);
+  });
+
   test('clears a stale failure banner when the dialog is reopened', async ({ page }) => {
     await setupOpenRepository(page);
 

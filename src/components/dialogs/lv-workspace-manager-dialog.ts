@@ -1451,7 +1451,7 @@ export class LvWorkspaceManagerDialog extends LitElement {
                             `,
                           )}
                         </div>
-                      ` : this.searchCompleted && !this.searching && this.searchFailures.length === 0 ? html`
+                      ` : this.searchCompleted && !this.searching ? html`
                         <div class="search-no-results">No results found</div>
                       ` : nothing}
                     </div>

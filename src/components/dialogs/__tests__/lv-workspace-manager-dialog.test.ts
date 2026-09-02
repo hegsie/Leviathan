@@ -653,6 +653,50 @@ describe('lv-workspace-manager-dialog', () => {
       expect(el.shadowRoot!.querySelector('.search-no-results')).to.be.null;
     });
 
+    it('reports an empty search only once it has completed', async () => {
+      setupDefaultMocks({ searchResults: [], searchFailures: [] });
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'nowhere';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+
+      // Typing is not a search: claiming "no results" on the first keystroke
+      // would answer a question the user has not asked yet.
+      expect(el.shadowRoot!.querySelector('.search-no-results')).to.be.null;
+
+      (el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      expect(el.shadowRoot!.querySelector('.search-no-results')!.textContent).to.include(
+        'No results found',
+      );
+    });
+
+    it('says the searched repositories had no matches when one repository failed', async () => {
+      setupDefaultMocks({
+        searchResults: [],
+        searchFailures: ['Failed to search repository "beta": repository path does not exist'],
+      });
+      const el = await renderDialog();
+
+      const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+      searchInput.value = 'test';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await el.updateComplete;
+      (el.shadowRoot!.querySelector('.search-btn') as HTMLButtonElement).click();
+      await tick(el, 100);
+
+      // Both halves of the story: beta could not be searched, and the
+      // repositories that were searched held nothing. Showing only the red
+      // panel reads as a wholly failed search.
+      expect(el.shadowRoot!.querySelector('.search-failures')!.textContent).to.include('beta');
+      expect(el.shadowRoot!.querySelector('.search-no-results')!.textContent).to.include(
+        'No results found',
+      );
+    });
+
     it('keeps successful results while showing skipped repositories', async () => {
       setupDefaultMocks({
         searchResults: [

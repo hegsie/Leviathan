@@ -95,9 +95,14 @@ fn run_workspace_grep(
     limit: usize,
 ) -> std::result::Result<Vec<(String, u32, String)>, String> {
     let mut cmd = Command::new("git");
+    // `--no-color` because the records are parsed byte-for-byte: a user with
+    // `color.grep` (or `color.ui`) set to `always` gets SGR escapes around the
+    // path and the line number even into a pipe, and every match would then be
+    // dropped by the line-number parse rather than shown.
     cmd.arg("-C")
         .arg(&repo_entry.path)
         .arg("grep")
+        .arg("--no-color")
         .arg("-n")
         .arg("-z")
         .arg("-I");
@@ -804,6 +809,32 @@ mod tests {
             "Add search content",
             &[("search.txt", "literal a.b\nregex axb\n")],
         );
+        let entry = WorkspaceRepository {
+            path: repo.path_str(),
+            name: "search-repo".to_string(),
+        };
+
+        let matches = run_workspace_grep(&entry, "a.b", true, false, None, 10).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![("search.txt".to_string(), 1, "literal a.b".to_string())]
+        );
+    }
+
+    /// `color.grep = always` makes git colour its output even into a pipe. The
+    /// records are parsed byte-for-byte, so without `--no-color` the escape
+    /// codes wrapping the line number fail to parse and every match is silently
+    /// dropped — a query that does match reads as "No results found".
+    #[test]
+    fn test_workspace_grep_ignores_forced_colour_output() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("search.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_str("color.grep", "always")
+            .unwrap();
         let entry = WorkspaceRepository {
             path: repo.path_str(),
             name: "search-repo".to_string(),
