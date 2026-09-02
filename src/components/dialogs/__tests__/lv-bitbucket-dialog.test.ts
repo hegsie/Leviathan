@@ -523,6 +523,23 @@ describe('lv-bitbucket-dialog', () => {
       expect(firstPr.querySelector('.pr-branch')?.textContent).to.include('main');
     });
 
+    it('does not disclose a cap when fewer pull requests come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pull Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(mockPullRequests.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
     it('shows filter dropdown and New PR button', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -596,6 +613,23 @@ describe('lv-bitbucket-dialog', () => {
       const metaText = firstIssue.querySelector('.issue-meta')?.textContent;
       expect(metaText).to.include('bug');
       expect(metaText).to.include('critical');
+    });
+
+    it('does not disclose a cap when fewer issues come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.issue-item').length).to.equal(mockIssues.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
     });
 
     it('discloses capped issues once', async () => {
@@ -791,6 +825,23 @@ describe('lv-bitbucket-dialog', () => {
       // Status indicator should exist
       const statusDot = firstPipeline.querySelector('.pipeline-status');
       expect(statusDot).to.not.be.null;
+    });
+
+    it('does not disclose a cap when fewer pipelines come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvBitbucketDialog>(html`
+        <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(mockPipelines.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
     });
 
     it('discloses when the pipeline list may be truncated', async () => {

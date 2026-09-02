@@ -40,7 +40,15 @@ type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'cr
  * this long, more may exist and the tab shows a "capped" hint.
  */
 const WORK_ITEMS_PAGE_SIZE = 50;
+
+/**
+ * Page size this dialog asks for when listing pipeline runs and pull requests.
+ * Both are passed straight into the listing call as `top`, so the number the
+ * request caps at and the number the "capped" hint discloses are the same
+ * constant — never a literal at the call site.
+ */
 const PIPELINE_RUNS_PAGE_SIZE = 20;
+const PULL_REQUESTS_PAGE_SIZE = 100;
 
 /** Shown when a PAT connect succeeded but writing the keyring git credential did not. */
 const GIT_CRED_WRITE_FAILED_TOAST =
@@ -1120,6 +1128,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.project,
         this.detectedRepo.repository,
         this.prFilter === 'all' ? undefined : this.prFilter,
+        PULL_REQUESTS_PAGE_SIZE,
         token
       );
 
@@ -1174,7 +1183,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        20,
+        PIPELINE_RUNS_PAGE_SIZE,
         token
       );
 
@@ -2138,6 +2147,16 @@ export class LvAzureDevOpsDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.pullRequests.length >= PULL_REQUESTS_PAGE_SIZE ? html`
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+          Showing the first ${PULL_REQUESTS_PAGE_SIZE} pull requests; more may exist.
+          <a
+            class="help-link"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_git/${this.detectedRepo.repository}/pullrequests"
+            @click=${handleExternalLink}
+          >Open in Azure DevOps</a> for the full list.
+        </p>
+      ` : nothing}
     `;
   }
 
@@ -2206,7 +2225,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         `)}
       </div>
       ${this.workItems.length >= WORK_ITEMS_PAGE_SIZE ? html`
-        <p class="help-text" style="text-align:center;padding-top:8px">
+        <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
           Showing your ${WORK_ITEMS_PAGE_SIZE} most recent.
           ${this.detectedRepo ? html`<a
             class="help-link"
@@ -2275,7 +2294,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           Showing the ${PIPELINE_RUNS_PAGE_SIZE} most recent pipeline runs; more may exist.
           <a
             class="help-link"
-            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_build"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_build?view=runs"
             @click=${handleExternalLink}
           >Open in Azure DevOps</a> for the full list.
         </p>

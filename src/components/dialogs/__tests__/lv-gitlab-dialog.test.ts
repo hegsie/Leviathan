@@ -531,6 +531,23 @@ describe('lv-gitlab-dialog', () => {
       expect(firstMr.querySelector('.mr-branch')?.textContent).to.include('main');
     });
 
+    it('does not disclose a cap when fewer merge requests come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Merge Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.mr-item').length).to.equal(mockMergeRequests.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
     it('shows filter dropdown and New MR button', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -607,6 +624,23 @@ describe('lv-gitlab-dialog', () => {
       expect(labels[1].textContent?.trim()).to.equal('performance');
     });
 
+    it('does not disclose a cap when fewer issues come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.issue-item').length).to.equal(mockIssues.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
     it('renders one capped hint for label-less issues', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -663,6 +697,23 @@ describe('lv-gitlab-dialog', () => {
       // Should show truncated sha
       const metaText = firstPipeline.querySelector('.pipeline-meta')?.textContent;
       expect(metaText).to.include('abc12345');
+    });
+
+    it('does not disclose a cap when fewer pipelines come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(mockPipelines.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
     });
 
     it('discloses when the pipeline list may be truncated', async () => {

@@ -573,6 +573,60 @@ describe('lv-azure-devops-dialog', () => {
       expect(firstPr.querySelector('.pr-branch')?.textContent).to.include('refs/heads/main');
     });
 
+    // Azure DevOps caps `pullrequests` server-side when no `$top` is sent, so the
+    // dialog asks for an explicit page size and discloses that same number.
+    it('discloses the same page size it requests when the PR list is full', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      let requestedTop = 0;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_ado_pull_requests') {
+          requestedTop = Number((args as Record<string, unknown>).top);
+          return Array.from({ length: requestedTop }, (_, index) => ({
+            ...mockPullRequests[0],
+            pullRequestId: 500 + index,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const prTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pull Requests') as HTMLButtonElement;
+      prTab.click();
+      await waitForLoad(el);
+
+      expect(requestedTop).to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(requestedTop);
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint, 'capped hint rendered for a full page').to.not.be.null;
+      expect(hint!.textContent).to.include(String(requestedTop));
+      expect(hint!.querySelector('a')?.getAttribute('href')).to.equal(
+        'https://dev.azure.com/testorg/test-project/_git/test-repo/pullrequests',
+      );
+    });
+
+    it('does not disclose a cap when fewer pull requests come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const prTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pull Requests') as HTMLButtonElement;
+      prTab.click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(mockPullRequests.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
     it('shows filter dropdown and New PR button', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -625,6 +679,53 @@ describe('lv-azure-devops-dialog', () => {
 
       const secondItem = workItems[1];
       expect(secondItem.querySelector('.work-item-type')?.textContent).to.include('Bug');
+    });
+
+    // The work-items hint predates the shared `capped-list-hint` marker; it is the
+    // same disclosure as its siblings and must carry the same class.
+    it('marks the capped work-item hint with the shared hint class', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'query_ado_work_items') {
+          return Array.from({ length: 50 }, (_, index) => ({
+            ...mockWorkItems[0],
+            id: 600 + index,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
+      expect(hints.length).to.equal(1);
+      expect(hints[0].querySelector('a')?.getAttribute('href')).to.include('/_workitems/');
+    });
+
+    it('does not disclose a cap when fewer work items come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'My Work Items'
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.work-item').length).to.equal(mockWorkItems.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
     });
 
     it('shows the @Me-scoped empty state when the user has no assigned work items', async () => {
@@ -998,13 +1099,18 @@ describe('lv-azure-devops-dialog', () => {
       expect(args.top).to.equal(20);
     });
 
-    it('discloses when the pipeline list may be truncated', async () => {
+    // The request size and the disclosed size must be the same number. Serving a
+    // full page of exactly `top` runs and then requiring the hint to name that
+    // same `top` fails if the call site and the hint ever drift apart.
+    it('discloses the same page size it requests when the pipeline list is full', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedTop = 0;
       const baseInvoke = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'list_ado_pipeline_runs') {
-          return Array.from({ length: 20 }, (_, index) => ({
+          requestedTop = Number((args as Record<string, unknown>).top);
+          return Array.from({ length: requestedTop }, (_, index) => ({
             ...mockPipelineRuns[0],
             id: 300 + index,
           }));
@@ -1022,9 +1128,32 @@ describe('lv-azure-devops-dialog', () => {
       tab.click();
       await waitForLoad(el);
 
+      expect(requestedTop).to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(requestedTop);
       const hint = el.shadowRoot!.querySelector('.capped-list-hint');
-      expect(hint?.textContent).to.include('20');
-      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/_build');
+      expect(hint, 'capped hint rendered for a full page').to.not.be.null;
+      expect(hint!.textContent).to.include(String(requestedTop));
+      // The Pipelines landing page lists definitions; the runs view is the list
+      // the hint promises to complete.
+      expect(hint!.querySelector('a')?.getAttribute('href')).to.include('/_build?view=runs');
+    });
+
+    it('does not disclose a cap when fewer pipeline runs come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const tab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (item) => item.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(mockPipelineRuns.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
     });
 
     it('surfaces a repository resolution failure in the pipelines tab', async () => {

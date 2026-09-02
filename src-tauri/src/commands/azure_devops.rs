@@ -177,6 +177,26 @@ fn ado_pr_status_param(status: Option<&str>) -> Option<String> {
     status.map(|s| format!("searchCriteria.status={}", s))
 }
 
+/// Default page size for the pull-request listing.
+///
+/// Kept in sync with PULL_REQUESTS_PAGE_SIZE in lv-azure-devops-dialog.ts, which
+/// discloses it to the user.
+const PULL_REQUESTS_DEFAULT_TOP: u32 = 100;
+
+/// Build the `pullrequests` query fragment: an explicit page size plus the
+/// optional status filter.
+///
+/// Omitting `$top` does not mean "everything" — Azure DevOps still applies a
+/// server-side default page size, so the list was silently truncated with no
+/// number the UI could disclose. Sending `$top` makes the cap ours and lets the
+/// dialog say how many it is showing.
+fn ado_pr_query_params(status: Option<&str>, top: u32) -> String {
+    match ado_pr_status_param(status) {
+        Some(status_param) => format!("$top={}&{}", top, status_param),
+        None => format!("$top={}", top),
+    }
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -505,15 +525,19 @@ pub async fn list_ado_pull_requests(
     project: String,
     repository: String,
     status: Option<String>,
+    top: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<AdoPullRequest>> {
     let token = resolve_ado_token(token)?;
 
+    let top = top.unwrap_or(PULL_REQUESTS_DEFAULT_TOP);
     let path = format!("git/repositories/{}/pullrequests", repository);
-    let url = match ado_pr_status_param(status.as_deref()) {
-        Some(params) => build_api_url_with_params(&organization, &project, &path, &params),
-        None => build_api_url(&organization, &project, &path),
-    };
+    let url = build_api_url_with_params(
+        &organization,
+        &project,
+        &path,
+        &ado_pr_query_params(status.as_deref(), top),
+    );
 
     let client = reqwest::Client::new();
     let response = client
@@ -1458,6 +1482,19 @@ mod tests {
         );
         // "All" (None) omits the filter so every PR state is returned.
         assert_eq!(ado_pr_status_param(None), None);
+    }
+
+    #[test]
+    fn test_ado_pr_query_params_always_sends_top() {
+        // Without $top the Azure DevOps server default silently caps the list,
+        // leaving the dialog no number to disclose.
+        assert_eq!(
+            ado_pr_query_params(Some("active"), 100),
+            "$top=100&searchCriteria.status=active"
+        );
+        // "All" (None) still gets an explicit page size, just no status filter.
+        assert_eq!(ado_pr_query_params(None, 100), "$top=100");
+        assert_eq!(ado_pr_query_params(None, 5), "$top=5");
     }
 
     #[test]

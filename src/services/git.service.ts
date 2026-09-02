@@ -4202,6 +4202,7 @@ export async function listAdoPullRequests(
   project: string,
   repository: string,
   status?: string,
+  top?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoPullRequest[]>> {
   return invokeProviderCommand<AdoPullRequest[]>("list_ado_pull_requests", {
@@ -4209,6 +4210,7 @@ export async function listAdoPullRequests(
     project,
     repository,
     status,
+    top,
     token,
   });
 }
