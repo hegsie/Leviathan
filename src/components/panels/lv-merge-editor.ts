@@ -1726,11 +1726,42 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     }
   }
 
+  /**
+   * Unsaved work that is actually IN the output — picks, applied hand edits
+   * and whole-file accepts. This is hasUnsavedResolutions() WITHOUT its
+   * open-draft shortcut, because an open draft is not in the output:
+   * buildResolvedContent() never sees editDraft.
+   */
+  private get outputHasUnsavedWork(): boolean {
+    return this.userTouched && this.buildResolvedContent() !== this.lastSavedContent;
+  }
+
+  /**
+   * Name what an overwrite destroys, in the words of the caller's operation.
+   * Both halves are needed: an open inline-edit draft is NOT in the output,
+   * so a message that only describes "work currently in the output" is
+   * silent about the typed text it discards — and when the draft is the ONLY
+   * unsaved work (hasUnsavedResolutions() is true on an open draft alone,
+   * which is the state after Edit-then-toolbar on a freshly loaded file) that
+   * message would also enumerate picks and edits the user does not have.
+   */
+  private overwriteLossText(inOutput: string, openDraft: string): string {
+    const parts: string[] = [];
+    if (this.outputHasUnsavedWork) parts.push(inOutput);
+    if (this.editingSegmentId !== null) parts.push(openDraft);
+    // Never empty: every caller gates on hasUnsavedResolutions(), which is
+    // exactly outputHasUnsavedWork || an open draft.
+    return parts.join(' and ');
+  }
+
   private async confirmWholeFileOverwrite(): Promise<boolean> {
     if (!this.hasUnsavedResolutions()) return true;
     return this.confirmOverwrite(
       'Replace in-progress resolution?',
-      'Using one whole-file version replaces every conflict pick and edit currently in the output. This cannot be undone.',
+      `Using one whole-file version ${this.overwriteLossText(
+        'replaces every conflict pick and edit currently in the output',
+        'discards the edit that was typed but not applied',
+      )}. This cannot be undone.`,
     );
   }
 
@@ -2066,11 +2097,15 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       // buttons at all — "replaces every conflict pick and edit" would name
       // work that is not there while hiding the on-disk consequence that is.
       const deletesFile = side === 'ours' ? !startFile.ours : !startFile.theirs;
+      const lead = deletesFile
+        ? 'Taking this side deletes the file and stages the deletion'
+        : 'Taking this side writes it to disk and stages the file';
       const proceed = await this.confirmOverwrite(
         'Take this whole side?',
-        deletesFile
-          ? 'Taking this side deletes the file and stages the deletion, discarding the picks, edits and whole-file choice currently in the output. This cannot be undone.'
-          : 'Taking this side writes it to disk and stages the file, discarding the picks, edits and whole-file choice currently in the output. This cannot be undone.',
+        `${lead}, discarding ${this.overwriteLossText(
+          'the picks, edits and whole-file choice currently in the output',
+          'the edit that was typed but not applied',
+        )}. This cannot be undone.`,
       );
       if (!proceed) return;
       // Re-check identity too: a file switch during the overwrite confirm

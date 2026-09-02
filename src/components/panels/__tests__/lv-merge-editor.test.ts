@@ -3350,10 +3350,13 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       let confirmAnswer: unknown = false;
       let confirmCalls = 0;
+      const confirms: { title?: string; message?: string }[] = [];
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (isConfirmCommand(command)) {
           confirmCalls++;
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
           return confirmAnswer;
         }
         return baseMock(command, args);
@@ -3368,6 +3371,18 @@ describe('lv-merge-editor', () => {
       await accept.call(el, 'ours');
       await el.updateComplete;
       expect(confirmCalls).to.equal(1);
+      // The draft is the ONLY unsaved work here — a freshly loaded file with
+      // an edit opened on it. The dialog must name the typed text it is about
+      // to throw away, and must not enumerate picks the user never made.
+      expect(confirms[0].title).to.equal('Replace in-progress resolution?');
+      expect(
+        confirms[0].message,
+        'the open draft is not in the output, so it must be named explicitly'
+      ).to.contain('discards the edit that was typed but not applied');
+      expect(
+        confirms[0].message,
+        'no pick or applied edit exists to replace'
+      ).to.not.contain('conflict pick and edit currently in the output');
       expect(internal.editingSegmentId, 'declining keeps the edit open').to.equal(editedId);
       expect(internal.editDraft).to.equal('careful hand-typed merge');
 
@@ -3378,6 +3393,112 @@ describe('lv-merge-editor', () => {
       expect(internal.editingSegmentId).to.equal(null);
       expect(internal.segments.length).to.equal(1);
       expect(internal.segments[0].origin).to.equal('ours');
+    });
+
+    it('whole-file accept with BOTH output work and an open draft names both losses', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      // A real pick lands in the output...
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      // ...and an inline edit is opened on top of it, which is NOT in the output.
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].message).to.contain(
+        'replaces every conflict pick and edit currently in the output'
+      );
+      expect(confirms[0].message, 'the open draft is lost too and must be named').to.contain(
+        'discards the edit that was typed but not applied'
+      );
+      // Declining keeps both.
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
+    });
+
+    it('take-side with only an open draft names the draft, not absent picks', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      // A modify/delete conflict: theirs dropped the file, so the toolbar
+      // offers "Use Theirs (delete file)" -> handleTakeSide directly.
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(internal.segments.length, 'the marker-free workdir file renders as output').to.be
+        .greaterThan(0);
+
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('deletes the file and stages the deletion');
+      expect(
+        confirms[0].message,
+        'the typed text is the only thing being discarded — say so'
+      ).to.contain('discarding the edit that was typed but not applied');
+      expect(
+        confirms[0].message,
+        'no pick or whole-file choice is in the output to lose'
+      ).to.not.contain('picks, edits and whole-file choice');
+      // Declining writes nothing and keeps the draft.
+      expect(takeSideCalls).to.equal(0);
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
     });
 
     it('whole-file accepts do not confirm before any in-editor work exists', async () => {
