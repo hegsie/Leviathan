@@ -31,6 +31,13 @@ import './lv-modal.ts';
 import './lv-account-selector.ts';
 
 type TabType = 'connection' | 'pull-requests' | 'issues' | 'pipelines' | 'create-pr' | 'create-issue';
+
+/**
+ * Page sizes this dialog asks for when listing pull requests, issues and
+ * pipelines. Each is passed straight into the listing call as `pagelen`, so the
+ * number the request caps at and the number the "capped" hint discloses are the
+ * same constant — never a literal at the call site or in commands/bitbucket.rs.
+ */
 const BITBUCKET_LIST_PAGE_SIZE = 30;
 const BITBUCKET_PIPELINE_PAGE_SIZE = 20;
 
@@ -1049,6 +1056,7 @@ export class LvBitbucketDialog extends LitElement {
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         this.prFilter,
+        BITBUCKET_LIST_PAGE_SIZE,
         token
       );
 
@@ -1073,6 +1081,7 @@ export class LvBitbucketDialog extends LitElement {
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
         undefined,
+        BITBUCKET_LIST_PAGE_SIZE,
         token
       );
 
@@ -1096,6 +1105,7 @@ export class LvBitbucketDialog extends LitElement {
       const result = await gitService.listBitbucketPipelines(
         this.detectedRepo.workspace,
         this.detectedRepo.repoSlug,
+        BITBUCKET_PIPELINE_PAGE_SIZE,
         token
       );
 

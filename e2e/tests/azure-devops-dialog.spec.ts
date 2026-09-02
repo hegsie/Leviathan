@@ -844,8 +844,27 @@ test.describe('Azure DevOps Dialog - Capped list disclosure', () => {
 
     await waitForCommand(page, 'plugin:shell|open');
     const opens = await findCommand(page, 'plugin:shell|open');
+    // The link has to open the same list the hint is attached to; the Azure
+    // DevOps PR page selects that list with `_a`.
     expect((opens[0].args as { path: string }).path).toBe(
-      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests',
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=active',
+    );
+
+    // Switching the filter must move the link with it, otherwise the "full list"
+    // link lands on a different list than the one on screen.
+    await page.locator('lv-azure-devops-dialog .filter-select').selectOption('abandoned');
+    await expect(hint.locator('a')).toHaveAttribute(
+      'href',
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=abandoned',
+    );
+    await hint.locator('a').click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'plugin:shell|open')).length)
+      .toBeGreaterThan(1);
+    const filteredOpens = await findCommand(page, 'plugin:shell|open');
+    expect((filteredOpens[1].args as { path: string }).path).toBe(
+      'https://dev.azure.com/testorg/testproject/_git/testrepo/pullrequests?_a=abandoned',
     );
   });
 

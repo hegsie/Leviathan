@@ -2105,6 +2105,13 @@ export class LvAzureDevOpsDialog extends LitElement {
       `;
     }
 
+    // The Azure DevOps PR page opens on its Active tab, so a bare link would send
+    // someone reading the Completed or Abandoned list to a different list than the
+    // one the hint promises to complete. `_a` selects that page's own tabs and
+    // takes the filter values verbatim; "All" has no tab of its own, so it stays
+    // on the default view.
+    const prListQuery = this.prFilter === 'all' ? '' : `?_a=${this.prFilter}`;
+
     return html`
       <div class="filter-row">
         <select class="filter-select" @change=${this.handlePrFilterChange}>
@@ -2152,7 +2159,7 @@ export class LvAzureDevOpsDialog extends LitElement {
           Showing the first ${PULL_REQUESTS_PAGE_SIZE} pull requests; more may exist.
           <a
             class="help-link"
-            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_git/${this.detectedRepo.repository}/pullrequests"
+            href="https://dev.azure.com/${this.detectedRepo.organization}/${this.detectedRepo.project}/_git/${this.detectedRepo.repository}/pullrequests${prListQuery}"
             @click=${handleExternalLink}
           >Open in Azure DevOps</a> for the full list.
         </p>

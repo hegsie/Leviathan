@@ -31,6 +31,13 @@ import './lv-modal.ts';
 import './lv-account-selector.ts';
 
 const log = loggers.gitlab;
+
+/**
+ * Page sizes this dialog asks for when listing merge requests, issues and
+ * pipelines. Each is passed straight into the listing call as `perPage`, so the
+ * number the request caps at and the number the "capped" hint discloses are the
+ * same constant — never a literal at the call site or in commands/gitlab.rs.
+ */
 const GITLAB_LIST_PAGE_SIZE = 30;
 const GITLAB_PIPELINE_PAGE_SIZE = 20;
 
@@ -1003,6 +1010,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         this.mrFilter === 'all' ? undefined : this.mrFilter,
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1028,6 +1036,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.projectPath,
         this.issueFilter === 'all' ? undefined : this.issueFilter,
         undefined, // labels
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1050,6 +1059,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         undefined, // status
+        GITLAB_PIPELINE_PAGE_SIZE,
         token
       );
 

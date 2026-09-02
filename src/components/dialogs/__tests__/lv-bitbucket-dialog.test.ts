@@ -564,14 +564,24 @@ describe('lv-bitbucket-dialog', () => {
       expect(newPrBtn).to.not.be.undefined;
     });
 
+    // The dialog asks the backend for an explicit page size and discloses that
+    // same number, so serving exactly what was requested keeps the requested cap
+    // and the disclosed cap from drifting apart unnoticed.
     it('discloses capped pull requests with the active filter', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPagelen = 0;
       const baseInvoke = mockInvoke;
-      mockInvoke = async (command: string, args?: unknown) =>
-        command === 'list_bitbucket_pull_requests'
-          ? Array.from({ length: 30 }, (_, index) => ({ ...mockPullRequests[0], id: index + 1 }))
-          : baseInvoke(command, args);
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_bitbucket_pull_requests') {
+          requestedPagelen = Number((args as Record<string, unknown>).pagelen);
+          return Array.from({ length: requestedPagelen }, (_, index) => ({
+            ...mockPullRequests[0],
+            id: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
       const el = await fixture<LvBitbucketDialog>(html`
         <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
       `);
@@ -581,8 +591,10 @@ describe('lv-bitbucket-dialog', () => {
       ) as HTMLButtonElement).click();
       await waitForLoad(el);
 
+      expect(requestedPagelen, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pr-item').length).to.equal(requestedPagelen);
       const hint = el.shadowRoot!.querySelector('.capped-list-hint');
-      expect(hint?.textContent).to.include('30');
+      expect(hint?.textContent).to.include(String(requestedPagelen));
       expect(hint?.querySelector('a')?.getAttribute('href')).to.include('state=OPEN');
     });
   });
@@ -635,11 +647,18 @@ describe('lv-bitbucket-dialog', () => {
     it('discloses capped issues once', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPagelen = 0;
       const baseInvoke = mockInvoke;
-      mockInvoke = async (command: string, args?: unknown) =>
-        command === 'list_bitbucket_issues'
-          ? Array.from({ length: 30 }, (_, index) => ({ ...mockIssues[0], id: index + 1 }))
-          : baseInvoke(command, args);
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_bitbucket_issues') {
+          requestedPagelen = Number((args as Record<string, unknown>).pagelen);
+          return Array.from({ length: requestedPagelen }, (_, index) => ({
+            ...mockIssues[0],
+            id: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
       const el = await fixture<LvBitbucketDialog>(html`
         <lv-bitbucket-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-bitbucket-dialog>
       `);
@@ -649,7 +668,10 @@ describe('lv-bitbucket-dialog', () => {
       ) as HTMLButtonElement).click();
       await waitForLoad(el);
 
-      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(1);
+      expect(requestedPagelen, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
+      expect(hints.length).to.equal(1);
+      expect(hints[0].textContent).to.include(String(requestedPagelen));
     });
   });
 
@@ -847,10 +869,12 @@ describe('lv-bitbucket-dialog', () => {
     it('discloses when the pipeline list may be truncated', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPagelen = 0;
       const baseInvoke = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'list_bitbucket_pipelines') {
-          return Array.from({ length: 20 }, (_, index) => ({
+          requestedPagelen = Number((args as Record<string, unknown>).pagelen);
+          return Array.from({ length: requestedPagelen }, (_, index) => ({
             ...mockPipelines[0],
             uuid: `{pipeline-${index}}`,
             buildNumber: index + 1,
@@ -869,8 +893,10 @@ describe('lv-bitbucket-dialog', () => {
       tab.click();
       await waitForLoad(el);
 
+      expect(requestedPagelen, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(requestedPagelen);
       const hint = el.shadowRoot!.querySelector('.capped-list-hint');
-      expect(hint?.textContent).to.include('20');
+      expect(hint?.textContent).to.include(String(requestedPagelen));
       expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/pipelines');
     });
   });

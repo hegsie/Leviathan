@@ -572,14 +572,24 @@ describe('lv-gitlab-dialog', () => {
       expect(newMrBtn).to.not.be.undefined;
     });
 
+    // The dialog asks the backend for an explicit page size and discloses that
+    // same number, so serving exactly what was requested keeps the requested cap
+    // and the disclosed cap from drifting apart unnoticed.
     it('discloses capped merge requests with the active filter', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
       const baseInvoke = mockInvoke;
-      mockInvoke = async (command: string, args?: unknown) =>
-        command === 'list_gitlab_merge_requests'
-          ? Array.from({ length: 30 }, (_, index) => ({ ...mockMergeRequests[0], iid: index + 1 }))
-          : baseInvoke(command, args);
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_merge_requests') {
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
+            ...mockMergeRequests[0],
+            iid: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
       const el = await fixture<LvGitLabDialog>(html`
         <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
       `);
@@ -589,8 +599,10 @@ describe('lv-gitlab-dialog', () => {
       ) as HTMLButtonElement).click();
       await waitForLoad(el);
 
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.mr-item').length).to.equal(requestedPerPage);
       const hint = el.shadowRoot!.querySelector('.capped-list-hint');
-      expect(hint?.textContent).to.include('30');
+      expect(hint?.textContent).to.include(String(requestedPerPage));
       expect(hint?.querySelector('a')?.getAttribute('href')).to.include('state=opened');
     });
   });
@@ -644,15 +656,19 @@ describe('lv-gitlab-dialog', () => {
     it('renders one capped hint for label-less issues', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
       const baseInvoke = mockInvoke;
-      mockInvoke = async (command: string, args?: unknown) =>
-        command === 'list_gitlab_issues'
-          ? Array.from({ length: 30 }, (_, index) => ({
-              ...mockIssues[0],
-              iid: index + 1,
-              labels: [],
-            }))
-          : baseInvoke(command, args);
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_issues') {
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
+            ...mockIssues[0],
+            iid: index + 1,
+            labels: [],
+          }));
+        }
+        return baseInvoke(command, args);
+      };
       const el = await fixture<LvGitLabDialog>(html`
         <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
       `);
@@ -662,8 +678,10 @@ describe('lv-gitlab-dialog', () => {
       ) as HTMLButtonElement).click();
       await waitForLoad(el);
 
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
       const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
       expect(hints.length).to.equal(1);
+      expect(hints[0].textContent).to.include(String(requestedPerPage));
       expect(hints[0].querySelector('a')?.getAttribute('href')).to.include('state=opened');
     });
   });
@@ -719,10 +737,12 @@ describe('lv-gitlab-dialog', () => {
     it('discloses when the pipeline list may be truncated', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
       const baseInvoke = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'list_gitlab_pipelines') {
-          return Array.from({ length: 20 }, (_, index) => ({
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
             ...mockPipelines[0],
             id: 1000 + index,
             iid: index + 1,
@@ -741,8 +761,10 @@ describe('lv-gitlab-dialog', () => {
       tab.click();
       await waitForLoad(el);
 
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(requestedPerPage);
       const hint = el.shadowRoot!.querySelector('.capped-list-hint');
-      expect(hint?.textContent).to.include('20');
+      expect(hint?.textContent).to.include(String(requestedPerPage));
       expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/-/pipelines');
     });
   });

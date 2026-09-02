@@ -606,6 +606,54 @@ describe('lv-azure-devops-dialog', () => {
       expect(hint, 'capped hint rendered for a full page').to.not.be.null;
       expect(hint!.textContent).to.include(String(requestedTop));
       expect(hint!.querySelector('a')?.getAttribute('href')).to.equal(
+        'https://dev.azure.com/testorg/test-project/_git/test-repo/pullrequests?_a=active',
+      );
+    });
+
+    // The hint promises the rest of the list the user is looking at, so the link
+    // has to open that same list - not the PR page's default Active tab.
+    it('carries the PR filter into the capped-list link', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_ado_pull_requests') {
+          const top = Number((args as Record<string, unknown>).top);
+          return Array.from({ length: top }, (_, index) => ({
+            ...mockPullRequests[0],
+            pullRequestId: 500 + index,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const tabs = el.shadowRoot!.querySelectorAll('.tab');
+      const prTab = Array.from(tabs).find((t) => t.textContent?.trim() === 'Pull Requests') as HTMLButtonElement;
+      prTab.click();
+      await waitForLoad(el);
+
+      const filterSelect = el.shadowRoot!.querySelector('.filter-select') as HTMLSelectElement;
+      filterSelect.value = 'completed';
+      filterSelect.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      const completedHint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(completedHint, 'capped hint rendered for a full page').to.not.be.null;
+      expect(completedHint!.querySelector('a')?.getAttribute('href')).to.equal(
+        'https://dev.azure.com/testorg/test-project/_git/test-repo/pullrequests?_a=completed',
+      );
+
+      // "All" has no dedicated tab on the Azure DevOps PR page, so it stays bare.
+      filterSelect.value = 'all';
+      filterSelect.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      const allHint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(allHint!.querySelector('a')?.getAttribute('href')).to.equal(
         'https://dev.azure.com/testorg/test-project/_git/test-repo/pullrequests',
       );
     });
