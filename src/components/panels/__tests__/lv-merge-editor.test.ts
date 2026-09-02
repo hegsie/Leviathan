@@ -3639,6 +3639,91 @@ describe('lv-merge-editor', () => {
       expect(takeSideCalls).to.equal(1);
     });
 
+    it('the deleted-side take confirm names the staged deletion, not an output swap', async () => {
+      // Modify/delete: git leaves the workdir file marker-free, so the output
+      // parses to ONE plain segment with no per-block buttons at all. The only
+      // route to this confirm is Use Ours followed by a change of mind — so
+      // there is no conflict pick and no edit to "replace", and the thing the
+      // user must be told is that the file gets deleted and staged.
+      setupDefaultMocks();
+      workdirContent = 'const value = "ours";';
+      const confirms: { title?: string; message?: string }[] = [];
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.code-conflict-block'), 'no per-block buttons exist')
+        .to.be.null;
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirms, 'the first whole-file accept has nothing to replace').to.have.length(0);
+      const before = structuredClone(internal.segments);
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('deletes the file and stages the deletion');
+      expect(
+        confirms[0].message,
+        'the in-editor whole-file wording describes work that is not there'
+      ).to.not.contain('conflict pick and edit currently in the output');
+      // Declining leaves the accepted side in place and writes nothing.
+      expect(takeSideCalls).to.equal(0);
+      expect(internal.segments).to.deep.equal(before);
+    });
+
+    it('a verbatim take-side confirm names the on-disk write, not an output swap', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false;
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('writes it to disk and stages the file');
+    });
+
     it('serializes take-side clicks while the overwrite confirmation is open', async () => {
       setupDefaultMocks();
       let releaseConfirm: (() => void) | null = null;

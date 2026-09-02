@@ -1574,6 +1574,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     this.updateSegment(id, { type: 'conflict', lines: [], origin: null, fromConflict: false });
   }
 
+  /**
+   * True when it is safe to throw away an open inline-edit draft: no edit
+   * is open, or the user confirmed the discard. Opening an edit on a
+   * DIFFERENT segment abandons the current typed draft, so this is the
+   * confirm for that one path — the same hazard Reload and file switches
+   * already confirm for. Whole-file operations use
+   * confirmWholeFileOverwrite instead.
+   */
+  private async confirmDiscardOpenEdit(): Promise<boolean> {
+    if (this.editingSegmentId === null) return true;
+    return showConfirm(
+      'Discard the open edit?',
+      'This section has an edit that was not applied — continuing discards the typed text.',
+      'warning',
+    );
+  }
+
   private async startEditSegment(segment: OutputSegment): Promise<void> {
     if (this.actionsBlocked) return;
     // Opening an edit on ANOTHER segment throws away the current typed
@@ -1677,22 +1694,6 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   // ── Whole-file operations ─────────────────────────────────────────────
 
   /**
-   * True when it is safe to throw away an open inline-edit draft: no edit
-   * is open, or the user confirmed the discard. Whole-file operations
-   * replace ALL segments, so a typed-but-unapplied draft would vanish
-   * silently without this — the same hazard Reload and file switches
-   * already confirm for.
-   */
-  private async confirmDiscardOpenEdit(): Promise<boolean> {
-    if (this.editingSegmentId === null) return true;
-    return showConfirm(
-      'Discard the open edit?',
-      'This section has an edit that was not applied — continuing discards the typed text.',
-      'warning',
-    );
-  }
-
-  /**
    * True when the output is nothing but a previous whole-file accept: no
    * per-block pick, no hand edit and no open draft is in it, so another
    * whole-file button loses nothing. Only acceptWholeFile produces such a
@@ -1708,18 +1709,29 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     );
   }
 
-  private async confirmWholeFileOverwrite(): Promise<boolean> {
-    if (!this.hasUnsavedResolutions()) return true;
+  /**
+   * Ask before an operation throws the current output away, holding the
+   * re-entrancy flag for the whole round trip: showConfirm is async IPC, so
+   * without it a second click (or an External Tool launch) would slip in
+   * behind the open dialog. The wording is the caller's — an in-editor
+   * whole-file swap and an on-disk take-side have different consequences
+   * and must not share one message.
+   */
+  private async confirmOverwrite(title: string, messageText: string): Promise<boolean> {
     this.confirmingWholeFileOverwrite = true;
     try {
-      return await showConfirm(
-        'Replace in-progress resolution?',
-        'Using one whole-file version replaces every conflict pick and edit currently in the output. This cannot be undone.',
-        'warning',
-      );
+      return await showConfirm(title, messageText, 'warning');
     } finally {
       this.confirmingWholeFileOverwrite = false;
     }
+  }
+
+  private async confirmWholeFileOverwrite(): Promise<boolean> {
+    if (!this.hasUnsavedResolutions()) return true;
+    return this.confirmOverwrite(
+      'Replace in-progress resolution?',
+      'Using one whole-file version replaces every conflict pick and edit currently in the output. This cannot be undone.',
+    );
   }
 
   private async acceptWholeFile(origin: 'ours' | 'theirs' | 'base'): Promise<void> {
@@ -2046,7 +2058,21 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
     const startFile = this.conflictFile;
     if (this.hasUnsavedResolutions()) {
-      if (!(await this.confirmWholeFileOverwrite())) return;
+      // Take-side is NOT the in-editor swap acceptWholeFile's copy describes:
+      // it writes the chosen blob to disk and stages it, and for a side that
+      // dropped the file that means staging a deletion. In the flow that
+      // realistically reaches this — a whole-file accept on a modify/delete
+      // conflict, whose marker-free workdir file renders no per-block
+      // buttons at all — "replaces every conflict pick and edit" would name
+      // work that is not there while hiding the on-disk consequence that is.
+      const deletesFile = side === 'ours' ? !startFile.ours : !startFile.theirs;
+      const proceed = await this.confirmOverwrite(
+        'Take this whole side?',
+        deletesFile
+          ? 'Taking this side deletes the file and stages the deletion, discarding the picks, edits and whole-file choice currently in the output. This cannot be undone.'
+          : 'Taking this side writes it to disk and stages the file, discarding the picks, edits and whole-file choice currently in the output. This cannot be undone.',
+      );
+      if (!proceed) return;
       // Re-check identity too: a file switch during the overwrite confirm
       // must not let this call take a side on a different file.
       if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
