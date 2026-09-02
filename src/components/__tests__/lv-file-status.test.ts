@@ -26,6 +26,7 @@ import { expect, fixture, html } from '@open-wc/testing';
 import type { LvFileStatus } from '../sidebar/lv-file-status.ts';
 import '../sidebar/lv-file-status.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
+import { uiStore } from '../../stores/ui.store.ts';
 import type { Repository } from '../../types/git.types.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
@@ -644,6 +645,42 @@ describe('lv-file-status', () => {
       expect(revealCalls).to.have.length(1);
       expect((revealCalls[0].args as { path: string }).path).to.equal(windowsPath);
       expect(findCommands('plugin:shell|open')).to.have.length(0);
+    });
+
+    it('shows an error toast when the reveal command is rejected', async () => {
+      const el = await renderFileStatus();
+      const windowsPath = String.raw`C:\repo\src\app.ts`;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'plugin:path|join') return windowsPath;
+        if (command === 'reveal_in_file_manager') {
+          return Promise.reject({
+            code: 'INVALID_PATH',
+            message: String.raw`Invalid path: C:\repo\src\app.ts`,
+          });
+        }
+        return baseMock(command, args);
+      };
+
+      uiStore.setState({ toasts: [] });
+
+      const stagedItem = el.shadowRoot!.querySelector('.section .file-item')!;
+      stagedItem.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }),
+      );
+      await el.updateComplete;
+      const revealItem = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.context-menu-item'),
+      ).find((item) => item.textContent?.includes('Reveal'));
+      expect(revealItem).to.not.be.undefined;
+
+      revealItem!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts).to.have.length(1);
+      expect(toasts[0].type).to.equal('error');
+      expect(toasts[0].message).to.equal(String.raw`Invalid path: C:\repo\src\app.ts`);
     });
 
     it('does not offer Reveal for a deleted file that no longer exists', async () => {

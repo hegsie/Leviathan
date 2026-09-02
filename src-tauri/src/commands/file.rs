@@ -178,11 +178,21 @@ pub async fn reveal_in_file_manager(path: String) -> Result<OpenResult> {
     })
 }
 
+/// Build the percent-encoded `file://` URI handed to FileManager1.ShowItems.
+/// Returns `None` for paths that cannot be expressed as a file URL (for
+/// example a relative path), so the caller can fall back to `xdg-open`.
+#[cfg(target_os = "linux")]
+fn dbus_reveal_uri(path: &Path) -> Option<String> {
+    url::Url::from_file_path(path)
+        .ok()
+        .map(|url| url.to_string())
+}
+
 #[cfg(target_os = "linux")]
 fn try_dbus_reveal(path: &Path) -> bool {
     // Try to use dbus to reveal file in file manager
     // This works with Nautilus, Dolphin, and other modern file managers
-    let Ok(uri) = url::Url::from_file_path(path) else {
+    let Some(uri) = dbus_reveal_uri(path) else {
         return false;
     };
     std::process::Command::new("dbus-send")
@@ -580,6 +590,25 @@ mod tests {
         let argument = windows_reveal_argument(target);
 
         assert_eq!(argument, r#"/select,"C:\repo with spaces\src\main.rs""#);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_dbus_reveal_uri_percent_encodes_reserved_characters() {
+        assert_eq!(
+            dbus_reveal_uri(Path::new("/home/u/my repo/a b.txt")).as_deref(),
+            Some("file:///home/u/my%20repo/a%20b.txt")
+        );
+        assert_eq!(
+            dbus_reveal_uri(Path::new("/home/u/repo/a#b?c.txt")).as_deref(),
+            Some("file:///home/u/repo/a%23b%3Fc.txt")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_dbus_reveal_uri_rejects_relative_path() {
+        assert!(dbus_reveal_uri(Path::new("relative/a.txt")).is_none());
     }
 
     #[tokio::test]
