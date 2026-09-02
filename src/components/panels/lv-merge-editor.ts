@@ -1759,7 +1759,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return this.confirmOverwrite(
       'Replace in-progress resolution?',
       `Using one whole-file version ${this.overwriteLossText(
-        'replaces every conflict pick and edit currently in the output',
+        'replaces the picks, edits and whole-file choice currently in the output',
         'discards the edit that was typed but not applied',
       )}. This cannot be undone.`,
     );
@@ -2094,8 +2094,8 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       // dropped the file that means staging a deletion. In the flow that
       // realistically reaches this — a whole-file accept on a modify/delete
       // conflict, whose marker-free workdir file renders no per-block
-      // buttons at all — "replaces every conflict pick and edit" would name
-      // work that is not there while hiding the on-disk consequence that is.
+      // buttons at all — "Using one whole-file version" would describe an
+      // in-editor swap while hiding the on-disk consequence that is real.
       const deletesFile = side === 'ours' ? !startFile.ours : !startFile.theirs;
       const lead = deletesFile
         ? 'Taking this side deletes the file and stages the deletion'

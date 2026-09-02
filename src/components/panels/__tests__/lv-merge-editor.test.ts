@@ -3381,8 +3381,8 @@ describe('lv-merge-editor', () => {
       ).to.contain('discards the edit that was typed but not applied');
       expect(
         confirms[0].message,
-        'no pick or applied edit exists to replace'
-      ).to.not.contain('conflict pick and edit currently in the output');
+        'no pick, edit or whole-file choice exists to replace'
+      ).to.not.contain('currently in the output');
       expect(internal.editingSegmentId, 'declining keeps the edit open').to.equal(editedId);
       expect(internal.editDraft).to.equal('careful hand-typed merge');
 
@@ -3429,12 +3429,68 @@ describe('lv-merge-editor', () => {
 
       expect(confirms).to.have.length(1);
       expect(confirms[0].message).to.contain(
-        'replaces every conflict pick and edit currently in the output'
+        'replaces the picks, edits and whole-file choice currently in the output'
       );
       expect(confirms[0].message, 'the open draft is lost too and must be named').to.contain(
         'discards the edit that was typed but not applied'
       );
       // Declining keeps both.
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
+    });
+
+    it('a whole-file accept plus an open draft is not described as conflict picks', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+
+      // Toolbar "Use Ours" puts a whole-file accept — and nothing else — in
+      // the output. It has nothing to replace, so it must not confirm.
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirms, 'the first whole-file accept replaces nothing').to.have.length(0);
+      expect(internal.segments.length).to.equal(1);
+
+      // Opening an edit on that accepted segment takes outputIsWholeFileAccept
+      // false, so the NEXT whole-file button does confirm.
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await accept.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Replace in-progress resolution?');
+      expect(
+        confirms[0].message,
+        'the only thing in the output is the whole-file choice — name it, not picks'
+      ).to.not.contain('conflict pick');
+      expect(confirms[0].message).to.contain(
+        'replaces the picks, edits and whole-file choice currently in the output'
+      );
+      expect(confirms[0].message, 'the open draft is lost too and must be named').to.contain(
+        'discards the edit that was typed but not applied'
+      );
+      // Declining keeps the accepted side and the draft.
+      expect(internal.segments[0].origin).to.equal('ours');
       expect(internal.editingSegmentId).to.not.equal(null);
       expect(internal.editDraft).to.equal('typed but never applied');
     });
@@ -3812,8 +3868,8 @@ describe('lv-merge-editor', () => {
       expect(confirms[0].message).to.contain('deletes the file and stages the deletion');
       expect(
         confirms[0].message,
-        'the in-editor whole-file wording describes work that is not there'
-      ).to.not.contain('conflict pick and edit currently in the output');
+        'the in-editor whole-file lead describes a swap that is not what happens here'
+      ).to.not.contain('Using one whole-file version');
       // Declining leaves the accepted side in place and writes nothing.
       expect(takeSideCalls).to.equal(0);
       expect(internal.segments).to.deep.equal(before);
