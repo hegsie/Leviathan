@@ -2,6 +2,7 @@
 //! Search in files, diffs, commits, and commit messages
 
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::process::Command;
 use tauri::command;
 
@@ -58,6 +59,54 @@ pub(crate) fn find_match_position(line: &str, query: &str, case_sensitive: bool)
     }
 }
 
+/// Read NUL-framed `git grep -z -n` records (path\0line\0content\n) from a
+/// reader, stopping once `limit` records have been collected.
+pub(crate) fn read_grep_records<R: BufRead>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Vec<(String, u32, String)>> {
+    let mut records = Vec::with_capacity(limit.min(128));
+    let mut path = Vec::new();
+    let mut line = Vec::new();
+    let mut content = Vec::new();
+
+    while records.len() < limit {
+        path.clear();
+        if reader.read_until(0, &mut path)? == 0 {
+            break;
+        }
+        if path.pop() != Some(0) {
+            break;
+        }
+
+        line.clear();
+        if reader.read_until(0, &mut line)? == 0 || line.pop() != Some(0) {
+            break;
+        }
+
+        content.clear();
+        if reader.read_until(b'\n', &mut content)? == 0 {
+            break;
+        }
+        if content.last() == Some(&b'\n') {
+            content.pop();
+        }
+        if content.last() == Some(&b'\r') {
+            content.pop();
+        }
+
+        if let Ok(line_number) = String::from_utf8_lossy(&line).parse::<u32>() {
+            records.push((
+                String::from_utf8_lossy(&path).into_owned(),
+                line_number,
+                String::from_utf8_lossy(&content).into_owned(),
+            ));
+        }
+    }
+
+    Ok(records)
+}
+
 /// Search for a pattern in repository files using git grep
 #[command]
 pub async fn search_in_files(
@@ -78,14 +127,24 @@ pub async fn search_in_files(
     // the line number in SGR escapes even into a pipe, so the line-number
     // parse fails and every match is silently dropped, and `grep.column`
     // inserts an extra column field that would end up prefixed to the reported
-    // line content. Kept in step with the workspace grep, which parses the
+    // line content. `-z` because the default `path:line:content` framing is
+    // ambiguous and lossy: a path containing a colon shifts every field (and
+    // the match is then dropped by the line-number parse), a path containing a
+    // newline splits one record into two, and `core.quotePath` — on by default
+    // — emits any path with a non-ASCII byte double-quoted and octal-escaped,
+    // which would be shown to the user and opened as a file that does not
+    // exist. `-I` because `git grep -z` still prints an unframed
+    // `Binary file <path> matches` line, which would desynchronise the
+    // NUL-framed reader. Kept in step with the workspace grep, which parses the
     // same records.
     cmd.arg("-C")
         .arg(&path)
         .arg("grep")
         .arg("--no-color")
         .arg("--no-column")
-        .arg("-n");
+        .arg("-n")
+        .arg("-z")
+        .arg("-I");
 
     if !case_sensitive {
         cmd.arg("-i");
@@ -120,30 +179,17 @@ pub async fn search_in_files(
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let records = read_grep_records(
+        &mut std::io::Cursor::new(&output.stdout),
+        max_results as usize,
+    )
+    .map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to read git grep output: {}", e))
+    })?;
+
     let mut file_map: HashMap<String, Vec<SearchResult>> = HashMap::new();
-    let mut total_results: u32 = 0;
 
-    for line in stdout.lines() {
-        if total_results >= max_results {
-            break;
-        }
-
-        // Format: file:linenum:content
-        // We need to handle filenames that might contain colons on some systems,
-        // but the standard git grep format is file:num:content
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-
-        let file_path = parts[0].to_string();
-        let line_number: u32 = match parts[1].parse() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let line_content = parts[2].to_string();
-
+    for (file_path, line_number, line_content) in records {
         let (match_start, match_end) = find_match_position(&line_content, &query, case_sensitive);
 
         let result = SearchResult {
@@ -155,7 +201,6 @@ pub async fn search_in_files(
         };
 
         file_map.entry(file_path).or_default().push(result);
-        total_results += 1;
     }
 
     let results: Vec<SearchFileResult> = file_map
@@ -900,6 +945,108 @@ mod tests {
         .await
         .unwrap();
         assert!(missing.is_empty());
+    }
+
+    /// The default `path:line:content` framing is ambiguous when the path
+    /// itself contains a colon: the fields shift, the line-number parse fails
+    /// and the match is dropped, so a query that does match reports nothing.
+    #[tokio::test]
+    async fn test_search_in_files_finds_matches_in_paths_containing_a_colon() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add search content",
+            &[("folder/na:me.txt", "literal a.b\n")],
+        );
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let file = files
+            .iter()
+            .find(|f| f.file_path == "folder/na:me.txt")
+            .expect("a colon in the path must not hide the match");
+        assert_eq!(file.match_count, 1);
+        assert_eq!(file.matches[0].line_number, 1);
+        assert_eq!(file.matches[0].line_content, "literal a.b");
+    }
+
+    /// `core.quotePath` is on by default, so without `-z` git emits any path
+    /// holding a non-ASCII byte double-quoted and octal-escaped. That string is
+    /// what the search dialog shows and what it asks the app to open, so the
+    /// path must come back exactly as it is on disk.
+    #[tokio::test]
+    async fn test_search_in_files_reports_a_non_ascii_path_verbatim() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("Add search content", &[("café.txt", "literal a.b\n")]);
+        repo.repo()
+            .config()
+            .unwrap()
+            .set_bool("core.quotePath", true)
+            .unwrap();
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let paths: Vec<&str> = files.iter().map(|f| f.file_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["café.txt"],
+            "path must not be escaped or quoted"
+        );
+        assert_eq!(files[0].matches[0].line_content, "literal a.b");
+    }
+
+    /// A binary file that matches makes git print an unframed
+    /// `Binary file <path> matches` line even under `-z`; `-I` keeps it out so
+    /// the following records stay readable and the text matches survive.
+    #[tokio::test]
+    async fn test_search_in_files_keeps_text_matches_alongside_a_binary_match() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit(
+            "Add search content",
+            &[
+                ("a-binary.dat", "literal a.b\u{0}binary\u{0}payload\n"),
+                ("z-text.txt", "literal a.b\n"),
+            ],
+        );
+
+        let files = search_in_files(
+            repo.path_str(),
+            "a.b".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let file = files
+            .iter()
+            .find(|f| f.file_path == "z-text.txt")
+            .expect("a binary match must not swallow the text match that follows it");
+        assert_eq!(file.matches[0].line_number, 1);
+        assert_eq!(file.matches[0].line_content, "literal a.b");
+        assert!(
+            files.iter().all(|f| f.file_path != "a-binary.dat"),
+            "binary files are not reported as text matches"
+        );
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 //! Manage multi-repository workspaces
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -11,7 +11,7 @@ use git2::Repository;
 use tauri::command;
 use uuid::Uuid;
 
-use crate::commands::search::find_match_position;
+use crate::commands::search::{find_match_position, read_grep_records};
 use crate::error::{LeviathanError, Result};
 use crate::models::{Workspace, WorkspaceRepoStatus, WorkspaceRepository, WorkspacesConfig};
 
@@ -33,54 +33,6 @@ pub struct WorkspaceSearchResult {
 pub struct WorkspaceSearchResponse {
     pub results: Vec<WorkspaceSearchResult>,
     pub failures: Vec<String>,
-}
-
-/// Read NUL-framed `git grep -z -n` records (path\0line\0content\n) from a
-/// reader, stopping once `limit` records have been collected.
-fn read_grep_records<R: BufRead>(
-    reader: &mut R,
-    limit: usize,
-) -> std::io::Result<Vec<(String, u32, String)>> {
-    let mut records = Vec::with_capacity(limit.min(128));
-    let mut path = Vec::new();
-    let mut line = Vec::new();
-    let mut content = Vec::new();
-
-    while records.len() < limit {
-        path.clear();
-        if reader.read_until(0, &mut path)? == 0 {
-            break;
-        }
-        if path.pop() != Some(0) {
-            break;
-        }
-
-        line.clear();
-        if reader.read_until(0, &mut line)? == 0 || line.pop() != Some(0) {
-            break;
-        }
-
-        content.clear();
-        if reader.read_until(b'\n', &mut content)? == 0 {
-            break;
-        }
-        if content.last() == Some(&b'\n') {
-            content.pop();
-        }
-        if content.last() == Some(&b'\r') {
-            content.pop();
-        }
-
-        if let Ok(line_number) = String::from_utf8_lossy(&line).parse::<u32>() {
-            records.push((
-                String::from_utf8_lossy(&path).into_owned(),
-                line_number,
-                String::from_utf8_lossy(&content).into_owned(),
-            ));
-        }
-    }
-
-    Ok(records)
 }
 
 /// Run `git grep` in one repository. Errors carry only the underlying detail;
