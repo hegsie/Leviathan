@@ -32,6 +32,15 @@ import './lv-account-selector.ts';
 
 const log = loggers.gitlab;
 
+/**
+ * Page sizes this dialog asks for when listing merge requests, issues and
+ * pipelines. Each is passed straight into the listing call as `perPage`, so the
+ * number the request caps at and the number the "capped" hint discloses are the
+ * same constant — never a literal at the call site or in commands/gitlab.rs.
+ */
+const GITLAB_LIST_PAGE_SIZE = 30;
+const GITLAB_PIPELINE_PAGE_SIZE = 20;
+
 type TabType = 'connection' | 'merge-requests' | 'issues' | 'pipelines' | 'create-mr' | 'create-issue';
 
 @customElement('lv-gitlab-dialog')
@@ -579,6 +588,12 @@ export class LvGitLabDialog extends LitElement {
         height: 20px;
       }
 
+      .oauth-cancel {
+        width: 100%;
+        justify-content: center;
+        margin-top: var(--spacing-sm);
+      }
+
       .oauth-spinner {
         width: 20px;
         height: 20px;
@@ -662,6 +677,13 @@ export class LvGitLabDialog extends LitElement {
   // the next save creates a NEW account). Guards the store subscription from
   // re-selecting an existing account on a background emit.
   private isAddingAccount = false;
+  // The account/instance the in-flight OAuth flow targets, pinned when the flow
+  // STARTS. The browser round-trip is async, so `selectedAccountId` may point at
+  // a different account by the time `oauth-complete` lands — writing the new
+  // token there would route it onto the wrong account.
+  private oauthTargetAccountId: string | null | undefined;
+  private oauthTargetWasAddingAccount: boolean | undefined;
+  private oauthTargetInstanceUrl: string | undefined;
 
   // Create MR form
   @state() private createMrTitle = '';
@@ -695,6 +717,12 @@ export class LvGitLabDialog extends LitElement {
         if (state.status === 'error') {
           this.error = state.error ?? 'GitLab sign-in failed';
           showToast(this.error, 'error');
+          // The flow is over and can no longer emit `oauth-complete`, so release
+          // the pinned target — otherwise a later completion would be attributed
+          // to whichever account was selected when this failed flow started.
+          this.oauthTargetAccountId = undefined;
+          this.oauthTargetWasAddingAccount = undefined;
+          this.oauthTargetInstanceUrl = undefined;
         }
       }
     });
@@ -1001,6 +1029,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         this.mrFilter === 'all' ? undefined : this.mrFilter,
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1026,6 +1055,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.projectPath,
         this.issueFilter === 'all' ? undefined : this.issueFilter,
         undefined, // labels
+        GITLAB_LIST_PAGE_SIZE,
         token
       );
 
@@ -1048,6 +1078,7 @@ export class LvGitLabDialog extends LitElement {
         this.detectedRepo.instanceUrl,
         this.detectedRepo.projectPath,
         undefined, // status
+        GITLAB_PIPELINE_PAGE_SIZE,
         token
       );
 
@@ -1257,9 +1288,32 @@ export class LvGitLabDialog extends LitElement {
     }
 
     this.error = null;
+    this.oauthTargetAccountId = this.selectedAccountId;
+    this.oauthTargetWasAddingAccount = this.isAddingAccount;
+    this.oauthTargetInstanceUrl = this.instanceUrlInput;
     // Pass instance URL for self-hosted GitLab
     const instanceUrl = this.instanceUrlInput !== 'https://gitlab.com' ? this.instanceUrlInput : undefined;
+    // `startOAuth` never rejects — it reports failure through the OAuth state
+    // subscriber — so the pinned target is cleared there, not here.
     await oauthService.startOAuth('gitlab', clientId, instanceUrl);
+  }
+
+  /**
+   * Abandon a sign-in that is waiting on the browser. Without this the whole
+   * connect form stays disabled until the backend loopback wait times out. The
+   * local state is set explicitly rather than relying on the service's
+   * notification, so the form can never stay stuck if there is no pending entry
+   * to cancel.
+   */
+  private handleCancelOAuth(): void {
+    oauthService.cancelOAuth('gitlab');
+    this.oauthState = { status: 'idle' };
+    this.error = null;
+    // Abandoned flow: release the pinned target so a stray late completion
+    // can't be attributed to the account this flow started on.
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
+    this.oauthTargetInstanceUrl = undefined;
   }
 
   /**
@@ -1275,21 +1329,37 @@ export class LvGitLabDialog extends LitElement {
     // OAuth can complete after the dialog was closed; still persist the account
     // but surface a toast instead of the (invisible) inline status.
     const wasOpen = this.open;
+    const targetAccountId =
+      this.oauthTargetAccountId !== undefined
+        ? this.oauthTargetAccountId
+        : this.selectedAccountId;
+    const targetWasAddingAccount =
+      this.oauthTargetWasAddingAccount ?? this.isAddingAccount;
+    // The callback's instance URL wins; otherwise use the one the flow started
+    // with, not whatever a mid-flow account switch left in the form.
+    const targetInstanceUrl =
+      instanceUrl ?? this.oauthTargetInstanceUrl ?? this.instanceUrlInput;
+    this.oauthTargetAccountId = undefined;
+    this.oauthTargetWasAddingAccount = undefined;
+    this.oauthTargetInstanceUrl = undefined;
 
     this.isLoading = true;
     this.error = null;
+    const targetAccountExists = (): boolean =>
+      !targetAccountId ||
+      getAccountsByType('gitlab').some((account) => account.id === targetAccountId);
+    const selectionChangedDuringOAuth = (): boolean =>
+      this.selectedAccountId !== targetAccountId ||
+      this.isAddingAccount !== targetWasAddingAccount;
+    let applyOAuthResultToSelection = false;
+    let connectedAccountId: string | undefined;
 
     try {
-      // Update instance URL if provided
-      if (instanceUrl) {
-        this.instanceUrlInput = instanceUrl;
-      }
-
-      log.debug('Verifying token', { instanceUrl: this.instanceUrlInput });
+      log.debug('Verifying token', { instanceUrl: targetInstanceUrl });
 
       // Verify the token works
       const verifyResult = await gitService.checkGitLabConnectionWithToken(
-        this.instanceUrlInput,
+        targetInstanceUrl,
         tokens.accessToken
       );
 
@@ -1305,23 +1375,28 @@ export class LvGitLabDialog extends LitElement {
       }
 
       const user = verifyResult.data.user;
+      if (!targetAccountExists()) {
+        this.error = 'The GitLab account was removed before sign-in completed. Please sign in again.';
+        showToast(this.error, 'error');
+        return;
+      }
 
       log.debug('Account state', {
-        selectedAccountId: this.selectedAccountId,
+        targetAccountId,
         accountsCount: this.accounts.length,
       });
 
-      // Find existing account for this instance URL, or use selected account.
-      // When the user explicitly chose "Add account", never match an existing
-      // same-instance account — that would clobber it instead of creating the
-      // new account they asked for (the common two-identities-on-gitlab.com case).
-      const existingAccount = this.selectedAccountId
-        ? getAccountById(this.selectedAccountId)
-        : this.isAddingAccount
+      // Find existing account for this instance URL, or use the account the flow
+      // targeted. When the user explicitly chose "Add account", never match an
+      // existing same-instance account — that would clobber it instead of creating
+      // the new account they asked for (the two-identities-on-gitlab.com case).
+      const existingAccount = targetAccountId
+        ? getAccountById(targetAccountId)
+        : targetWasAddingAccount
           ? undefined
           : this.accounts.find((a) =>
               a.config.type === 'gitlab' &&
-              a.config.instanceUrl === this.instanceUrlInput
+              a.config.instanceUrl === targetInstanceUrl
             );
 
       if (existingAccount) {
@@ -1334,6 +1409,14 @@ export class LvGitLabDialog extends LitElement {
           tokens.refreshToken,
           tokens.expiresIn
         );
+        if (!targetAccountExists()) {
+          // Deleted between the existence check and the write — don't leave an
+          // orphaned credential behind for an account that no longer exists.
+          await credentialService.deleteAccountToken('gitlab', existingAccount.id);
+          this.error = 'The GitLab account was removed before sign-in completed. Please sign in again.';
+          showToast(this.error, 'error');
+          return;
+        }
 
         // Update cached user info
         if (user) {
@@ -1345,13 +1428,17 @@ export class LvGitLabDialog extends LitElement {
           });
         }
 
-        this.selectedAccountId = existingAccount.id;
+        applyOAuthResultToSelection = !selectionChangedDuringOAuth();
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = existingAccount.id;
+        }
+        connectedAccountId = existingAccount.id;
       } else {
         // Create new global account
         log.debug('Creating new global account');
         const { createEmptyIntegrationAccount, generateId } = await import('../../types/unified-profile.types.ts');
         const newAccount: IntegrationAccount = {
-          ...createEmptyIntegrationAccount('gitlab', this.instanceUrlInput),
+          ...createEmptyIntegrationAccount('gitlab', targetInstanceUrl),
           id: generateId(),
           name: user?.username ? `GitLab (${user.username})` : 'GitLab Account',
           isDefault: this.accounts.length === 0,
@@ -1374,23 +1461,48 @@ export class LvGitLabDialog extends LitElement {
           tokens.expiresIn
         );
 
-        this.selectedAccountId = savedAccount.id;
-        // The new account now exists and is selected — the add flow is complete.
-        this.isAddingAccount = false;
         // Refresh accounts list
         await unifiedProfileService.loadUnifiedProfiles();
         this.accounts = getAccountsByType('gitlab');
         log.debug('Account created', { count: this.accounts.length });
+        applyOAuthResultToSelection =
+          (this.selectedAccountId === targetAccountId ||
+            this.selectedAccountId === savedAccount.id) &&
+          this.isAddingAccount === targetWasAddingAccount;
+        if (applyOAuthResultToSelection) {
+          this.selectedAccountId = savedAccount.id;
+          // The new account now exists and is selected — the add flow is complete.
+          this.isAddingAccount = false;
+        }
+        connectedAccountId = savedAccount.id;
       }
+
+      if (connectedAccountId) {
+        // Mirror the verified status into the shared store so the profile
+        // manager's status dots update immediately (matches checkConnection and
+        // the GitHub/OIDC dialogs) instead of staying stale until restart.
+        unifiedProfileStore
+          .getState()
+          .setAccountConnectionStatus(connectedAccountId, 'connected');
+      }
+      if (!applyOAuthResultToSelection) {
+        // The user moved on to a different account mid-flow: the token is saved
+        // on the account the flow targeted, but the dialog's visible state must
+        // keep describing the account they are looking at now.
+        this.oauthState = { status: 'idle' };
+        showToast(
+          user?.username ? `Connected GitLab account @${user.username}` : 'Connected GitLab account',
+          'success'
+        );
+        return;
+      }
+
+      this.instanceUrlInput = targetInstanceUrl;
 
       // Force UI update
       this.requestUpdate();
 
       this.connectionStatus = verifyResult.data;
-      // Mirror the verified status into the shared store so the profile
-      // manager's status dots update immediately (matches checkConnection and
-      // the GitHub/OIDC dialogs) instead of staying stale until restart.
-      this.syncSharedConnectionStatus(true);
       this.oauthState = { status: 'idle' };
 
       // If the dialog was closed before OAuth completed, surface a toast so the
@@ -1407,6 +1519,9 @@ export class LvGitLabDialog extends LitElement {
         await this.loadAllData();
       }
     } catch (err) {
+      if (targetAccountId && !targetAccountExists()) {
+        await credentialService.deleteAccountToken('gitlab', targetAccountId);
+      }
       this.error = err instanceof Error ? err.message : 'Failed to complete OAuth';
     } finally {
       this.isLoading = false;
@@ -1635,6 +1750,10 @@ export class LvGitLabDialog extends LitElement {
             `}
           </button>
 
+          ${isOAuthPending ? html`
+            <button class="btn oauth-cancel" @click=${this.handleCancelOAuth}>Cancel</button>
+          ` : ''}
+
           ${this.oauthState.status === 'error' ? html`
             <div class="oauth-status error">${this.oauthState.error}</div>
           ` : ''}
@@ -1734,6 +1853,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.mergeRequests.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'merge requests',
+        'merge_requests',
+        this.mrFilter,
+      )}
     `;
   }
 
@@ -1791,6 +1917,13 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.issues.length,
+        GITLAB_LIST_PAGE_SIZE,
+        'issues',
+        'issues',
+        this.issueFilter,
+      )}
     `;
   }
 
@@ -1831,6 +1964,34 @@ export class LvGitLabDialog extends LitElement {
           </div>
         `)}
       </div>
+      ${this.renderCappedListHint(
+        this.pipelines.length,
+        GITLAB_PIPELINE_PAGE_SIZE,
+        'pipelines',
+        'pipelines',
+      )}
+    `;
+  }
+
+  private renderCappedListHint(
+    count: number,
+    limit: number,
+    label: string,
+    route: string,
+    state?: string,
+  ) {
+    if (count < limit || !this.detectedRepo) return nothing;
+    const base = this.detectedRepo.instanceUrl.replace(/\/$/, '');
+    const query = state ? `?state=${encodeURIComponent(state)}` : '';
+    return html`
+      <p class="help-text capped-list-hint" style="text-align:center;padding-top:8px">
+        Showing the first ${limit} ${label}; more may exist.
+        <a
+          class="help-link"
+          href="${base}/${this.detectedRepo.projectPath}/-/${route}${query}"
+          @click=${handleExternalLink}
+        >Open in GitLab</a> for the full list.
+      </p>
     `;
   }
 

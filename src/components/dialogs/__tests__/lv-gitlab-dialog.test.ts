@@ -531,6 +531,23 @@ describe('lv-gitlab-dialog', () => {
       expect(firstMr.querySelector('.mr-branch')?.textContent).to.include('main');
     });
 
+    it('does not disclose a cap when fewer merge requests come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Merge Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.mr-item').length).to.equal(mockMergeRequests.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
     it('shows filter dropdown and New MR button', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -553,6 +570,40 @@ describe('lv-gitlab-dialog', () => {
         (b) => b.textContent?.trim().includes('New MR')
       );
       expect(newMrBtn).to.not.be.undefined;
+    });
+
+    // The dialog asks the backend for an explicit page size and discloses that
+    // same number, so serving exactly what was requested keeps the requested cap
+    // and the disclosed cap from drifting apart unnoticed.
+    it('discloses capped merge requests with the active filter', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_merge_requests') {
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
+            ...mockMergeRequests[0],
+            iid: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Merge Requests',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.mr-item').length).to.equal(requestedPerPage);
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include(String(requestedPerPage));
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('state=opened');
     });
   });
 
@@ -583,6 +634,55 @@ describe('lv-gitlab-dialog', () => {
       expect(labels.length).to.equal(2);
       expect(labels[0].textContent?.trim()).to.equal('bug');
       expect(labels[1].textContent?.trim()).to.equal('performance');
+    });
+
+    it('does not disclose a cap when fewer issues come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.issue-item').length).to.equal(mockIssues.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
+    it('renders one capped hint for label-less issues', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_issues') {
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
+            ...mockIssues[0],
+            iid: index + 1,
+            labels: [],
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (tab) => tab.textContent?.trim() === 'Issues',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
+      expect(hints.length).to.equal(1);
+      expect(hints[0].textContent).to.include(String(requestedPerPage));
+      expect(hints[0].querySelector('a')?.getAttribute('href')).to.include('state=opened');
     });
   });
 
@@ -615,6 +715,57 @@ describe('lv-gitlab-dialog', () => {
       // Should show truncated sha
       const metaText = firstPipeline.querySelector('.pipeline-meta')?.textContent;
       expect(metaText).to.include('abc12345');
+    });
+
+    it('does not disclose a cap when fewer pipelines come back', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      (Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement).click();
+      await waitForLoad(el);
+
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(mockPipelines.length);
+      expect(el.shadowRoot!.querySelectorAll('.capped-list-hint').length).to.equal(0);
+    });
+
+    it('discloses when the pipeline list may be truncated', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+      let requestedPerPage = 0;
+      const baseInvoke = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'list_gitlab_pipelines') {
+          requestedPerPage = Number((args as Record<string, unknown>).perPage);
+          return Array.from({ length: requestedPerPage }, (_, index) => ({
+            ...mockPipelines[0],
+            id: 1000 + index,
+            iid: index + 1,
+          }));
+        }
+        return baseInvoke(command, args);
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+      const tab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (item) => item.textContent?.trim() === 'Pipelines',
+      ) as HTMLButtonElement;
+      tab.click();
+      await waitForLoad(el);
+
+      expect(requestedPerPage, 'dialog requested an explicit page size').to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.pipeline-item').length).to.equal(requestedPerPage);
+      const hint = el.shadowRoot!.querySelector('.capped-list-hint');
+      expect(hint?.textContent).to.include(String(requestedPerPage));
+      expect(hint?.querySelector('a')?.getAttribute('href')).to.include('/-/pipelines');
     });
   });
 
@@ -933,6 +1084,368 @@ describe('lv-gitlab-dialog', () => {
 
       const status = unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1'];
       expect(status?.status).to.equal('connected');
+    });
+  });
+
+  // The browser round-trip is asynchronous: the user can switch accounts (or
+  // start "Add account", or delete the account) between clicking "Sign in with
+  // GitLab" and the callback landing. The flow must stay bound to the account it
+  // started on instead of writing the new token onto whatever is selected then.
+  describe('OAuth target pinning (regression)', () => {
+    interface GitLabDialogInternals {
+      oauthTargetAccountId: string | null | undefined;
+      oauthTargetWasAddingAccount: boolean | undefined;
+      oauthTargetInstanceUrl: string | undefined;
+      selectedAccountId: string | null;
+      isAddingAccount: boolean;
+      instanceUrlInput: string;
+      error: string | null;
+      handleStartOAuth(): Promise<void>;
+      handleCancelOAuth(): void;
+      handleOAuthComplete(
+        tokens: { accessToken: string; refreshToken?: string; expiresIn?: number },
+        instanceUrl?: string
+      ): Promise<void>;
+    }
+
+    const secondAccount = createTestAccount({
+      id: 'gl-acc-2',
+      name: 'Personal GitLab',
+      integrationType: 'gitlab',
+      config: { type: 'gitlab', instanceUrl: 'https://gitlab.com' },
+      isDefault: false,
+    });
+
+    /**
+     * Hold `check_gitlab_connection_with_token` open so the test can mutate the
+     * dialog's selection while an OAuth completion is still in flight.
+     */
+    function gateVerification(): { started: Promise<void>; release: () => void } {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'check_gitlab_connection') {
+          markStarted();
+          await gate;
+        }
+        return previous(command, args);
+      };
+      return { started, release };
+    }
+
+    it('pins the selected account and instance when the sign-in flow starts', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return { authorizeUrl: 'https://gitlab.example.com/oauth/authorize', state: 'st-1' };
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.instanceUrlInput = 'https://gitlab.example.com';
+
+      await internals.handleStartOAuth();
+
+      expect(internals.oauthTargetAccountId, 'account pinned at start').to.equal('gl-acc-1');
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pinned at start').to.be.false;
+      expect(internals.oauthTargetInstanceUrl, 'instance pinned at start').to.equal(
+        'https://gitlab.example.com'
+      );
+    });
+
+    it('releases the pinned target when the sign-in flow fails to start', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const previous = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          throw new Error('Authorize URL request failed');
+        }
+        return previous(command, args);
+      };
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      // A pin left over from an earlier attempt must not survive a flow that
+      // never started — a later completion would otherwise be attributed to it.
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      // `startOAuth` never rejects — it reports the failure through the OAuth
+      // state subscriber.
+      await internals.handleStartOAuth();
+      await el.updateComplete;
+
+      expect(internals.oauthTargetAccountId, 'pin released').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetInstanceUrl, 'instance pin released').to.be.undefined;
+    });
+
+    it('writes the token to the account the flow started on, not a later selection', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount, secondAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount, secondAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'glpat_reauth', refreshToken: 'r-1', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      // The user switches to a different account while the browser round-trip
+      // is still outstanding.
+      internals.selectedAccountId = 'gl-acc-2';
+      gate.release();
+      await completion;
+
+      expect(keyringStore.get('gitlab_token_gl-acc-1')).to.equal('glpat_reauth');
+      expect(
+        keyringStore.has('gitlab_token_gl-acc-2'),
+        'the newly selected account is not overwritten'
+      ).to.be.false;
+      expect(internals.selectedAccountId, 'newer selection preserved').to.equal('gl-acc-2');
+    });
+
+    it('keeps a newer add-account flow when a re-auth completes', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'glpat_reauth_2', refreshToken: 'r-2', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      internals.selectedAccountId = null;
+      internals.isAddingAccount = true;
+      // loadInitialData's connection check already marked gl-acc-1 connected —
+      // clear it so the final assertion proves handleOAuthComplete set it for
+      // the OAuth target, not for the newer (mid-flight) selection.
+      unifiedProfileStore.getState().setAccountConnectionStatus('gl-acc-1', 'disconnected');
+      gate.release();
+      await completion;
+
+      expect(keyringStore.get('gitlab_token_gl-acc-1')).to.equal('glpat_reauth_2');
+      expect(internals.selectedAccountId, 'add-account selection preserved').to.be.null;
+      expect(internals.isAddingAccount, 'add-account flow preserved').to.be.true;
+      expect(
+        unifiedProfileStore.getState().accountConnectionStatus['gl-acc-1']?.status,
+        'the signed-in account is still marked connected'
+      ).to.equal('connected');
+    });
+
+    it('does not recreate an account deleted during the OAuth round-trip', async () => {
+      connectionResponse = mockConnectedStatus;
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.selectedAccountId = 'gl-acc-1';
+      internals.isAddingAccount = false;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      const gate = gateVerification();
+      invokeHistory.length = 0;
+      const completion = internals.handleOAuthComplete(
+        { accessToken: 'orphan-token', refreshToken: 'r-3', expiresIn: 3600 },
+        'https://gitlab.com'
+      );
+      await gate.started;
+      // The account is deleted from the profile manager mid-flow.
+      unifiedProfileStore.getState().setAccounts([]);
+      keyringStore.delete('gitlab_token_gl-acc-1');
+      gate.release();
+      await completion;
+
+      expect(
+        invokeHistory.some((h) => h.command === 'save_global_account'),
+        'a deleted account is not resurrected as a new one'
+      ).to.be.false;
+      expect(
+        keyringStore.has('gitlab_token_gl-acc-1'),
+        'no orphaned credential remains'
+      ).to.be.false;
+      expect(internals.error).to.match(/account was removed/i);
+    });
+
+    it('releases the pinned target when the user cancels a pending sign-in', async () => {
+      accountsResponse = [mockAccount];
+      unifiedProfileStore.getState().setAccounts([mockAccount]);
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await waitForLoad(el);
+
+      const internals = el as unknown as GitLabDialogInternals;
+      internals.oauthTargetAccountId = 'gl-acc-1';
+      internals.oauthTargetWasAddingAccount = false;
+      internals.oauthTargetInstanceUrl = 'https://gitlab.com';
+
+      internals.handleCancelOAuth();
+
+      expect(internals.oauthTargetAccountId, 'pin released on cancel').to.be.undefined;
+      expect(internals.oauthTargetWasAddingAccount, 'add-account pin released').to.be.undefined;
+      expect(internals.oauthTargetInstanceUrl, 'instance pin released').to.be.undefined;
+    });
+  });
+
+  // Without a Cancel affordance a user who closes the browser tab without
+  // authorizing is stuck: the sign-in button, the instance-URL input, the
+  // auth-method toggles AND the PAT save button are all disabled until the
+  // backend loopback wait times out (~5 minutes).
+  describe('Cancelling a pending OAuth sign-in', () => {
+    /** Starts a GitLab sign-in that hangs waiting for the browser callback. */
+    async function startPendingSignIn(options: { cancelFails?: boolean } = {}) {
+      const previousMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (command === 'oauth_get_authorize_url') {
+          return {
+            authorizeUrl: 'https://gitlab.com/oauth/authorize',
+            state: 'gl-state-1',
+            loopbackPort: 8086,
+          };
+        }
+        // Never resolves: the flow stays pending, as it does while the user is
+        // in the browser.
+        if (command === 'oauth_wait_for_callback') return new Promise(() => {});
+        if (command === 'oauth_cancel_flow' && options.cancelFails) {
+          throw new Error('No server found for port 8086');
+        }
+        return previousMock(command, args);
+      };
+
+      const el = await fixture<LvGitLabDialog>(html`
+        <lv-gitlab-dialog .open=${true}></lv-gitlab-dialog>
+      `);
+      await el.updateComplete;
+
+      await oauthService.startOAuth('gitlab', 'test-client-id');
+      await el.updateComplete;
+      return el;
+    }
+
+    afterEach(() => {
+      oauthService.cancelOAuth();
+    });
+
+    it('offers a Cancel button while pending and returns the form to idle', async () => {
+      const el = await startPendingSignIn();
+
+      const signInButton = el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement;
+      expect(signInButton.disabled, 'sign in is disabled while pending').to.be.true;
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton, 'a pending sign-in must offer a way out').to.exist;
+
+      invokeHistory.length = 0;
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el as unknown as { oauthState: { status: string } }).oauthState.status).to.equal(
+        'idle'
+      );
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be.false;
+      expect(
+        el.shadowRoot!.querySelector('.oauth-cancel'),
+        'cancel disappears once idle'
+      ).to.not.exist;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'spinner is gone').to.not.exist;
+
+      const release = invokeHistory.find((h) => h.command === 'oauth_cancel_flow');
+      expect(release, 'the backend loopback server is released').to.exist;
+      expect(release!.args).to.deep.equal({ port: 8086 });
+    });
+
+    it('returns the dialog to idle even when the backend release fails', async () => {
+      const el = await startPendingSignIn({ cancelFails: true });
+
+      const cancelButton = el.shadowRoot!.querySelector('.oauth-cancel') as HTMLButtonElement;
+      expect(cancelButton).to.exist;
+
+      cancelButton.click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect((el.shadowRoot!.querySelector('.btn-oauth') as HTMLButtonElement).disabled).to.be
+        .false;
+      expect(el.shadowRoot!.querySelector('.oauth-spinner'), 'no spinner remains').to.not.exist;
+      expect(
+        el.shadowRoot!.querySelector('.oauth-status.error'),
+        'a failed release is not user-facing'
+      ).to.not.exist;
+      expect((el as unknown as { error: string | null }).error).to.be.null;
+    });
+
+    it('leaves a sign-in pending in another provider dialog alone', async () => {
+      const el = await startPendingSignIn();
+
+      oauthService.cancelOAuth();
+      await oauthService.startOAuth('bitbucket', 'bb-client');
+      await oauthService.startOAuth('gitlab', 'gl-client');
+
+      (el as unknown as { handleCancelOAuth(): void }).handleCancelOAuth();
+
+      expect(
+        oauthService.getPendingProvider(),
+        'a sign-in pending in another provider dialog is left alone'
+      ).to.equal('bitbucket');
+      oauthService.cancelOAuth();
     });
   });
 

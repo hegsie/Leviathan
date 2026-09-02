@@ -483,6 +483,7 @@ function createMockHandler(mocks: typeof defaultMockData) {
         return null;
       }
       case 'push_tag':
+        return null;
       // Deleting a tag offers to delete the remote copy too — the local
       // delete leaves it behind and the tag fetch refspec restores it.
       case 'delete_remote_tag':
@@ -518,6 +519,22 @@ function createMockHandler(mocks: typeof defaultMockData) {
       // Remote commands
       case 'get_remotes':
         return mocks.remotes;
+
+      // The remote a fetch/pull/push resolves to before the network gate runs.
+      // Unmocked these fell through to the default arm's `null`, so every
+      // remote operation silently ran the "could not resolve" fallback and no
+      // test ever saw the remote the app actually picked.
+      //
+      // An explicit `remote` wins, mirroring the backend's resolve_*_remote,
+      // which hands back the requested remote untouched. The tag force-push
+      // retry re-resolves the destination the rejected push was aimed at, so
+      // ignoring the argument here answered `origin` for a push aimed at
+      // `upstream`. This must stay the ONLY arm for these three commands —
+      // a second `case 'get_push_remote'` later in the switch is unreachable.
+      case 'get_fetch_remote':
+      case 'get_pull_remote':
+      case 'get_push_remote':
+        return (args?.remote as string) ?? mocks.remotes[0]?.name ?? 'origin';
 
       case 'fetch':
         return null;
@@ -841,6 +858,16 @@ export async function setupTauriMocks(
             return state.tags;
           case 'get_remotes':
             return state.remotes;
+          // See the other builder's switch: an explicit `remote` wins, and
+          // this is the ONLY arm for these three commands.
+          case 'get_fetch_remote':
+          case 'get_pull_remote':
+          case 'get_push_remote':
+            return (
+              (args as { remote?: string })?.remote ??
+              state.remotes[0]?.name ??
+              'origin'
+            );
           case 'get_profiles':
             return [
               { id: 'default', name: 'Default', gitName: 'Test User', gitEmail: 'test@example.com' },
@@ -1061,6 +1088,7 @@ export async function setupTauriMocks(
             return null;
           }
           case 'push_tag':
+            return null;
           // See the other builder's switch — tag delete offers the remote too.
           case 'delete_remote_tag':
             return null;

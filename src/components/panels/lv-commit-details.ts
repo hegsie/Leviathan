@@ -709,6 +709,13 @@ export class LvCommitDetails extends LitElement {
     const repositoryChanged =
       changedProperties.has('repositoryPath') && this.repositoryPath !== '';
     if (repositoryChanged) {
+      // The file menu acts on the entry it was opened over but resolves the
+      // repo from `this.repositoryPath` at click time. A keyboard tab switch
+      // produces no document click, and the panel merely renders its empty
+      // state while `commit` is null — so an armed menu would come back over
+      // the NEW repo the moment a commit is selected, and Restore/Open would
+      // join repo B's path with repo A's file.
+      this.contextMenu = { ...this.contextMenu, visible: false };
       this.resetNotesState();
       this.refreshNotes();
     }

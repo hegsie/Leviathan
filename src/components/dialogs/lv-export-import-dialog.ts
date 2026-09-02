@@ -12,7 +12,7 @@
  * place instead of three.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles, buttonStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
@@ -228,7 +228,11 @@ export class LvExportImportDialog extends LitElement {
 
   /** Bound live to the active tab — never used for IPC, see pinnedRepoPath. */
   @property({ type: String }) repositoryPath = '';
+  @property({ type: String }) graphRepositoryPath = '';
   @property({ attribute: false }) branches: Branch[] = [];
+  private pinnedBranches: Branch[] = [];
+  private pinnedTags: Array<{ name: string; oid: string }> = [];
+  private pinnedCommits: Commit[] = [];
   @property({ attribute: false }) tags: Array<{ name: string; oid: string }> = [];
   @property({ attribute: false }) commits: Commit[] = [];
 
@@ -313,6 +317,11 @@ export class LvExportImportDialog extends LitElement {
 
     this.reset();
     this.pinnedRepoPath = this.repositoryPath;
+    this.pinnedBranches = [...this.branches];
+    this.pinnedTags =
+      this.graphRepositoryPath === this.repositoryPath ? [...this.tags] : [];
+    this.pinnedCommits =
+      this.graphRepositoryPath === this.repositoryPath ? [...this.commits] : [];
     this.isOpen = true;
     this.applyOptions(opts);
 
@@ -322,6 +331,29 @@ export class LvExportImportDialog extends LitElement {
       if (!this.isOpen) return;
       this.modal.open = true;
     });
+  }
+
+  private get scopedBranches(): Branch[] {
+    return this.repositoryPath === this.pinnedRepoPath ? this.branches : this.pinnedBranches;
+  }
+
+  private get scopedTags(): Array<{ name: string; oid: string }> {
+    return this.graphRepositoryPath === this.pinnedRepoPath ? this.tags : this.pinnedTags;
+  }
+
+  private get scopedCommits(): Commit[] {
+    return this.graphRepositoryPath === this.pinnedRepoPath ? this.commits : this.pinnedCommits;
+  }
+
+  protected willUpdate(changedProperties: PropertyValues<this>): void {
+    if (!this.isOpen) return;
+    if (this.repositoryPath === this.pinnedRepoPath && changedProperties.has('branches')) {
+      this.pinnedBranches = [...this.branches];
+    }
+    if (this.graphRepositoryPath === this.pinnedRepoPath) {
+      if (changedProperties.has('tags')) this.pinnedTags = [...this.tags];
+      if (changedProperties.has('commits')) this.pinnedCommits = [...this.commits];
+    }
   }
 
   public close(): void {
@@ -402,9 +434,9 @@ export class LvExportImportDialog extends LitElement {
   // ── Archive ──────────────────────────────────────────────────────────────
 
   private knownRefs(): string[] {
-    const locals = this.branches.filter((b) => !b.isRemote).map((b) => b.shorthand);
-    const remotes = this.branches.filter((b) => b.isRemote).map((b) => b.shorthand);
-    return ['HEAD', ...locals, ...remotes, ...this.tags.map((t) => t.name)];
+    const locals = this.scopedBranches.filter((b) => !b.isRemote).map((b) => b.shorthand);
+    const remotes = this.scopedBranches.filter((b) => b.isRemote).map((b) => b.shorthand);
+    return ['HEAD', ...locals, ...remotes, ...this.scopedTags.map((t) => t.name)];
   }
 
   private archiveRefOptions(): string[] {
@@ -488,17 +520,17 @@ export class LvExportImportDialog extends LitElement {
   private visibleCommits(): { rows: Commit[]; total: number; pinned: Commit | null } {
     const needle = this.commitFilter.trim().toLowerCase();
     const matches = needle
-      ? this.commits.filter(
+      ? this.scopedCommits.filter(
           (c) =>
             c.summary.toLowerCase().includes(needle) ||
             c.shortId.toLowerCase().includes(needle) ||
             c.oid.toLowerCase().startsWith(needle),
         )
-      : this.commits;
+      : this.scopedCommits;
     const rows = matches.slice(0, MAX_ROWS);
     const pinned =
       this.pinnedCommitOid && !rows.some((c) => c.oid === this.pinnedCommitOid)
-        ? (this.commits.find((c) => c.oid === this.pinnedCommitOid) ?? null)
+        ? (this.scopedCommits.find((c) => c.oid === this.pinnedCommitOid) ?? null)
         : null;
     return { rows, total: matches.length, pinned };
   }
@@ -533,7 +565,7 @@ export class LvExportImportDialog extends LitElement {
     // before its parent, which `git am` cannot replay. Fall back to graph
     // order, which is newest-first, so an ancestor always wins the tie.
     const order = new Map(
-      this.commits.map((c, i) => [c.oid, { timestamp: c.timestamp, index: i }]),
+      this.scopedCommits.map((c, i) => [c.oid, { timestamp: c.timestamp, index: i }]),
     );
     const oids = [...this.selectedCommits].sort((a, b) => {
       const ea = order.get(a);
@@ -642,8 +674,8 @@ export class LvExportImportDialog extends LitElement {
 
   private bundleRefOptions(): string[] {
     return [
-      ...this.branches.filter((b) => !b.isRemote).map((b) => `refs/heads/${b.shorthand}`),
-      ...this.tags.map((t) => `refs/tags/${t.name}`),
+      ...this.scopedBranches.filter((b) => !b.isRemote).map((b) => `refs/heads/${b.shorthand}`),
+      ...this.scopedTags.map((t) => `refs/tags/${t.name}`),
     ];
   }
 

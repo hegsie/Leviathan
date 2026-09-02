@@ -49,7 +49,20 @@ export async function offerRemoteTagDelete(repoPath: string, tagName: string): P
   const remotes = remotesResult.data ?? [];
   if (remotes.length === 0) return;
   // The remote push_tag targets by default, named so the confirm can say it.
-  const remote = (remotes.find((r) => r.name === 'origin') ?? remotes[0]).name;
+  //
+  // A failed resolve is NOT a dead end here: `resolve_push_remote` answers from
+  // config and falls back to the literal "origin", so a stale
+  // `remote.pushDefault`, or two remotes with no `origin` among them and no
+  // push/upstream config, makes `get_push_remote` fail on a repo that plainly
+  // has remotes. `remotes` was just read successfully, so fall back to the same
+  // local pick this used before — dropping the follow-up would leave the user
+  // with no surface at all for deleting the remote tag, and the next fetch
+  // would restore it.
+  const remoteResult = await gitService.getPushRemote(repoPath);
+  const remote =
+    remoteResult.success && remoteResult.data
+      ? remoteResult.data
+      : (remotes.find((r) => r.name === 'origin') ?? remotes[0]).name;
 
   // The SHARED tag-push key: this pushes a refspec for the same ref Push Tag
   // and Force Push Tag push, and it is held across the confirm so neither can

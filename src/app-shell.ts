@@ -5,6 +5,7 @@ import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
 import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
+import { rebasedOntoMessage } from './utils/rebase-messages.ts';
 import * as watcherService from './services/watcher.service.ts';
 
 const log = loggers.app;
@@ -681,8 +682,10 @@ export class AppShell extends LitElement {
   // Command palette
   @state() private showCommandPalette = false;
   @state() private showOutputPanel = false;
-  @state() private branches: Branch[] = [];
-  @state() private trackedFiles: string[] = [];
+  @state() private paletteBranches: Branch[] = [];
+  @state() private paletteTrackedFiles: string[] = [];
+  private commandPaletteRepositoryPath: string | null = null;
+  private commandPaletteRequestId = 0;
 
   // File history
   @state() private showFileHistory = false;
@@ -967,6 +970,7 @@ export class AppShell extends LitElement {
   }
   private lastOfflineMode = false;
   private lastAutoFetchInterval = 0;
+  private lastRemoteAllowlistKey = '';
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
   private shownIntegrationSuggestions: Set<string> = new Set();
@@ -1068,6 +1072,8 @@ export class AppShell extends LitElement {
   // Per-path monotonic sequence for badge hydration: a superseded hydration
   // (an older watcher tick's) must not overwrite a newer one's store write.
   private badgeHydrationSeq = new Map<string, number>();
+  private autoFetchStartSeq = new Map<string, number>();
+  private autoFetchOperationChains = new Map<string, Promise<void>>();
 
   /**
    * Tear down every per-repo backend service and client-side cache for a
@@ -1102,22 +1108,92 @@ export class AppShell extends LitElement {
   // Auto-fetch start/stop are fire-and-forget, but a failure must not be
   // fully silent — log it (matching the watcher-start error handling) so a
   // repo silently not auto-fetching is diagnosable.
-  private startAutoFetchLogged(path: string, intervalMinutes: number): void {
-    gitService
-      .startAutoFetch(path, intervalMinutes)
-      .then((r) => {
-        if (!r.success) log.warn('Failed to start auto-fetch for', path, r.error?.message);
+  private startAutoFetchLogged(
+    path: string,
+    intervalMinutes: number,
+    immediate = false,
+  ): void {
+    const sequence = (this.autoFetchStartSeq.get(path) ?? 0) + 1;
+    this.autoFetchStartSeq.set(path, sequence);
+    const previous = this.autoFetchOperationChains.get(path) ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.autoFetchStartSeq.get(path) !== sequence) return;
+        const r = await gitService.startAutoFetch(path, intervalMinutes);
+        if (!r.success) {
+          log.warn('Failed to start auto-fetch for', path, r.error?.message);
+          // `immediate` means this is the restart after the backend reported
+          // FETCH_REMOTE_CHANGED. That loop is still alive and still parked on
+          // its timer, so a failed restart leaves it re-reporting the same
+          // change every interval while the ahead/behind badge stays frozen —
+          // and, without this, saying nothing at all. Clear the dead loop and
+          // tell the user their counts are stale.
+          //
+          // Only while this restart is still the current one, the same guard
+          // the success path below applies: `startAutoFetch` is several IPC
+          // round trips, and the repo can be closed — or the loop legitimately
+          // restarted — while they are in flight. Reporting a superseded
+          // restart's failure toasts about a repo the user has already shut,
+          // and stops a loop somebody else just started.
+          if (immediate && this.autoFetchStartSeq.get(path) === sequence) {
+            this.reportAutoFetchFailure(path, r.error?.message);
+            await gitService.stopAutoFetch(path);
+          }
+          return;
+        }
+        if (this.autoFetchStartSeq.get(path) !== sequence) {
+          await gitService.stopAutoFetch(path);
+        } else if (immediate) {
+          const triggered = await gitService.triggerAutoFetch(path);
+          if (!triggered.success) {
+            log.warn('Failed to trigger auto-fetch for', path, triggered.error?.message);
+          }
+        }
       })
-      .catch((err) => log.warn('Failed to start auto-fetch for', path, err));
+      .catch((err) => log.warn('Failed to start auto-fetch for', path, err))
+      .finally(() => {
+        if (this.autoFetchOperationChains.get(path) === operation) {
+          this.autoFetchOperationChains.delete(path);
+        }
+      });
+    this.autoFetchOperationChains.set(path, operation);
   }
 
   private stopAutoFetchLogged(path: string): void {
-    gitService
-      .stopAutoFetch(path)
-      .then((r) => {
+    this.autoFetchStartSeq.set(path, (this.autoFetchStartSeq.get(path) ?? 0) + 1);
+    const previous = this.autoFetchOperationChains.get(path) ?? Promise.resolve();
+    const operation = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const r = await gitService.stopAutoFetch(path);
         if (!r.success) log.warn('Failed to stop auto-fetch for', path, r.error?.message);
       })
-      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err));
+      .catch((err) => log.warn('Failed to stop auto-fetch for', path, err))
+      .finally(() => {
+        if (this.autoFetchOperationChains.get(path) === operation) {
+          this.autoFetchOperationChains.delete(path);
+        }
+      });
+    this.autoFetchOperationChains.set(path, operation);
+  }
+
+  private async ensureAutoFetchRunning(path: string): Promise<void> {
+    const initialSettings = settingsStore.getState();
+    if (initialSettings.autoFetchInterval <= 0 || initialSettings.offlineMode) return;
+    const running = await gitService.isAutoFetchRunning(path);
+    const settings = settingsStore.getState();
+    if (
+      running.success &&
+      running.data === false &&
+      settings.autoFetchInterval > 0 &&
+      !settings.offlineMode &&
+      repositoryStore
+        .getState()
+        .openRepositories.some((repo) => repo.repository.path === path)
+    ) {
+      this.startAutoFetchLogged(path, settings.autoFetchInterval);
+    }
   }
 
   /**
@@ -1655,6 +1731,11 @@ export class AppShell extends LitElement {
 
       // Clear view state when switching repositories
       if (repoChanged) {
+        this.commandPaletteRequestId++;
+        this.showCommandPalette = false;
+        this.commandPaletteRepositoryPath = null;
+        this.paletteBranches = [];
+        this.paletteTrackedFiles = [];
         // Clear selected commit and refs
         this.selectedCommit = null;
         this.selectedCommitRefs = [];
@@ -1672,6 +1753,12 @@ export class AppShell extends LitElement {
         this.blameCommitOid = null;
         this.showFileHistory = false;
         this.fileHistoryPath = null;
+
+        // Graph context-menu entries are scoped to the repository that
+        // produced their commit/ref. Leaving either menu open across a tab
+        // switch lets a subsequent click resolve against the new active repo.
+        this.contextMenu = { ...this.contextMenu, visible: false };
+        this.refContextMenu = { ...this.refContextMenu, visible: false };
 
         // Clear search filter
         this.searchFilter = null;
@@ -2194,6 +2281,10 @@ export class AppShell extends LitElement {
     // per-repo lock in the backend. The sidebar has always guarded its own
     // checkout with the flag it shares with merge/rebase/rename.
     const refName = this.refContextMenu.refName;
+    const checkoutRef =
+      this.refContextMenu.refType === 'tag'
+        ? this.refContextMenu.fullName || `refs/tags/${refName}`
+        : refName;
     const repoPath = this.activeRepository.repository.path;
     if (!this.claimRefOperation(repoPath)) return;
     const refType = this.refContextMenu.refType;
@@ -2216,7 +2307,7 @@ export class AppShell extends LitElement {
     }
 
     try {
-      const result = await gitService.checkoutWithAutoStash(repoPath, refName);
+      const result = await gitService.checkoutWithAutoStash(repoPath, checkoutRef);
 
       if (result.success && result.data?.success) {
         this.handleAutoStashToast(result.data, refName, repoPath);
@@ -2341,7 +2432,7 @@ export class AppShell extends LitElement {
 
     if (result.success) {
       this.refreshConflictDialogRepo(repoPath);
-      showToast(`Rebased onto ${refName}`, 'success');
+      showToast(rebasedOntoMessage(refName, result.data), 'success');
     } else if (result.error?.code === 'REBASE_CONFLICT') {
       this.conflictOperationType = 'rebase';
       this.resetConflictDetailState();
@@ -2471,11 +2562,28 @@ export class AppShell extends LitElement {
     this.refContextMenu = { ...this.refContextMenu, visible: false };
 
     try {
-      const result = await gitService.pushTag({ path: repoPath, name: tagName });
+      const remoteResult = await gitService.getPushRemote(repoPath);
+      if (!remoteResult.success || !remoteResult.data) {
+        // A repo with no remote cannot push a tag anywhere. The resolver falls
+        // back to the literal `origin`, so its answer — "Remote not found:
+        // origin" — names a remote the user never configured, which reads as a
+        // bug rather than as missing setup. Translated exactly as the tag list
+        // translates it, so both tag-push surfaces say the same thing.
+        const remotes = await gitService.getRemotes(repoPath);
+        showToast(
+          remotes.success && (remotes.data?.length ?? 0) === 0
+            ? 'No remotes configured. Add a remote before pushing tags.'
+            : `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
+        return;
+      }
+      const remote = remoteResult.data;
+      const result = await gitService.pushTag({ path: repoPath, name: tagName, remote });
 
       if (result.success) {
         this.refreshConflictDialogRepo(repoPath);
-        showToast(`Pushed tag ${tagName}`, 'success');
+        showToast(`Pushed tag ${tagName} to ${remote}`, 'success');
       } else if (!gitService.isNetworkGateRefusal(result.error)) {
         log.error('Push tag failed:', result.error);
         showErrorWithSuggestion(result.error?.message || '', 'Push tag failed', {
@@ -2483,6 +2591,7 @@ export class AppShell extends LitElement {
           // Carries the tag through to the Force Push Tag suggestion action.
           branchName: tagName,
           repoPath,
+          remote,
         });
       }
     } finally {
@@ -3140,9 +3249,19 @@ export class AppShell extends LitElement {
       .openRepositories.find((r) => r.repository.path === repoPath);
     if (!repo) return;
 
+    const remoteResult = await gitService.getPushRemote(repoPath, remote);
+    if (!remoteResult.success || !remoteResult.data) {
+      showToast(
+        `Could not determine the tag destination: ${remoteResult.error?.message ?? 'Unknown error'}`,
+        'error',
+      );
+      return;
+    }
+    const destination = remoteResult.data;
+
     const confirmed = await showConfirm(
       'Force Push Tag',
-      `This moves the tag "${tagName}" on ${remote ?? 'the remote'} in ` +
+      `This moves the tag "${tagName}" on "${destination}" in ` +
         `${repo.repository.name} to your local commit. Anyone who already fetched ` +
         `the tag keeps the old one until they delete it locally.`,
       'error'
@@ -3153,13 +3272,14 @@ export class AppShell extends LitElement {
       path: repoPath,
       name: tagName,
       force: true,
-      // Omitted, not undefined: the backend resolver only runs when the key is
-      // absent, and git.service's allowlist/token lookups key off it too.
-      ...(remote ? { remote } : {}),
+      // Always explicit: the destination was resolved above, so the confirm,
+      // the toast and git.service's allowlist/token lookups all name the same
+      // remote.
+      remote: destination,
     });
     if (result.success) {
       showToast(
-        remote ? `Force pushed tag ${tagName} to ${remote}` : `Force pushed tag ${tagName}`,
+        `Force pushed tag ${tagName} to ${destination}`,
         'success',
       );
       this.refreshConflictDialogRepo(repoPath);
@@ -3891,13 +4011,14 @@ export class AppShell extends LitElement {
       return;
     }
     this.refreshInFlight = true;
+    let refreshingPath: string | null = null;
     try {
       // Refresh the repository state (e.g., after cherry-pick, merge, rebase)
       if (this.activeRepository) {
         // Capture the path before awaiting: if the user switches tabs during the
         // IPC round-trip, updateActiveRepository would otherwise write repo A's
         // data into repo B's (now-active) tab slot, corrupting its identity.
-        const refreshingPath = this.activeRepository.repository.path;
+        refreshingPath = this.activeRepository.repository.path;
         const result = await gitService.openRepository({ path: refreshingPath });
         if (result.success && result.data) {
           if (
@@ -3922,6 +4043,9 @@ export class AppShell extends LitElement {
       window.dispatchEvent(
         new CustomEvent('repository-refresh', { detail: { source: 'app-shell' } }),
       );
+      if (refreshingPath) {
+        await this.ensureAutoFetchRunning(refreshingPath);
+      }
     } finally {
       this.refreshInFlight = false;
     }
@@ -4079,6 +4203,7 @@ export class AppShell extends LitElement {
   }
 
   private async openCommandPalette(): Promise<void> {
+    const requestId = ++this.commandPaletteRequestId;
     // Fetch branches and tracked files for quick switching
     if (this.activeRepository) {
       const path = this.activeRepository.repository.path;
@@ -4086,14 +4211,52 @@ export class AppShell extends LitElement {
         gitService.getBranches(path),
         gitService.listTrackedFiles(path),
       ]);
-      if (branchResult.success && branchResult.data) {
-        this.branches = branchResult.data;
+      if (
+        requestId !== this.commandPaletteRequestId ||
+        this.activeRepository?.repository.path !== path
+      ) return;
+      // Only a failed command is an error. A repository with no branches or no
+      // tracked files succeeds with an empty (or absent) payload, and toasting
+      // that as "Unknown error" would cry wolf every time the palette opens.
+      if (branchResult.success) {
+        this.paletteBranches = branchResult.data ?? [];
+      } else {
+        this.paletteBranches = [];
+        showToast(
+          `Failed to load branches: ${branchResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
-      if (filesResult.success && filesResult.data) {
-        this.trackedFiles = filesResult.data;
+      if (filesResult.success) {
+        this.paletteTrackedFiles = filesResult.data ?? [];
+      } else {
+        this.paletteTrackedFiles = [];
+        showToast(
+          `Failed to load tracked files: ${filesResult.error?.message ?? 'Unknown error'}`,
+          'error',
+        );
       }
+      this.commandPaletteRepositoryPath = path;
+    } else {
+      this.paletteBranches = [];
+      this.paletteTrackedFiles = [];
+      this.commandPaletteRepositoryPath = null;
     }
+    if (requestId !== this.commandPaletteRequestId) return;
     this.showCommandPalette = true;
+  }
+
+  /**
+   * Dismissal must also supersede an in-flight load. Ctrl+P stays live while
+   * the palette is up (keyboard.service lets Ctrl/Cmd combos through an open
+   * overlay), so a second press starts another loader; pressing Escape before
+   * it settled cleared the flag, then the loader — same requestId, same
+   * repository — set it straight back and the palette sprang open again over
+   * whatever the user had just returned to.
+   */
+  private handleCommandPaletteClose(): void {
+    this.commandPaletteRequestId++;
+    this.showCommandPalette = false;
   }
 
   private requiresRepository(action: () => void): () => void {
@@ -4729,6 +4892,7 @@ export class AppShell extends LitElement {
     // reacting to unrelated changes would defer fetches indefinitely.
     this.lastAutoFetchInterval = settings.autoFetchInterval;
     this.lastOfflineMode = settings.offlineMode;
+    this.lastRemoteAllowlistKey = settings.remoteAllowlist.join('\0');
     this.autoFetchUnsubscribe = settingsStore.subscribe((state) => {
       // Offline mode gates the START call, but the loop it started is a Tokio
       // task with no re-check: turning offline mode on left it fetching every
@@ -4736,12 +4900,24 @@ export class AppShell extends LitElement {
       // start had been refused. Treat an offline-mode flip like an interval
       // change.
       const offlineChanged = state.offlineMode !== this.lastOfflineMode;
-      if (state.autoFetchInterval !== this.lastAutoFetchInterval || offlineChanged) {
+      const allowlistKey = state.remoteAllowlist.join('\0');
+      const allowlistChanged = allowlistKey !== this.lastRemoteAllowlistKey;
+      if (
+        state.autoFetchInterval !== this.lastAutoFetchInterval ||
+        offlineChanged ||
+        allowlistChanged
+      ) {
         this.lastAutoFetchInterval = state.autoFetchInterval;
         this.lastOfflineMode = state.offlineMode;
+        this.lastRemoteAllowlistKey = allowlistKey;
         const paths = repositoryStore
           .getState()
           .openRepositories.map((r) => r.repository.path);
+        if (allowlistChanged) {
+          for (const path of paths) {
+            this.stopAutoFetchLogged(path);
+          }
+        }
         if (state.autoFetchInterval > 0 && !state.offlineMode) {
           for (const path of paths) {
             this.startAutoFetchLogged(path, state.autoFetchInterval);
@@ -4824,6 +5000,16 @@ export class AppShell extends LitElement {
     message?: string;
   }): void => {
     if (!event.success) {
+      if (event.message === 'FETCH_REMOTE_CHANGED') {
+        const settings = settingsStore.getState();
+        const isOpen = repositoryStore
+          .getState()
+          .openRepositories.some((repo) => repo.repository.path === event.repoPath);
+        if (isOpen && settings.autoFetchInterval > 0 && !settings.offlineMode) {
+          this.startAutoFetchLogged(event.repoPath, settings.autoFetchInterval, true);
+        }
+        return;
+      }
       this.reportAutoFetchFailure(event.repoPath, event.message);
       return;
     }
@@ -5194,23 +5380,26 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleCheckoutBranch(e: CustomEvent<{ branch: string }>): Promise<void> {
+  private handleCheckoutBranch(
+    e: CustomEvent<{ branch: string; repositoryPath: string }>,
+  ): Promise<void> {
     // The third checkout surface. Round 33 folded the ref menu's and the graph
     // label's into this lock and left the palette's out — the same stale
     // enumeration again. Two concurrent auto-stash checkouts cross-apply and
     // cross-drop each other's stash, because a stash index is a position.
-    const repoPath = this.activeRepository?.repository.path;
-    if (!repoPath) return Promise.resolve();
-    return this.runRefExclusive(repoPath, () => this.checkoutBranchFromPalette(e));
+    const repoPath = e.detail.repositoryPath;
+    if (!repoPath || this.activeRepository?.repository.path !== repoPath) {
+      return Promise.resolve();
+    }
+    return this.runRefExclusive(repoPath, () =>
+      this.checkoutBranchFromPalette(repoPath, e.detail.branch)
+    );
   }
 
   private async checkoutBranchFromPalette(
-    e: CustomEvent<{ branch: string }>,
+    repoPath: string,
+    branch: string,
   ): Promise<void> {
-    if (!this.activeRepository) return;
-
-    const branch = e.detail.branch;
-    const repoPath = this.activeRepository.repository.path;
     const result = await gitService.checkoutWithAutoStash(repoPath, branch);
 
     if (result.success && result.data?.success) {
@@ -5224,14 +5413,17 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleOpenFileFromPalette(e: CustomEvent<{ path: string }>): Promise<void> {
-    if (!this.activeRepository) return;
+  private async handleOpenFileFromPalette(
+    e: CustomEvent<{ path: string; repositoryPath: string }>,
+  ): Promise<void> {
+    const activeRepoPath = this.activeRepository?.repository.path;
+    if (!activeRepoPath || activeRepoPath !== e.detail.repositoryPath) return;
     // gitService.openInConfiguredEditor returns a CommandResult (invokeCommand
     // never throws), so we must inspect result.success — the catch-only path
     // could never fire, so a file deleted since the palette listed it, or an
     // editor that fails to launch, closed the palette and did nothing at all.
     const result = await gitService.openInConfiguredEditor(
-      this.activeRepository.repository.path,
+      e.detail.repositoryPath,
       e.detail.path,
     );
     if (!result.success || !result.data?.success) {
@@ -5289,7 +5481,10 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleNavigateToCommit(e: CustomEvent<{ oid: string }>): void {
+  private handleNavigateToCommit(
+    e: CustomEvent<{ oid: string; repositoryPath: string }>,
+  ): void {
+    if (this.activeRepository?.repository.path !== e.detail.repositoryPath) return;
     this.revealCommitInGraph(e.detail.oid);
   }
 
@@ -5931,12 +6126,13 @@ export class AppShell extends LitElement {
 
       <lv-command-palette
         ?open=${this.showCommandPalette}
+        .repositoryPath=${this.commandPaletteRepositoryPath ?? ''}
         .commands=${this.getPaletteCommands()}
-        .branches=${this.branches}
-        .files=${this.trackedFiles}
+        .branches=${this.paletteBranches}
+        .files=${this.paletteTrackedFiles}
         .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
         .tags=${this.graphCanvas?.getTagTips() ?? []}
-        @close=${() => { this.showCommandPalette = false; }}
+        @close=${() => { this.handleCommandPaletteClose(); }}
         @checkout-branch=${this.handleCheckoutBranch}
         @open-file=${this.handleOpenFileFromPalette}
         @navigate-to-commit=${this.handleNavigateToCommit}
@@ -6211,7 +6407,8 @@ export class AppShell extends LitElement {
         ></lv-compare-branches-dialog>
         <lv-export-import-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          .branches=${this.branches}
+          .graphRepositoryPath=${this.graphCanvas?.repositoryPath ?? ''}
+          .branches=${this.activeRepository?.branches ?? []}
           .tags=${this.graphCanvas?.getTagTips() ?? []}
           .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
           @patch-applied=${(e: CustomEvent<{ repositoryPath?: string }>) =>

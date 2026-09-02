@@ -4,12 +4,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Emitter;
+use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+const FETCH_REMOTE_CHANGED: &str = "FETCH_REMOTE_CHANGED";
 
 /// Auto-fetch state for a single repository
 struct RepoFetchState {
     task: JoinHandle<()>,
+    trigger: Arc<Notify>,
 }
 
 /// Global auto-fetch service state
@@ -35,6 +39,8 @@ impl AutoFetchService {
         &mut self,
         repo_path: String,
         interval_minutes: u32,
+        remote: String,
+        remote_url: String,
         token: Option<String>,
         app_handle: tauri::AppHandle,
     ) {
@@ -44,17 +50,22 @@ impl AutoFetchService {
         let path = repo_path.clone();
         let interval = Duration::from_secs(interval_minutes as u64 * 60);
         let initial_delay = interval + stagger_offset(&repo_path, interval);
+        let trigger = Arc::new(Notify::new());
+        let task_trigger = Arc::clone(&trigger);
 
         let task = tokio::spawn(async move {
             // The first tick is staggered per repo so that many open repos
             // don't all fetch at the same instant (thundering herd on every
             // interval boundary); afterwards each repo keeps its own cadence.
-            tokio::time::sleep(initial_delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(initial_delay) => {}
+                _ = task_trigger.notified() => {}
+            }
             loop {
                 // Perform fetch
                 tracing::info!("Auto-fetching repository: {}", path);
 
-                match perform_fetch(&path, token.clone()).await {
+                match perform_fetch(&path, &remote, &remote_url, token.clone()).await {
                     Ok(status) => {
                         tracing::info!("Auto-fetch complete for {}: {:?}", path, status);
 
@@ -98,11 +109,23 @@ impl AutoFetchService {
                     }
                 }
 
-                tokio::time::sleep(interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = task_trigger.notified() => {}
+                }
             }
         });
 
-        self.repos.insert(repo_path, RepoFetchState { task });
+        self.repos
+            .insert(repo_path, RepoFetchState { task, trigger });
+    }
+
+    pub fn trigger(&self, repo_path: &str) -> bool {
+        let Some(state) = self.repos.get(repo_path) else {
+            return false;
+        };
+        state.trigger.notify_one();
+        true
     }
 
     /// Stop auto-fetching for a repository
@@ -172,30 +195,34 @@ fn stagger_offset(repo_path: &str, interval: Duration) -> Duration {
 }
 
 /// Perform a fetch operation
-async fn perform_fetch(repo_path: &str, token: Option<String>) -> Result<RemoteStatus, String> {
+async fn perform_fetch(
+    repo_path: &str,
+    remote_name: &str,
+    expected_remote_url: &str,
+    token: Option<String>,
+) -> Result<RemoteStatus, String> {
     let path = repo_path.to_string();
+    let remote_name = remote_name.to_string();
+    let expected_remote_url = expected_remote_url.to_string();
 
     tokio::task::spawn_blocking(move || {
         let repo =
             git2::Repository::open(&path).map_err(|e| format!("Failed to open repo: {}", e))?;
 
-        // Fetch the remote the CURRENT BRANCH tracks, not a hard-coded "origin".
-        //
-        // remote.rs's resolve_pull_target exists precisely because "origin" is
-        // an assumption: `git clone -o upstream`, Gerrit checkouts, and remotes
-        // renamed through this app's own Remote dialog all break it, and every
-        // cycle then failed with a persistent "auto-fetch failed" warning.
-        //
-        // The quieter failure mattered more. In the fork workflow — origin is
-        // your fork, the branch tracks upstream/main — fetching origin and then
-        // computing ahead/behind against the never-updated upstream tracking ref
-        // reported SUCCESS, so the badge and the "remote has N new commits"
-        // toast were stale while looking fresh.
-        let remote_name = tracked_remote(&repo);
+        // A branch switch can change the fetch destination. Stop before using
+        // credentials authorized for the previous remote; the frontend will
+        // restart this loop after re-running permission and token resolution.
+        let current_remote = crate::commands::remote::resolve_fetch_remote(&repo, None);
+        if current_remote != remote_name {
+            return Err(FETCH_REMOTE_CHANGED.to_string());
+        }
 
         let mut remote = repo
             .find_remote(&remote_name)
             .map_err(|e| format!("Failed to find remote: {}", e))?;
+        if remote.url().ok() != Some(expected_remote_url.as_str()) {
+            return Err(FETCH_REMOTE_CHANGED.to_string());
+        }
 
         // Use the shared credentials helper (reads from OS keyring via `security` CLI
         // on macOS, avoiding Keychain authorization dialogs)
@@ -215,32 +242,6 @@ async fn perform_fetch(repo_path: &str, token: Option<String>) -> Result<RemoteS
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
-}
-
-/// The remote the current branch tracks, falling back to "origin".
-///
-/// Mirrors what resolve_pull_target does for an explicit pull, so the
-/// background loop fetches the same remote the foreground would.
-fn tracked_remote(repo: &git2::Repository) -> String {
-    const DEFAULT_REMOTE: &str = "origin";
-
-    let Ok(head) = repo.head() else {
-        return DEFAULT_REMOTE.to_string();
-    };
-
-    if !head.is_branch() {
-        return DEFAULT_REMOTE.to_string();
-    }
-
-    let Ok(refname) = head.name() else {
-        return DEFAULT_REMOTE.to_string();
-    };
-
-    repo.branch_upstream_remote(refname)
-        .ok()
-        .and_then(|buf| buf.as_str().ok().map(|s| s.to_string()))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| DEFAULT_REMOTE.to_string())
 }
 
 /// Get remote status (ahead/behind counts)
@@ -340,104 +341,111 @@ mod tests {
         assert!(status.upstream_name.is_none());
     }
 
-    /// Auto-fetch must follow the branch's own upstream, the way an explicit
-    /// pull does. Hard-coding "origin" broke `git clone -o upstream` and
-    /// renamed remotes outright, and silently reported stale counts in the fork
-    /// workflow (origin = your fork, branch tracks upstream/main).
-    #[test]
-    fn test_tracked_remote_follows_the_branch_upstream() {
-        let test_repo = TestRepo::with_initial_commit();
-        let repo = test_repo.repo();
-        let branch = test_repo.current_branch();
-
-        // Two remotes; the branch tracks the one that is NOT origin.
-        repo.remote("origin", "https://example.com/fork.git")
-            .unwrap();
-        repo.remote("upstream", "https://example.com/canonical.git")
-            .unwrap();
-
-        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.reference(
-            &format!("refs/remotes/upstream/{}", branch),
-            head_commit.id(),
-            true,
-            "test",
-        )
-        .unwrap();
-
-        let mut local = repo.find_branch(&branch, git2::BranchType::Local).unwrap();
-        local
-            .set_upstream(Some(&format!("upstream/{}", branch)))
-            .unwrap();
-
-        assert_eq!(tracked_remote(&repo), "upstream");
-    }
-
-    /// The call site must USE the tracked remote, not just be able to compute
-    /// it: testing tracked_remote() alone leaves perform_fetch's one-line
-    /// substitution unverified.
-    ///
-    /// Uses a local path as the remote, so this exercises the real fetch with no
-    /// network. The repository deliberately has NO "origin": with the remote
-    /// hard-coded, find_remote("origin") fails and the fetch errors.
+    /// The timer must use the remote resolved by the frontend for its permission
+    /// check and token selection.
     #[tokio::test]
-    async fn test_perform_fetch_uses_the_tracked_remote_not_origin() {
+    async fn test_perform_fetch_uses_the_resolved_remote() {
         let upstream = TestRepo::with_initial_commit();
         let consumer = TestRepo::with_initial_commit();
-        let branch = consumer.current_branch();
 
         {
             let repo = consumer.repo();
-            // Only "upstream" exists — no "origin" anywhere.
             repo.remote("upstream", &upstream.path.to_string_lossy())
                 .unwrap();
             assert!(repo.find_remote("origin").is_err(), "origin must not exist");
-
-            let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
-            repo.reference(
-                &format!("refs/remotes/upstream/{}", branch),
-                head_commit.id(),
-                true,
-                "test",
-            )
-            .unwrap();
-
-            let mut local = repo.find_branch(&branch, git2::BranchType::Local).unwrap();
-            local
-                .set_upstream(Some(&format!("upstream/{}", branch)))
-                .unwrap();
         }
 
-        let result = perform_fetch(&consumer.path_str(), None).await;
+        let result = perform_fetch(
+            &consumer.path_str(),
+            "upstream",
+            &upstream.path.to_string_lossy(),
+            None,
+        )
+        .await;
 
         assert!(
             result.is_ok(),
-            "auto-fetch must follow the branch's upstream remote, got: {:?}",
+            "auto-fetch must use the resolved remote, got: {:?}",
             result.err()
         );
     }
 
-    /// With no upstream configured, "origin" remains the sensible default.
-    #[test]
-    fn test_tracked_remote_falls_back_to_origin() {
+    #[tokio::test]
+    async fn test_perform_fetch_rejects_a_changed_remote() {
         let test_repo = TestRepo::with_initial_commit();
-        let repo = test_repo.repo();
-        repo.remote("origin", "https://example.com/repo.git")
+        test_repo
+            .repo()
+            .remote("upstream", "https://example.com/repo.git")
             .unwrap();
 
-        assert_eq!(tracked_remote(&repo), "origin");
+        let error = perform_fetch(
+            &test_repo.path_str(),
+            "origin",
+            "https://example.com/repo.git",
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, FETCH_REMOTE_CHANGED);
     }
 
-    /// A detached HEAD has no upstream to consult, so the default applies
-    /// rather than a panic or an empty remote name.
-    #[test]
-    fn test_tracked_remote_on_detached_head_falls_back_to_origin() {
+    #[tokio::test]
+    async fn test_perform_fetch_rejects_a_changed_remote_url() {
         let test_repo = TestRepo::with_initial_commit();
-        let repo = test_repo.repo();
-        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-        repo.set_head_detached(head_oid).unwrap();
+        test_repo
+            .repo()
+            .remote("origin", "https://attacker.example/repo.git")
+            .unwrap();
 
-        assert_eq!(tracked_remote(&repo), "origin");
+        let error = perform_fetch(
+            &test_repo.path_str(),
+            "origin",
+            "https://github.com/example/repo.git",
+            Some("secret".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, FETCH_REMOTE_CHANGED);
+    }
+
+    /// The frontend restarts the loop after a fetch-remote change and then
+    /// triggers it, so the badge refreshes now instead of a full interval
+    /// later. A trigger for a repo with no loop must report that rather than
+    /// pretend it worked — the command turns that `false` into the error the
+    /// caller logs.
+    #[tokio::test]
+    async fn test_trigger_wakes_a_parked_loop_and_reports_unknown_repos() {
+        let mut service = AutoFetchService::new();
+        assert!(
+            !service.trigger("/repo/one"),
+            "a repo with no loop has nothing to wake"
+        );
+
+        let trigger = Arc::new(Notify::new());
+        let waiter = Arc::clone(&trigger);
+        // Stands in for the loop's `select!` arm: parked until the trigger fires.
+        let task = tokio::spawn(async move { waiter.notified().await });
+        service
+            .repos
+            .insert("/repo/one".to_string(), RepoFetchState { task, trigger });
+
+        assert!(service.trigger("/repo/one"), "a running loop is woken");
+
+        // `notify_one` stores a permit when nobody is waiting yet, so a trigger
+        // issued right after `start` — before the task has reached its first
+        // await — is not lost.
+        let state = service.repos.remove("/repo/one").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), state.task)
+            .await
+            .expect("the parked loop must wake on a trigger")
+            .expect("the loop task must not panic");
+
+        assert!(
+            !service.trigger("/repo/one"),
+            "a stopped loop is no longer triggerable"
+        );
     }
 
     #[test]

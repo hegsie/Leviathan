@@ -81,6 +81,7 @@ describe('lv-command-palette', () => {
 
     el = await fixture<LvCommandPalette>(html`
       <lv-command-palette
+        .repositoryPath=${'/repo/one'}
         .commands=${testCommands}
         .branches=${testBranches}
         .files=${[]}
@@ -358,7 +359,7 @@ describe('lv-command-palette', () => {
       el.open = true;
       await el.updateComplete;
 
-      let eventDetail: { branch: string } | null = null;
+      let eventDetail: { branch: string; repositoryPath: string } | null = null;
       el.addEventListener('checkout-branch', ((e: CustomEvent) => {
         eventDetail = e.detail;
       }) as EventListener);
@@ -373,6 +374,10 @@ describe('lv-command-palette', () => {
 
       expect(eventDetail).to.not.be.null;
       expect(eventDetail!.branch).to.be.a('string');
+      // app-shell's handleCheckoutBranch bails on a missing or non-active
+      // repositoryPath, so dropping it here would make "Switch to <branch>"
+      // silently do nothing at all.
+      expect(eventDetail!.repositoryPath).to.equal('/repo/one');
     });
 
     it('dispatches open-file event for file commands', async () => {
@@ -380,7 +385,7 @@ describe('lv-command-palette', () => {
       el.open = true;
       await el.updateComplete;
 
-      let eventDetail: { path: string } | null = null;
+      let eventDetail: { path: string; repositoryPath: string } | null = null;
       el.addEventListener('open-file', ((e: CustomEvent) => {
         eventDetail = e.detail;
       }) as EventListener);
@@ -393,6 +398,7 @@ describe('lv-command-palette', () => {
 
       expect(eventDetail).to.not.be.null;
       expect(eventDetail!.path).to.equal('src/utils.ts');
+      expect(eventDetail!.repositoryPath).to.equal('/repo/one');
     });
 
     it('dispatches navigate-to-commit event for commit commands', async () => {
@@ -400,7 +406,7 @@ describe('lv-command-palette', () => {
       el.open = true;
       await el.updateComplete;
 
-      let eventDetail: { oid: string } | null = null;
+      let eventDetail: { oid: string; repositoryPath: string } | null = null;
       el.addEventListener('navigate-to-commit', ((e: CustomEvent) => {
         eventDetail = e.detail;
       }) as EventListener);
@@ -413,6 +419,7 @@ describe('lv-command-palette', () => {
 
       expect(eventDetail).to.not.be.null;
       expect(eventDetail!.oid).to.equal('abc123def456');
+      expect(eventDetail!.repositoryPath).to.equal('/repo/one');
     });
   });
 
@@ -553,6 +560,7 @@ describe('lv-command-palette reveal-in-graph commands', () => {
   async function makePalette(): Promise<LvCommandPalette> {
     const el = await fixture<LvCommandPalette>(html`
       <lv-command-palette
+        .repositoryPath=${'/repo/reveal'}
         .branches=${[makeBranch('main'), makeBranch('feature/x')]}
         .tags=${[{ name: 'v1.0.0', oid: 'tagoid123' }]}
         open
@@ -593,32 +601,38 @@ describe('lv-command-palette reveal-in-graph commands', () => {
     const el = await makePalette();
     await search(el, 'reveal main');
 
-    let navigatedOid: string | null = null;
+    let detail: { oid: string; repositoryPath: string } | null = null;
     el.addEventListener('navigate-to-commit', (e: Event) => {
-      navigatedOid = (e as CustomEvent<{ oid: string }>).detail.oid;
+      detail = (e as CustomEvent<{ oid: string; repositoryPath: string }>).detail;
     });
 
     const input = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await el.updateComplete;
 
-    expect(navigatedOid).to.equal('abc123');
+    expect(detail).to.not.be.null;
+    expect(detail!.oid).to.equal('abc123');
+    // app-shell's handleNavigateToCommit drops the event when this does not
+    // match the active tab, so an absent path reveals nothing at all.
+    expect(detail!.repositoryPath).to.equal('/repo/reveal');
   });
 
   it('dispatches navigate-to-commit with the tag OID', async () => {
     const el = await makePalette();
     await search(el, 'reveal tag v1.0.0');
 
-    let navigatedOid: string | null = null;
+    let detail: { oid: string; repositoryPath: string } | null = null;
     el.addEventListener('navigate-to-commit', (e: Event) => {
-      navigatedOid = (e as CustomEvent<{ oid: string }>).detail.oid;
+      detail = (e as CustomEvent<{ oid: string; repositoryPath: string }>).detail;
     });
 
     const input = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await el.updateComplete;
 
-    expect(navigatedOid).to.equal('tagoid123');
+    expect(detail).to.not.be.null;
+    expect(detail!.oid).to.equal('tagoid123');
+    expect(detail!.repositoryPath).to.equal('/repo/reveal');
   });
 
   it('hides reveal entries from the default (empty-query) view', async () => {

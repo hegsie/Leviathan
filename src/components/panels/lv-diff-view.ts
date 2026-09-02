@@ -384,6 +384,18 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         border-color: var(--color-warning);
       }
 
+      /* The .stage-btn.stage:hover / .stage-btn.unstage:hover rules above are
+         restated here so a disabled button does not still light up on hover. */
+      .stage-btn:disabled,
+      .stage-btn.stage:disabled:hover,
+      .stage-btn.unstage:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        background: var(--color-bg-primary);
+        color: var(--color-text-secondary);
+        border-color: var(--color-border);
+      }
+
       .stage-btn svg {
         width: 12px;
         height: 12px;
@@ -806,6 +818,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         filter: brightness(1.1);
       }
 
+      .selection-btn:disabled,
+      .selection-btn:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        filter: none;
+      }
+
       .selection-btn svg {
         width: 12px;
         height: 12px;
@@ -860,6 +879,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
       .context-menu-item:hover {
         background: var(--color-bg-hover);
+      }
+
+      .context-menu-item:disabled,
+      .context-menu-item:disabled:hover {
+        opacity: 0.6;
+        cursor: not-allowed;
+        background: none;
       }
 
       .context-menu-item svg {
@@ -979,7 +1005,10 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * buffer and the Save target could name two different files.
    */
   private editPath: string | null = null;
+  private editRepositoryPath: string | null = null;
+  private editRequestId = 0;
   @state() private saving = false;
+  private saveContextChanged = false;
   @state() private contextMenu: DiffContextMenuState = { visible: false, x: 0, y: 0, line: null, hunk: null };
   @state() private selectedLines: Set<LineKey> = new Set();
   @state() private lineSelectionMode = false;
@@ -993,6 +1022,16 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private virtualScrollManager = new DiffVirtualScrollManager();
   private flatLines: FlatDiffItem[] = [];
   private diffScrollTop = 0;
+  private diffRequestId = 0;
+  // Reactive: the stage/unstage buttons bind `?disabled` to it, so a second
+  // click while a mutation is in flight is visibly refused rather than
+  // silently dropped by the guards in the handlers below.
+  @state() private diffMutationInProgress = false;
+  private loadedWorkingDiffContext: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  } | null = null;
 
   private handleDocumentClick = (): void => {
     if (this.contextMenu.visible) {
@@ -1054,7 +1093,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   async updated(changedProperties: Map<string, unknown>): Promise<void> {
     // A different file/commit resets the "show full diff" opt-in so large diffs
     // are re-truncated by default.
-    if (changedProperties.has('file') || changedProperties.has('commitFile')) {
+    if (
+      changedProperties.has('file') ||
+      changedProperties.has('commitFile') ||
+      changedProperties.has('repositoryPath')
+    ) {
       this.showFullDiff = false;
       // The editor does NOT follow the selection. This pane is one reused
       // element, so selecting another file while the editor was open left the
@@ -1063,12 +1106,43 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
       // the previous file's content over the newly selected file, destroying
       // its uncommitted changes with no git object and no reflog entry.
       this.exitEditModeOnFileChange();
-    }
-    if (changedProperties.has('file') && this.file) {
-      await this.loadWorkingDiff();
-    }
-    if (changedProperties.has('commitFile') && this.commitFile) {
-      await this.loadCommitDiff();
+      const previousFile = changedProperties.get('file') as StatusEntry | null | undefined;
+      const previousCommitFile = changedProperties.get('commitFile') as
+        | { commitOid: string; filePath: string }
+        | null
+        | undefined;
+      const editContextChanged =
+        (changedProperties.has('repositoryPath') &&
+          changedProperties.get('repositoryPath') !== this.repositoryPath) ||
+        (changedProperties.has('file') &&
+          (previousFile?.path !== this.file?.path ||
+            previousFile?.isConflicted !== this.file?.isConflicted)) ||
+        (changedProperties.has('commitFile') &&
+          (previousCommitFile?.commitOid !== this.commitFile?.commitOid ||
+            previousCommitFile?.filePath !== this.commitFile?.filePath));
+      if (editContextChanged) this.editRequestId++;
+
+      const replacedExistingContext =
+        (changedProperties.has('file') && changedProperties.get('file') !== null) ||
+        (changedProperties.has('commitFile') && changedProperties.get('commitFile') !== null) ||
+        (changedProperties.has('repositoryPath') && !!changedProperties.get('repositoryPath'));
+      if (replacedExistingContext) {
+        this.selectedLines = new Set();
+        this.contextMenu = { ...this.contextMenu, visible: false, line: null, hunk: null };
+        this.currentHunkIndex = 0;
+      }
+
+      if (this.commitFile) {
+        await this.loadCommitDiff();
+      } else if (this.file) {
+        await this.loadWorkingDiff();
+      } else {
+        this.diffRequestId++;
+        this.loadedWorkingDiffContext = null;
+        this.diff = null;
+        this.error = null;
+        this.loading = false;
+      }
     }
     if (changedProperties.has('repositoryPath') && this.repositoryPath) {
       await this.checkDiffToolAvailability();
@@ -1111,11 +1185,81 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     }
   }
 
+  /**
+   * True while the pane still shows the file an apply was made against.
+   *
+   * Deliberately weaker than `isSameWorkingDiffContext`: it ignores the loaded
+   * diff, so it stays true while a reload for the SAME file is still in flight
+   * (the "Load full diff" link is not disabled during an apply, so it can start
+   * one mid-apply, and it leaves no loaded context behind). That in-flight
+   * reload asked for the diff BEFORE the apply landed, so gating on the loaded
+   * context would both keep the invalidated positional
+   * `${hunkIndex}-${lineIndex}` keys and let the pre-apply content settle with
+   * nothing left to correct it - `status-changed` only re-binds the file when
+   * its status or conflicted flag changed, which a partial apply does not do.
+   * Re-running `loadWorkingDiff()` bumps `diffRequestId`, so the newer fetch
+   * discards the superseded one.
+   */
+  private isStillOnAppliedFile(context: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  }): boolean {
+    return (
+      !this.commitFile &&
+      this.repositoryPath === context.repositoryPath &&
+      this.file?.path === context.filePath &&
+      this.file?.isStaged === context.isStaged
+    );
+  }
+
+  /**
+   * Clear the pane when the reload that followed an apply found nothing left.
+   *
+   * Staging the last unstaged hunk (or unstaging the last staged one) empties
+   * this side of the index for the file, and the backend answers that reload
+   * with a "not found in diff" error — which would otherwise be painted into
+   * the pane as raw text. The shell cannot rescue it either: the surviving
+   * entry for the other side has the same path and status, so it never swaps
+   * the bound file. Clear and let the shell close the diff instead.
+   *
+   * A reload for another file can win the request race while the apply is
+   * still awaiting, leaving `error`/`file` describing that other file, so the
+   * selection has to still be the file we applied to.
+   * `isSameWorkingDiffContext` cannot be used for that: a "not found in diff"
+   * reload leaves no loaded context, which is exactly the case handled here.
+   */
+  private clearIfFullyApplied(context: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  }): void {
+    if (!this.isStillOnAppliedFile(context)) return;
+    if (!this.error?.includes('not found in diff')) return;
+    this.error = null;
+    this.diff = null;
+    this.file = null;
+    this.dispatchEvent(new CustomEvent('file-cleared', {
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   private async loadWorkingDiff(): Promise<void> {
     if (!this.repositoryPath || !this.file) return;
+    const requestId = ++this.diffRequestId;
+    const repositoryPath = this.repositoryPath;
+    const filePath = this.file.path;
+    const isStaged = this.file.isStaged;
+    this.loadedWorkingDiffContext = null;
     // Conflicted files render a redirect to the merge editor — don't load the
     // marker-laden diff at all.
-    if (this.isConflicted) return;
+    if (this.isConflicted) {
+      this.loading = false;
+      this.error = null;
+      this.diff = null;
+      return;
+    }
 
     this.loading = true;
     this.error = null;
@@ -1125,29 +1269,37 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
     try {
       // Initialize highlighter and detect language
-      await this.initCodeLanguage(this.file.path);
+      await this.initCodeLanguage(filePath);
 
       const result = await gitService.getFileDiff(
-        this.repositoryPath,
-        this.file.path,
-        this.file.isStaged,
+        repositoryPath,
+        filePath,
+        isStaged,
         this.showFullDiff ? undefined : DEFAULT_MAX_DIFF_LINES
       );
 
+      if (requestId !== this.diffRequestId) return;
       if (result.success) {
         this.diff = result.data!;
+        this.loadedWorkingDiffContext = { repositoryPath, filePath, isStaged };
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
     } catch (err) {
+      if (requestId !== this.diffRequestId) return;
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
-      this.loading = false;
+      if (requestId === this.diffRequestId) this.loading = false;
     }
   }
 
   private async loadCommitDiff(): Promise<void> {
     if (!this.repositoryPath || !this.commitFile) return;
+    const requestId = ++this.diffRequestId;
+    const repositoryPath = this.repositoryPath;
+    const commitOid = this.commitFile.commitOid;
+    const filePath = this.commitFile.filePath;
+    this.loadedWorkingDiffContext = null;
 
     this.loading = true;
     this.error = null;
@@ -1157,25 +1309,57 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
 
     try {
       // Initialize highlighter and detect language
-      await this.initCodeLanguage(this.commitFile.filePath);
+      await this.initCodeLanguage(filePath);
 
       const result = await gitService.getCommitFileDiff(
-        this.repositoryPath,
-        this.commitFile.commitOid,
-        this.commitFile.filePath,
+        repositoryPath,
+        commitOid,
+        filePath,
         this.showFullDiff ? undefined : DEFAULT_MAX_DIFF_LINES
       );
 
+      if (requestId !== this.diffRequestId) return;
       if (result.success) {
         this.diff = result.data!;
       } else {
         this.error = result.error?.message ?? 'Failed to load diff';
       }
     } catch (err) {
+      if (requestId !== this.diffRequestId) return;
       this.error = err instanceof Error ? err.message : 'Unknown error';
     } finally {
-      this.loading = false;
+      if (requestId === this.diffRequestId) this.loading = false;
     }
+  }
+
+  private currentWorkingDiffContext(): {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  } | null {
+    if (
+      this.commitFile ||
+      !this.file ||
+      !this.loadedWorkingDiffContext ||
+      this.loadedWorkingDiffContext.repositoryPath !== this.repositoryPath ||
+      this.loadedWorkingDiffContext.filePath !== this.file.path ||
+      this.loadedWorkingDiffContext.isStaged !== this.file.isStaged
+    ) return null;
+    return this.loadedWorkingDiffContext;
+  }
+
+  private isSameWorkingDiffContext(context: {
+    repositoryPath: string;
+    filePath: string;
+    isStaged: boolean;
+  }): boolean {
+    const current = this.currentWorkingDiffContext();
+    return !!(
+      current &&
+      current.repositoryPath === context.repositoryPath &&
+      current.filePath === context.filePath &&
+      current.isStaged === context.isStaged
+    );
   }
 
   private setViewMode(mode: DiffViewMode): void {
@@ -1194,13 +1378,20 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private get canEdit(): boolean {
     // Conflicted files must not be free-text edited here — their working-tree
     // content is git's conflict-marker text.
-    return this.file !== null && this.commitFile === null && !this.diff?.isBinary && !this.isConflicted;
+    return (
+      !this.saving &&
+      this.file !== null &&
+      this.commitFile === null &&
+      !this.diff?.isBinary &&
+      !this.isConflicted
+    );
   }
 
   /**
    * Toggle edit mode
    */
   private async toggleEditMode(): Promise<void> {
+    if (this.saving) return;
     if (!this.canEdit) return;
 
     if (!this.editMode) {
@@ -1218,17 +1409,28 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    */
   private async loadFileContent(): Promise<void> {
     if (!this.repositoryPath || !this.file) return;
+    const requestId = ++this.editRequestId;
+    const repositoryPath = this.repositoryPath;
+    const filePath = this.file.path;
 
     const result = await gitService.readFileContent(
-      this.repositoryPath,
-      this.file.path,
+      repositoryPath,
+      filePath,
       false // Read from working directory
     );
+
+    if (
+      requestId !== this.editRequestId ||
+      this.repositoryPath !== repositoryPath ||
+      this.file?.path !== filePath ||
+      this.commitFile
+    ) return;
 
     if (result.success && result.data !== undefined) {
       this.originalContent = result.data;
       this.editContent = result.data;
-      this.editPath = this.file.path;
+      this.editPath = filePath;
+      this.editRepositoryPath = repositoryPath;
       this.editMode = true;
       return;
     }
@@ -1242,7 +1444,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // separate codes because they are presented very differently.
     showToast(
       result.error?.code === 'FILE_NOT_FOUND'
-        ? `${this.file.path} is no longer on disk — refresh to see its current state`
+        ? `${filePath} is no longer on disk — refresh to see its current state`
         : result.error?.message ?? 'Could not open this file for editing',
       'error'
     );
@@ -1287,34 +1489,51 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     if (!this.editMode || !this.repositoryPath || !this.file || this.saving) return;
     // Identity, not just existence: the buffer must belong to the file it is
     // about to be written to.
-    if (this.editPath && this.editPath !== this.file.path) {
+    if (
+      (this.editPath && this.editPath !== this.file.path) ||
+      (this.editRepositoryPath && this.editRepositoryPath !== this.repositoryPath)
+    ) {
       showToast('The editor no longer matches the selected file', 'error');
       return;
     }
 
+    const requestId = this.editRequestId;
+    const repositoryPath = this.repositoryPath;
+    const filePath = this.file.path;
+    const content = this.editContent;
+    this.saveContextChanged = false;
     this.saving = true;
 
     const result = await gitService.writeFileContent(
-      this.repositoryPath,
-      this.file.path,
-      this.editContent,
+      repositoryPath,
+      filePath,
+      content,
       false // Don't auto-stage
     );
 
     this.saving = false;
 
     if (result.success) {
-      this.discardEditBuffer();
-      // Reload the diff to show updated changes
-      await this.loadWorkingDiff();
-      // Dispatch event to notify parent to refresh status
       this.dispatchEvent(new CustomEvent('file-edited', {
         bubbles: true,
         composed: true,
-        detail: { path: this.file.path }
+        detail: { path: filePath, repositoryPath }
       }));
+      if (
+        requestId !== this.editRequestId ||
+        this.editRepositoryPath !== repositoryPath ||
+        this.editPath !== filePath
+      ) return;
+      this.discardEditBuffer();
+      // Reload the diff to show updated changes
+      await this.loadWorkingDiff();
     } else {
-      showToast(`Failed to save file: ${result.error?.message ?? 'Unknown error'}`, 'error');
+      showToast(
+        this.saveContextChanged
+          ? `Failed to save ${filePath}; its unsaved edits were discarded when the selection changed`
+          : `Failed to save file: ${result.error?.message ?? 'Unknown error'}`,
+        'error'
+      );
     }
   }
 
@@ -1326,9 +1545,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * `showDiff = false` in app-shell. Every teardown the component CAN see
    * already guards (Cancel confirms, a file change warns); the host needs this
    * to close the gap for the ones it owns.
+   *
+   * A save in flight is NOT unsaved: the write is already on its way to disk
+   * and `saveEdit` reports its own failure, so counting it here would tell the
+   * user their edits were discarded moments before they land.
    */
   public get hasUnsavedEdits(): boolean {
-    return this.editMode && this.hasChanges;
+    return this.editMode && this.hasChanges && !this.saving;
   }
 
   /** The file the unsaved buffer belongs to, for a message naming it. */
@@ -1342,6 +1565,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     this.editContent = '';
     this.originalContent = '';
     this.editPath = null;
+    this.editRepositoryPath = null;
   }
 
   /**
@@ -1350,11 +1574,24 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * A confirm is not possible here — the property has already changed by the
    * time `updated()` runs, so there is nothing left to cancel. Unsaved text is
    * therefore reported rather than silently dropped.
+   *
+   * The same file turning conflicted closes the editor too, matching the
+   * invalidation `updated()` already applies to an in-flight load. `render()`
+   * hides the textarea behind the conflict notice, so the buffer would survive
+   * unreachable — and reappear over the merge the user then resolved, with
+   * Save writing pre-conflict text over the resolution.
    */
   private exitEditModeOnFileChange(): void {
     if (!this.editMode) return;
-    if (this.editPath && this.file?.path === this.editPath) return;
-    const lost = this.hasChanges ? this.editPath : null;
+    if (
+      !this.commitFile &&
+      !this.file?.isConflicted &&
+      this.editPath &&
+      this.file?.path === this.editPath &&
+      this.editRepositoryPath === this.repositoryPath
+    ) return;
+    if (this.saving) this.saveContextChanged = true;
+    const lost = this.hasChanges && !this.saving ? this.editPath : null;
     this.discardEditBuffer();
     if (lost) {
       showToast(`Unsaved edits to ${lost} were discarded`, 'warning');
@@ -1369,6 +1606,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    * bound app-wide to "close diff" — so it gets pressed reflexively.
    */
   private async cancelEdit(): Promise<void> {
+    if (this.saving) return;
     if (this.hasChanges) {
       const confirmed = await showConfirm(
         'Discard edits?',
@@ -1744,25 +1982,30 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   /**
    * Stage selected lines
    *
-   * Resolves to true only when the stage was applied and the diff reloaded.
-   * The reload renumbers hunks and lines, so every positional
+   * Resolves to true only when the stage was applied. A same-context reload
+   * renumbers hunks and lines, so every positional
    * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
   private async stageSelectedLines(): Promise<boolean> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
+    const context = this.currentWorkingDiffContext();
+    if (!context || this.diffMutationInProgress || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch();
     if (!patch) return false;
 
+    this.diffMutationInProgress = true;
     try {
-      const result = await gitService.stageHunk(this.repositoryPath, patch);
+      const result = await gitService.stageHunk(context.repositoryPath, patch);
       if (result.success) {
-        this.selectedLines = new Set();
         this.dispatchEvent(new CustomEvent('status-changed', {
           bubbles: true,
           composed: true,
         }));
-        await this.loadWorkingDiff();
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
+          await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
+        }
         return true;
       }
       console.error('Failed to stage selected lines:', result.error);
@@ -1770,6 +2013,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     } catch (err) {
       console.error('Failed to stage selected lines:', err);
       showToast(`Failed to stage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.diffMutationInProgress = false;
     }
     return false;
   }
@@ -1777,25 +2022,30 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   /**
    * Unstage selected lines
    *
-   * Resolves to true only when the unstage was applied and the diff reloaded.
-   * The reload renumbers hunks and lines, so every positional
+   * Resolves to true only when the unstage was applied. A same-context reload
+   * renumbers hunks and lines, so every positional
    * `${hunkIndex}-${lineIndex}` key a caller saved is stale after that.
    */
   private async unstageSelectedLines(): Promise<boolean> {
-    if (!this.repositoryPath || !this.file || this.selectedLines.size === 0) return false;
+    const context = this.currentWorkingDiffContext();
+    if (!context || this.diffMutationInProgress || this.selectedLines.size === 0) return false;
 
     const patch = this.buildSelectedLinesPatch('unstage');
     if (!patch) return false;
 
+    this.diffMutationInProgress = true;
     try {
-      const result = await gitService.unstageHunk(this.repositoryPath, patch);
+      const result = await gitService.unstageHunk(context.repositoryPath, patch);
       if (result.success) {
-        this.selectedLines = new Set();
         this.dispatchEvent(new CustomEvent('status-changed', {
           bubbles: true,
           composed: true,
         }));
-        await this.loadWorkingDiff();
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
+          await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
+        }
         return true;
       }
       console.error('Failed to unstage selected lines:', result.error);
@@ -1803,6 +2053,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     } catch (err) {
       console.error('Failed to unstage selected lines:', err);
       showToast(`Failed to unstage lines: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.diffMutationInProgress = false;
     }
     return false;
   }
@@ -1812,13 +2064,15 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    */
   private async handleStageHunk(hunk: DiffHunk, e: Event): Promise<void> {
     e.stopPropagation();
-    if (!this.repositoryPath || !this.file) return;
+    const context = this.currentWorkingDiffContext();
+    if (!context || this.diffMutationInProgress) return;
 
     const patch = this.buildHunkPatch(hunk);
     if (!patch) return;
 
+    this.diffMutationInProgress = true;
     try {
-      const result = await gitService.stageHunk(this.repositoryPath, patch);
+      const result = await gitService.stageHunk(context.repositoryPath, patch);
       if (result.success) {
         // Dispatch event to refresh status
         this.dispatchEvent(new CustomEvent('status-changed', {
@@ -1826,16 +2080,10 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           composed: true,
         }));
         // Reload diff - if file is fully staged, clear the view
-        await this.loadWorkingDiff();
-        // Check if we got a "not found" error (file fully staged)
-        if (this.error?.includes('not found in diff')) {
-          this.error = null;
-          this.diff = null;
-          this.file = null;
-          this.dispatchEvent(new CustomEvent('file-cleared', {
-            bubbles: true,
-            composed: true,
-          }));
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
+          await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
         }
       } else {
         console.error('Failed to stage hunk:', result.error);
@@ -1844,6 +2092,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     } catch (err) {
       console.error('Failed to stage hunk:', err);
       showToast(`Failed to stage hunk: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.diffMutationInProgress = false;
     }
   }
 
@@ -1852,21 +2102,27 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
    */
   private async handleUnstageHunk(hunk: DiffHunk, e: Event): Promise<void> {
     e.stopPropagation();
-    if (!this.repositoryPath || !this.file) return;
+    const context = this.currentWorkingDiffContext();
+    if (!context || this.diffMutationInProgress) return;
 
     const patch = this.buildHunkPatch(hunk);
     if (!patch) return;
 
+    this.diffMutationInProgress = true;
     try {
-      const result = await gitService.unstageHunk(this.repositoryPath, patch);
+      const result = await gitService.unstageHunk(context.repositoryPath, patch);
       if (result.success) {
         // Dispatch event to refresh status
         this.dispatchEvent(new CustomEvent('status-changed', {
           bubbles: true,
           composed: true,
         }));
-        // Reload diff to show updated state
-        await this.loadWorkingDiff();
+        // Reload diff - if nothing is left staged for this file, clear the view
+        if (this.isStillOnAppliedFile(context)) {
+          this.selectedLines = new Set();
+          await this.loadWorkingDiff();
+          this.clearIfFullyApplied(context);
+        }
       } else {
         console.error('Failed to unstage hunk:', result.error);
         showToast(`Failed to unstage hunk: ${result.error?.message ?? 'Unknown error'}`, 'error');
@@ -1874,6 +2130,8 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     } catch (err) {
       console.error('Failed to unstage hunk:', err);
       showToast(`Failed to unstage hunk: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+    } finally {
+      this.diffMutationInProgress = false;
     }
   }
 
@@ -2060,7 +2318,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private async handleContextStageLine(): Promise<void> {
     const line = this.contextMenu.line;
     const hunk = this.contextMenu.hunk;
-    if (!line || !hunk || !this.diff) return;
+    const context = this.currentWorkingDiffContext();
+    if (!line || !hunk || !this.diff || !context) return;
+    const requestId = this.diffRequestId;
 
     // Find hunk and line indices
     const hunkIndex = this.diff.hunks.indexOf(hunk);
@@ -2075,7 +2335,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // A successful stage reloads the diff, which renumbers hunks and lines, so
     // the saved `${hunkIndex}-${lineIndex}` keys would point at different code.
     // Put the previous selection back only when nothing was applied.
-    if (!(await this.stageSelectedLines())) {
+    if (
+      !(await this.stageSelectedLines()) &&
+      requestId === this.diffRequestId &&
+      this.isSameWorkingDiffContext(context)
+    ) {
       this.selectedLines = prevSelected;
     }
   }
@@ -2086,7 +2350,9 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
   private async handleContextUnstageLine(): Promise<void> {
     const line = this.contextMenu.line;
     const hunk = this.contextMenu.hunk;
-    if (!line || !hunk || !this.diff) return;
+    const context = this.currentWorkingDiffContext();
+    if (!line || !hunk || !this.diff || !context) return;
+    const requestId = this.diffRequestId;
 
     // Find hunk and line indices
     const hunkIndex = this.diff.hunks.indexOf(hunk);
@@ -2101,7 +2367,11 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
     // A successful unstage reloads the diff, which renumbers hunks and lines,
     // so the saved `${hunkIndex}-${lineIndex}` keys would point at different
     // code. Put the previous selection back only when nothing was applied.
-    if (!(await this.unstageSelectedLines())) {
+    if (
+      !(await this.unstageSelectedLines()) &&
+      requestId === this.diffRequestId &&
+      this.isSameWorkingDiffContext(context)
+    ) {
       this.selectedLines = prevSelected;
     }
   }
@@ -2394,6 +2664,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         <button
           class="stage-btn unstage"
           @click=${(e: Event) => this.handleUnstageHunk(hunk, e)}
+          ?disabled=${this.diffMutationInProgress}
           title="Unstage this hunk"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2405,6 +2676,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         <button
           class="stage-btn stage"
           @click=${(e: Event) => this.handleStageHunk(hunk, e)}
+          ?disabled=${this.diffMutationInProgress}
           title="Stage this hunk"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2677,14 +2949,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           Clear
         </button>
         ${isStaged ? html`
-          <button class="selection-btn primary" @click=${this.unstageSelectedLines}>
+          <button
+            class="selection-btn primary"
+            @click=${this.unstageSelectedLines}
+            ?disabled=${this.diffMutationInProgress}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
             Unstage Selected
           </button>
         ` : html`
-          <button class="selection-btn primary" @click=${this.stageSelectedLines}>
+          <button
+            class="selection-btn primary"
+            @click=${this.stageSelectedLines}
+            ?disabled=${this.diffMutationInProgress}
+          >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -2740,14 +3020,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ${showStageButton && isChangeableLine ? html`
           <div class="context-menu-divider"></div>
           ${isStaged ? html`
-            <button class="context-menu-item" @click=${this.handleContextUnstageLine}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextUnstageLine}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="5" y1="12" x2="19" y2="12"></line>
               </svg>
               Unstage line
             </button>
           ` : html`
-            <button class="context-menu-item" @click=${this.handleContextStageLine}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextStageLine}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
                 <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -2759,14 +3047,22 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         ${showStageButton ? html`
           <div class="context-menu-divider"></div>
           ${isStaged ? html`
-            <button class="context-menu-item" @click=${this.handleContextUnstageHunk}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextUnstageHunk}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="5" y1="12" x2="19" y2="12"></line>
               </svg>
               Unstage hunk
             </button>
           ` : html`
-            <button class="context-menu-item" @click=${this.handleContextStageHunk}>
+            <button
+              class="context-menu-item"
+              @click=${this.handleContextStageHunk}
+              ?disabled=${this.diffMutationInProgress}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="12" y1="5" x2="12" y2="19"></line>
                 <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -2833,6 +3129,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           <button
             class="edit-btn active"
             @click=${() => void this.toggleEditMode()}
+            ?disabled=${this.saving}
             title="Exit edit mode"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2847,7 +3144,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
           : nothing}
         <div class="editor-container">
           <div class="editor-toolbar">
-            <button class="cancel-btn" @click=${() => void this.cancelEdit()}>Cancel</button>
+            <button
+              class="cancel-btn"
+              @click=${() => void this.cancelEdit()}
+              ?disabled=${this.saving}
+            >
+              Cancel
+            </button>
             <button
               class="save-btn"
               @click=${this.saveEdit}
@@ -2861,6 +3164,7 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
             .value=${this.editContent}
             @input=${this.handleEditorChange}
             @keydown=${this.handleEditorKeydown}
+            ?disabled=${this.saving}
             spellcheck="false"
           ></textarea>
         </div>

@@ -50,6 +50,8 @@ interface PushCall {
 let pushCalls: PushCall[] = [];
 /** When set, push_tag rejects with this instead of succeeding. */
 let pushFailure: { code: string; message: string } | null = null;
+/** When set, get_push_remote rejects with this instead of resolving. */
+let pushRemoteFailure: { code: string; message: string } | null = null;
 /** The in-flight get_remotes call for the most recent context-menu open. */
 let remotesCall: Promise<unknown> | null = null;
 
@@ -67,6 +69,10 @@ async function createComponent(remotes: ReturnType<typeof remote>[] | 'fail'): P
           ? Promise.reject({ code: 'COMMAND_ERROR', message: 'bad config' })
           : Promise.resolve(remotes);
       return remotesCall;
+    }
+    if (command === 'get_push_remote') {
+      if (pushRemoteFailure) return Promise.reject(pushRemoteFailure);
+      return Promise.resolve('origin');
     }
     if (command === 'push_tag') {
       pushCalls.push(args as PushCall);
@@ -126,6 +132,7 @@ describe('lv-tag-list push destination', () => {
     const state = uiStore.getState();
     state.toasts.forEach((t) => state.removeToast(t.id));
     pushFailure = null;
+    pushRemoteFailure = null;
   });
 
   it('names the sole remote in the menu and pushes to it', async () => {
@@ -204,9 +211,7 @@ describe('lv-tag-list push destination', () => {
     expect(isRefOpRunning(REPO_PATH), 'the working-tree lock is not held').to.equal(false);
   });
 
-  it('an unreadable remote list still pushes the way it always did', async () => {
-    // remotes === null: the destination is unknown, so the arg is left off
-    // entirely and the backend resolves it.
+  it('an unreadable remote list resolves and names the backend destination', async () => {
     const el = await createComponent('fail');
     await openMenu(el);
     expect(pushLabel(el)).to.equal('Push to Remote');
@@ -215,15 +220,36 @@ describe('lv-tag-list push destination', () => {
     await waitUntil(() => pushCalls.length === 1, 'push_tag to be invoked');
 
     expect(pushCalls[0].name).to.equal('v1.0.0');
-    expect('remote' in pushCalls[0], 'no remote key at all, so the backend resolver runs')
-      .to.equal(false);
+    expect(pushCalls[0].remote).to.equal('origin');
 
     await waitUntil(
       () => uiStore.getState().toasts.some((t) => t.type === 'success'),
       'the success toast'
     );
     const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
-    expect(toast!.message).to.equal('Pushed tag v1.0.0 to remote');
+    expect(toast!.message).to.equal('Pushed tag v1.0.0 to origin');
+  });
+
+  it('an unresolvable destination is reported instead of pushing blind', async () => {
+    // The unreadable-remote-list path leans entirely on the backend resolver.
+    // When that fails too there is no destination to name in the toast or to
+    // hand the Force Push Tag retry, so nothing may be pushed.
+    pushRemoteFailure = { code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' };
+    const el = await createComponent('fail');
+    await openMenu(el);
+
+    pushItem(el)!.click();
+    await waitUntil(
+      () => uiStore.getState().toasts.some((t) => t.type === 'error'),
+      'the error toast'
+    );
+
+    const toast = uiStore.getState().toasts.find((t) => t.type === 'error');
+    expect(toast!.message).to.contain('Could not determine the tag destination');
+    expect(toast!.message).to.contain('Remote not found: origin');
+    expect(pushCalls, 'nothing is pushed to a destination nobody could name').to.have.length(0);
+    // The early return must leak no lock.
+    await waitUntil(() => !isRefOpRunning(REPO_PATH), 'the working-tree lock to be released');
   });
 
   it('a push clicked before the remote read lands still asks which remote', async () => {
@@ -233,14 +259,20 @@ describe('lv-tag-list push destination', () => {
     // was about to render is never offered.
     pushCalls = [];
     let landRemotes: (value: unknown) => void = () => undefined;
+    let remoteReads = 0;
     mockInvoke = (command: string, args?: unknown) => {
       if (command === 'get_tags') return Promise.resolve([TAG]);
       if (command === 'get_tag_sort_mode') return Promise.resolve('name');
       if (command === 'get_remotes') {
+        remoteReads++;
+        if (remoteReads > 1) {
+          return Promise.resolve([remote('origin'), remote('upstream')]);
+        }
         return new Promise((resolvePending) => {
           landRemotes = resolvePending;
         });
       }
+      if (command === 'get_push_remote') return Promise.resolve('origin');
       if (command === 'push_tag') {
         pushCalls.push(args as PushCall);
         return Promise.resolve(null);

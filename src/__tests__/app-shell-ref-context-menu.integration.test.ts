@@ -77,10 +77,11 @@ function commandIndex(name: string): number {
 /** Make every showConfirm() in the run resolve to "declined". */
 function declineConfirms(): void {
   const previous = mockInvoke;
-  mockInvoke = (command: string, args?: unknown) =>
-    command === 'plugin:dialog|message'
-      ? Promise.resolve('Cancel')
-      : previous(command, args);
+  mockInvoke = (command: string, args?: unknown) => {
+    if (command === 'plugin:dialog|confirm') return Promise.resolve(false);
+    if (command === 'plugin:dialog|message') return Promise.resolve('Cancel');
+    return previous(command, args);
+  };
 }
 
 function setupDefaultMocks(): void {
@@ -91,6 +92,8 @@ function setupDefaultMocks(): void {
       // their sidebar counterparts.
       case 'plugin:dialog|message':
         return 'Ok';
+      case 'plugin:dialog|confirm':
+        return true;
       case 'checkout_with_autostash':
         return { success: true, stashed: false, stashApplied: false, stashConflict: false, message: 'ok' };
       case 'open_repository':
@@ -105,6 +108,8 @@ function setupDefaultMocks(): void {
         return null;
       case 'push_tag':
         return null;
+      case 'get_push_remote':
+        return 'origin';
       case 'get_branches':
         return [];
       case 'get_remotes':
@@ -129,14 +134,19 @@ function createAppShell(): AppShell {
   return el;
 }
 
-function setRefContextMenu(el: AppShell, refName: string, refType: 'localBranch' | 'remoteBranch' | 'tag' = 'localBranch'): void {
+function setRefContextMenu(
+  el: AppShell,
+  refName: string,
+  refType: 'localBranch' | 'remoteBranch' | 'tag' = 'localBranch',
+  fullName = refName,
+): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (el as any).refContextMenu = {
     visible: true,
     x: 100,
     y: 100,
     refName,
-    fullName: refName,
+    fullName,
     refType,
   };
 }
@@ -162,6 +172,21 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(calls[0].args).to.deep.include({
         path: REPO_PATH,
         refName: 'feature-branch',
+      });
+    });
+
+    it('uses the qualified tag ref when a branch has the same short name', async () => {
+      const el = createAppShell();
+      setRefContextMenu(el, 'release', 'tag', 'refs/tags/release');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefCheckout();
+
+      const calls = findCommands('checkout_with_autostash');
+      expect(calls).to.have.length(1);
+      expect(calls[0].args).to.deep.include({
+        path: REPO_PATH,
+        refName: 'refs/tags/release',
       });
     });
 
@@ -321,6 +346,39 @@ describe('app-shell ref context menu handlers (integration)', () => {
       await (el as any).handleRefRebase();
 
       expect(findCommands('open_repository').length).to.be.greaterThan(0);
+    });
+
+    // A commit whose patch is already on `onto` is dropped by the rebase and
+    // disappears from the branch. `git rebase` warns on stderr; the toast is
+    // the only place this GUI can say it.
+    it('names the skipped commits in the success toast', async () => {
+      mockInvoke = async (command: string) => {
+        if (command === 'plugin:dialog|message') return 'Ok';
+        if (command === 'rebase') return 2;
+        return null;
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'main');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal(
+        'Rebased onto main, skipped 2 commit(s) already applied upstream'
+      );
+    });
+
+    it('keeps the plain success toast when nothing was skipped', async () => {
+      const el = createAppShell();
+      setRefContextMenu(el, 'main');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefRebase();
+
+      const toast = uiStore.getState().toasts.find((t) => t.type === 'success');
+      expect(toast?.message).to.equal('Rebased onto main');
     });
 
     it('opens conflict dialog on REBASE_CONFLICT', async () => {
@@ -552,7 +610,94 @@ describe('app-shell ref context menu handlers (integration)', () => {
       expect(calls[0].args).to.deep.include({
         path: REPO_PATH,
         name: 'v2.0.0',
+        remote: 'origin',
       });
+    });
+
+    it('reports an unresolvable destination instead of pushing blind', async () => {
+      // The toast and the Force Push Tag suggestion both name the destination,
+      // so a push that could not resolve one must stop rather than let the
+      // backend pick a remote the user is never told about.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: upstream' });
+        }
+        // Remotes exist — the configured push remote just is not one of them.
+        if (command === 'get_remotes') {
+          return Promise.resolve([
+            { name: 'origin', url: 'https://example.test/r.git', pushUrl: null },
+          ]);
+        }
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: upstream');
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
+    });
+
+    it('names missing setup, not a phantom remote, when the repo has none', async () => {
+      // The resolver falls back to the literal `origin`, so a fresh `git init`
+      // repo fails with "Remote not found: origin" — a remote the user never
+      // configured. The tag list translates that into setup guidance; this
+      // surface must say the same thing rather than read as a bug.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' });
+        }
+        if (command === 'get_remotes') return Promise.resolve([]);
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.equal(
+        'No remotes configured. Add a remote before pushing tags.',
+      );
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
+    });
+
+    it('falls back to the resolver error when the remote list cannot be read', async () => {
+      // No answer about the remote count means no basis for the setup wording;
+      // the resolver's own message is still better than silence.
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'get_push_remote') {
+          return Promise.reject({ code: 'REMOTE_NOT_FOUND', message: 'Remote not found: origin' });
+        }
+        if (command === 'get_remotes') {
+          return Promise.reject({ code: 'GIT_ERROR', message: 'could not read config' });
+        }
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'v2.0.0', 'tag');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefPushTag();
+
+      const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+      expect(errors.length, 'the user is told why nothing happened').to.equal(1);
+      expect(errors[0].message).to.contain('Could not determine the tag destination');
+      expect(errors[0].message).to.contain('Remote not found: origin');
+      expect(findCommands('push_tag').length, 'and nothing is pushed').to.equal(0);
     });
   });
 
@@ -686,4 +831,3 @@ describe('app-shell force-delete toast action (integration)', () => {
       .to.be.true;
   });
 });
-

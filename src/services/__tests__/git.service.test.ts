@@ -3,7 +3,11 @@ import {
   parseIssueReferences,
   isClosingKeyword,
   getAdoToken,
+  getGitHubToken,
+  getGitLabToken,
   fetch as gitFetch,
+  pull as gitPull,
+  push as gitPush,
   resetAdoGitCredentialSyncCache,
 } from '../git.service.ts';
 import { unifiedProfileStore } from '../../stores/unified-profile.store.ts';
@@ -379,7 +383,7 @@ describe('git.service - Tauri command invocations', () => {
   });
 });
 
-describe('git.service - getAdoToken refresh wiring', () => {
+describe('git.service - provider token refresh wiring', () => {
   const keyring = new Map<string, string>();
 
   afterEach(() => {
@@ -421,6 +425,73 @@ describe('git.service - getAdoToken refresh wiring', () => {
     expect(result.success).to.be.true;
     expect(result.data, 'returns the refreshed token').to.equal('new-access');
     expect(refreshCalled, 'refresh grant was used').to.be.true;
+  });
+
+  it('refreshes an expiring OAuth token for the default GitHub account', async () => {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('github'),
+      id: 'gh-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+    const key = 'github_token_gh-1';
+    keyring.clear();
+    keyring.set(key, 'old-access');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'old-access',
+      refreshToken: 'r1',
+      expiresAt: Date.now() + 1000,
+    }));
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') {
+        return { accessToken: 'new-access', refreshToken: 'r2', expiresIn: 3600 };
+      }
+      return null;
+    };
+
+    const result = await getGitHubToken();
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.equal('new-access');
+  });
+
+  it('refreshes an expiring OAuth token for the default GitLab account', async () => {
+    const account: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('gitlab', 'https://gitlab.example.com'),
+      id: 'gl-1',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([account]);
+    const key = 'gitlab_token_gl-1';
+    keyring.clear();
+    keyring.set(key, 'old-access');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'old-access',
+      refreshToken: 'r1',
+      expiresAt: Date.now() + 1000,
+    }));
+    let refreshArgs: Record<string, unknown> | undefined;
+
+    mockInvoke = async (command: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
+      if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') {
+        refreshArgs = a;
+        return { accessToken: 'new-access', refreshToken: 'r2', expiresIn: 3600 };
+      }
+      return null;
+    };
+
+    const result = await getGitLabToken();
+
+    expect(result.success).to.be.true;
+    expect(result.data).to.equal('new-access');
+    expect(refreshArgs?.instanceUrl).to.equal('https://gitlab.example.com');
   });
 });
 
@@ -511,7 +582,7 @@ describe('git.service - getRepoToken keyring sync (via fetch)', () => {
 
 describe('git.service - getRepoToken repo-aware account resolution', () => {
   const keyring = new Map<string, string>();
-  /** The token `fetch` actually sent to the backend — i.e. the one that authenticates. */
+  /** The token fetch/pull/push actually sent to the backend — i.e. the one that authenticates. */
   let fetchToken: string | undefined;
   /** Args the backend resolver was invoked with, or null when it was never called. */
   let resolverArgs: Record<string, unknown> | null;
@@ -543,20 +614,38 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     detectAdo?: unknown;
     detectGitLab?: unknown;
     remoteUrl?: string;
+    remotes?: Array<{ name: string; url: string; pushUrl: string | null }>;
     /** null → no profile assigned; 'throw' → the profile lookup fails. */
     assignedProfile?: { id: string } | null | 'throw';
     /** What the backend resolver returns; 'throw' → the command fails. */
     preferredAccount?: IntegrationAccount | null | 'throw';
+    /** The remote `fetch` resolves when the caller names none. */
+    fetchRemote?: string;
+    /** The remote `pull` / `push` resolve when the caller names none. */
+    pullRemote?: string;
+    pushRemote?: string;
+    oauthRefresh?: {
+      accessToken: string;
+      refreshToken?: string;
+      expiresIn?: number;
+    };
   }
 
   function installMock(opts: MockOptions) {
     mockInvoke = async (command: string, args?: unknown) => {
       const a = args as Record<string, unknown> | undefined;
+      // `fetch` resolves the repo's fetch remote before picking a credential,
+      // and only takes the remote-scoped token path when it has one. Leaving
+      // this unmocked sent every assertion below down a branch the real
+      // toolbar and background fetches no longer use.
+      if (command === 'get_fetch_remote') return opts.fetchRemote ?? 'origin';
+      if (command === 'get_pull_remote') return opts.pullRemote ?? 'origin';
+      if (command === 'get_push_remote') return opts.pushRemote ?? 'origin';
       if (command === 'detect_github_repo') return opts.detectGitHub ?? null;
       if (command === 'detect_ado_repo') return opts.detectAdo ?? null;
       if (command === 'detect_gitlab_repo') return opts.detectGitLab ?? null;
       if (command === 'get_remotes') {
-        return [{ name: 'origin', url: opts.remoteUrl ?? GH_URL, pushUrl: null }];
+        return opts.remotes ?? [{ name: 'origin', url: opts.remoteUrl ?? GH_URL, pushUrl: null }];
       }
       if (command === 'get_assigned_unified_profile') {
         if (opts.assignedProfile === 'throw') throw new Error('profile lookup failed');
@@ -569,8 +658,12 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       }
       if (command === 'get_keyring_token') return keyring.get(a!.key as string) ?? null;
       if (command === 'store_keyring_token') { keyring.set(a!.key as string, a!.value as string); return null; }
+      if (command === 'oauth_refresh_token') return opts.oauthRefresh ?? null;
       if (command === 'store_git_credentials') { credWrites.push(a!.url as string); return null; }
-      if (command === 'fetch') { fetchToken = a?.token as string | undefined; return null; }
+      if (command === 'fetch' || command === 'pull' || command === 'push') {
+        fetchToken = a?.token as string | undefined;
+        return null;
+      }
       return null;
     };
   }
@@ -635,6 +728,147 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
       integrationType: 'github',
       repoUrl: GH_URL,
     });
+  });
+
+  it('scopes provider detection and account resolution to the requested remote', async () => {
+    const { work } = setupGitHubAccounts();
+    const upstreamUrl = 'https://github.com/acme/upstream.git';
+    let detectedRemote: unknown;
+    installMock({
+      detectGitHub: { owner: 'acme', repo: 'upstream', remoteName: 'upstream' },
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: upstreamUrl, pushUrl: null },
+      ],
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+    const baseInvoke = mockInvoke;
+    mockInvoke = async (command: string, args?: unknown) => {
+      if (command === 'detect_github_repo') {
+        detectedRemote = (args as Record<string, unknown>).remoteName;
+      }
+      return baseInvoke(command, args);
+    };
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(detectedRemote).to.equal('upstream');
+    expect(resolverArgs).to.deep.equal({
+      profileId: 'profile-work',
+      integrationType: 'github',
+      repoUrl: upstreamUrl,
+    });
+    expect(fetchToken).to.equal('work-tok');
+  });
+
+  it("withholds the token when the fetch remote is on a different host from the account's", async () => {
+    // A fork setup: `origin` is the GitHub repo the account belongs to,
+    // `upstream` lives somewhere else entirely. Nothing about `upstream`
+    // resolves to an account, so the lookup falls back to the repo's default
+    // remote — and that token must not follow the fetch to another host.
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO, // matches `origin` only
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: 'https://git.other.test/acme/app.git', pushUrl: null },
+      ],
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(fetchToken, "origin's token must not authenticate to another host").to.be.undefined;
+  });
+
+  it('withholds a host-agnostic token too when the fetch remote host differs', async () => {
+    // The Azure DevOps branch resolves no credential host, so only the
+    // source-host === target-host comparison stands between an ADO token and
+    // an unrelated remote.
+    const work: IntegrationAccount = {
+      ...createEmptyIntegrationAccount('azure-devops', 'workorg'),
+      id: 'ado-work',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([work]);
+    keyring.clear();
+    seedToken('azure-devops', 'ado-work', 'ado-tok');
+    installMock({
+      detectAdo: { organization: 'workorg', project: 'p', repository: 'repo', remoteName: 'origin' },
+      remotes: [
+        { name: 'origin', url: 'https://dev.azure.com/workorg/p/_git/repo', pushUrl: null },
+        { name: 'upstream', url: 'https://github.com/acme/app.git', pushUrl: null },
+      ],
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitFetch({ path: '/repo', remote: 'upstream', silent: true });
+
+    expect(fetchToken, 'an ADO token must not be offered to github.com').to.be.undefined;
+  });
+
+  /**
+   * The fork layout the app cannot avoid: `origin` is your GitHub fork, the
+   * branch tracks `upstream` on an unrelated host. Neither pull nor push has a
+   * remote selector, so both resolve the remote themselves — and the token
+   * must follow that remote, not origin.
+   */
+  const FORK_REMOTES = [
+    { name: 'origin', url: GH_URL, pushUrl: null },
+    { name: 'upstream', url: 'https://git.other.test/acme/app.git', pushUrl: null },
+  ];
+
+  it("withholds origin's token from a pull that follows the branch's upstream", async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO, // matches `origin` only
+      remotes: FORK_REMOTES,
+      pullRemote: 'upstream',
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitPull({ path: '/repo', silent: true });
+
+    expect(fetchToken, "a GitHub PAT must not be sent to git.other.test").to.be.undefined;
+  });
+
+  it("withholds origin's token from a push aimed at another host", async () => {
+    setupGitHubAccounts();
+    installMock({
+      detectGitHub: GH_REPO,
+      remotes: FORK_REMOTES,
+      pushRemote: 'upstream',
+      assignedProfile: null,
+      preferredAccount: null,
+    });
+
+    await gitPush({ path: '/repo', silent: true });
+
+    expect(fetchToken, "a GitHub PAT must not be sent to git.other.test").to.be.undefined;
+  });
+
+  it('still authenticates a pull to the resolved remote on the same host', async () => {
+    const { work } = setupGitHubAccounts();
+    installMock({
+      detectGitHub: { owner: 'acme', repo: 'upstream', remoteName: 'upstream' },
+      remotes: [
+        { name: 'origin', url: GH_URL, pushUrl: null },
+        { name: 'upstream', url: 'https://github.com/acme/upstream.git', pushUrl: null },
+      ],
+      pullRemote: 'upstream',
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+    });
+
+    await gitPull({ path: '/repo', silent: true });
+
+    expect(fetchToken, 'scoping must not cost the credential its legitimate use').to.equal(
+      'work-tok',
+    );
   });
 
   it('still resolves by account URL patterns when the profile lookup fails', async () => {
@@ -722,6 +956,64 @@ describe('git.service - getRepoToken repo-aware account resolution', () => {
     await gitFetch({ path: '/repo', silent: true });
 
     expect(fetchToken).to.equal('gl-work-tok');
+  });
+
+  it('refreshes an expiring GitHub OAuth token before a repository fetch', async () => {
+    const { work } = setupGitHubAccounts();
+    const key = 'github_token_gh-work';
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'expired-gh-token',
+      refreshToken: 'gh-refresh',
+      expiresAt: Date.now() + 1000,
+    }));
+    installMock({
+      detectGitHub: GH_REPO,
+      assignedProfile: { id: 'profile-work' },
+      preferredAccount: work,
+      oauthRefresh: {
+        accessToken: 'fresh-gh-token',
+        refreshToken: 'rotated-gh-refresh',
+        expiresIn: 3600,
+      },
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('fresh-gh-token');
+  });
+
+  it('refreshes an expiring GitLab OAuth token before a repository fetch', async () => {
+    const work: IntegrationAccount = {
+      // The account must name the instance the remote below actually lives on:
+      // a GitLab token is pinned to its instance host, so a gitlab.com account
+      // is (correctly) withheld from a self-hosted gitlab.example.com remote.
+      ...createEmptyIntegrationAccount('gitlab', 'https://gitlab.example.com'),
+      id: 'gl-work',
+      isDefault: true,
+    };
+    unifiedProfileStore.getState().setAccounts([work]);
+    keyring.clear();
+    const key = 'gitlab_token_gl-work';
+    keyring.set(key, 'expired-gl-token');
+    keyring.set(`${key}_oauth`, JSON.stringify({
+      accessToken: 'expired-gl-token',
+      refreshToken: 'gl-refresh',
+      expiresAt: Date.now() + 1000,
+    }));
+    installMock({
+      detectGitLab: { projectId: '1', projectPath: 'acme/app', remoteName: 'origin' },
+      remoteUrl: 'https://gitlab.example.com/acme/app.git',
+      preferredAccount: work,
+      oauthRefresh: {
+        accessToken: 'fresh-gl-token',
+        refreshToken: 'rotated-gl-refresh',
+        expiresIn: 3600,
+      },
+    });
+
+    await gitFetch({ path: '/repo', silent: true });
+
+    expect(fetchToken).to.equal('fresh-gl-token');
   });
 
   it('keeps using the global default when nothing repo-specific matches', async () => {

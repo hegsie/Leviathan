@@ -123,6 +123,10 @@ describe('app-shell multi-repo behavior', () => {
     for (const key of Object.keys(mockResponses)) {
       delete mockResponses[key];
     }
+    mockResponses.get_fetch_remote = () => 'origin';
+    mockResponses.get_remotes = () => [
+      { name: 'origin', url: 'https://github.com/example/repo.git', pushUrl: null },
+    ];
     uiStore.setState({ toasts: [] });
     repositoryStore.getState().reset();
     searchIndexService.invalidate();
@@ -212,10 +216,13 @@ describe('app-shell multi-repo behavior', () => {
   /** start_auto_fetch now resolves a credential token first, so the invoke
    * lands a microtask later than a bare `setTimeout(0)` observes. */
   const waitForCommand = async (command: string): Promise<{ command: string; args: any } | undefined> => {
-    for (let i = 0; i < 50; i++) {
+    // Generous, because it returns the instant the call lands: the whole
+    // budget is only ever spent on a genuine failure. A tight one flaked when
+    // the full suite ran the browser under load.
+    for (let i = 0; i < 200; i++) {
       const call = invokeCallArgs.find((c) => c.command === command);
       if (call) return call;
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     }
     return undefined;
   };
@@ -332,17 +339,215 @@ describe('app-shell multi-repo behavior', () => {
       try {
         repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
         repositoryStore.getState().addRepository(mockRepo('/repo/two', 'two'));
-        await new Promise((r) => setTimeout(r, 0));
+        // Wait for the START to land, not a fixed macrotask: stops are queued
+        // behind the in-flight start for the same repo, and that start resolves
+        // a remote, a URL and a credential first. A `setTimeout(0)` here beat
+        // the stop to the assertion whenever the machine was loaded.
+        await waitForCommand('start_auto_fetch');
         invokeCallArgs.length = 0;
 
         repositoryStore.getState().removeRepository('/repo/one');
-        await new Promise((r) => setTimeout(r, 0));
 
-        const stopCall = invokeCallArgs.find((c) => c.command === 'stop_auto_fetch');
+        const stopCall = await waitForCommand('stop_auto_fetch');
         expect(stopCall).to.not.be.undefined;
         expect(stopCall!.args.path).to.equal('/repo/one');
       } finally {
         el.remove();
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    /** Lifecycle commands in the order the backend saw them. */
+    const lifecycleOrder = () =>
+      invokeCallArgs
+        .filter((c) =>
+          ['start_auto_fetch', 'stop_auto_fetch', 'trigger_auto_fetch'].includes(c.command)
+        )
+        .map((c) => c.command);
+
+    it('restarts every open repo when the remote allowlist changes', async () => {
+      // The allowlist decides which remotes the loop may reach, and the loop
+      // is a Tokio task with no re-check — so a running loop must be torn down
+      // and re-approved, not left running under the old decision.
+      settingsStore.setState({ autoFetchInterval: 5, remoteAllowlist: [] });
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+        await waitForCommand('start_auto_fetch');
+        invokeCallArgs.length = 0;
+
+        settingsStore.setState({ remoteAllowlist: ['github.com'] });
+        await waitForCommand('start_auto_fetch');
+
+        expect(lifecycleOrder()).to.deep.equal(['stop_auto_fetch', 'start_auto_fetch']);
+      } finally {
+        el.remove();
+        settingsStore.setState({ autoFetchInterval: 0, remoteAllowlist: [] });
+      }
+    });
+
+    it('restarts and immediately triggers a fetch when the fetch remote changed', async () => {
+      // A branch switch can move the fetch destination. The backend refuses to
+      // reuse credentials authorized for the old remote and reports
+      // FETCH_REMOTE_CHANGED; the frontend must re-run permission and token
+      // resolution and then fetch NOW, or the badge stays stale for a full
+      // interval.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/one',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+
+        const trigger = await waitForCommand('trigger_auto_fetch');
+        expect(trigger!.args.path).to.equal('/repo/one');
+        expect(lifecycleOrder()).to.deep.equal(['start_auto_fetch', 'trigger_auto_fetch']);
+        expect(uiStore.getState().toasts, 'a remote change is not a failure to report').to.have
+          .length(0);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('reports and clears the loop when the fetch-remote restart fails', async () => {
+      // The backend keeps its loop parked on the timer after
+      // FETCH_REMOTE_CHANGED. If the restart cannot re-approve it — here the
+      // branch's upstream remote is gone — the old loop would re-report the
+      // same change every interval, forever, with the badge frozen and nothing
+      // shown to the user.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      mockResponses.get_remotes = () => [];
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/one',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+
+        const stopCall = await waitForCommand('stop_auto_fetch');
+        expect(stopCall, 'the loop that cannot be restarted is torn down').to.not.be.undefined;
+        expect(stopCall!.args.path).to.equal('/repo/one');
+        expect(
+          invokeCallArgs.find((c) => c.command === 'start_auto_fetch'),
+          'the refused start never reached the backend'
+        ).to.be.undefined;
+
+        const toast = uiStore.getState().toasts.find((t) => t.message.includes('auto-fetch failed'));
+        expect(toast, 'the user is told the ahead/behind counts are stale').to.not.be.undefined;
+        expect(toast!.message).to.contain('one');
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('does not restart a fetch-remote change for a repo that is no longer open', async () => {
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      try {
+        (el as any).handleAutoFetchCompleted({
+          repoPath: '/repo/closed',
+          success: false,
+          ahead: 0,
+          behind: 0,
+          message: 'FETCH_REMOTE_CHANGED',
+        });
+        await new Promise((r) => setTimeout(r, 20));
+
+        expect(lifecycleOrder(), 'a closed repo has no loop to revive').to.deep.equal([]);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0 });
+      }
+    });
+
+    it('does not restart a fetch-remote change while offline, or with no interval', async () => {
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      const event = {
+        repoPath: '/repo/one',
+        success: false,
+        ahead: 0,
+        behind: 0,
+        message: 'FETCH_REMOTE_CHANGED',
+      };
+      try {
+        settingsStore.setState({ autoFetchInterval: 5, offlineMode: true });
+        (el as any).handleAutoFetchCompleted(event);
+        await new Promise((r) => setTimeout(r, 20));
+        expect(lifecycleOrder(), 'offline mode must not start a fetch loop').to.deep.equal([]);
+
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+        (el as any).handleAutoFetchCompleted(event);
+        await new Promise((r) => setTimeout(r, 20));
+        expect(lifecycleOrder(), 'auto-fetch turned off must stay off').to.deep.equal([]);
+      } finally {
+        settingsStore.setState({ autoFetchInterval: 0, offlineMode: false });
+      }
+    });
+
+    it('a stop issued before a start resolves leaves the repo stopped', async () => {
+      // `startAutoFetch` resolves the remote, its URL and a credential before
+      // it reaches the backend. A stop that lands inside that window — closing
+      // a tab, or going offline — must supersede it, not be overtaken by a
+      // start that was already obsolete when it was issued.
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+
+      (el as any).startAutoFetchLogged('/repo/one', 5);
+      (el as any).stopAutoFetchLogged('/repo/one');
+
+      await waitForCommand('stop_auto_fetch');
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(
+        invokeCallArgs.find((c) => c.command === 'start_auto_fetch'),
+        'the superseded start must never reach the backend'
+      ).to.be.undefined;
+      expect(lifecycleOrder()).to.deep.equal(['stop_auto_fetch']);
+    });
+
+    it('stays quiet when a superseded fetch-remote restart fails', async () => {
+      // The restart's own resolution is several IPC round trips long, and the
+      // user can close the tab (or a newer start can be issued) inside that
+      // window. Reporting the failure then toasts about a repo that is already
+      // gone and tears down a loop the supersession owns — so the failure
+      // branch has to check the sequence exactly as the success branch does.
+      settingsStore.setState({ autoFetchInterval: 5 });
+      const el = createAppShell();
+      seedRepo('/repo/one', 'one');
+      try {
+        // The supersession has to land WHILE the restart is resolving, which
+        // is the only window that can go wrong: `get_remotes` is one of the
+        // round trips `startAutoFetch` makes before it reaches the backend.
+        // Returning nothing then fails that restart.
+        mockResponses.get_remotes = () => {
+          (el as any).stopAutoFetchLogged('/repo/one');
+          return [];
+        };
+
+        (el as any).startAutoFetchLogged('/repo/one', 5, true);
+
+        await waitForCommand('stop_auto_fetch');
+        await new Promise((r) => setTimeout(r, 20));
+
+        expect(
+          uiStore.getState().toasts.filter((t) => t.message.includes('auto-fetch failed')),
+          'a superseded restart must not report its failure'
+        ).to.have.length(0);
+        expect(
+          lifecycleOrder(),
+          'only the supersession stops the loop — the dead restart must not stop it again'
+        ).to.deep.equal(['stop_auto_fetch']);
+      } finally {
         settingsStore.setState({ autoFetchInterval: 0 });
       }
     });
@@ -1392,7 +1597,9 @@ describe('app-shell multi-repo behavior', () => {
         (el as any).handleRefresh = () => { plainRefreshCalled = true; };
 
         await (el as any).handleCheckoutBranch(
-          new CustomEvent('checkout-branch', { detail: { branch: 'feature' } })
+          new CustomEvent('checkout-branch', {
+            detail: { branch: 'feature', repositoryPath: '/repo/a' },
+          })
         );
 
         expect(pinnedCalls).to.deep.equal(['/repo/a']);
@@ -1712,6 +1919,48 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('context-menu operation pinning', () => {
+    it('closes commit and ref context menus when the active repository changes', async () => {
+      // Append BEFORE adding repos so connectedCallback's restore pass sees an
+      // empty persistedOpenRepos and returns early — otherwise its async prune
+      // writes drive the store subscription and land the element on /repo/b
+      // before the switch below, making it a no-op.
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
+        repositoryStore.getState().addRepository(mockRepo('/repo/b', 'b'));
+        // addRepository activates by default, so /repo/b is active here; pin
+        // back to /repo/a so the switch below is a real A -> B transition.
+        repositoryStore.getState().setActiveByPath('/repo/a');
+        await el.updateComplete;
+        expect((el as any).activeRepository?.repository.path).to.equal('/repo/a');
+
+        (el as any).contextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          commit: { oid: 'commit-from-a', summary: 'A commit', shortId: 'commit-f' },
+        };
+        (el as any).refContextMenu = {
+          visible: true,
+          x: 0,
+          y: 0,
+          refName: 'branch-from-a',
+          fullName: 'refs/heads/branch-from-a',
+          refType: 'localBranch',
+          isHead: false,
+        };
+
+        repositoryStore.getState().setActiveByPath('/repo/b');
+        await el.updateComplete;
+
+        expect((el as any).contextMenu.visible).to.be.false;
+        expect((el as any).refContextMenu.visible).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+
     it('handleResetToCommit hard-resets the origin repo, not the tab switched to during the confirm', async () => {
       // A hard reset discards uncommitted work — it must never run against a
       // repo the user did not confirm. The confirm await yields; a mid-confirm
@@ -1728,6 +1977,9 @@ describe('app-shell multi-repo behavior', () => {
       };
 
       let resolveConfirm: (v: unknown) => void = () => {};
+      // showConfirm() goes through @tauri-apps/plugin-dialog's confirm(), which
+      // is a wrapper over the message command — there is no dedicated
+      // `plugin:dialog|confirm` IPC command to mock.
       mockResponses['plugin:dialog|message'] = () =>
         new Promise((res) => {
           resolveConfirm = res;
@@ -2108,8 +2360,11 @@ describe('the toolbar command-palette button loads the active repo', () => {
     });
     await el.updateComplete;
 
-    const internal = el as unknown as { branches: unknown[]; showCommandPalette: boolean };
-    internal.branches = [];
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      showCommandPalette: boolean;
+    };
+    internal.paletteBranches = [];
     invokeCallArgs.length = 0;
 
     const toolbar = el.shadowRoot!.querySelector('lv-toolbar');
@@ -2131,6 +2386,248 @@ describe('the toolbar command-palette button loads the active repo', () => {
 
     el.remove();
   });
+
+  it('does not reopen or populate the palette with a superseded repository load', async () => {
+    const branchResolvers: Array<(value: unknown[]) => void> = [];
+    const fileResolvers: Array<(value: string[]) => void> = [];
+    mockResponses['get_branches'] = (args) =>
+      args.path === '/repo/a'
+        ? new Promise<unknown[]>((resolve) => branchResolvers.push(resolve))
+        : [];
+    mockResponses['list_tracked_files'] = (args) =>
+      args.path === '/repo/a'
+        ? new Promise<string[]>((resolve) => fileResolvers.push(resolve))
+        : [];
+
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      paletteBranches: Array<{ name: string }>;
+      paletteTrackedFiles: string[];
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    const pendingOpen = internal.openCommandPalette();
+    await waitUntil(() => branchResolvers.length > 0 && fileResolvers.length > 0);
+
+    repositoryStore.setState({ activeIndex: 1 });
+    await el.updateComplete;
+    branchResolvers.forEach((resolve) => resolve([{ name: 'only-in-a' }]));
+    fileResolvers.forEach((resolve) => resolve(['only-in-a.txt']));
+    await pendingOpen;
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette, 'the stale request must not reopen the overlay').to.be.false;
+    expect(internal.paletteBranches.some((branch) => branch.name === 'only-in-a')).to.be.false;
+    expect(internal.paletteTrackedFiles).not.to.include('only-in-a.txt');
+
+    el.remove();
+  });
+
+  // Every palette action carries `repositoryPath` and app-shell drops the ones
+  // that do not match the active tab, so the binding that feeds the palette
+  // that path is load-bearing: leave it empty and Switch/Reveal/Open silently
+  // do nothing.
+  it('hands the palette the repository its data was loaded from', async () => {
+    mockResponses['get_branches'] = () => [];
+    mockResponses['list_tracked_files'] = () => [];
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    await (el as unknown as { openCommandPalette: () => Promise<void> }).openCommandPalette();
+    await el.updateComplete;
+
+    const palette = el.shadowRoot!.querySelector('lv-command-palette');
+    expect(palette, 'the palette must be rendered').to.not.be.null;
+    expect((palette as unknown as { repositoryPath: string }).repositoryPath).to.equal('/repo/a');
+
+    el.remove();
+  });
+
+  // Ctrl+P stays live while the palette is up (keyboard.service lets Ctrl/Cmd
+  // combos through an open overlay), so a second press starts another loader.
+  // Escape before it settled cleared the flag and the loader — same requestId,
+  // same repository — set it straight back.
+  it('a dismissal during an in-flight reload does not spring the palette back open', async () => {
+    const branchResolvers: Array<(value: unknown[]) => void> = [];
+    const fileResolvers: Array<(value: string[]) => void> = [];
+    let deferLoads = false;
+    mockResponses['get_branches'] = () =>
+      deferLoads ? new Promise<unknown[]>((resolve) => branchResolvers.push(resolve)) : [];
+    mockResponses['list_tracked_files'] = () =>
+      deferLoads ? new Promise<string[]>((resolve) => fileResolvers.push(resolve)) : [];
+
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    await internal.openCommandPalette();
+    await el.updateComplete;
+    expect(internal.showCommandPalette, 'the palette is up to begin with').to.be.true;
+
+    deferLoads = true;
+    const pendingOpen = internal.openCommandPalette();
+    await waitUntil(() => branchResolvers.length > 0 && fileResolvers.length > 0);
+
+    // Escape: the palette dismisses itself and reports it through `close`.
+    const palette = el.shadowRoot!.querySelector('lv-command-palette');
+    expect(palette, 'the palette must be rendered').to.not.be.null;
+    (palette as unknown as { close: () => void }).close();
+    await el.updateComplete;
+    expect(internal.showCommandPalette, 'the dismissal takes effect').to.be.false;
+
+    branchResolvers.forEach((resolve) => resolve([]));
+    fileResolvers.forEach((resolve) => resolve([]));
+    await pendingOpen;
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette, 'the superseded load must not reopen it').to.be.false;
+    expect(
+      (palette as unknown as { open: boolean }).open,
+      'and the overlay itself stays down'
+    ).to.be.false;
+
+    el.remove();
+  });
+
+  it('closes an open palette when the active repository changes', async () => {
+    mockResponses['get_branches'] = () => [];
+    mockResponses['list_tracked_files'] = () => [];
+    const el = createAppShell();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/a', 'a'), branches: [], currentBranch: null },
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    await el.updateComplete;
+
+    const internal = el as unknown as {
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    await internal.openCommandPalette();
+    await el.updateComplete;
+    expect(internal.showCommandPalette).to.be.true;
+
+    repositoryStore.setState({ activeIndex: 1 });
+    await el.updateComplete;
+
+    expect(internal.showCommandPalette).to.be.false;
+    el.remove();
+  });
+
+  it('rejects a palette action whose repository no longer matches the active tab', async () => {
+    const el = createAppShell();
+    repositoryStore.setState({
+      openRepositories: [
+        { repository: mockRepo('/repo/b', 'b'), branches: [], currentBranch: null },
+      ] as never,
+      activeIndex: 0,
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+    invokeCallArgs.length = 0;
+
+    await (el as unknown as {
+      handleCheckoutBranch: (
+        event: CustomEvent<{ branch: string; repositoryPath: string }>
+      ) => Promise<void>;
+    }).handleCheckoutBranch(
+      new CustomEvent('checkout-branch', {
+        detail: { branch: 'feature-a', repositoryPath: '/repo/a' },
+      })
+    );
+
+    expect(invokeCallArgs.some((call) => call.command === 'checkout_with_autostash')).to.be.false;
+    el.remove();
+  });
+
+  it('clears failed datasets and reports both load failures', async () => {
+    mockResponses['get_branches'] = () => {
+      throw new Error('branches unavailable');
+    };
+    mockResponses['list_tracked_files'] = () => {
+      throw new Error('files unavailable');
+    };
+    const el = createAppShell();
+    (el as unknown as { activeRepository: unknown }).activeRepository = {
+      repository: mockRepo('/repo/a', 'a'),
+    };
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      paletteTrackedFiles: string[];
+      openCommandPalette: () => Promise<void>;
+    };
+    internal.paletteBranches = [{ name: 'stale-a' }];
+    internal.paletteTrackedFiles = ['stale-a.txt'];
+    uiStore.setState({ toasts: [] });
+
+    await internal.openCommandPalette();
+
+    expect(internal.paletteBranches).to.deep.equal([]);
+    expect(internal.paletteTrackedFiles).to.deep.equal([]);
+    const messages = uiStore.getState().toasts.map((toast) => toast.message);
+    expect(messages.join('|')).to.contain('Failed to load branches');
+    expect(messages.join('|')).to.contain('Failed to load tracked files');
+  });
+
+  // A succeeded command with an empty payload is not a failure. Gating the
+  // success path on `result.data` being truthy sent a repository with no
+  // branches and no tracked files down the error branch, so every palette
+  // open raised two "Unknown error" toasts nothing had gone wrong in.
+  it('reports no failure when both loads succeed with an empty payload', async () => {
+    mockResponses['get_branches'] = () => null;
+    mockResponses['list_tracked_files'] = () => null;
+    const el = createAppShell();
+    (el as unknown as { activeRepository: unknown }).activeRepository = {
+      repository: mockRepo('/repo/a', 'a'),
+    };
+    const internal = el as unknown as {
+      paletteBranches: unknown[];
+      paletteTrackedFiles: string[];
+      showCommandPalette: boolean;
+      openCommandPalette: () => Promise<void>;
+    };
+    uiStore.setState({ toasts: [] });
+
+    await internal.openCommandPalette();
+
+    expect(internal.paletteBranches).to.deep.equal([]);
+    expect(internal.paletteTrackedFiles).to.deep.equal([]);
+    expect(internal.showCommandPalette).to.be.true;
+    expect(uiStore.getState().toasts).to.deep.equal([]);
+  });
 });
-
-

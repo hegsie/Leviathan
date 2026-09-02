@@ -53,9 +53,29 @@ pub struct TestRepo {
 impl TestRepo {
     /// Create a new empty git repository
     pub fn new() -> Self {
+        Self::new_in_subdir(None)
+    }
+
+    /// Create a new empty git repository in a subdirectory with the given name.
+    ///
+    /// TempDir only ever produces alphanumeric names, so it cannot exercise the
+    /// paths users actually have. Anything the code interpolates into a shell
+    /// command or a script has to survive a directory called `re$po "x"`.
+    pub fn new_named(dir_name: &str) -> Self {
+        Self::new_in_subdir(Some(dir_name))
+    }
+
+    fn new_in_subdir(dir_name: Option<&str>) -> Self {
         isolate_git_config();
         let dir = TempDir::new().expect("Failed to create temp dir");
-        let path = dir.path().to_path_buf();
+        let path = match dir_name {
+            Some(name) => {
+                let nested = dir.path().join(name);
+                std::fs::create_dir_all(&nested).expect("Failed to create repo dir");
+                nested
+            }
+            None => dir.path().to_path_buf(),
+        };
 
         let repo = git2::Repository::init(&path).expect("Failed to init repo");
 
@@ -73,7 +93,15 @@ impl TestRepo {
 
     /// Create a repository with an initial commit on the "main" branch
     pub fn with_initial_commit() -> Self {
-        let test_repo = Self::new();
+        Self::with_initial_commit_in(Self::new())
+    }
+
+    /// `with_initial_commit`, in a subdirectory with the given name.
+    pub fn with_initial_commit_named(dir_name: &str) -> Self {
+        Self::with_initial_commit_in(Self::new_named(dir_name))
+    }
+
+    fn with_initial_commit_in(test_repo: Self) -> Self {
         test_repo.create_commit("Initial commit", &[("README.md", "# Test Repo")]);
 
         // Rename the default branch to "main" for consistency

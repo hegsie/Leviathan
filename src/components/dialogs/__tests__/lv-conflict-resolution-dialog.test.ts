@@ -45,6 +45,9 @@ function clearToasts(): void {
   state.toasts.forEach((t) => state.removeToast(t.id));
 }
 
+/** What `continue_rebase` resolves with — see setupDefaultMocks. */
+let continueRebaseSkipped: unknown = 0;
+
 const TEST_CONFLICTS: ConflictFile[] = [
   makeConflict('src/main.ts'),
   makeConflict('src/utils.ts'),
@@ -66,7 +69,10 @@ function setupDefaultMocks(conflicts: ConflictFile[] = TEST_CONFLICTS): void {
       case 'abort_cherry_pick':
       case 'abort_revert':
         return { success: true };
+      // The backend resolves continue_rebase with the number of commits the
+      // rebase dropped as already applied upstream — 0 for a clean continue.
       case 'continue_rebase':
+        return continueRebaseSkipped;
       case 'continue_cherry_pick':
       case 'continue_revert':
         return { success: true };
@@ -95,6 +101,7 @@ async function renderDialog(
 describe('lv-conflict-resolution-dialog', () => {
   beforeEach(() => {
     invokeHistory.length = 0;
+    continueRebaseSkipped = 0;
     setupDefaultMocks();
   });
 
@@ -935,6 +942,79 @@ describe('lv-conflict-resolution-dialog', () => {
       confirmAnswer = 'Ok';
       await internal.handleContinue.call(el);
       expect(completedFired).to.be.true;
+    });
+
+    // A rebase that paused on a conflict finishes HERE, not in rebase(). Every
+    // commit it drops as already-applied — before the pause and after it —
+    // disappears from the branch, and this toast is the only place the user can
+    // find out. The four direct-rebase toasts already say so.
+    it('names the commits a continued rebase dropped', async () => {
+      const el = await renderDialog('rebase');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      continueRebaseSkipped = 2;
+      clearToasts();
+      await internal.handleContinue.call(el);
+
+      const success = uiStore.getState().toasts.find(t => t.type === 'success');
+      expect(success?.message).to.equal(
+        'Rebase completed, skipped 2 commit(s) already applied upstream'
+      );
+    });
+
+    it('keeps the plain completion when a continued rebase dropped nothing', async () => {
+      const el = await renderDialog('rebase');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      continueRebaseSkipped = 0;
+      clearToasts();
+      await internal.handleContinue.call(el);
+
+      const success = uiStore.getState().toasts.find(t => t.type === 'success');
+      expect(success?.message).to.equal('Rebase completed');
+    });
+
+    // The other operations share this toast and have no such count; an
+    // undefined `data` must never render as "skipped undefined".
+    it('leaves a merge completion untouched', async () => {
+      const el = await renderDialog('merge');
+      el.open = true;
+      await el.updateComplete;
+      await new Promise(r => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const internal = el as unknown as {
+        resolvedFiles: Set<string>;
+        conflicts: ConflictFile[];
+        handleContinue: () => Promise<void>;
+      };
+      internal.resolvedFiles = new Set(internal.conflicts.map(c => c.path));
+
+      clearToasts();
+      await internal.handleContinue.call(el);
+
+      const success = uiStore.getState().toasts.find(t => t.type === 'success');
+      expect(success?.message).to.equal('Merge completed');
     });
 
     it('dispatches operation-completed on successful continue', async () => {
@@ -2664,8 +2744,70 @@ describe('lv-conflict-resolution-dialog', () => {
       expect((delCall!.args as Record<string, unknown>).name).to.equal('feature/x');
       expect((delCall!.args as Record<string, unknown>).force).to.equal(true);
       expect(invokeHistory.some(h => h.command === 'gitflow_finish_feature'), 'finish NOT re-invoked for squash').to.be.false;
+
+      // The squash commit was made here, so the backend must be told about it —
+      // BEFORE the optional delete, since a blocked delete leaves the feature
+      // listed and the user's retry has to find the marker.
+      const recordIndex = invokeHistory.findIndex(h => h.command === 'gitflow_record_squash_finish');
+      expect(recordIndex, 'gitflow_record_squash_finish called').to.be.greaterThan(-1);
+      expect((invokeHistory[recordIndex].args as Record<string, unknown>).name).to.equal('x');
+      const deleteIndex = invokeHistory.findIndex(h => h.command === 'delete_branch');
+      expect(recordIndex, 'squash recorded before the delete attempt').to.be.lessThan(deleteIndex);
+
       expect(completedFired).to.be.true;
       expect(el.open).to.be.false;
+    });
+
+    it('records the completed squash even when the branch delete is blocked', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'blocked', branchName: 'feature/blocked', deleteBranch: true },
+        true, // squashMerge
+      );
+
+      mockInvoke = async (command: string) => {
+        if (command === 'delete_branch') {
+          throw { code: 'OPERATION_FAILED', message: 'Branch rule prevents deletion' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+
+      clearToasts();
+      invokeHistory.length = 0;
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      expect(
+        invokeHistory.some(h => h.command === 'gitflow_record_squash_finish'),
+        'squash recorded despite the blocked delete',
+      ).to.be.true;
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn, 'blocked delete warned about').to.not.be.undefined;
+      expect(warn!.message).to.contain('Branch rule prevents deletion');
+      expect(el.open, 'a blocked delete still completes the finish').to.be.false;
+    });
+
+    it('warns when the completed squash could not be recorded', async () => {
+      const el = await openWithFinish(
+        { kind: 'feature', name: 'unrecorded', branchName: 'feature/unrecorded', deleteBranch: false },
+        true, // squashMerge
+      );
+
+      mockInvoke = async (command: string) => {
+        if (command === 'gitflow_record_squash_finish') {
+          throw { code: 'OPERATION_FAILED', message: 'marker directory is read-only' };
+        }
+        if (command === 'get_conflicts') return [];
+        return null;
+      };
+
+      clearToasts();
+      await (el as unknown as { handleContinue: () => Promise<void> }).handleContinue.bind(el)();
+
+      const warn = uiStore.getState().toasts.find(t => t.type === 'warning');
+      expect(warn, 'unrecorded squash warned about').to.not.be.undefined;
+      expect(warn!.message).to.contain('marker directory is read-only');
+      expect(warn!.message).to.contain('unrecorded');
+      expect(el.open, 'the squash commit landed, so the dialog still completes').to.be.false;
     });
 
     it('re-invokes gitflow_finish_feature (not delete) for a NON-squash feature finish', async () => {

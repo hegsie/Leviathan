@@ -22,6 +22,7 @@ import {
   deleteTag,
   deleteRemoteTag,
   pushTag,
+  getPushRemote,
   getTagDetails,
   editTagMessage,
 } from '../git.service.ts';
@@ -310,6 +311,18 @@ describe('git.service - Tag operations', () => {
       expect(args.path).to.equal('/test/repo');
       expect(args.name).to.equal('v1.0.0');
       expect(result.success).to.be.true;
+    });
+
+    describe('getPushRemote', () => {
+      it('invokes get_push_remote without an undefined remote key', async () => {
+        mockInvoke = () => Promise.resolve('upstream');
+
+        const result = await getPushRemote('/test/repo');
+
+        expect(lastInvokedCommand).to.equal('get_push_remote');
+        expect(lastInvokedArgs).to.deep.equal({ path: '/test/repo' });
+        expect(result.data).to.equal('upstream');
+      });
     });
 
     it('invokes push_tag with remote specified', async () => {

@@ -3,12 +3,13 @@
 //! Provides functionality for repository cleanup and maintenance operations
 //! similar to GitKraken and SourceTree.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
-use crate::utils::create_command;
+use crate::utils::{apply_token_credential_helper, create_command};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Structs from HEAD (feature branch)
@@ -242,13 +243,71 @@ pub async fn run_garbage_collection(
     }
 }
 
+/// The URL a remote points at, or `None` when the repository does not name it.
+///
+/// The token is scoped to this URL's host, so a remote whose URL cannot be read
+/// simply gets no credential — it is never offered to a host it does not belong
+/// to.
+fn remote_url(repo: &git2::Repository, remote_name: &str) -> Option<String> {
+    repo.find_remote(remote_name)
+        .ok()
+        .and_then(|remote| remote.url().ok().map(str::to_owned))
+}
+
+/// The app-managed token for one remote, or `None` when the map holds none for
+/// it.
+///
+/// The map is keyed by remote NAME because each remote is resolved
+/// independently: a token belongs to the host ITS remote points at, so handing
+/// `origin` a token keyed to `upstream` would offer one provider's credential
+/// to another provider's host. Any remote the map does not name simply gets no
+/// credential.
+fn token_for<'a>(
+    tokens: &'a Option<HashMap<String, String>>,
+    remote_name: &str,
+) -> Option<&'a str> {
+    tokens
+        .as_ref()
+        .and_then(|values| values.get(remote_name))
+        .map(String::as_str)
+}
+
+/// One `git remote prune` invocation, with the app's token attached as a
+/// url-scoped credential helper when there is one for this remote.
+///
+/// Built in one place so the dry run and the prune that follows it cannot
+/// drift: `git remote prune` queries the remote's ref list, so a token on only
+/// one of the two makes the dry run report nothing to prune (it never
+/// authenticated) while the prune itself succeeds — the user is told nothing
+/// was removed when branches were.
+fn prune_command(
+    path: &str,
+    remote_name: &str,
+    remote_url: Option<&str>,
+    token: Option<&str>,
+    dry_run: bool,
+) -> std::process::Command {
+    let mut cmd = create_command("git");
+    cmd.current_dir(path);
+    if dry_run {
+        cmd.args(["remote", "prune", "--dry-run", remote_name]);
+    } else {
+        cmd.args(["remote", "prune", remote_name]);
+    }
+    if let (Some(token), Some(url)) = (token, remote_url) {
+        apply_token_credential_helper(&mut cmd, token, url);
+    }
+    cmd
+}
+
 /// Prune remote tracking branches that no longer exist on the remote
 ///
 /// This runs `git remote prune` to remove stale remote tracking branches.
 #[command]
 pub async fn prune_remote_tracking_branches(
     path: String,
-    remote: Option<String>,
+    remotes: Vec<String>,
+    tokens: Option<HashMap<String, String>>,
 ) -> Result<PruneResult> {
     let repo_path = Path::new(&path);
 
@@ -257,39 +316,14 @@ pub async fn prune_remote_tracking_branches(
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
-    // Get list of remotes to prune
-    let remotes_to_prune = if let Some(ref remote_name) = remote {
-        vec![remote_name.clone()]
-    } else {
-        // Get all remotes
-        let output = create_command("git")
-            .current_dir(&path)
-            .args(["remote"])
-            .output()
-            .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to list remotes: {}", e))
-            })?;
-
-        if !output.status.success() {
-            return Err(LeviathanError::OperationFailed(
-                "Failed to list remotes".to_string(),
-            ));
-        }
-
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-
     let mut all_pruned_branches = Vec::new();
 
-    for remote_name in remotes_to_prune {
+    for remote_name in remotes {
+        let remote_url = remote_url(&git2::Repository::open(&path)?, &remote_name);
+        let token = token_for(&tokens, &remote_name);
+
         // First, do a dry-run to see what would be pruned
-        let dry_run_output = create_command("git")
-            .current_dir(&path)
-            .args(["remote", "prune", "--dry-run", &remote_name])
+        let dry_run_output = prune_command(&path, &remote_name, remote_url.as_deref(), token, true)
             .output()
             .map_err(|e| {
                 LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
@@ -317,9 +351,7 @@ pub async fn prune_remote_tracking_branches(
         }
 
         // Actually perform the prune
-        let output = create_command("git")
-            .current_dir(&path)
-            .args(["remote", "prune", &remote_name])
+        let output = prune_command(&path, &remote_name, remote_url.as_deref(), token, false)
             .output()
             .map_err(|e| {
                 LeviathanError::OperationFailed(format!("Failed to prune remote: {}", e))
@@ -799,12 +831,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// The frontend enumerates the repo's remotes, so an empty list reaches
+    /// here for a repo that has none. It must be a no-op, not an error.
     #[tokio::test]
     async fn test_prune_remote_tracking_branches_no_remotes() {
         let repo = TestRepo::with_initial_commit();
 
         // A repo without remotes should succeed but prune nothing
-        let result = prune_remote_tracking_branches(repo.path_str(), None).await;
+        let result = prune_remote_tracking_branches(repo.path_str(), vec![], None).await;
 
         assert!(result.is_ok());
         let prune_result = result.unwrap();
@@ -822,16 +856,218 @@ mod tests {
 
         // Pruning a specific remote should work (though there's nothing to prune)
         let result =
-            prune_remote_tracking_branches(repo.path_str(), Some("origin".to_string())).await;
+            prune_remote_tracking_branches(repo.path_str(), vec!["origin".to_string()], None).await;
 
         assert!(result.is_ok());
         let prune_result = result.unwrap();
         assert!(prune_result.success);
     }
 
+    /// The tracking refs that the remote no longer has are what this command
+    /// exists to remove, and a token must not get in the way of removing them.
+    #[tokio::test]
+    async fn test_prune_remote_tracking_branches_removes_stale_refs_with_a_token() {
+        let repo = TestRepo::with_initial_commit();
+        let remote_repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", &remote_repo.path_str());
+        // The remote never had this branch, so `git remote prune` must drop it.
+        repo.create_remote_branch("gone", repo.head_oid());
+
+        let tokens = HashMap::from([("origin".to_string(), "tok".to_string())]);
+        let result = prune_remote_tracking_branches(
+            repo.path_str(),
+            vec!["origin".to_string()],
+            Some(tokens),
+        )
+        .await;
+
+        let prune_result = result.expect("prune succeeded");
+        assert!(prune_result.success);
+        assert!(
+            prune_result
+                .branches_pruned
+                .iter()
+                .any(|b| b == "origin/gone"),
+            "expected origin/gone to be pruned, got {:?}",
+            prune_result.branches_pruned
+        );
+        assert!(
+            repo.repo()
+                .find_reference("refs/remotes/origin/gone")
+                .is_err(),
+            "the stale tracking ref must be gone"
+        );
+    }
+
+    /// A tokens map naming only OTHER remotes must not get in the way of the
+    /// prune it is not for. End to end over a local remote, which carries no
+    /// credential either way — the keying itself is covered by
+    /// `test_token_for_is_keyed_by_remote_name`.
+    #[tokio::test]
+    async fn test_prune_remote_tracking_branches_with_a_token_for_another_remote() {
+        let repo = TestRepo::with_initial_commit();
+        let remote_repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", &remote_repo.path_str());
+        repo.create_remote_branch("gone", repo.head_oid());
+
+        let tokens = HashMap::from([("upstream".to_string(), "tok".to_string())]);
+        let result = prune_remote_tracking_branches(
+            repo.path_str(),
+            vec!["origin".to_string()],
+            Some(tokens),
+        )
+        .await;
+
+        let prune_result = result.expect("prune succeeded");
+        assert!(prune_result.success);
+        assert!(
+            prune_result
+                .branches_pruned
+                .iter()
+                .any(|b| b == "origin/gone"),
+            "expected origin/gone to be pruned, got {:?}",
+            prune_result.branches_pruned
+        );
+    }
+
+    /// The lookup is by remote NAME, not "any token in the map": a token keyed
+    /// to `upstream` is scoped to `upstream`'s host, so offering it while
+    /// pruning `origin` would hand one provider's credential to another.
+    #[test]
+    fn test_token_for_is_keyed_by_remote_name() {
+        let tokens = Some(HashMap::from([("upstream".to_string(), "tok".to_string())]));
+
+        assert_eq!(token_for(&tokens, "upstream"), Some("tok"));
+        assert_eq!(
+            token_for(&tokens, "origin"),
+            None,
+            "a token keyed to another remote must not be handed to origin"
+        );
+        assert_eq!(token_for(&None, "origin"), None);
+    }
+
+    /// Lookup and injection together, over an https url that CAN carry a
+    /// credential: with a token for `upstream` only, `origin` must be given
+    /// none while `upstream` gets it.
+    #[test]
+    fn test_prune_command_injects_only_the_matching_remotes_token() {
+        let tokens = Some(HashMap::from([(
+            "upstream".to_string(),
+            "ghp_secret".to_string(),
+        )]));
+
+        let envs_for = |remote_name: &str| -> HashMap<String, String> {
+            prune_command(
+                "/repo",
+                remote_name,
+                Some("https://github.com/acme/repo.git"),
+                token_for(&tokens, remote_name),
+                false,
+            )
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect()
+        };
+
+        assert!(
+            !envs_for("origin").contains_key("LEVIATHAN_GIT_TOKEN"),
+            "origin has no token in the map and must be offered none"
+        );
+        assert_eq!(
+            envs_for("upstream")
+                .get("LEVIATHAN_GIT_TOKEN")
+                .map(String::as_str),
+            Some("ghp_secret")
+        );
+    }
+
+    /// The token is scoped to the remote's URL, so reading that URL back off the
+    /// repository is what decides whether a credential is offered at all.
+    #[test]
+    fn test_remote_url_reads_the_remote_it_is_asked_for() {
+        let repo = TestRepo::with_initial_commit();
+        let remote_repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", &remote_repo.path_str());
+
+        let opened = repo.repo();
+        assert_eq!(
+            remote_url(&opened, "origin").as_deref(),
+            Some(remote_repo.path_str().as_str())
+        );
+        assert!(
+            remote_url(&opened, "upstream").is_none(),
+            "a remote the repo does not have has no url to scope a token to"
+        );
+    }
+
+    /// The token rides as a url-scoped credential helper, and it must ride on
+    /// BOTH invocations: `git remote prune --dry-run` queries the remote too,
+    /// so a dry run without the credential reports nothing to prune and the
+    /// user is told no branches were removed when some were.
+    #[test]
+    fn test_prune_command_carries_the_token_on_the_dry_run_and_the_prune() {
+        for dry_run in [true, false] {
+            let cmd = prune_command(
+                "/repo",
+                "origin",
+                Some("https://github.com/acme/repo.git"),
+                Some("ghp_secret"),
+                dry_run,
+            );
+            let envs: HashMap<String, String> = cmd
+                .get_envs()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.to_string_lossy().to_string(),
+                        v?.to_string_lossy().to_string(),
+                    ))
+                })
+                .collect();
+
+            assert_eq!(
+                envs.get("GIT_CONFIG_KEY_1").map(String::as_str),
+                Some("credential.https://github.com.helper"),
+                "dry_run={}",
+                dry_run
+            );
+            assert_eq!(
+                envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+                Some("ghp_secret"),
+                "dry_run={}",
+                dry_run
+            );
+        }
+    }
+
+    /// With no token there is nothing to inject — in particular the command
+    /// must not export an empty credential that shadows the user's own helper.
+    #[test]
+    fn test_prune_command_injects_nothing_without_a_token() {
+        let cmd = prune_command(
+            "/repo",
+            "origin",
+            Some("https://github.com/acme/repo.git"),
+            None,
+            false,
+        );
+        let keys: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+
+        assert!(!keys.iter().any(|k| k == "GIT_CONFIG_COUNT"));
+        assert!(!keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"));
+    }
+
     #[tokio::test]
     async fn test_prune_remote_tracking_branches_invalid_path() {
-        let result = prune_remote_tracking_branches("/nonexistent/path".to_string(), None).await;
+        let result =
+            prune_remote_tracking_branches("/nonexistent/path".to_string(), vec![], None).await;
 
         assert!(result.is_err());
     }

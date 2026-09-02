@@ -193,11 +193,16 @@ pub async fn fetch(
         Some(remote_ops_registry.acquire(Path::new(&path), RemoteOp::Fetch)?)
     };
 
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name_owned = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name_owned)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
+    drop(repo);
+
     let repo_path = path.clone();
     let deadline = network_deadline(timeout_secs);
     let path_clone = path.clone();
     let prune_val = prune.unwrap_or(false);
-    let remote_name_owned = remote.unwrap_or_else(|| "origin".to_string());
     let remote_name_for_event = remote_name_owned.clone();
 
     // git2 fetch is blocking network I/O; offload to a blocking thread so
@@ -277,6 +282,38 @@ pub async fn fetch(
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_fetch_remote(repo: &git2::Repository, requested: Option<String>) -> String {
+    if let Some(remote) = requested {
+        return remote;
+    }
+    let from_upstream = repo
+        .head()
+        .ok()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.name().ok().map(str::to_owned))
+        .and_then(|refname| repo.branch_upstream_remote(&refname).ok())
+        .and_then(|name| name.as_str().ok().map(str::to_owned))
+        .filter(|name| name != "." && repo.find_remote(name).is_ok());
+    if let Some(remote) = from_upstream {
+        return remote;
+    }
+    match repo.remotes() {
+        Ok(names) if names.len() == 1 => {
+            names.get(0).ok().flatten().unwrap_or("origin").to_string()
+        }
+        _ => "origin".to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_fetch_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_fetch_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
 }
 
 /// The message and IPC error code for a failure reported through an EVENT
@@ -513,6 +550,87 @@ fn pull_should_rebase(repo: &git2::Repository, branch_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The branch a pull will merge into, and its full refname.
+///
+/// On a detached HEAD, shorthand() is the literal "HEAD" — so this used to
+/// resolve origin/HEAD (a symref that DOES exist in a normal clone),
+/// fast-forward-check-out its tree, and only then fail looking up
+/// "refs/heads/HEAD". The tree ended up holding origin/main's content while
+/// HEAD still pointed at the tag, so every diverging file showed as an
+/// uncommitted change. git refuses to pull with no upstream; so do we. merge()
+/// gets this right by using head.name() rather than rebuilding it.
+///
+/// Shared with `get_pull_remote` so the remote the frontend's network gate is
+/// evaluated against comes from exactly the ref the pull itself will use.
+pub(crate) fn resolve_pull_branch(
+    repo: &git2::Repository,
+    branch_for_task: Option<&str>,
+) -> Result<(String, String)> {
+    if let Some(b) = branch_for_task {
+        return Ok((b.to_string(), format!("refs/heads/{}", b)));
+    }
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(LeviathanError::OperationFailed(
+            "You are not currently on a branch. Check out a branch before \
+             pulling, or say which branch to pull."
+                .to_string(),
+        ));
+    }
+    let refname = head
+        .name()
+        .map_err(|_| LeviathanError::InvalidReference)?
+        .to_string();
+    Ok((head.shorthand().unwrap_or("main").to_string(), refname))
+}
+
+/// Which remote a pull will contact when the caller named none.
+///
+/// The remote half of `resolve_pull_target`, split out so `get_pull_remote` can
+/// answer the same question WITHOUT touching the network. The frontend's
+/// offline/allowlist gate and its credential scoping both need the remote a
+/// pull will actually reach: assuming "origin" evaluated the allowlist against
+/// the wrong host and offered origin's token to an unrelated one.
+pub(crate) fn resolve_pull_remote(
+    repo: &git2::Repository,
+    requested_remote: Option<String>,
+    head_refname: &str,
+) -> String {
+    match requested_remote {
+        Some(r) => r,
+        None => repo
+            .branch_upstream_remote(head_refname)
+            .ok()
+            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
+            .unwrap_or_else(|| "origin".to_string()),
+    }
+}
+
+/// The remote a pull would contact, without performing it.
+#[tauri::command]
+pub async fn get_pull_remote(
+    path: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let (_, head_refname) = resolve_pull_branch(&repo, branch.as_deref())?;
+    let remote_name = resolve_pull_remote(&repo, remote, &head_refname);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
+}
+
+/// The remote a push would target, without performing it.
+#[tauri::command]
+pub async fn get_push_remote(path: String, remote: Option<String>) -> Result<String> {
+    let repo = git2::Repository::open(Path::new(&path))?;
+    let remote_name = resolve_push_remote(&repo, remote);
+    repo.find_remote(&remote_name)
+        .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
+    Ok(remote_name)
+}
+
 /// Which remote to fetch, and which remote-tracking ref to merge, for a pull.
 ///
 /// Asks git rather than rebuilding "<remote>/<shorthand>". The rebuilt form was
@@ -534,14 +652,7 @@ pub(crate) fn resolve_pull_target(
         .and_then(|b| b.upstream().ok())
         .and_then(|u| u.get().name().ok().map(|n| n.to_string()));
 
-    let remote = match requested_remote {
-        Some(r) => r,
-        None => repo
-            .branch_upstream_remote(head_refname)
-            .ok()
-            .and_then(|b| b.as_str().ok().map(|s| s.to_string()))
-            .unwrap_or_else(|| "origin".to_string()),
-    };
+    let remote = resolve_pull_remote(repo, requested_remote, head_refname);
 
     let remote_ref = upstream_ref
         .as_deref()
@@ -563,6 +674,7 @@ pub(crate) fn resolve_push_remote(repo: &git2::Repository, requested: Option<Str
     if let Some(r) = requested {
         return r;
     }
+
     let head_branch = repo
         .head()
         .ok()
@@ -707,31 +819,7 @@ pub(crate) fn pull_branch(
 
     let repo = git2::Repository::open(Path::new(path_for_task))?;
 
-    // On a detached HEAD, shorthand() is the literal "HEAD" — so
-    // this used to resolve origin/HEAD (a symref that DOES exist in
-    // a normal clone), fast-forward-check-out its tree, and only
-    // then fail looking up "refs/heads/HEAD". The tree ended up
-    // holding origin/main's content while HEAD still pointed at the
-    // tag, so every diverging file showed as an uncommitted change.
-    // git refuses to pull with no upstream; so do we. merge() gets
-    // this right by using head.name() rather than rebuilding it.
-    let (branch_name, head_refname) = if let Some(ref b) = branch_for_task {
-        (b.clone(), format!("refs/heads/{}", b))
-    } else {
-        let head = repo.head()?;
-        if !head.is_branch() {
-            return Err(LeviathanError::OperationFailed(
-                "You are not currently on a branch. Check out a branch before \
-                 pulling, or say which branch to pull."
-                    .to_string(),
-            ));
-        }
-        let refname = head
-            .name()
-            .map_err(|_| LeviathanError::InvalidReference)?
-            .to_string();
-        (head.shorthand().unwrap_or("main").to_string(), refname)
-    };
+    let (branch_name, head_refname) = resolve_pull_branch(&repo, branch_for_task.as_deref())?;
 
     // Honour the repository's own pull strategy when the caller
     // did not force one. Defaulting to merge meant a user with
@@ -794,21 +882,38 @@ pub(crate) fn pull_branch(
         // RebaseConflict because the UI surfaces a "resolve
         // conflicts" flow that needs the rebase state intact.
         let mut commit_count = 0;
+        let mut skipped_count = 0usize;
         let rebase_result = (|| -> Result<()> {
             while let Some(op) = rebase_obj.next() {
-                let _op = op?;
+                let op = op?;
                 if repo.index()?.has_conflicts() {
                     return Err(LeviathanError::RebaseConflict);
                 }
                 let signature = repo.signature()?;
-                rebase_obj.commit(None, &signature, None)?;
-                commit_count += 1;
+                if crate::commands::merge::commit_or_skip_empty(
+                    &repo,
+                    &mut rebase_obj,
+                    &signature,
+                    Some(op.id()),
+                )?
+                .is_some()
+                {
+                    commit_count += 1;
+                } else {
+                    skipped_count += 1;
+                }
             }
+            crate::commands::merge::ensure_libgit2_rewritten_file(&repo)?;
             rebase_obj.finish(Some(&repo.signature()?))?;
             Ok(())
         })();
         match rebase_result {
             Err(LeviathanError::RebaseConflict) => {
+                // Paused, not finished: this call reports a conflict, never a
+                // count, so the commits already dropped here would go
+                // unreported. Hand them to the continue_rebase that finishes
+                // this rebase, which adds its own and reports the total.
+                crate::commands::merge::append_skipped(&repo, skipped_count);
                 return Err(LeviathanError::RebaseConflict);
             }
             Err(e) => {
@@ -817,7 +922,20 @@ pub(crate) fn pull_branch(
             }
             Ok(()) => {}
         }
-        message = format!("Rebased {} commit(s)", commit_count);
+        // A skipped commit is a local commit that silently disappears from the
+        // branch, so say so. `git rebase` prints "warning: skipped previously
+        // applied commit ..." on stderr; there is no stderr here, and without
+        // this the flagship case this fix unblocks (every local commit already
+        // upstream) reports the bare "Rebased 0 commit(s)" while the branch
+        // moves and the user's commits are gone.
+        message = if skipped_count > 0 {
+            format!(
+                "Rebased {} commit(s), skipped {} already applied upstream",
+                commit_count, skipped_count
+            )
+        } else {
+            format!("Rebased {} commit(s)", commit_count)
+        };
     } else {
         let (analysis, _preference) = repo.merge_analysis(&[&fetch_commit])?;
 
@@ -2258,6 +2376,183 @@ mod tests {
         assert_eq!(local.head_oid(), upstream.head_oid());
     }
 
+    // ---- pull's rebase arm ----
+
+    fn pull_rebase(local: &TestRepo, branch: &str) -> Result<(String, String)> {
+        pull_branch(
+            &local.path_str(),
+            Some("origin".to_string()),
+            Some(branch.to_string()),
+            Some(true),
+            None,
+            None,
+        )
+    }
+
+    /// The bug, on the path most users hit it: your patch landed upstream, so
+    /// replaying your own copy of it produces nothing and libgit2 reports
+    /// GIT_EAPPLIED. The pull used to abort the whole rebase with "this patch
+    /// has already been applied"; it must skip that one commit and keep the
+    /// rest.
+    #[test]
+    fn test_pull_rebase_skips_a_local_commit_already_applied_upstream() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        // The same patch as a distinct local commit, plus work only we have.
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+        local.create_commit("local only", &[("local.txt", "local\n")]);
+
+        let (_, message) = pull_rebase(&local, &branch)
+            .expect("an already-applied local commit must be skipped, not abort the pull");
+
+        assert_eq!(
+            message,
+            "Rebased 1 commit(s), skipped 1 already applied upstream"
+        );
+        let repo = local.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "local only");
+        assert_eq!(head.parent(0).unwrap().id(), upstream.head_oid());
+        assert_eq!(
+            std::fs::read_to_string(local.path.join("shared.txt")).unwrap(),
+            "shared\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.path.join("local.txt")).unwrap(),
+            "local\n"
+        );
+    }
+
+    /// Every local commit already upstream: the branch still moves to the
+    /// remote tip, so the message must not be the bare "Rebased 0 commit(s)" —
+    /// in a GUI it is the only feedback the user gets for commits disappearing
+    /// from their branch.
+    #[test]
+    fn test_pull_rebase_reports_when_every_local_commit_was_already_upstream() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+
+        let (_, message) =
+            pull_rebase(&local, &branch).expect("a fully already-applied pull must succeed");
+
+        assert_eq!(
+            message,
+            "Rebased 0 commit(s), skipped 1 already applied upstream"
+        );
+        assert_eq!(local.head_oid(), upstream.head_oid());
+        assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// A pull --rebase that stops on a conflict reports RebaseConflict, not a
+    /// message — so the commits it already dropped had nowhere to go. They are
+    /// handed to the continue_rebase that finishes the rebase, which reports
+    /// the total to the conflict dialog.
+    #[tokio::test]
+    async fn test_pull_rebase_carries_its_skips_across_a_conflict() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit(
+            "upstream took the shared change",
+            &[("shared.txt", "shared\n")],
+        );
+        upstream.create_commit("upstream edits contested", &[("contested.txt", "theirs\n")]);
+        // The same patch as a distinct local commit — dropped before the stop.
+        local.create_commit("local shared change", &[("shared.txt", "shared\n")]);
+        local.create_commit("local edits contested", &[("contested.txt", "ours\n")]);
+
+        let err = pull_rebase(&local, &branch).expect_err("the pull must stop on the conflict");
+        assert!(matches!(err, LeviathanError::RebaseConflict), "{:?}", err);
+
+        crate::commands::merge::resolve_conflict(
+            local.path_str(),
+            "contested.txt".to_string(),
+            "resolved\n".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let skipped = crate::commands::merge::continue_rebase(local.path_str())
+            .await
+            .expect("the resolved pull must finish");
+
+        assert_eq!(
+            skipped, 1,
+            "the commit the pull dropped before the conflict must still be reported"
+        );
+        assert_eq!(local.repo().state(), git2::RepositoryState::Clean);
+    }
+
+    /// The other arm of the same libgit2 error: a commit that was ALREADY
+    /// empty before the pull is not an already-applied patch, and git keeps
+    /// it. It must be recreated on the rebased HEAD and counted as rebased.
+    #[test]
+    fn test_pull_rebase_preserves_a_local_commit_that_started_empty() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("upstream change", &[("up.txt", "up\n")]);
+        let empty_oid = {
+            let repo = local.repo();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            let tree = head.tree().unwrap();
+            let signature = repo.signature().unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Intentional empty marker",
+                &tree,
+                &[&head],
+            )
+            .unwrap()
+        };
+        local.create_commit("local follow-up", &[("local.txt", "local\n")]);
+
+        let (_, message) = pull_rebase(&local, &branch)
+            .expect("a commit that started empty must survive the pull");
+
+        assert_eq!(message, "Rebased 2 commit(s)");
+        let repo = local.repo();
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "local follow-up");
+        let empty = head.parent(0).unwrap();
+        assert_ne!(
+            empty.id(),
+            empty_oid,
+            "the empty commit must be replayed onto the upstream tip"
+        );
+        assert_eq!(empty.message().unwrap(), "Intentional empty marker");
+        assert_eq!(empty.tree_id(), empty.parent(0).unwrap().tree_id());
+        assert_eq!(empty.parent(0).unwrap().id(), upstream.head_oid());
+    }
+
+    /// Skipping empty patches must not swallow a real conflict: that one still
+    /// stops the loop and leaves the rebase state in place for the UI's
+    /// resolve flow.
+    #[test]
+    fn test_pull_rebase_conflict_keeps_the_rebase_state() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("upstream edit", &[("conflict.txt", "upstream\n")]);
+        local.create_commit("local edit", &[("conflict.txt", "local\n")]);
+
+        let err = pull_rebase(&local, &branch)
+            .expect_err("a conflicting rebase pull must report the conflict");
+
+        assert!(
+            matches!(err, LeviathanError::RebaseConflict),
+            "unexpected error: {}",
+            err
+        );
+        assert_eq!(local.repo().state(), git2::RepositoryState::RebaseMerge);
+    }
+
     // ---- pull strategy comes from git config ----
 
     /// Sets a config value on the repo and reads back what pull would do.
@@ -2583,6 +2878,7 @@ mod tests {
             )
             .unwrap();
         }
+
         assert_eq!(
             resolve_push_remote(&repo, None),
             "upstream",
@@ -2616,6 +2912,121 @@ mod tests {
             resolve_push_remote(&repo, Some("chosen".to_string())),
             "chosen",
             "an explicit remote still wins over everything"
+        );
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_checked_out_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        let branch = repo_dir.current_branch();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        repo_dir.add_remote("upstream", "https://example.test/upstream.git");
+        let repo = repo_dir.repo();
+        let mut config = repo.config().unwrap();
+        config
+            .set_str(&format!("branch.{}.remote", branch), "upstream")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{}.merge", branch),
+                &format!("refs/heads/{}", branch),
+            )
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo, None), "upstream");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_uses_the_only_configured_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_local_branch_upstream() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://example.test/origin.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), ".")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "origin");
+    }
+
+    #[test]
+    fn test_resolve_fetch_remote_ignores_missing_upstream_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("mirror", "https://example.test/mirror.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "deleted")
+            .unwrap();
+        config
+            .set_str(&format!("branch.{branch}.merge"), "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(resolve_fetch_remote(&repo_dir.repo(), None), "mirror");
+    }
+
+    #[tokio::test]
+    async fn test_get_push_remote_returns_the_resolved_destination() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("upstream", "https://example.test/repo.git");
+
+        let remote = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect("the sole remote should resolve");
+
+        assert_eq!(remote, "upstream");
+    }
+
+    /// A repo with NO remotes resolves to the "origin" default, which does not
+    /// exist. Returning it anyway would send the UI on to push_tag and surface
+    /// "Remote not found: origin" from the push instead of from the lookup the
+    /// callers gate on.
+    #[tokio::test]
+    async fn test_get_push_remote_errors_when_the_repo_has_no_remotes() {
+        let repo_dir = TestRepo::with_initial_commit();
+
+        let err = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect_err("a repo with no remotes has no push destination");
+
+        assert!(
+            matches!(err, LeviathanError::RemoteNotFound(ref name) if name == "origin"),
+            "the missing destination is named: {err:?}"
+        );
+    }
+
+    /// remote.pushDefault can outlive the remote it names (renamed, removed).
+    /// The resolver happily returns the stale name, so the existence check is
+    /// the only thing standing between the user and a confirm dialog naming a
+    /// remote that is not there.
+    #[tokio::test]
+    async fn test_get_push_remote_errors_when_the_configured_default_is_gone() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://example.test/repo.git");
+        {
+            let repo = git2::Repository::open(&repo_dir.path).unwrap();
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("remote.pushDefault", "nope").unwrap();
+        }
+
+        let err = get_push_remote(repo_dir.path_str(), None)
+            .await
+            .expect_err("a pushDefault naming a missing remote must not resolve");
+
+        assert!(
+            matches!(err, LeviathanError::RemoteNotFound(ref name) if name == "nope"),
+            "the missing destination is named: {err:?}"
         );
     }
 
@@ -2690,6 +3101,147 @@ mod tests {
             &format!("refs/heads/{}", branch),
         );
         assert_eq!(remote, "chosen");
+    }
+
+    // ---- get_pull_remote / get_push_remote ----
+    //
+    // The frontend's offline/allowlist gate and its credential scoping both
+    // have to know which remote an operation will REACH before it runs. They
+    // used to assume "origin"; in the ordinary fork layout that checked the
+    // allowlist against the fork's host and offered the fork's token to the
+    // upstream's. These commands answer the same question the pull/push paths
+    // answer, without touching the network.
+
+    /// A repo with two remotes whose branch tracks the NON-origin one.
+    #[cfg(unix)]
+    fn repo_tracking_upstream() -> (TestRepo, String) {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        repo_dir.add_remote("upstream", "https://gitlab.example.test/acme/app.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "upstream")
+            .unwrap();
+        config
+            .set_str(
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
+            )
+            .unwrap();
+        drop(config);
+        (repo_dir, branch)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_follows_the_branch_upstream() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let remote = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(remote, "upstream", "a pull follows the branch's upstream");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_falls_back_to_origin() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let remote = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(remote, "origin");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_honours_an_explicit_remote() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let remote = get_pull_remote(
+            repo_dir.path.to_string_lossy().to_string(),
+            Some("origin".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote, "origin");
+    }
+
+    /// A configured upstream whose remote was deleted must be reported, not
+    /// silently downgraded to origin — the gate would then approve a host the
+    /// pull is never going to reach anyway.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_rejects_a_missing_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let branch = repo_dir.current_branch();
+        let mut config = repo_dir.repo().config().unwrap();
+        config
+            .set_str(&format!("branch.{branch}.remote"), "deleted")
+            .unwrap();
+        drop(config);
+
+        let err = get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LeviathanError::RemoteNotFound(name) if name == "deleted"));
+    }
+
+    /// Detached HEAD: `pull_branch` refuses outright, so this must too rather
+    /// than inventing a remote for an operation that cannot run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_pull_remote_refuses_a_detached_head() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let oid = repo_dir.head_oid();
+        repo_dir.repo().set_head_detached(oid).unwrap();
+
+        assert!(
+            get_pull_remote(repo_dir.path.to_string_lossy().to_string(), None, None)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Push follows remote.pushDefault ahead of the branch's upstream — the
+    /// fork case where a pull and a push reach DIFFERENT hosts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_push_remote_honours_push_default() {
+        let (repo_dir, _) = repo_tracking_upstream();
+        let mut config = repo_dir.repo().config().unwrap();
+        config.set_str("remote.pushDefault", "origin").unwrap();
+        drop(config);
+
+        let path = repo_dir.path.to_string_lossy().to_string();
+        assert_eq!(
+            get_push_remote(path.clone(), None).await.unwrap(),
+            "origin",
+            "a push follows pushDefault"
+        );
+        assert_eq!(
+            get_pull_remote(path, None, None).await.unwrap(),
+            "upstream",
+            "while the pull still follows the upstream"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_get_push_remote_rejects_a_missing_remote() {
+        let repo_dir = TestRepo::with_initial_commit();
+        repo_dir.add_remote("origin", "https://github.com/me/app.git");
+        let mut config = repo_dir.repo().config().unwrap();
+        config.set_str("remote.pushDefault", "gone").unwrap();
+        drop(config);
+
+        let err = get_push_remote(repo_dir.path.to_string_lossy().to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LeviathanError::RemoteNotFound(name) if name == "gone"));
     }
 
     // ---- pull's normal-merge arm (merge_fetched_commit) ----

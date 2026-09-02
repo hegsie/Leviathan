@@ -207,6 +207,26 @@ fn state_query_param(state: Option<&str>) -> String {
     }
 }
 
+/// Default page size for the merge-request and issue listings.
+///
+/// Kept in sync with GITLAB_LIST_PAGE_SIZE in lv-gitlab-dialog.ts, which
+/// discloses it to the user.
+const LIST_DEFAULT_PER_PAGE: u32 = 30;
+
+/// Default page size for the pipeline listing.
+///
+/// Kept in sync with GITLAB_PIPELINE_PAGE_SIZE in lv-gitlab-dialog.ts.
+const PIPELINES_DEFAULT_PER_PAGE: u32 = 20;
+
+/// Build the `per_page=<n>` query fragment for a listing.
+///
+/// The dialog discloses the page size it asked for ("Showing the first N ...").
+/// Taking the size from the caller keeps the number the request caps at and the
+/// number the hint quotes the same value, instead of two literals that drift.
+fn per_page_query_param(per_page: Option<u32>, default_per_page: u32) -> String {
+    format!("per_page={}", per_page.unwrap_or(default_per_page))
+}
+
 // ============================================================================
 // Connection Commands
 // ============================================================================
@@ -294,7 +314,10 @@ pub async fn check_gitlab_connection(
 
 /// Detect GitLab repository from git remotes
 #[command]
-pub async fn detect_gitlab_repo(path: String) -> Result<Option<DetectedGitLabRepo>> {
+pub async fn detect_gitlab_repo(
+    path: String,
+    remote_name: Option<String>,
+) -> Result<Option<DetectedGitLabRepo>> {
     let repo = git2::Repository::open(&path).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to open repository: {}", e))
     })?;
@@ -303,14 +326,20 @@ pub async fn detect_gitlab_repo(path: String) -> Result<Option<DetectedGitLabRep
         .remotes()
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get remotes: {}", e)))?;
 
-    for remote_name in remotes.iter().flatten().flatten() {
-        if let Ok(remote) = repo.find_remote(remote_name) {
+    for candidate in remotes.iter().flatten().flatten() {
+        if remote_name
+            .as_deref()
+            .is_some_and(|wanted| wanted != candidate)
+        {
+            continue;
+        }
+        if let Ok(remote) = repo.find_remote(candidate) {
             if let Ok(url) = remote.url() {
                 if let Some(repo_info) = parse_gitlab_url(url) {
                     return Ok(Some(DetectedGitLabRepo {
                         instance_url: repo_info.0,
                         project_path: repo_info.1,
-                        remote_name: remote_name.to_string(),
+                        remote_name: candidate.to_string(),
                     }));
                 }
             }
@@ -376,17 +405,19 @@ pub async fn list_gitlab_merge_requests(
     instance_url: String,
     project_path: String,
     state: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabMergeRequest>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let url = format!(
-        "{}?per_page=30{}",
+        "{}?{}{}",
         build_api_url(
             &instance_url,
             &format!("projects/{}/merge_requests", encoded_path)
         ),
+        per_page_query_param(per_page, LIST_DEFAULT_PER_PAGE),
         state_query_param(state.as_deref())
     );
 
@@ -637,14 +668,16 @@ pub async fn list_gitlab_issues(
     project_path: String,
     state: Option<String>,
     labels: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabIssue>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let mut url = format!(
-        "{}?per_page=30{}",
+        "{}?{}{}",
         build_api_url(&instance_url, &format!("projects/{}/issues", encoded_path)),
+        per_page_query_param(per_page, LIST_DEFAULT_PER_PAGE),
         state_query_param(state.as_deref())
     );
 
@@ -827,17 +860,19 @@ pub async fn list_gitlab_pipelines(
     instance_url: String,
     project_path: String,
     status: Option<String>,
+    per_page: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<GitLabPipeline>> {
     let token = resolve_token(token)?;
 
     let encoded_path = url_encode(&project_path);
     let mut url = format!(
-        "{}?per_page=20&order_by=updated_at&sort=desc",
+        "{}?{}&order_by=updated_at&sort=desc",
         build_api_url(
             &instance_url,
             &format!("projects/{}/pipelines", encoded_path)
-        )
+        ),
+        per_page_query_param(per_page, PIPELINES_DEFAULT_PER_PAGE)
     );
 
     if let Some(status_str) = status {
@@ -952,6 +987,17 @@ mod tests {
     }
 
     #[test]
+    fn test_per_page_query_param() {
+        // The caller's page size wins, so the size requested is the size the
+        // dialog discloses.
+        assert_eq!(per_page_query_param(Some(30), 30), "per_page=30");
+        assert_eq!(per_page_query_param(Some(5), 30), "per_page=5");
+        // No caller size falls back to this file's default.
+        assert_eq!(per_page_query_param(None, 30), "per_page=30");
+        assert_eq!(per_page_query_param(None, 20), "per_page=20");
+    }
+
+    #[test]
     fn test_state_query_param() {
         // A concrete state appends the filter.
         assert_eq!(state_query_param(Some("opened")), "&state=opened");
@@ -1051,7 +1097,7 @@ mod tests {
         // Add a non-GitLab remote
         repo.add_remote("origin", "https://github.com/user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -1062,7 +1108,7 @@ mod tests {
         // Add a GitLab remote
         repo.add_remote("origin", "https://gitlab.com/user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         let detected = result.unwrap();
         assert!(detected.is_some());
@@ -1074,12 +1120,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_detect_gitlab_repo_targets_requested_remote() {
+        let repo = TestRepo::with_initial_commit();
+        repo.add_remote("origin", "https://gitlab.com/personal/repo.git");
+        repo.add_remote("upstream", "https://gitlab.com/work/repo.git");
+
+        let detected = detect_gitlab_repo(repo.path_str(), Some("upstream".to_string()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detected.project_path, "work/repo");
+        assert_eq!(detected.remote_name, "upstream");
+    }
+
+    #[tokio::test]
     async fn test_detect_gitlab_repo_with_ssh_remote() {
         let repo = TestRepo::with_initial_commit();
         // Add a GitLab SSH remote
         repo.add_remote("origin", "git@gitlab.com:user/repo.git");
 
-        let result = detect_gitlab_repo(repo.path_str()).await;
+        let result = detect_gitlab_repo(repo.path_str(), None).await;
         assert!(result.is_ok());
         let detected = result.unwrap();
         assert!(detected.is_some());
@@ -1114,6 +1175,7 @@ mod tests {
             "user/repo".to_string(),
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1139,6 +1201,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1149,6 +1212,7 @@ mod tests {
         let result = list_gitlab_pipelines(
             "https://gitlab.com".to_string(),
             "user/repo".to_string(),
+            None,
             None,
             None,
         )
