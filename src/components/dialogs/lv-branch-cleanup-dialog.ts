@@ -33,6 +33,9 @@ interface CleanupBranch {
 
 const BUILTIN_PROTECTED = ['main', 'master', 'develop', 'development', 'staging', 'production'];
 
+/** Most branch names spelled out in the delete confirm; the rest collapse to a count. */
+const MAX_CONFIRM_NAMES = 10;
+
 @customElement('lv-branch-cleanup-dialog')
 export class LvBranchCleanupDialog extends LitElement {
   static styles = [
@@ -452,9 +455,10 @@ export class LvBranchCleanupDialog extends LitElement {
       if (preserveSelection) {
         // Reload of an ALREADY-OPEN dialog. Auto-select must not run: it only
         // ever adds, so it would silently re-check a branch the user
-        // deliberately unchecked, and the next Delete would remove it without
-        // a confirm (safe branches skip the risky-branch gate). Keep exactly
-        // what the user chose, minus anything no longer listed.
+        // deliberately unchecked, and the delete confirm names the snapshot it
+        // is about to delete — a silently re-checked branch would be listed
+        // there but was never chosen. Keep exactly what the user chose, minus
+        // anything no longer listed.
         const stillListed = new Set(
           [...this.mergedBranches, ...this.staleBranches, ...this.goneUpstreamBranches].map(
             (cb) => cb.branch.name,
@@ -679,16 +683,14 @@ export class LvBranchCleanupDialog extends LitElement {
 
     const toDelete = this.selectedForDeletion();
 
-    // Gate on the SAME deduplicated list the message and the deletes use.
-    // Distinguish MEASURED unpushed commits from unmeasurable divergence —
-    // claiming "has unpushed commits" about a branch we could not compare is
-    // the same false precision the risk badge used to have, reversed.
+    // Confirm the exact snapshot this invocation will delete. Safe branches
+    // still remove refs and may be difficult to recover, so they need the same
+    // explicit count/scope gate as risky branches.
     const risky = toDelete.filter((cb) => cb.risk === 'warning' || cb.risk === 'danger');
 
-    if (risky.length > 0) {
+    if (toDelete.length > 0) {
       const unpushed = risky.filter((cb) => (cb.branch.aheadBehind?.ahead ?? 0) > 0).length;
       const unknown = risky.length - unpushed;
-
       const parts: string[] = [];
       if (unpushed > 0) {
         parts.push(
@@ -700,10 +702,47 @@ export class LvBranchCleanupDialog extends LitElement {
           `${unknown} could not be checked for unmerged work (no upstream to compare against)`,
         );
       }
+      const count = toDelete.length;
+      // Cap the enumeration. Open auto-selects every safe merged and gone
+      // branch, so on the long-lived repo this dialog exists for the list is
+      // routinely dozens of refs — enough to push the loss warning and the
+      // final question off the bottom of a native message dialog. The count
+      // above already carries the exact scope; the names are orientation.
+      //
+      // Risky branches are listed FIRST so the cap drops safe names before
+      // risky ones; only a selection holding more than MAX_CONFIRM_NAMES risky
+      // branches can truncate a name the loss clause is about. Slicing
+      // `toDelete` in its own order put the auto-selected safe merged/gone
+      // branches at the front, so the very branches the loss clause is about
+      // were the ones collapsed into "and N more" — the user was told commits
+      // would be destroyed and never told which branch carried them. `risk` is
+      // exactly 'safe' | 'warning' | 'danger', so these two halves partition
+      // `toDelete` with no duplicates and `count` is unchanged.
+      const ordered = [...risky, ...toDelete.filter((cb) => cb.risk === 'safe')];
+      const shown = ordered.slice(0, MAX_CONFIRM_NAMES).map((cb) => cb.branch.name);
+      const names =
+        count > MAX_CONFIRM_NAMES
+          ? `${shown.join(', ')}, and ${count - MAX_CONFIRM_NAMES} more`
+          : shown.join(', ');
+      const riskSummary =
+        parts.length > 0
+          ? `\n\nOf ${count === 1 ? 'this branch' : 'these branches'}, ${parts.join(', and ')}.`
+          : count === 1
+            ? '\n\nThis branch was reported as fully merged or otherwise safe to delete.'
+            : '\n\nAll selected branches were reported as fully merged or otherwise safe to delete.';
+      const pruneSummary = this.pruneRemotes
+        ? '\n\nRemote-tracking branches will also be pruned.'
+        : '';
 
+      // Risk clause BEFORE the name list: the list is the part that can grow
+      // without bound, so anything after it is what a clipped dialog hides.
       const confirmed = await showConfirm(
-        'Delete Branches with Unpushed Work?',
-        `Of the selected branches, ${parts.join(', and ')}.\n\nThis action cannot be undone. Continue?`,
+        `Delete ${count} Local Branch${count === 1 ? '' : 'es'}?`,
+        `${count} selected local branch${count === 1 ? '' : 'es'} will be deleted.` +
+          riskSummary +
+          `\n\n${names}.` +
+          pruneSummary +
+          '\n\nThis action cannot be undone. Continue?',
         'warning',
       );
       if (!confirmed) {
@@ -731,11 +770,11 @@ export class LvBranchCleanupDialog extends LitElement {
 
     for (const cb of toDelete) {
       // NEVER force a branch the dialog labelled Safe. Two reasons: a merged
-      // branch deletes fine without force, and the confirm above only fires for
-      // risky branches — so forcing a safe one would be an UNCONFIRMED force
-      // delete. Withholding force also keeps delete_branch's merged-check,
-      // which is the only thing that catches the label having gone stale (an
-      // external reset or checkout while this modal sat open).
+      // branch deletes fine without force, and withholding force keeps
+      // delete_branch's merged-check, which is the only thing that catches the
+      // label having gone stale (an external reset or checkout while this modal
+      // sat open). The confirm above no longer distinguishes safe from risky,
+      // so it is not what protects this.
       //
       // Among risky branches, force only on MEASURED unpushed commits. Deriving
       // it from the label alone would force-delete a branch labelled 'warning'
