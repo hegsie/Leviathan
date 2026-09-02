@@ -671,7 +671,38 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(messages[0]).to.include('2 selected local branches');
       expect(messages[0]).to.include(mergedSafe.name);
       expect(messages[0]).to.include(goneSafe.name);
+      // "Also prune remote tracking branches" is ticked by default and the
+      // prune runs off this same confirmed click, so the confirm has to state
+      // that scope — declining it skips the prune too.
+      expect(messages[0], 'a ticked prune is part of what is being confirmed').to.include(
+        'Remote-tracking branches will also be pruned.',
+      );
       expect(findCommands('delete_branch')).to.have.length(2);
+      expect(findCommands('prune_remote_tracking_branches')).to.have.length(1);
+    });
+
+    it('omits the prune clause from the confirm when prune is unticked', async () => {
+      // The clause must track the checkbox, not be boilerplate: with the tick
+      // removed nothing prunes, so promising a prune would misstate the scope
+      // of an irreversible action.
+      const el = await renderAndOpen([mergedSafe, goneSafe]);
+      (el.shadowRoot!.querySelector(
+        '.prune-option input[type="checkbox"]',
+      ) as HTMLInputElement).click();
+      await settle(el);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = confirmMessages();
+      expect(messages).to.have.length(1);
+      expect(messages[0]).to.include('2 selected local branches');
+      expect(messages[0], 'nothing will be pruned, so it must not say so').to.not.include(
+        'Remote-tracking branches will also be pruned.',
+      );
+      expect(findCommands('delete_branch')).to.have.length(2);
+      expect(findCommands('prune_remote_tracking_branches')).to.have.length(0);
     });
 
     it('caps the name list, naming the risky branches first', async () => {

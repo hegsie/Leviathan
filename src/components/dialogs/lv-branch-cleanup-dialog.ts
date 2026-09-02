@@ -709,14 +709,15 @@ export class LvBranchCleanupDialog extends LitElement {
       // final question off the bottom of a native message dialog. The count
       // above already carries the exact scope; the names are orientation.
       //
-      // Risky branches are listed FIRST so the cap can only ever drop branches
-      // whose deletion loses nothing. Slicing `toDelete` in its own order put
-      // the auto-selected safe merged/gone branches at the front, so the very
-      // branches the loss clause is about were the ones collapsed into "and N
-      // more" — the user was told commits would be destroyed and never told
-      // which branch carried them. `risk` is exactly 'safe' | 'warning' |
-      // 'danger', so these two halves partition `toDelete` with no duplicates
-      // and `count` is unchanged.
+      // Risky branches are listed FIRST so the cap drops safe names before
+      // risky ones; only a selection holding more than MAX_CONFIRM_NAMES risky
+      // branches can truncate a name the loss clause is about. Slicing
+      // `toDelete` in its own order put the auto-selected safe merged/gone
+      // branches at the front, so the very branches the loss clause is about
+      // were the ones collapsed into "and N more" — the user was told commits
+      // would be destroyed and never told which branch carried them. `risk` is
+      // exactly 'safe' | 'warning' | 'danger', so these two halves partition
+      // `toDelete` with no duplicates and `count` is unchanged.
       const ordered = [...risky, ...toDelete.filter((cb) => cb.risk === 'safe')];
       const shown = ordered.slice(0, MAX_CONFIRM_NAMES).map((cb) => cb.branch.name);
       const names =
