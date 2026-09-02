@@ -4267,12 +4267,14 @@ export async function queryAdoWorkItems(
   organization: string,
   project: string,
   state?: string,
+  limit?: number,
   token?: string | null,
 ): Promise<CommandResult<AdoWorkItem[]>> {
   return invokeProviderCommand<AdoWorkItem[]>("query_ado_work_items", {
     organization,
     project,
     state,
+    limit,
     token,
   });
 }

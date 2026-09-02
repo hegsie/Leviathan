@@ -658,6 +658,43 @@ describe('lv-azure-devops-dialog', () => {
       );
     });
 
+    // Azure DevOps defaults `searchCriteria.status` to `active`, so sending no
+    // status for "All" returns the Active list again — completed and abandoned
+    // PRs would go missing while the empty state claims to be showing "all".
+    it('sends the all status when the All filter is selected', async () => {
+      connectionResponse = mockConnectedStatus;
+      detectedRepoResponse = mockDetectedRepo;
+
+      const el = await fixture<LvAzureDevOpsDialog>(html`
+        <lv-azure-devops-dialog .open=${true} .repositoryPath=${'/mock/repo'}></lv-azure-devops-dialog>
+      `);
+      await waitForLoad(el);
+      const prTab = Array.from(el.shadowRoot!.querySelectorAll('.tab')).find(
+        (t) => t.textContent?.trim() === 'Pull Requests'
+      ) as HTMLButtonElement;
+      prTab.click();
+      await waitForLoad(el);
+
+      const filterSelect = el.shadowRoot!.querySelector('.filter-select') as HTMLSelectElement;
+      invokeHistory.length = 0;
+      filterSelect.value = 'all';
+      filterSelect.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      const allCall = invokeHistory.find((c) => c.command === 'list_ado_pull_requests');
+      expect(allCall, 'pull requests reloaded for the All filter').to.not.be.undefined;
+      expect((allCall!.args as Record<string, unknown>).status).to.equal('all');
+
+      // A concrete state still sends itself, unchanged.
+      invokeHistory.length = 0;
+      filterSelect.value = 'abandoned';
+      filterSelect.dispatchEvent(new Event('change'));
+      await waitForLoad(el);
+
+      const abandonedCall = invokeHistory.find((c) => c.command === 'list_ado_pull_requests');
+      expect((abandonedCall!.args as Record<string, unknown>).status).to.equal('abandoned');
+    });
+
     it('does not disclose a cap when fewer pull requests come back', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
@@ -730,14 +767,18 @@ describe('lv-azure-devops-dialog', () => {
     });
 
     // The work-items hint predates the shared `capped-list-hint` marker; it is the
-    // same disclosure as its siblings and must carry the same class.
-    it('marks the capped work-item hint with the shared hint class', async () => {
+    // same disclosure as its siblings and must carry the same class. Serving
+    // exactly the requested `limit` and then requiring the hint to name that same
+    // number fails if the call site and the hint ever drift apart.
+    it('discloses the same page size it requests when the work-item list is full', async () => {
       connectionResponse = mockConnectedStatus;
       detectedRepoResponse = mockDetectedRepo;
+      let requestedLimit = 0;
       const baseInvoke = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'query_ado_work_items') {
-          return Array.from({ length: 50 }, (_, index) => ({
+          requestedLimit = Number((args as Record<string, unknown>).limit);
+          return Array.from({ length: requestedLimit }, (_, index) => ({
             ...mockWorkItems[0],
             id: 600 + index,
           }));
@@ -754,8 +795,11 @@ describe('lv-azure-devops-dialog', () => {
       ) as HTMLButtonElement).click();
       await waitForLoad(el);
 
+      expect(requestedLimit).to.be.greaterThan(0);
+      expect(el.shadowRoot!.querySelectorAll('.work-item').length).to.equal(requestedLimit);
       const hints = el.shadowRoot!.querySelectorAll('.capped-list-hint');
       expect(hints.length).to.equal(1);
+      expect(hints[0].textContent).to.include(String(requestedLimit));
       expect(hints[0].querySelector('a')?.getAttribute('href')).to.include('/_workitems/');
     });
 

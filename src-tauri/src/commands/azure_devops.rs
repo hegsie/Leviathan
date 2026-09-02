@@ -169,10 +169,10 @@ fn build_api_url_with_params(
 
 /// Build the `searchCriteria.status` query fragment for a PR status filter.
 ///
-/// Azure DevOps returns pull requests in *all* states when
-/// `searchCriteria.status` is omitted. A `None` status therefore means "All"
-/// and must not append any status filter (previously this defaulted to
-/// `active`, hiding completed/abandoned PRs from the "All" filter).
+/// Azure DevOps defaults `searchCriteria.status` to `active` when the parameter
+/// is omitted, so omitting it is *not* "All" — a caller wanting every state must
+/// pass the `all` status explicitly. `None` here means only "no filter
+/// supplied", which leaves that server default in place.
 fn ado_pr_status_param(status: Option<&str>) -> Option<String> {
     status.map(|s| format!("searchCriteria.status={}", s))
 }
@@ -867,9 +867,22 @@ pub async fn get_ado_work_items(
         .collect())
 }
 
-/// Max work items fetched for the "My Work Items" list. When the caller receives
-/// exactly this many, more may exist — the dialog surfaces a "capped" hint.
-const WORK_ITEMS_LIMIT: usize = 50;
+/// Default number of work items fetched for the "My Work Items" list. When the
+/// caller receives exactly this many, more may exist — the dialog surfaces a
+/// "capped" hint.
+///
+/// Kept in sync with WORK_ITEMS_PAGE_SIZE in lv-azure-devops-dialog.ts, which
+/// discloses it to the user.
+const WORK_ITEMS_DEFAULT_LIMIT: u32 = 50;
+
+/// Resolve how many work items to fetch details for.
+///
+/// The dialog discloses the size it asked for ("Showing your N most recent"), so
+/// taking the size from the caller keeps the number the request caps at and the
+/// number the hint quotes the same value, instead of two literals that drift.
+fn work_items_limit(limit: Option<u32>) -> usize {
+    limit.unwrap_or(WORK_ITEMS_DEFAULT_LIMIT) as usize
+}
 
 /// Build the WIQL for the work-items list.
 ///
@@ -909,6 +922,7 @@ pub async fn query_ado_work_items(
     organization: String,
     project: String,
     state: Option<String>,
+    limit: Option<u32>,
     token: Option<String>,
 ) -> Result<Vec<AdoWorkItem>> {
     let token = resolve_ado_token(token)?;
@@ -963,13 +977,13 @@ pub async fn query_ado_work_items(
         LeviathanError::OperationFailed(format!("Failed to parse WIQL response: {}", e))
     })?;
 
-    // Fetch full details for at most WORK_ITEMS_LIMIT of the user's most-recent
-    // items. The dialog flags the list as capped when it receives this many (kept
-    // in sync with WORK_ITEMS_PAGE_SIZE on the frontend).
+    // Fetch full details for at most the caller's page size of the user's
+    // most-recent items. The dialog flags the list as capped when it receives
+    // exactly this many, and it asks for the number it discloses.
     let ids: Vec<u32> = data
         .work_items
         .into_iter()
-        .take(WORK_ITEMS_LIMIT)
+        .take(work_items_limit(limit))
         .map(|w| w.id)
         .collect();
 
@@ -1492,9 +1506,26 @@ mod tests {
             ado_pr_query_params(Some("active"), 100),
             "$top=100&searchCriteria.status=active"
         );
-        // "All" (None) still gets an explicit page size, just no status filter.
+        // "All" is a real Azure DevOps status, so it is sent like any other —
+        // omitting it would leave the API's `active` default in place and hide
+        // completed and abandoned pull requests.
+        assert_eq!(
+            ado_pr_query_params(Some("all"), 100),
+            "$top=100&searchCriteria.status=all"
+        );
+        // No filter supplied still gets an explicit page size.
         assert_eq!(ado_pr_query_params(None, 100), "$top=100");
         assert_eq!(ado_pr_query_params(None, 5), "$top=5");
+    }
+
+    #[test]
+    fn test_work_items_limit() {
+        // The caller's page size wins, so the size requested is the size the
+        // dialog discloses.
+        assert_eq!(work_items_limit(Some(50)), 50);
+        assert_eq!(work_items_limit(Some(3)), 3);
+        // No caller size falls back to this file's default.
+        assert_eq!(work_items_limit(None), WORK_ITEMS_DEFAULT_LIMIT as usize);
     }
 
     #[test]

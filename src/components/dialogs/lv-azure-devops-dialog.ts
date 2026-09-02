@@ -35,9 +35,10 @@ import './lv-account-selector.ts';
 type TabType = 'connection' | 'pull-requests' | 'work-items' | 'pipelines' | 'create-pr' | 'create-work-item';
 
 /**
- * Max work items the backend returns for the "My Work Items" list (kept in sync
- * with WORK_ITEMS_LIMIT in commands/azure_devops.rs). When the list is exactly
- * this long, more may exist and the tab shows a "capped" hint.
+ * Page size this dialog asks for when listing work items. Passed straight into
+ * the listing call as `limit`, so the number the request caps at and the number
+ * the "capped" hint discloses are the same constant. When the list is exactly
+ * this long, more may exist and the tab shows the hint.
  */
 const WORK_ITEMS_PAGE_SIZE = 50;
 
@@ -1127,7 +1128,11 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.detectedRepo.repository,
-        this.prFilter === 'all' ? undefined : this.prFilter,
+        // Always send the filter: Azure DevOps defaults `searchCriteria.status`
+        // to `active`, so omitting it for "All" would return the Active list
+        // again and silently drop completed and abandoned pull requests. `all`
+        // is a valid PullRequestStatus, so it goes over the wire like the rest.
+        this.prFilter,
         PULL_REQUESTS_PAGE_SIZE,
         token
       );
@@ -1157,6 +1162,7 @@ export class LvAzureDevOpsDialog extends LitElement {
         this.detectedRepo.organization,
         this.detectedRepo.project,
         this.workItemFilter || undefined,
+        WORK_ITEMS_PAGE_SIZE,
         token
       );
 
