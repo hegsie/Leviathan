@@ -70,16 +70,18 @@ function clearHistory(): void {
   invokeHistory.length = 0;
 }
 
+/**
+ * plugin-dialog 2.7 implements confirm() as a `plugin:dialog|message` call with
+ * buttons: 'OkCancel', and compares the RETURNED BUTTON LABEL to 'Ok' — there
+ * is no `plugin:dialog|confirm` command. So these mocks answer a confirm with
+ * the string 'Ok'/'Cancel', not a boolean.
+ */
 function isConfirmCommand(command: string): boolean {
-  return command === 'plugin:dialog|message' || command === 'plugin:dialog|confirm';
+  return command === 'plugin:dialog|message';
 }
 
-function confirmResult(command: string, accepted: boolean): boolean | string {
-  return command === 'plugin:dialog|message'
-    ? accepted
-      ? 'Ok'
-      : 'Cancel'
-    : accepted;
+function confirmResult(accepted: boolean): string {
+  return accepted ? 'Ok' : 'Cancel';
 }
 
 /** Messages passed to showConfirm(), in order. */
@@ -116,8 +118,7 @@ async function renderAndOpen(
       case 'plugin:notification|is_permission_granted':
         return false;
       case 'plugin:dialog|message':
-      case 'plugin:dialog|confirm':
-        return confirmResult(command, true);
+        return confirmResult(true);
       default:
         return null;
     }
@@ -673,10 +674,88 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       expect(findCommands('delete_branch')).to.have.length(2);
     });
 
+    it('caps the name list and keeps the loss warning ahead of it', async () => {
+      // Open auto-selects every safe branch, so a long-lived repo produces a
+      // confirm with dozens of refs in it. The names must not be able to push
+      // the loss warning and the final question out of a native dialog.
+      const candidates = [
+        ...Array.from({ length: 13 }, (_, i) =>
+          createCandidate(`gone/${String(i).padStart(2, '0')}`, 'gone', {
+            aheadBehind: { ahead: 0, behind: 0 },
+            upstream: `origin/gone/${String(i).padStart(2, '0')}`,
+          }),
+        ),
+        createCandidate('gone/danger-a', 'gone', {
+          aheadBehind: { ahead: 4, behind: 0 },
+          upstream: 'origin/gone/danger-a',
+        }),
+        createCandidate('gone/danger-b', 'gone', {
+          aheadBehind: { ahead: 7, behind: 0 },
+          upstream: 'origin/gone/danger-b',
+        }),
+      ];
+      const el = await renderAndOpen(candidates);
+      for (const box of Array.from(
+        el.shadowRoot!.querySelectorAll('.branch-item input[type="checkbox"]'),
+      )) {
+        if (!(box as HTMLInputElement).checked) (box as HTMLInputElement).click();
+      }
+      await settle(el);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = confirmMessages();
+      expect(messages).to.have.length(1);
+      const body = messages[0];
+      expect(body, 'the exact scope is still stated').to.include(
+        '15 selected local branches will be deleted.',
+      );
+      expect(body, 'the first names orient the user').to.include('gone/00');
+      expect(body, 'beyond the cap the names collapse to a count').to.include(
+        'and 5 more',
+      );
+      for (const omitted of ['gone/10', 'gone/11', 'gone/12', 'gone/danger-a']) {
+        expect(body, `${omitted} must not be spelled out`).to.not.include(omitted);
+      }
+
+      const warning = '2 have unpushed commits that will be lost';
+      expect(body).to.include(warning);
+      expect(
+        body.indexOf(warning) < body.indexOf('gone/00'),
+        'the loss warning must precede the list that can grow without bound',
+      ).to.be.true;
+      expect(
+        body.indexOf('gone/00') < body.indexOf('This action cannot be undone'),
+        'and the final question must still come last',
+      ).to.be.true;
+
+      expect(findCommands('delete_branch')).to.have.length(15);
+    });
+
+    it('describes a single safe branch in the singular', async () => {
+      const el = await renderAndOpen([mergedSafe]);
+      clearHistory();
+
+      (el.shadowRoot!.querySelector('.btn-danger') as HTMLButtonElement).click();
+      await settle(el);
+
+      const messages = confirmMessages();
+      expect(messages).to.have.length(1);
+      expect(messages[0]).to.include('1 selected local branch will be deleted.');
+      expect(messages[0]).to.include(
+        'This branch was reported as fully merged or otherwise safe to delete.',
+      );
+      expect(messages[0], 'no plural sentence for a single branch').to.not.include(
+        'All selected branches',
+      );
+    });
+
     it('does not delete or prune safe branches when confirmation is declined', async () => {
       const el = await renderAndOpen([mergedSafe]);
       mockInvoke = async (command: string) => {
-        if (isConfirmCommand(command)) return confirmResult(command, false);
+        if (isConfirmCommand(command)) return confirmResult(false);
         if (command === 'get_cleanup_candidates') return [];
         return null;
       };
@@ -712,8 +791,8 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
     it('never issues a force delete without a confirm', async () => {
       // Invariant guard. force=true skips delete_branch's merged-check, so it
       // must never happen on a path the user was not asked about. A merged
-      // branch with upstream drift is labelled Safe (correctly) and therefore
-      // bypasses the risky-branch confirm — it must not be forced.
+      // branch with upstream drift is labelled Safe (correctly) and is
+      // confirmed like any other selection — but it must still never be forced.
       const el = await renderAndOpen([
         createCandidate('feature/merged-drift', 'merged', {
           aheadBehind: { ahead: 5, behind: 0 },
@@ -756,7 +835,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
         if (command === 'get_remotes') return REMOTES;
         if (isConfirmCommand(command)) {
           confirms++;
-          return confirmResult(command, confirms === 1);
+          return confirmResult(confirms === 1);
         }
         if (command === 'delete_branch') {
           throw {
@@ -827,7 +906,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
         if (command === 'get_remotes') return REMOTES;
-        if (isConfirmCommand(command)) return confirmResult(command, true);
+        if (isConfirmCommand(command)) return confirmResult(true);
         if (command === 'delete_branch') {
           deleteCalls++;
           if (deleteCalls === 1) {
@@ -876,7 +955,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
         if (command === 'get_remotes') return REMOTES;
         if (isConfirmCommand(command)) {
           confirms++;
-          return confirmResult(command, confirms === 1);
+          return confirmResult(confirms === 1);
         }
         if (command === 'delete_branch') {
           throw {
@@ -929,7 +1008,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
         if (command === 'get_remotes') return REMOTES;
-        if (isConfirmCommand(command)) return confirmResult(command, true);
+        if (isConfirmCommand(command)) return confirmResult(true);
         if (command === 'delete_branch') return undefined;
         if (command === 'prune_remote_tracking_branches') {
           throw { code: 'COMMAND_ERROR', message: 'could not connect to origin' };
@@ -977,7 +1056,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
         if (command === 'get_remotes') return REMOTES;
         if (isConfirmCommand(command)) {
           confirms++;
-          return confirmResult(command, confirms === 1);
+          return confirmResult(confirms === 1);
         }
         if (command === 'delete_branch') {
           throw {
@@ -1030,7 +1109,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
         if (isConfirmCommand(command)) {
           confirms++;
           // Confirm the delete, decline the force escalation.
-          return confirmResult(command, confirms === 1);
+          return confirmResult(confirms === 1);
         }
         if (command === 'delete_branch') {
           const name = (args as { name: string }).name;
@@ -1080,7 +1159,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
         if (command === 'get_remotes') return REMOTES;
         if (isConfirmCommand(command)) {
           confirms++;
-          return confirmResult(command, confirms === 1);
+          return confirmResult(confirms === 1);
         }
         if (command === 'delete_branch') {
           throw {
@@ -1295,7 +1374,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
         if (command === 'get_remotes') return [];
-        if (command === 'plugin:dialog|message') return 'Ok';
+        if (isConfirmCommand(command)) return confirmResult(true);
         if (command === 'delete_branch') return undefined;
         return null;
       };
@@ -1323,7 +1402,7 @@ describe('lv-branch-cleanup-dialog (fixture)', () => {
       mockInvoke = async (command: string) => {
         if (command === 'get_cleanup_candidates') return [];
         if (command === 'get_remotes') throw { code: 'COMMAND_ERROR', message: 'no remotes' };
-        if (command === 'plugin:dialog|message') return 'Ok';
+        if (isConfirmCommand(command)) return confirmResult(true);
         if (command === 'delete_branch') return undefined;
         return null;
       };

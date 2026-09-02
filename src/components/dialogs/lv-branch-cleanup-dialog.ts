@@ -33,6 +33,9 @@ interface CleanupBranch {
 
 const BUILTIN_PROTECTED = ['main', 'master', 'develop', 'development', 'staging', 'production'];
 
+/** Most branch names spelled out in the delete confirm; the rest collapse to a count. */
+const MAX_CONFIRM_NAMES = 10;
+
 @customElement('lv-branch-cleanup-dialog')
 export class LvBranchCleanupDialog extends LitElement {
   static styles = [
@@ -452,9 +455,10 @@ export class LvBranchCleanupDialog extends LitElement {
       if (preserveSelection) {
         // Reload of an ALREADY-OPEN dialog. Auto-select must not run: it only
         // ever adds, so it would silently re-check a branch the user
-        // deliberately unchecked, and the next Delete would remove it without
-        // a confirm (safe branches skip the risky-branch gate). Keep exactly
-        // what the user chose, minus anything no longer listed.
+        // deliberately unchecked, and the delete confirm names the snapshot it
+        // is about to delete — a silently re-checked branch would be listed
+        // there but was never chosen. Keep exactly what the user chose, minus
+        // anything no longer listed.
         const stillListed = new Set(
           [...this.mergedBranches, ...this.staleBranches, ...this.goneUpstreamBranches].map(
             (cb) => cb.branch.name,
@@ -699,19 +703,33 @@ export class LvBranchCleanupDialog extends LitElement {
         );
       }
       const count = toDelete.length;
-      const names = toDelete.map((cb) => cb.branch.name).join(', ');
+      // Cap the enumeration. Open auto-selects every safe merged and gone
+      // branch, so on the long-lived repo this dialog exists for the list is
+      // routinely dozens of refs — enough to push the loss warning and the
+      // final question off the bottom of a native message dialog. The count
+      // above already carries the exact scope; the names are orientation.
+      const shown = toDelete.slice(0, MAX_CONFIRM_NAMES).map((cb) => cb.branch.name);
+      const names =
+        count > MAX_CONFIRM_NAMES
+          ? `${shown.join(', ')}, and ${count - MAX_CONFIRM_NAMES} more`
+          : shown.join(', ');
       const riskSummary =
         parts.length > 0
           ? `\n\nOf these branches, ${parts.join(', and ')}.`
-          : '\n\nAll selected branches were reported as fully merged or otherwise safe to delete.';
+          : count === 1
+            ? '\n\nThis branch was reported as fully merged or otherwise safe to delete.'
+            : '\n\nAll selected branches were reported as fully merged or otherwise safe to delete.';
       const pruneSummary = this.pruneRemotes
         ? '\n\nRemote-tracking branches will also be pruned.'
         : '';
 
+      // Risk clause BEFORE the name list: the list is the part that can grow
+      // without bound, so anything after it is what a clipped dialog hides.
       const confirmed = await showConfirm(
         `Delete ${count} Local Branch${count === 1 ? '' : 'es'}?`,
-        `${count} selected local branch${count === 1 ? '' : 'es'} will be deleted: ${names}.` +
+        `${count} selected local branch${count === 1 ? '' : 'es'} will be deleted.` +
           riskSummary +
+          `\n\n${names}.` +
           pruneSummary +
           '\n\nThis action cannot be undone. Continue?',
         'warning',
@@ -741,11 +759,11 @@ export class LvBranchCleanupDialog extends LitElement {
 
     for (const cb of toDelete) {
       // NEVER force a branch the dialog labelled Safe. Two reasons: a merged
-      // branch deletes fine without force, and the confirm above only fires for
-      // risky branches — so forcing a safe one would be an UNCONFIRMED force
-      // delete. Withholding force also keeps delete_branch's merged-check,
-      // which is the only thing that catches the label having gone stale (an
-      // external reset or checkout while this modal sat open).
+      // branch deletes fine without force, and withholding force keeps
+      // delete_branch's merged-check, which is the only thing that catches the
+      // label having gone stale (an external reset or checkout while this modal
+      // sat open). The confirm above no longer distinguishes safe from risky,
+      // so it is not what protects this.
       //
       // Among risky branches, force only on MEASURED unpushed commits. Deriving
       // it from the label alone would force-delete a branch labelled 'warning'
