@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { setupOpenRepository, withConflicts } from '../fixtures/tauri-mock';
 import {
   startCommandCapture,
+  startCommandCaptureWithMocks,
   findCommand,
   waitForCommand,
   injectCommandError,
@@ -294,6 +295,77 @@ test.describe('Merge Editor - Conflict Resolution Dialog', () => {
     // After accepting ours, conflict count should show "No conflicts"
     const conflictCount = page.locator('lv-merge-editor .conflict-count');
     await expect(conflictCount).toContainText('No conflicts');
+  });
+
+  test('toolbar Use Ours confirms before replacing a per-block pick', async ({ page }) => {
+    await openConflictResolutionDialog(page);
+
+    // Make a per-block pick — this is the in-progress work the confirm guards.
+    const block = page.locator('lv-merge-editor .code-conflict-block');
+    await block.locator('button', { hasText: 'Use Theirs' }).click();
+    const output = page.locator('lv-merge-editor #panel-output');
+    await expect(output).toContainText('const value = "theirs";');
+
+    // Declining must leave the pick exactly as it was. The whole-file blobs
+    // all read as `base` here, so its absence proves nothing was overwritten.
+    await startCommandCaptureWithMocks(page, { 'plugin:dialog|confirm': false });
+    await page.locator('lv-merge-editor .toolbar-actions .btn-ours').click();
+    await waitForCommand(page, 'plugin:dialog|message');
+    await expect(output).toContainText('const value = "theirs";');
+    await expect(output).not.toContainText('const value = "base";');
+
+    // Accepting replaces the pick with the whole ours blob.
+    await startCommandCaptureWithMocks(page, { 'plugin:dialog|confirm': true });
+    await page.locator('lv-merge-editor .toolbar-actions .btn-ours').click();
+    await waitForCommand(page, 'plugin:dialog|message');
+    await expect(output).toContainText('const value = "base";');
+    await expect(output).not.toContainText('const value = "theirs";');
+  });
+
+  test('declining the take-side confirm keeps the deleted-side file unresolved', async ({
+    page,
+  }) => {
+    // Modify/delete: git leaves the workdir file marker-free, so the toolbar's
+    // "Use Theirs (delete file)" is a take-side that stages a deletion on disk.
+    await injectCommandMock(page, {
+      get_conflicts: [
+        {
+          path: 'src/conflict.ts',
+          ancestor: { oid: 'ancestor_oid_123' },
+          ours: { oid: 'ours_oid_456' },
+          theirs: null,
+        },
+      ],
+      read_file_content: 'const value = "ours";',
+      resolve_conflict_take_side: null,
+    });
+    await openConflictResolutionDialog(page);
+
+    // Accept ours whole-file first — the only in-editor work reachable here.
+    await page.locator('lv-merge-editor .toolbar-actions .btn-ours').click();
+    const output = page.locator('lv-merge-editor #panel-output');
+    await expect(output).toContainText('const value = "base";');
+
+    const deleteBtn = page.locator('lv-merge-editor .toolbar-actions .btn-theirs', {
+      hasText: 'Use Theirs (delete file)',
+    });
+    await expect(deleteBtn).toBeVisible();
+
+    await startCommandCaptureWithMocks(page, { 'plugin:dialog|confirm': false });
+    await deleteBtn.click();
+    await waitForCommand(page, 'plugin:dialog|message');
+    expect(await findCommand(page, 'resolve_conflict_take_side')).toHaveLength(0);
+    await expect(output).toContainText('const value = "base";');
+
+    // Confirming stages the deletion and lands in the terminal deleted state.
+    // (Each stacked mock wrapper records the call, so assert on the args, not
+    // on how many times the capture layers saw it.)
+    await startCommandCaptureWithMocks(page, { 'plugin:dialog|confirm': true });
+    await deleteBtn.click();
+    await waitForCommand(page, 'resolve_conflict_take_side');
+    const taken = await findCommand(page, 'resolve_conflict_take_side');
+    expect((taken[0].args as { side: string }).side).toBe('theirs');
+    await expect(output).toContainText('this file was deleted by the resolution');
   });
 
   test('clicking Use Theirs in toolbar replaces output with theirs content', async ({ page }) => {

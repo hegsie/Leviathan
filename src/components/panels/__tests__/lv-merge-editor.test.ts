@@ -81,6 +81,10 @@ let aiAvailable = false;
 let aiUnavailable: { reason: string; providerSelected: boolean } | null = null;
 let aiSuggestion: (() => Promise<unknown>) | null = null;
 
+function isConfirmCommand(command: string): boolean {
+  return command === 'plugin:dialog|message' || command === 'plugin:dialog|confirm';
+}
+
 function setupDefaultMocks(): void {
   workdirContent = DEFAULT_WORKDIR_CONTENT;
   aiAvailable = false;
@@ -1607,7 +1611,7 @@ describe('lv-merge-editor', () => {
       // The whole-file accept is unsaved work, so Reload confirms first.
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') return 'Ok';
+        if (isConfirmCommand(command)) return 'Ok';
         return baseMock(command, args);
       };
       const el = await renderLoadedEditor();
@@ -2798,7 +2802,7 @@ describe('lv-merge-editor', () => {
       let confirmAnswer: unknown = false;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|message') return confirmAnswer;
+        if (isConfirmCommand(command)) return confirmAnswer;
         if (command === 'launch_merge_tool') {
           launchCalls++;
           return { success: true };
@@ -2842,7 +2846,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           // The native confirm is an async IPC round-trip — a second click
           // can land before it resolves.
@@ -2894,7 +2898,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           return new Promise((res) => {
             releaseConfirm = () => res('Ok');
           });
@@ -2939,7 +2943,7 @@ describe('lv-merge-editor', () => {
       let confirmAnswer: unknown = false;
       mockInvoke = async (command: string, args?: unknown) => {
         if (command === 'get_merge_tool_config') return { toolName: 'meld' };
-        if (command === 'plugin:dialog|message') return confirmAnswer;
+        if (isConfirmCommand(command)) return confirmAnswer;
         if (command === 'launch_merge_tool') {
           launchCalls++;
           return { success: true };
@@ -3271,7 +3275,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false; // decline
         }
@@ -3295,7 +3299,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') return 'Ok';
+        if (isConfirmCommand(command)) return 'Ok';
         return baseMock(command, args);
       };
       const { el, internal } = await renderWithEdit();
@@ -3315,7 +3319,7 @@ describe('lv-merge-editor', () => {
       let releaseConfirm: (() => void) | null = null;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           return new Promise((res) => {
             releaseConfirm = () => res('Ok');
           });
@@ -3346,10 +3350,13 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       let confirmAnswer: unknown = false;
       let confirmCalls = 0;
+      const confirms: { title?: string; message?: string }[] = [];
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
           return confirmAnswer;
         }
         return baseMock(command, args);
@@ -3364,6 +3371,18 @@ describe('lv-merge-editor', () => {
       await accept.call(el, 'ours');
       await el.updateComplete;
       expect(confirmCalls).to.equal(1);
+      // The draft is the ONLY unsaved work here — a freshly loaded file with
+      // an edit opened on it. The dialog must name the typed text it is about
+      // to throw away, and must not enumerate picks the user never made.
+      expect(confirms[0].title).to.equal('Replace in-progress resolution?');
+      expect(
+        confirms[0].message,
+        'the open draft is not in the output, so it must be named explicitly'
+      ).to.contain('discards the edit that was typed but not applied');
+      expect(
+        confirms[0].message,
+        'no pick, edit or whole-file choice exists to replace'
+      ).to.not.contain('currently in the output');
       expect(internal.editingSegmentId, 'declining keeps the edit open').to.equal(editedId);
       expect(internal.editDraft).to.equal('careful hand-typed merge');
 
@@ -3376,13 +3395,564 @@ describe('lv-merge-editor', () => {
       expect(internal.segments[0].origin).to.equal('ours');
     });
 
+    it('whole-file accept with BOTH output work and an open draft names both losses', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      // A real pick lands in the output...
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      // ...and an inline edit is opened on top of it, which is NOT in the output.
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].message).to.contain(
+        'replaces the picks, edits and whole-file choice currently in the output'
+      );
+      expect(confirms[0].message, 'the open draft is lost too and must be named').to.contain(
+        'discards the edit that was typed but not applied'
+      );
+      // Declining keeps both.
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
+    });
+
+    it('a whole-file accept plus an open draft is not described as conflict picks', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+
+      // Toolbar "Use Ours" puts a whole-file accept — and nothing else — in
+      // the output. It has nothing to replace, so it must not confirm.
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirms, 'the first whole-file accept replaces nothing').to.have.length(0);
+      expect(internal.segments.length).to.equal(1);
+
+      // Opening an edit on that accepted segment takes outputIsWholeFileAccept
+      // false, so the NEXT whole-file button does confirm.
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await accept.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Replace in-progress resolution?');
+      expect(
+        confirms[0].message,
+        'the only thing in the output is the whole-file choice — name it, not picks'
+      ).to.not.contain('conflict pick');
+      expect(confirms[0].message).to.contain(
+        'replaces the picks, edits and whole-file choice currently in the output'
+      );
+      expect(confirms[0].message, 'the open draft is lost too and must be named').to.contain(
+        'discards the edit that was typed but not applied'
+      );
+      // Declining keeps the accepted side and the draft.
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
+    });
+
+    it('take-side with only an open draft names the draft, not absent picks', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = internalOf(el) as EditorInternal & {
+        editingSegmentId: number | null;
+        editDraft: string;
+      };
+      // A modify/delete conflict: theirs dropped the file, so the toolbar
+      // offers "Use Theirs (delete file)" -> handleTakeSide directly.
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(internal.segments.length, 'the marker-free workdir file renders as output').to.be
+        .greaterThan(0);
+
+      await (
+        el as unknown as { startEditSegment: (s: unknown) => Promise<void> }
+      ).startEditSegment.call(el, internal.segments[0]);
+      await el.updateComplete;
+      internal.editDraft = 'typed but never applied';
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('deletes the file and stages the deletion');
+      expect(
+        confirms[0].message,
+        'the typed text is the only thing being discarded — say so'
+      ).to.contain('discarding the edit that was typed but not applied');
+      expect(
+        confirms[0].message,
+        'no pick or whole-file choice is in the output to lose'
+      ).to.not.contain('picks, edits and whole-file choice');
+      // Declining writes nothing and keeps the draft.
+      expect(takeSideCalls).to.equal(0);
+      expect(internal.editingSegmentId).to.not.equal(null);
+      expect(internal.editDraft).to.equal('typed but never applied');
+    });
+
+    it('whole-file accepts do not confirm before any in-editor work exists', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return 'Ok';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'ours');
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+
+      expect(confirmCalls).to.equal(0);
+      expect(internalOf(el).segments).to.have.length(1);
+      expect(internalOf(el).segments[0].origin).to.equal('ours');
+    });
+
+    it('swapping between whole-file sides does not confirm — nothing is lost', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return 'Ok';
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(internal.segments[0].origin).to.equal('ours');
+
+      // Comparing the sides is a browse action, not a destructive one.
+      await accept.call(el, 'theirs');
+      await el.updateComplete;
+      expect(confirmCalls, 'swapping whole-file sides must not confirm').to.equal(0);
+      expect(internal.segments).to.have.length(1);
+      expect(internal.segments[0].origin).to.equal('theirs');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.theirsContent);
+
+      await accept.call(el, 'base');
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(0);
+      expect(internal.segments[0].origin).to.equal('base');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.baseContent);
+
+      // And back — the first side is one click away, so it stays silent too.
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirmCalls).to.equal(0);
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(internal.segments[0].lines.join('\n')).to.equal(internal.oursContent);
+    });
+
+    it('hand-editing a whole-file accept makes the next whole-file pick confirm', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return false; // decline
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = el as unknown as EditorInternal & {
+        startEditSegment: (segment: unknown) => Promise<void>;
+        applyEditSegment: () => Promise<void>;
+        editDraft: string;
+        acceptWholeFile: (origin: string) => Promise<void>;
+      };
+      await internal.acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+      await internal.startEditSegment.call(el, internal.segments[0]);
+      internal.editDraft = 'hand written';
+      await internal.applyEditSegment.call(el);
+      await el.updateComplete;
+
+      await internal.acceptWholeFile.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirmCalls, 'a typed edit is real work and must confirm').to.equal(1);
+      expect(internal.segments[0].lines).to.deep.equal(['hand written']);
+      expect(internal.segments[0].origin).to.equal('manual');
+    });
+
+    it('a per-block pick that fills the whole file still confirms and is replaced', async () => {
+      // One conflict block IS the whole file, so a per-block "Use Ours"
+      // leaves a single ours-origin segment — but its lines are the block's
+      // ours side, not the ours blob, so the toolbar button must still act.
+      setupDefaultMocks();
+      let confirmAnswer: unknown = false;
+      let confirmCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return confirmAnswer;
+        }
+        if (command === 'get_blob_content') {
+          const oid = (args as { oid: string })?.oid;
+          if (oid === 'ours-oid') return 'ours-line\ntail';
+          if (oid === 'theirs-oid') return 'theirs-line\ntail';
+          return 'base-line\ntail';
+        }
+        return baseMock(command, args);
+      };
+      workdirContent = '<<<<<<< HEAD\nours-line\n=======\ntheirs-line\n>>>>>>> feature';
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = {
+        ...makeConflictFile('src/test.ts'),
+        conflictHunks: [{ start: 0, separator: 2, end: 4 }],
+      };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(internal.segments).to.have.length(1);
+
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      expect(internal.segments[0].origin).to.equal('ours');
+      expect(internal.segments[0].fromConflict).to.be.true;
+      const before = structuredClone(internal.segments);
+
+      const accept = (el as unknown as { acceptWholeFile: (o: string) => Promise<void> })
+        .acceptWholeFile;
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+
+      expect(confirmCalls, 'a per-block pick is real work and must confirm').to.equal(1);
+      expect(internal.segments, 'declining keeps the pick').to.deep.equal(before);
+
+      confirmAnswer = 'Ok';
+      await accept.call(el, 'ours');
+      await el.updateComplete;
+
+      expect(confirmCalls).to.equal(2);
+      expect(internal.segments).to.have.length(1);
+      expect(internal.segments[0].fromConflict).to.be.false;
+      expect(
+        internal.segments[0].lines,
+        'the whole ours blob replaces the block-only pick'
+      ).to.deep.equal(['ours-line', 'tail']);
+    });
+
+    for (const origin of ['ours', 'theirs'] as const) {
+      it(`whole-file ${origin} confirms before replacing per-block resolutions`, async () => {
+        setupDefaultMocks();
+        let confirmAnswer: unknown = false;
+        let confirmCalls = 0;
+        const baseMock = mockInvoke;
+        mockInvoke = async (command: string, args?: unknown) => {
+          if (isConfirmCommand(command)) {
+            confirmCalls++;
+            return confirmAnswer;
+          }
+          return baseMock(command, args);
+        };
+        const el = await renderLoadedEditor();
+        findConflictButton(el, 'Use Both').click();
+        await el.updateComplete;
+        const before = structuredClone(internalOf(el).segments);
+
+        const accept = (
+          el as unknown as { acceptWholeFile: (selected: string) => Promise<void> }
+        ).acceptWholeFile;
+        await accept.call(el, origin);
+        await el.updateComplete;
+
+        expect(confirmCalls).to.equal(1);
+        expect(internalOf(el).segments).to.deep.equal(before);
+
+        confirmAnswer = 'Ok';
+        await accept.call(el, origin);
+        await el.updateComplete;
+
+        expect(confirmCalls).to.equal(2);
+        expect(internalOf(el).segments).to.have.length(1);
+        expect(internalOf(el).segments[0].origin).to.equal(origin);
+      });
+    }
+
+    it('declining a verbatim take-side preserves per-block resolutions', async () => {
+      setupDefaultMocks();
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) return false;
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const before = structuredClone(internalOf(el).segments);
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(takeSideCalls).to.equal(0);
+      expect(internalOf(el).segments).to.deep.equal(before);
+      expect(el.hasUnsavedResolutions()).to.be.true;
+    });
+
+    it('accepting a deleted whole-file side confirms only once before taking it', async () => {
+      setupDefaultMocks();
+      let confirmCalls = 0;
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return 'Ok';
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      const internal = internalOf(el);
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      internal.conflictFile = { ...internal.conflictFile!, theirs: null };
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirmCalls).to.equal(1);
+      expect(takeSideCalls).to.equal(1);
+    });
+
+    it('the deleted-side take confirm names the staged deletion, not an output swap', async () => {
+      // Modify/delete: git leaves the workdir file marker-free, so the output
+      // parses to ONE plain segment with no per-block buttons at all. The only
+      // route to this confirm is Use Ours followed by a change of mind — so
+      // there is no conflict pick and no edit to "replace", and the thing the
+      // user must be told is that the file gets deleted and staged.
+      setupDefaultMocks();
+      workdirContent = 'const value = "ours";';
+      const confirms: { title?: string; message?: string }[] = [];
+      let takeSideCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false; // decline
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderEditor();
+      const internal = internalOf(el);
+      internal.conflictFile = { ...makeConflictFile('src/test.ts'), theirs: null };
+      await el.updateComplete;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!internal.loading && (internal.segments.length > 0 || internal.loadFailed)) break;
+      }
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.code-conflict-block'), 'no per-block buttons exist')
+        .to.be.null;
+
+      await (
+        el as unknown as { acceptWholeFile: (origin: string) => Promise<void> }
+      ).acceptWholeFile.call(el, 'ours');
+      await el.updateComplete;
+      expect(confirms, 'the first whole-file accept has nothing to replace').to.have.length(0);
+      const before = structuredClone(internal.segments);
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('deletes the file and stages the deletion');
+      expect(
+        confirms[0].message,
+        'the in-editor whole-file lead describes a swap that is not what happens here'
+      ).to.not.contain('Using one whole-file version');
+      // Declining leaves the accepted side in place and writes nothing.
+      expect(takeSideCalls).to.equal(0);
+      expect(internal.segments).to.deep.equal(before);
+    });
+
+    it('a verbatim take-side confirm names the on-disk write, not an output swap', async () => {
+      setupDefaultMocks();
+      const confirms: { title?: string; message?: string }[] = [];
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          const shown = (args ?? {}) as { title?: string; message?: string };
+          confirms.push({ title: shown.title, message: shown.message });
+          return false;
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+
+      await (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide.call(el, 'theirs');
+      await el.updateComplete;
+
+      expect(confirms).to.have.length(1);
+      expect(confirms[0].title).to.equal('Take this whole side?');
+      expect(confirms[0].message).to.contain('writes it to disk and stages the file');
+    });
+
+    it('serializes take-side clicks while the overwrite confirmation is open', async () => {
+      setupDefaultMocks();
+      let releaseConfirm: (() => void) | null = null;
+      let confirmCalls = 0;
+      let takeSideCalls = 0;
+      let externalToolCalls = 0;
+      const baseMock = mockInvoke;
+      mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) {
+          confirmCalls++;
+          return new Promise((resolve) => {
+            releaseConfirm = () => resolve('Ok');
+          });
+        }
+        if (command === 'resolve_conflict_take_side') {
+          takeSideCalls++;
+          return { success: true };
+        }
+        if (command === 'launch_merge_tool') {
+          externalToolCalls++;
+          return { success: true };
+        }
+        return baseMock(command, args);
+      };
+      const el = await renderLoadedEditor();
+      findConflictButton(el, 'Use Ours').click();
+      await el.updateComplete;
+      const takeSide = (
+        el as unknown as { handleTakeSide: (side: string) => Promise<void> }
+      ).handleTakeSide;
+
+      const first = takeSide.call(el, 'theirs');
+      const second = takeSide.call(el, 'theirs');
+      await (
+        el as unknown as { handleOpenExternalMergeTool: () => Promise<void> }
+      ).handleOpenExternalMergeTool.call(el);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(confirmCalls).to.equal(1);
+      expect(externalToolCalls).to.equal(0);
+
+      releaseConfirm!();
+      await Promise.all([first, second]);
+      expect(takeSideCalls).to.equal(1);
+    });
+
     it('opening Edit on another segment confirms before discarding the open draft', async () => {
       setupDefaultMocks();
       let confirmAnswer: unknown = false;
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return confirmAnswer;
         }
@@ -3416,7 +3986,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return 'Ok';
         }
@@ -3443,7 +4013,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return confirmAnswer;
         }
@@ -3483,6 +4053,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
+        if (isConfirmCommand(command)) return 'Ok';
         if (command === 'resolve_conflict_take_side') return { success: true };
         return baseMock(command, args);
       };
@@ -3688,7 +4259,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }
@@ -3921,7 +4492,7 @@ describe('lv-merge-editor', () => {
       setupDefaultMocks();
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmAnswers.calls++;
           return confirmAnswers.answer;
         }
@@ -3977,7 +4548,7 @@ describe('lv-merge-editor', () => {
       let confirmCalls = 0;
       const baseMock = mockInvoke;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }
@@ -4002,7 +4573,7 @@ describe('lv-merge-editor', () => {
       const baseMock = mockInvoke;
       let confirmCalls = 0;
       mockInvoke = async (command: string, args?: unknown) => {
-        if (command === 'plugin:dialog|message') {
+        if (isConfirmCommand(command)) {
           confirmCalls++;
           return false;
         }

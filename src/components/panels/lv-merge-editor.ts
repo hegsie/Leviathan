@@ -558,6 +558,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
    * that errors "No conflict found" on an already-resolved file. */
   @state() private resolvedInPlace = false;
   @state() private launchingExternalTool = false;
+  @state() private confirmingWholeFileOverwrite = false;
   @state() private hasMergeTool = false;
   @state() private aiAvailable = false;
   /**
@@ -641,6 +642,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
       !this.conflictFile ||
       this.externalToolLocked ||
       this.launchingExternalTool ||
+      this.confirmingWholeFileOverwrite ||
       this.resolving ||
       this.resolvedAsDeleted ||
       // A chooser/verbatim take-side or gitlink resolution leaves the file
@@ -1490,6 +1492,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     return (
       this.resolving ||
       this.launchingExternalTool ||
+      this.confirmingWholeFileOverwrite ||
       this.externalToolLocked ||
       this.resolvedAsDeleted ||
       this.resolvedInPlace
@@ -1569,6 +1572,23 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     if (this.editingSegmentId === id) this.editingSegmentId = null;
     this.clearAiExplanation(id);
     this.updateSegment(id, { type: 'conflict', lines: [], origin: null, fromConflict: false });
+  }
+
+  /**
+   * True when it is safe to throw away an open inline-edit draft: no edit
+   * is open, or the user confirmed the discard. Opening an edit on a
+   * DIFFERENT segment abandons the current typed draft, so this is the
+   * confirm for that one path — the same hazard Reload and file switches
+   * already confirm for. Whole-file operations use
+   * confirmWholeFileOverwrite instead.
+   */
+  private async confirmDiscardOpenEdit(): Promise<boolean> {
+    if (this.editingSegmentId === null) return true;
+    return showConfirm(
+      'Discard the open edit?',
+      'This section has an edit that was not applied — continuing discards the typed text.',
+      'warning',
+    );
   }
 
   private async startEditSegment(segment: OutputSegment): Promise<void> {
@@ -1674,18 +1694,74 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   // ── Whole-file operations ─────────────────────────────────────────────
 
   /**
-   * True when it is safe to throw away an open inline-edit draft: no edit
-   * is open, or the user confirmed the discard. Whole-file operations
-   * replace ALL segments, so a typed-but-unapplied draft would vanish
-   * silently without this — the same hazard Reload and file switches
-   * already confirm for.
+   * True when the output is nothing but a previous whole-file accept: no
+   * per-block pick, no hand edit and no open draft is in it, so another
+   * whole-file button loses nothing. Only acceptWholeFile produces such a
+   * segment — per-block picks and AI fills set fromConflict, hand edits set
+   * origin 'manual', and freshly parsed segments carry origin null.
    */
-  private async confirmDiscardOpenEdit(): Promise<boolean> {
-    if (this.editingSegmentId === null) return true;
-    return showConfirm(
-      'Discard the open edit?',
-      'This section has an edit that was not applied — continuing discards the typed text.',
-      'warning',
+  private get outputIsWholeFileAccept(): boolean {
+    if (this.editingSegmentId !== null || this.segments.length !== 1) return false;
+    const only = this.segments[0];
+    return (
+      !only.fromConflict &&
+      (only.origin === 'ours' || only.origin === 'theirs' || only.origin === 'base')
+    );
+  }
+
+  /**
+   * Ask before an operation throws the current output away, holding the
+   * re-entrancy flag for the whole round trip: showConfirm is async IPC, so
+   * without it a second click (or an External Tool launch) would slip in
+   * behind the open dialog. The wording is the caller's — an in-editor
+   * whole-file swap and an on-disk take-side have different consequences
+   * and must not share one message.
+   */
+  private async confirmOverwrite(title: string, messageText: string): Promise<boolean> {
+    this.confirmingWholeFileOverwrite = true;
+    try {
+      return await showConfirm(title, messageText, 'warning');
+    } finally {
+      this.confirmingWholeFileOverwrite = false;
+    }
+  }
+
+  /**
+   * Unsaved work that is actually IN the output — picks, applied hand edits
+   * and whole-file accepts. This is hasUnsavedResolutions() WITHOUT its
+   * open-draft shortcut, because an open draft is not in the output:
+   * buildResolvedContent() never sees editDraft.
+   */
+  private get outputHasUnsavedWork(): boolean {
+    return this.userTouched && this.buildResolvedContent() !== this.lastSavedContent;
+  }
+
+  /**
+   * Name what an overwrite destroys, in the words of the caller's operation.
+   * Both halves are needed: an open inline-edit draft is NOT in the output,
+   * so a message that only describes "work currently in the output" is
+   * silent about the typed text it discards — and when the draft is the ONLY
+   * unsaved work (hasUnsavedResolutions() is true on an open draft alone,
+   * which is the state after Edit-then-toolbar on a freshly loaded file) that
+   * message would also enumerate picks and edits the user does not have.
+   */
+  private overwriteLossText(inOutput: string, openDraft: string): string {
+    const parts: string[] = [];
+    if (this.outputHasUnsavedWork) parts.push(inOutput);
+    if (this.editingSegmentId !== null) parts.push(openDraft);
+    // Never empty: every caller gates on hasUnsavedResolutions(), which is
+    // exactly outputHasUnsavedWork || an open draft.
+    return parts.join(' and ');
+  }
+
+  private async confirmWholeFileOverwrite(): Promise<boolean> {
+    if (!this.hasUnsavedResolutions()) return true;
+    return this.confirmOverwrite(
+      'Replace in-progress resolution?',
+      `Using one whole-file version ${this.overwriteLossText(
+        'replaces the picks, edits and whole-file choice currently in the output',
+        'discards the edit that was typed but not applied',
+      )}. This cannot be undone.`,
     );
   }
 
@@ -1698,26 +1774,36 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
     if (this.loadFailed || this.actionsBlocked) return;
     if (origin === 'base' && this.sideReadErrors.base) return;
     const startFile = this.conflictFile;
-    if (this.editingSegmentId !== null) {
-      if (!(await this.confirmDiscardOpenEdit())) return;
+
+    // A side with no entry DELETED the file — accepting it means staging the
+    // deletion, not writing a 0-byte file from its empty content. The
+    // take-side path owns the overwrite confirmation so this delegates
+    // before prompting and never asks twice.
+    if (
+      (origin === 'ours' && !this.conflictFile?.ours) ||
+      (origin === 'theirs' && !this.conflictFile?.theirs)
+    ) {
+      return this.handleTakeSide(origin);
+    }
+
+    // Re-picking the side the output already holds verbatim changes nothing.
+    if (this.outputIsWholeFileAccept && this.segments[0].origin === origin) return;
+
+    // A pure whole-file accept holds no pick and no edit to lose — the other
+    // buttons restore it in one click — so swapping sides to compare them
+    // must not raise a confirm that misdescribes the state.
+    if (!this.outputIsWholeFileAccept && this.hasUnsavedResolutions()) {
+      if (!(await this.confirmWholeFileOverwrite())) return;
       // Re-check after the confirm's await — a resolve/tool session may
       // have started while it was up (same re-check as Reload and Apply),
       // and file IDENTITY too: a switch during the confirm must not let
       // this call overwrite a DIFFERENT file's segments with this side.
       if (this.loadFailed || this.actionsBlocked) return;
       if (this.conflictFile !== startFile) return;
+    }
+    if (this.editingSegmentId !== null) {
       this.editingSegmentId = null;
       this.editDraft = '';
-    }
-
-    // A side with no entry DELETED the file — accepting it means staging the
-    // deletion, not writing a 0-byte file from its empty content.
-    if (
-      (origin === 'ours' && !this.conflictFile?.ours) ||
-      (origin === 'theirs' && !this.conflictFile?.theirs)
-    ) {
-      void this.handleTakeSide(origin);
-      return;
     }
 
     const content =
@@ -2002,16 +2088,32 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
   private async handleTakeSide(side: 'ours' | 'theirs'): Promise<void> {
     if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
     const startFile = this.conflictFile;
-    // Taking a side writes the whole file — an open typed-but-unapplied
-    // draft would vanish silently. (The acceptWholeFile delegation already
-    // confirmed and cleared the edit, so this only fires for the direct
-    // deleted-side buttons.)
-    if (this.editingSegmentId !== null) {
-      if (!(await this.confirmDiscardOpenEdit())) return;
-      // Re-check identity too: a file switch during the discard confirm
+    if (this.hasUnsavedResolutions()) {
+      // Take-side is NOT the in-editor swap acceptWholeFile's copy describes:
+      // it writes the chosen blob to disk and stages it, and for a side that
+      // dropped the file that means staging a deletion. In the flow that
+      // realistically reaches this — a whole-file accept on a modify/delete
+      // conflict, whose marker-free workdir file renders no per-block
+      // buttons at all — "Using one whole-file version" would describe an
+      // in-editor swap while hiding the on-disk consequence that is real.
+      const deletesFile = side === 'ours' ? !startFile.ours : !startFile.theirs;
+      const lead = deletesFile
+        ? 'Taking this side deletes the file and stages the deletion'
+        : 'Taking this side writes it to disk and stages the file';
+      const proceed = await this.confirmOverwrite(
+        'Take this whole side?',
+        `${lead}, discarding ${this.overwriteLossText(
+          'the picks, edits and whole-file choice currently in the output',
+          'the edit that was typed but not applied',
+        )}. This cannot be undone.`,
+      );
+      if (!proceed) return;
+      // Re-check identity too: a file switch during the overwrite confirm
       // must not let this call take a side on a different file.
       if (!this.repositoryPath || !this.conflictFile || this.actionsBlocked) return;
       if (this.conflictFile !== startFile) return;
+    }
+    if (this.editingSegmentId !== null) {
       this.editingSegmentId = null;
       this.editDraft = '';
     }
@@ -2673,6 +2775,7 @@ export class LvMergeEditor extends CodeRenderMixin(LitElement) {
               class="btn"
               @click=${this.handleOpenExternalMergeTool}
               ?disabled=${this.launchingExternalTool ||
+              this.confirmingWholeFileOverwrite ||
               this.externalToolLocked ||
               this.resolving ||
               this.resolvedAsDeleted ||
