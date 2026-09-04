@@ -31,8 +31,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().defaultClonePath).to.equal('');
     });
 
-    it('should show avatars by default', () => {
-      expect(settingsStore.getState().showAvatars).to.be.true;
+    it('should NOT show avatars by default', () => {
+      // Avatars are images fetched from gravatar.com, which hands a third
+      // party an MD5 of every commit author's email. Opt-in, not opt-out.
+      expect(settingsStore.getState().showAvatars).to.be.false;
     });
 
     it('should show commit size by default', () => {
@@ -175,6 +177,8 @@ describe('settings.store', () => {
     });
 
     it('should set show avatars', () => {
+      settingsStore.getState().setShowAvatars(true);
+      expect(settingsStore.getState().showAvatars).to.be.true;
       settingsStore.getState().setShowAvatars(false);
       expect(settingsStore.getState().showAvatars).to.be.false;
     });
@@ -414,6 +418,59 @@ describe('settings.store', () => {
 
       expect(migrated.wordWrap, 'a persisted wordWrap was never a user choice').to.equal(false);
       expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
+    });
+
+    it('a pre-v4 state keeps a persisted showAvatars choice', () => {
+      // The v4 default flip (true -> false) must not reach anyone who already
+      // has settings: avatars were always drawn, so a persisted value IS a
+      // real user choice. zustand's shallow merge preserves it and the
+      // migration must not overwrite it.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      expect((migrate({ showAvatars: true }, 3) as { showAvatars: boolean }).showAvatars).to.equal(
+        true
+      );
+      expect((migrate({ showAvatars: false }, 3) as { showAvatars: boolean }).showAvatars).to.equal(
+        false
+      );
+    });
+
+    it('a pre-v4 state with no showAvatars key gets the OLD default', () => {
+      // Such a state predates the key and was rendered with the old default
+      // of `true`; keep showing what those users saw rather than silently
+      // switching avatars off under them.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 3) as {
+        showAvatars: boolean;
+        theme: string;
+      };
+      expect(migrated.showAvatars).to.equal(true);
+      expect(migrated.theme, 'other settings survive').to.equal('light');
+    });
+
+    it('a v4 state with no showAvatars key takes the new default', () => {
+      // v4 onwards the key is always written, so an absent one is not a
+      // pre-existing choice and must fall through to the `false` default.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 4) as { showAvatars?: boolean };
+      expect(migrated.showAvatars, 'left to the store default').to.equal(undefined);
     });
 
     it('leaves a v3 wordWrap alone', () => {

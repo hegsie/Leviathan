@@ -94,7 +94,11 @@ const defaultSettings = {
   defaultBranchName: 'main',
   defaultRemoteName: 'origin',
   defaultClonePath: '',
-  showAvatars: true,
+  // Defaults OFF: avatars are images fetched from gravatar.com, which hands a
+  // third party an MD5 of every commit author's email and this machine's IP.
+  // A privacy-first client does not do that until the user asks for it.
+  // Existing installs keep whatever they had — see the v4 migration below.
+  showAvatars: false,
   showCommitSize: true,
   graphRowHeight: 40,
   graphColorScheme: 'default' as GraphColorScheme,
@@ -217,7 +221,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 3,
+      version: 4,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -228,6 +232,13 @@ export const settingsStore = createStore<SettingsState>()(
       // has only ever experienced auto-stashing. `wordWrap` has exactly the same
       // story: it was persisted but never read, so a persisted value is not a
       // user choice either and is dropped in favour of the diff view's own key.
+      //
+      // `showAvatars` is the opposite case: it WAS read — avatars have always
+      // been drawn — so a persisted value is a real user choice and the v4
+      // default flip to `false` must not reach it. The shallow merge already
+      // preserves a persisted `true`; the migration below only fills in the
+      // OLD default for a pre-v4 state that predates the key, so those users
+      // keep seeing exactly what they saw before the upgrade.
       migrate: (persisted: unknown, fromVersion: number) => {
         const state = { ...((persisted ?? {}) as Partial<SettingsState>) };
         if (fromVersion < 2) {
@@ -235,6 +246,9 @@ export const settingsStore = createStore<SettingsState>()(
         }
         if (fromVersion < 3) {
           state.wordWrap = false;
+        }
+        if (fromVersion < 4 && state.showAvatars === undefined) {
+          state.showAvatars = true;
         }
         return state as SettingsState;
       },

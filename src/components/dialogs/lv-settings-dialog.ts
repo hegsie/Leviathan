@@ -9,6 +9,7 @@ import * as localAiService from '../../services/local-ai.service.ts';
 import * as mcpService from '../../services/mcp.service.ts';
 import * as gitService from '../../services/git.service.ts';
 import type { MergeToolInfo, AvailableDiffTool } from '../../services/git.service.ts';
+import { avatarBlockedExplanation, GRAVATAR_HOST } from '../../utils/avatar-policy.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/repository.store.ts';
 import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.ts';
@@ -67,6 +68,22 @@ export class LvSettingsDialog extends LitElement {
       .setting-description {
         font-size: 11px;
         color: var(--text-secondary);
+      }
+
+      /* A setting another setting has taken away: dimmed, with the reason
+         spelled out under it rather than left for the user to guess. */
+      .setting-row.setting-unavailable .setting-label {
+        opacity: 0.6;
+      }
+
+      .setting-unavailable-reason {
+        font-size: 11px;
+        color: var(--color-warning);
+      }
+
+      .toggle-switch input:disabled + .toggle-slider {
+        cursor: not-allowed;
+        opacity: 0.5;
       }
 
       select, input[type="text"], input[type="number"] {
@@ -324,7 +341,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private graphColorScheme: GraphColorScheme = 'default';
   @state() private defaultBranchName = 'main';
   @state() private defaultClonePath = '';
-  @state() private showAvatars = true;
+  @state() private showAvatars = false;
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
   @state() private confirmBeforeDiscard = true;
@@ -1196,12 +1213,53 @@ export class LvSettingsDialog extends LitElement {
     this.handleClose();
   }
 
-  private renderToggle(checked: boolean, setting: string): unknown {
+  /**
+   * "Show Avatars" is the only setting on this screen that sends data to a
+   * third party, so the row says so — a user cannot opt out of something the
+   * copy never told them about. Offline Mode and the remote allowlist take the
+   * control away, and the row explains which one did it rather than leaving a
+   * toggle that silently does nothing.
+   */
+  private renderShowAvatarsRow(): unknown {
+    const reason = avatarBlockedExplanation({
+      showAvatars: this.showAvatars,
+      offlineMode: this.offlineMode,
+      remoteAllowlist: this.remoteAllowlist,
+    });
     return html`
-      <label class="toggle-switch">
+      <div class="setting-row ${reason ? 'setting-unavailable' : ''}">
+        <div class="setting-label">
+          <span class="setting-name">Show Avatars</span>
+          <span class="setting-description">
+            Display author avatars in commit nodes. Avatars are fetched from
+            Gravatar (${GRAVATAR_HOST}), a third-party service: each request
+            sends an MD5 hash of the commit author's email address and your IP
+            address. Off by default; Offline Mode disables it.
+          </span>
+          ${reason
+            ? html`<span class="setting-unavailable-reason" role="note">${reason}</span>`
+            : nothing}
+        </div>
+        ${this.renderToggle(this.showAvatars, 'showAvatars', {
+          disabled: reason !== null,
+          reason: reason ?? undefined,
+        })}
+      </div>
+    `;
+  }
+
+  private renderToggle(
+    checked: boolean,
+    setting: string,
+    options?: { disabled?: boolean; reason?: string }
+  ): unknown {
+    const disabled = options?.disabled ?? false;
+    return html`
+      <label class="toggle-switch" title=${options?.reason ?? nothing}>
         <input
           type="checkbox"
           .checked=${checked}
+          ?disabled=${disabled}
           @change=${(e: Event) => this.handleToggle(setting, e)}
         />
         <span class="toggle-slider"></span>
@@ -1255,13 +1313,7 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Graph</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Show Avatars</span>
-              <span class="setting-description">Display author avatars in commit nodes</span>
-            </div>
-            ${this.renderToggle(this.showAvatars, 'showAvatars')}
-          </div>
+          ${this.renderShowAvatarsRow()}
 
           <div class="setting-row">
             <div class="setting-label">

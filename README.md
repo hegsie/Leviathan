@@ -33,11 +33,11 @@ Leviathan aims to be a fast, privacy-first alternative to existing Git clients l
 
 Leviathan is built for developers who value **privacy, performance, and control**:
 
-- **🔒 Privacy-First**: No telemetry, no analytics, no cloud dependencies. Your code and workflow stay on your machine.
+- **🔒 Privacy-First**: No telemetry, no analytics, no cloud dependencies. Your code and workflow stay on your machine. The only third-party lookup is the opt-in "Show Avatars" setting, which sends an MD5 hash of each commit author's email address to gravatar.com; it is off by default and is blocked by Offline Mode and by the remote allowlist.
 - **⚡ Performance**: Built with Rust and native Git libraries for blazing-fast operations, even with large repositories (100k+ commits).
 - **🆓 Free & Open Source**: MIT licensed, no account required, no subscription fees, no feature paywalls.
 - **🌐 Cross-Platform**: Native apps for macOS, Windows, and Linux with consistent UX.
-- **🚫 Offline-First**: Works perfectly without an internet connection. Network operations only when you explicitly push/pull/fetch.
+- **🚫 Offline-First**: Works perfectly without an internet connection. Network operations only when you explicitly push/pull/fetch. The one optional exception is author avatars, which are off by default and fetched from Gravatar only if you turn them on — and never while Offline Mode is enabled.
 - **🤖 AI-Powered**: Local or cloud-based AI for commit message generation - choose from embedded local model (runs on your machine with GPU acceleration), Ollama, LM Studio, OpenAI, Anthropic, or GitHub Copilot.
 - **🔧 Full-Featured**: Supports advanced Git operations like interactive rebase, cherry-pick, worktrees, submodules, and more.
 
@@ -630,7 +630,7 @@ You can delete the model folder to re-download or free up space.
 A: Yes! Leviathan is open source under the MIT license. There are no subscription fees, account requirements, or feature paywalls.
 
 **Q: Does Leviathan send any data to external servers?**  
-A: No. Leviathan has zero telemetry and no analytics. The only network requests are Git operations (push/pull/fetch) and optional integrations (GitHub, GitLab, etc.) that you explicitly configure.
+A: No. Leviathan has zero telemetry and no analytics. The only network requests are Git operations (push/pull/fetch), optional integrations (GitHub, GitLab, etc.) that you explicitly configure, and — if you turn on the "Show Avatars" setting, which is off by default — author avatar images from gravatar.com, each request carrying an MD5 hash of that commit author's email address. Offline Mode and the remote allowlist block all of them.
 
 **Q: Can I use Leviathan offline?**  
 A: Absolutely. Leviathan works perfectly offline. All features work locally, including AI commit message generation (after initial model download).

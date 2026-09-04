@@ -34,6 +34,7 @@ import type { GraphPullRequest } from '../../graph/virtual-scroll.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
+import { shouldFetchAvatars } from '../../utils/avatar-policy.ts';
 
 /**
  * Per-repository cache of the last loaded commit page. Switching back to an
@@ -953,8 +954,11 @@ export class LvGraphCanvas extends LitElement {
         showAuthorColumn: this.showAuthorColumn,
         showDateColumn: this.showDateColumn,
         // The "Show Avatars" app setting controls whether author avatars
-        // are fetched from Gravatar (off = colored initials only)
-        fetchAvatars: settingsStore.getState().showAvatars,
+        // are fetched from Gravatar (off = colored initials only). The
+        // request is a plain image load, so it never reaches git.service's
+        // network gate — `shouldFetchAvatars` applies Offline Mode and the
+        // remote allowlist to it here instead.
+        fetchAvatars: shouldFetchAvatars(settingsStore.getState()),
         // The "Show Commit Size" app setting scales node radius by how much
         // each commit changed (off = uniform nodes)
         scaleNodesByCommitSize: settingsStore.getState().showCommitSize,
@@ -962,10 +966,12 @@ export class LvGraphCanvas extends LitElement {
       getThemeFromCSS()
     );
 
-    // Keep avatar fetching and node scaling in sync with the settings toggles
+    // Keep avatar fetching and node scaling in sync with the settings toggles.
+    // Offline Mode and the remote allowlist feed the same effective flag, so
+    // switching Offline Mode on stops further avatar loads immediately.
     this.settingsUnsubscribe = settingsStore.subscribe((state) => {
       this.renderer?.setConfig({
-        fetchAvatars: state.showAvatars,
+        fetchAvatars: shouldFetchAvatars(state),
         scaleNodesByCommitSize: state.showCommitSize,
       });
       this.renderer?.markDirty();
