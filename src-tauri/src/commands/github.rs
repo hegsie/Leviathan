@@ -8,6 +8,19 @@ use crate::error::{LeviathanError, Result};
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 
+/// The HTTP client every outbound GitHub API call in this module goes through.
+///
+/// Offline mode and the remote allowlist are enforced HERE rather than at each
+/// command: `reqwest::Client::new()` was already the first thing every
+/// network-touching function in this file does, so making it the one
+/// constructor means a command added later cannot forget the check. The host is
+/// the fixed API base, matching what the frontend gate checks the allowlist
+/// against (`providerApiHost` in src/services/git.service.ts).
+fn api_client() -> Result<reqwest::Client> {
+    crate::services::security::guard_url(GITHUB_API_BASE)?;
+    Ok(reqwest::Client::new())
+}
+
 /// GitHub user information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubUser {
@@ -281,7 +294,7 @@ pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConn
         },
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!("{}/user", GITHUB_API_BASE))
         .header("Authorization", format!("Bearer {}", token))
@@ -449,7 +462,7 @@ pub async fn list_pull_requests(
     let state = state.unwrap_or_else(|| "open".to_string());
     let per_page = per_page.unwrap_or(30);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/pulls",
@@ -553,7 +566,7 @@ pub async fn get_pull_request(
 ) -> Result<PullRequestDetails> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/pulls/{}",
@@ -727,7 +740,7 @@ pub async fn create_pull_request(
         draft: input.draft,
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(format!(
             "{}/repos/{}/{}/pulls",
@@ -822,7 +835,7 @@ pub async fn get_pull_request_reviews(
 ) -> Result<Vec<PullRequestReview>> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/pulls/{}/reviews",
@@ -906,7 +919,7 @@ pub async fn get_workflow_runs(
 
     let per_page = per_page.unwrap_or(20);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let mut request = client
         .get(format!(
             "{}/repos/{}/{}/actions/runs",
@@ -990,7 +1003,7 @@ pub async fn get_check_runs(
 ) -> Result<Vec<CheckRun>> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/commits/{}/check-runs",
@@ -1060,7 +1073,7 @@ pub async fn get_commit_status(
 ) -> Result<String> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/commits/{}/status",
@@ -1215,7 +1228,7 @@ pub async fn list_issues(
         description: Option<String>,
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let mut current = page.unwrap_or(1).max(1);
     let mut collected: Vec<IssueSummary> = Vec::new();
     let mut fetches = 0u32;
@@ -1327,7 +1340,7 @@ pub async fn get_issue(
 ) -> Result<IssueSummary> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/issues/{}",
@@ -1457,7 +1470,7 @@ pub async fn create_issue(
         assignees: input.assignees,
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(format!(
             "{}/repos/{}/{}/issues",
@@ -1576,7 +1589,7 @@ pub async fn update_issue_state(
         state: String,
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .patch(format!(
             "{}/repos/{}/{}/issues/{}",
@@ -1692,7 +1705,7 @@ pub async fn get_issue_comments(
 
     let per_page = per_page.unwrap_or(30);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/issues/{}/comments",
@@ -1775,7 +1788,7 @@ pub async fn add_issue_comment(
         body: String,
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(format!(
             "{}/repos/{}/{}/issues/{}/comments",
@@ -1863,7 +1876,7 @@ pub async fn get_repo_labels(
         description: Option<String>,
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let mut current = 1u32;
     let mut fetches = 0u32;
     let mut labels: Vec<Label> = Vec::new();
@@ -1982,7 +1995,7 @@ pub async fn list_releases(
 
     let per_page = per_page.unwrap_or(30);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/releases",
@@ -2069,7 +2082,7 @@ pub async fn get_release_by_tag(
 ) -> Result<ReleaseSummary> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/releases/tags/{}",
@@ -2151,7 +2164,7 @@ pub async fn get_latest_release(
 ) -> Result<ReleaseSummary> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/repos/{}/{}/releases/latest",
@@ -2262,7 +2275,7 @@ pub async fn create_release(
         generate_release_notes: input.generate_release_notes,
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(format!(
             "{}/repos/{}/{}/releases",
@@ -2346,7 +2359,7 @@ pub async fn delete_release(
 ) -> Result<()> {
     let token = resolve_github_token(token).await?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .delete(format!(
             "{}/repos/{}/{}/releases/{}",
@@ -2808,7 +2821,7 @@ pub async fn configure_github_app(
         .map_err(LeviathanError::OperationFailed)?;
 
     // Verify the token works by checking connection
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(format!(
             "{}/installation/repositories?per_page=1",

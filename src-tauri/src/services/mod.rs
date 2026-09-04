@@ -16,6 +16,7 @@ pub mod keyring_util;
 pub mod loopback_server;
 pub mod oauth;
 pub mod remote_ops;
+pub mod security;
 pub mod update_service;
 pub mod watcher_service;
 
@@ -25,5 +26,6 @@ pub use cancellation::CancellationRegistry;
 pub use credentials_service::CredentialsHelper;
 pub use git_service::GitService;
 pub use remote_ops::{RemoteOp, RemoteOpRegistry};
+pub use security::{SecuritySettings, SecurityState};
 pub use update_service::{create_update_state, UpdateState};
 pub use watcher_service::WatcherService;

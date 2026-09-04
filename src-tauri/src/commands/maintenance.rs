@@ -316,6 +316,12 @@ pub async fn prune_remote_tracking_branches(
         return Err(LeviathanError::RepositoryNotFound(path));
     }
 
+    // Every remote in the gesture is checked before any of them is contacted,
+    // so a disallowed one refuses the whole prune rather than pruning half.
+    for remote_name in &remotes {
+        crate::services::security::guard_remote(&path, Some(remote_name))?;
+    }
+
     let mut all_pruned_branches = Vec::new();
 
     for remote_name in remotes {

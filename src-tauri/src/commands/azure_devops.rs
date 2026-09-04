@@ -148,6 +148,22 @@ fn get_auth_header(token: &str) -> String {
     }
 }
 
+/// The API host every outbound Azure DevOps call in this module reaches.
+///
+/// The identity endpoints live on `vssps.dev.azure.com` and
+/// `app.vssps.visualstudio.com`, but the allowlist is checked against
+/// `dev.azure.com` — the same host the frontend gate checks
+/// (`providerApiHost` in src/services/git.service.ts). Being stricter here
+/// would refuse an operation the user can see being allowed in Settings.
+const ADO_API_HOST: &str = "https://dev.azure.com";
+
+/// The HTTP client every outbound Azure DevOps call goes through — see the note
+/// on GitHub's `api_client` for why the gate lives on the client constructor.
+fn api_client() -> Result<reqwest::Client> {
+    crate::services::security::guard_url(ADO_API_HOST)?;
+    Ok(reqwest::Client::new())
+}
+
 fn build_api_url(organization: &str, project: &str, path: &str) -> String {
     format!(
         "https://dev.azure.com/{}/{}/_apis/{}?api-version={}",
@@ -225,7 +241,7 @@ pub async fn check_ado_connection(
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
 
     // Use the profile endpoint to verify connection and get user info
     let url = format!(
@@ -382,7 +398,7 @@ pub async fn get_ado_pull_request(
         ),
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(&token))
@@ -548,7 +564,7 @@ pub async fn list_ado_pull_requests(
         &ado_pr_query_params(status.as_deref(), top),
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(&token))
@@ -678,7 +694,7 @@ pub async fn create_ado_pull_request(
         is_draft: input.is_draft,
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(&url)
         .header("Authorization", get_auth_header(&token))
@@ -793,7 +809,7 @@ pub async fn get_ado_work_items(
         &format!("ids={}&fields=System.Id,System.Title,System.WorkItemType,System.State,System.AssignedTo,System.CreatedDate", ids_str),
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(&token))
@@ -945,7 +961,7 @@ pub async fn query_ado_work_items(
         query: String,
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(&url)
         .header("Authorization", get_auth_header(&token))
@@ -1063,7 +1079,7 @@ pub async fn create_azure_devops_work_item(
 
     let patch = build_create_work_item_patch(&input);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(&url)
         .header("Authorization", get_auth_header(&token))
@@ -1189,7 +1205,7 @@ async fn resolve_ado_repository_id(
         &ado_repository_lookup_path(repository),
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(token))
@@ -1246,7 +1262,7 @@ pub async fn list_ado_pipeline_runs(
         &ado_pipeline_query_params(top, &repository_id),
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(&token))
@@ -1336,7 +1352,7 @@ pub async fn list_ado_pipeline_runs(
 pub async fn list_ado_organizations(token: Option<String>) -> Result<Vec<AdoOrganization>> {
     let token = resolve_ado_token(token)?;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
 
     // Step 1: Resolve the member id via the org-less profile endpoint.
     let profile_url =

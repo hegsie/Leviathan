@@ -125,9 +125,34 @@ pub fn run() {
         .manage(CancellationRegistry::default())
         .manage(RemoteOpRegistry::default())
         .manage(SharedCommitIndex::default())
+        // Offline mode and the remote allowlist, enforced backend-side. The
+        // same handle `services::security::global()` hands the guards, so a
+        // guard is one line at the top of a command instead of a new `State`
+        // parameter on every network command.
+        .manage(services::security::global().clone())
         .setup(|app| {
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
+
+            // Adopt the security settings the last run was told about, BEFORE
+            // anything can run. The frontend pushes them again once its shell
+            // mounts, but a fetch triggered in between (auto-fetch resuming a
+            // restored repository, a deep link) must not slip through the gap.
+            services::security::global().init(config_dir.clone());
+
+            // Keep them in sync from the frontend settings store. Same shape as
+            // the tray listener below: the frontend emits on startup and on
+            // every change.
+            app.listen("update-security-settings", move |event| {
+                if let Some(settings) = services::security::global().apply_payload(event.payload())
+                {
+                    tracing::info!(
+                        "Security settings updated: offline={}, allowlist entries={}",
+                        settings.offline_mode,
+                        settings.remote_allowlist.len()
+                    );
+                }
+            });
             app.manage(create_ai_state(config_dir.clone()));
 
             // Initialize local AI state with models directory

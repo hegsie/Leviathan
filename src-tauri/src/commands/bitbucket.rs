@@ -11,6 +11,14 @@ use tauri::command;
 
 const BITBUCKET_API_BASE: &str = "https://api.bitbucket.org/2.0";
 
+/// The HTTP client every outbound Bitbucket API call in this module goes
+/// through — see the note on GitHub's `api_client` for why the gate lives on
+/// the client constructor rather than on each command.
+fn api_client() -> Result<reqwest::Client> {
+    crate::services::security::guard_url(BITBUCKET_API_BASE)?;
+    Ok(reqwest::Client::new())
+}
+
 /// Sentinel prefix marking a per-account token slot that actually holds an
 /// app-password credential of the form `<PREFIX><username>:<app_password>`.
 /// App passwords must be sent as HTTP Basic auth, NOT as a Bearer token
@@ -239,7 +247,7 @@ pub async fn check_bitbucket_connection(
         },
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
 
     let response = client
         .get(format!("{}/user", BITBUCKET_API_BASE))
@@ -308,7 +316,7 @@ pub async fn check_bitbucket_connection_with_token(
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
 
     let response = client
         .get(format!("{}/user", BITBUCKET_API_BASE))
@@ -464,7 +472,7 @@ pub async fn list_bitbucket_pull_requests(
         token.is_some()
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", auth_header)
@@ -581,7 +589,7 @@ pub async fn get_bitbucket_pull_request(
         BITBUCKET_API_BASE, workspace, repo_slug, pr_id
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", auth_header)
@@ -726,7 +734,7 @@ pub async fn create_bitbucket_pull_request(
         close_source_branch: input.close_source_branch,
     };
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(&url)
         .header("Authorization", auth_header)
@@ -848,7 +856,7 @@ pub async fn list_bitbucket_issues(
         url.push_str(&format!("&q=state=\"{}\"", state_str));
     }
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", auth_header)
@@ -974,7 +982,7 @@ pub async fn create_bitbucket_issue(
 
     let body = build_create_issue_body(&input);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .post(&url)
         .header("Authorization", auth_header)
@@ -1125,7 +1133,7 @@ pub async fn list_bitbucket_pipelines(
         pagelen_query_param(pagelen, PIPELINES_DEFAULT_PAGELEN)
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", auth_header)

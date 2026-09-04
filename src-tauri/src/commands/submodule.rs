@@ -213,6 +213,8 @@ pub async fn add_submodule(
 
     reject_flag_like(&url, "Submodule URL")?;
     reject_flag_like(&submodule_path, "Submodule path")?;
+    // `git submodule add` clones the submodule.
+    crate::services::security::guard_url(&url)?;
     if let Some(ref b) = branch {
         reject_flag_like(b, "Submodule branch")?;
     }
@@ -289,6 +291,11 @@ pub async fn update_submodules(
     // `token_remote` names the remote the frontend resolved that token
     // against, so the helper is scoped to the host it belongs to rather than
     // to whichever remote happens to be called `origin`.
+
+    // `git submodule update` fetches (and clones with --init), so it is gated
+    // like fetch/pull. The superproject's remote is the host checked, matching
+    // the frontend gate in `updateSubmodules`.
+    crate::services::security::guard_remote(&path, None)?;
 
     let repo_path = Path::new(&path);
 

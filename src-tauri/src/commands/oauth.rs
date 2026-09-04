@@ -501,6 +501,9 @@ pub async fn oauth_exchange_code(
     }
 
     // Make token request
+    // Offline mode / remote allowlist. An OAuth exchange is an outbound
+    // request like any other.
+    crate::services::security::guard_url(&token_url)?;
     let client = reqwest::Client::new();
     let response = client
         .post(&token_url)
@@ -608,6 +611,9 @@ pub async fn oauth_refresh_token(
     let params = refresh_token_params(&refresh_token, &client_id, client_secret.as_deref());
 
     // Make token request
+    // Offline mode / remote allowlist. An OAuth exchange is an outbound
+    // request like any other.
+    crate::services::security::guard_url(&token_url)?;
     let client = reqwest::Client::new();
     let response = client
         .post(&token_url)

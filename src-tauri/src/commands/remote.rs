@@ -154,6 +154,28 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
     Ok(result)
 }
 
+/// Backend half of the offline/allowlist gate for a remote operation.
+///
+/// The frontend gate (`checkNetworkAllowed`) still runs first and is the half
+/// that can explain the refusal before any work starts; this is the backstop
+/// for a call site that forgets it. `resolve` names the remote the operation
+/// will ACTUALLY contact — assuming "origin" evaluates the allowlist against
+/// the wrong host in the ordinary fork layout, which is the same reason
+/// `get_pull_remote` and `get_push_remote` exist.
+fn guard_remote_op(
+    path: &str,
+    resolve: impl FnOnce(&git2::Repository) -> Option<String>,
+) -> Result<()> {
+    // Offline mode refuses everything, so don't pay for opening the repository
+    // just to name a remote nobody is allowed to reach.
+    if crate::services::security::global().snapshot().offline_mode {
+        return crate::services::security::guard_remote(path, None);
+    }
+    let repo = git2::Repository::open(Path::new(path)).ok();
+    let remote = repo.as_ref().and_then(resolve);
+    crate::services::security::guard_remote(path, remote.as_deref())
+}
+
 /// Fetch from remote
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -175,6 +197,9 @@ pub async fn fetch(
     // alt-tabbed back into the app. That is exactly the noise the background
     // fetch is documented to avoid.
     let quiet = quiet.unwrap_or(false);
+    guard_remote_op(&path, |repo| {
+        Some(resolve_fetch_remote(repo, remote.clone()))
+    })?;
     // Claimed BEFORE the timeout wrapper, and handed to the blocking task
     // below so it outlives a timed-out caller — see services/remote_ops.rs.
     //
@@ -969,6 +994,10 @@ pub async fn pull(
     timeout_secs: Option<u64>,
     _operation_id: Option<String>,
 ) -> Result<()> {
+    guard_remote_op(&path, |repo| {
+        let (_, head_refname) = resolve_pull_branch(repo, branch.as_deref()).ok()?;
+        Some(resolve_pull_remote(repo, remote.clone(), &head_refname))
+    })?;
     // Claimed before the timeout wrapper and released by the blocking task,
     // not by this future — see services/remote_ops.rs. The ensure_pullable
     // guard inside pull_branch only refuses a repository that is ALREADY
@@ -1305,6 +1334,9 @@ pub async fn push(
     if let Some(ref r) = remote {
         reject_flag_like(r, "Remote name")?;
     }
+    guard_remote_op(&path, |repo| {
+        Some(resolve_push_remote(repo, remote.clone()))
+    })?;
 
     // The claim the racing retry is about. Push has no abort point at all, so
     // when the network timeout fires the git2/CLI push keeps running against
@@ -1606,6 +1638,11 @@ pub async fn push_to_multiple_remotes(
     for r in &remotes {
         reject_flag_like(r, "Remote name")?;
     }
+    // Every destination is checked, so one disallowed remote refuses the whole
+    // gesture rather than half-pushing.
+    for r in &remotes {
+        crate::services::security::guard_remote(&path, Some(r))?;
+    }
 
     // Each push is blocking network I/O for potentially seconds; running them
     // sequentially on the async executor blocks a Tokio worker for the full
@@ -1718,6 +1755,13 @@ pub async fn fetch_all_remotes(
     tags: bool,
     token: Option<String>,
 ) -> Result<FetchAllResult> {
+    {
+        let repo = git2::Repository::open(Path::new(&path))?;
+        for remote_name in repo.remotes()?.iter().filter_map(|s| s.ok().flatten()) {
+            crate::services::security::guard_remote(&path, Some(remote_name))?;
+        }
+    }
+
     // Multiple sequential blocking fetches; run on a blocking thread to keep
     // the Tokio runtime responsive.
     let path_for_task = path.clone();
@@ -4499,6 +4543,8 @@ mod tests {
 /// Deepen a shallow repository by fetching more history
 #[command]
 pub async fn deepen_repository(path: String, depth: u32) -> Result<()> {
+    // `git fetch --deepen` is a fetch.
+    crate::services::security::guard_remote(&path, None)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(&path)
@@ -4521,6 +4567,7 @@ pub async fn deepen_repository(path: String, depth: u32) -> Result<()> {
 /// Convert a shallow repository to a full clone by fetching all history
 #[command]
 pub async fn unshallow_repository(path: String) -> Result<()> {
+    crate::services::security::guard_remote(&path, None)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(&path)

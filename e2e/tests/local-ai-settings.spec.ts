@@ -478,6 +478,45 @@ test.describe('Settings Dialog — Cloud provider test', () => {
     await expect(row.locator('.status-indicator').last()).toContainText('Failed');
   });
 
+  /**
+   * With offline mode on, the backend deliberately does not probe a cloud
+   * provider: probing an OpenAI-compatible endpoint is an outbound models-list
+   * request, and this list is exactly what Settings renders in order to offer
+   * the switch that turns that provider off. The provider must therefore still
+   * be listed and selectable, labelled as unchecked rather than as broken.
+   */
+  test('lists an unprobed cloud provider as not checked, not as unavailable', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [
+        ...mockProvidersUnavailable.map((p) => ({ ...p, probed: true })),
+        { ...mockOpenAiProvider, probed: false },
+      ],
+    }));
+    await openSettings(page);
+
+    const option = page.locator('lv-settings-dialog option', { hasText: 'OpenAI' });
+    await expect(option).toHaveCount(1);
+    await expect(option).toContainText('(Not checked - offline)');
+    // The other providers were probed, so they keep their real verdict.
+    await expect(
+      page.locator('lv-settings-dialog option', { hasText: 'Anthropic Claude' })
+    ).toContainText('(API key required)');
+  });
+
+  test('a probed but unreachable cloud provider still reads as unavailable', async ({ page }) => {
+    await injectCommandMock(page, localAiMocks({
+      get_ai_providers: [
+        ...mockProvidersUnavailable.map((p) => ({ ...p, probed: true })),
+        { ...mockOpenAiProvider, probed: true },
+      ],
+    }));
+    await openSettings(page);
+
+    await expect(
+      page.locator('lv-settings-dialog option', { hasText: 'OpenAI' })
+    ).toContainText('(Unavailable)');
+  });
+
   test('shows Working and no error when the OpenAI test succeeds', async ({ page }) => {
     await injectCommandMock(page, localAiMocks({
       get_ai_providers: [...mockProvidersUnavailable, mockOpenAiProvider],

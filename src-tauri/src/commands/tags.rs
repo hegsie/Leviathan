@@ -249,6 +249,8 @@ pub async fn push_tag(
     // renamed — the tag push errored "Remote not found: origin", naming a
     // remote the user never configured, with no way to make it succeed.
     let remote_name = crate::commands::remote::resolve_push_remote(&repo, remote);
+    // Offline mode / remote allowlist, enforced backend-side too.
+    crate::services::security::guard_remote(&path, Some(&remote_name))?;
     let mut remote_obj = repo
         .find_remote(&remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.clone()))?;
@@ -287,6 +289,7 @@ pub async fn delete_remote_tag(
     let repo = git2::Repository::open(Path::new(&path))?;
 
     let remote_name = remote.as_deref().unwrap_or("origin");
+    crate::services::security::guard_remote(&path, Some(remote_name))?;
     let mut remote_obj = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;

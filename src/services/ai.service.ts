@@ -23,6 +23,17 @@ export interface AiProviderInfo {
   providerType: AiProviderType;
   name: string;
   available: boolean;
+  /**
+   * Whether `available` is an answer or a guess.
+   *
+   * Listing providers must not itself be a network request: for a cloud
+   * provider the reachability probe is an outbound models-list call, and this
+   * list is exactly what Settings renders in order to offer the switch that
+   * turns that provider off. So with offline mode on (or its host outside the
+   * allowlist) the backend skips the probe and sends `false` here, meaning
+   * "not probed" rather than "unavailable".
+   */
+  probed: boolean;
   requiresApiKey: boolean;
   hasApiKey: boolean;
   endpoint: string;

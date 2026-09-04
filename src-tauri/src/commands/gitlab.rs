@@ -21,10 +21,20 @@ fn resolve_token(token: Option<String>) -> Result<String> {
     }
 }
 
+/// The HTTP client every outbound GitLab API call in this module goes through.
+///
+/// GitLab is self-hostable, so the host to check is the instance URL the call
+/// is aimed at rather than a fixed constant — the same value the frontend gate
+/// passes (`providerApiHost` in src/services/git.service.ts).
+fn api_client(instance_url: &str) -> Result<reqwest::Client> {
+    crate::services::security::guard_url(instance_url)?;
+    Ok(reqwest::Client::new())
+}
+
 /// Helper to make authenticated GitLab API GET requests
 /// Tries Bearer auth first (for OAuth tokens), falls back to PRIVATE-TOKEN (for PATs)
 async fn gitlab_get(url: &str, token: &str) -> Result<reqwest::Response> {
-    let client = reqwest::Client::new();
+    let client = api_client(url)?;
 
     // Try Bearer auth first (for OAuth tokens)
     let response = client
@@ -54,7 +64,7 @@ async fn gitlab_post<T: Serialize + ?Sized>(
     token: &str,
     body: &T,
 ) -> Result<reqwest::Response> {
-    let client = reqwest::Client::new();
+    let client = api_client(url)?;
 
     // Try Bearer auth first (for OAuth tokens)
     let response = client
@@ -250,8 +260,8 @@ pub async fn check_gitlab_connection(
         }
     };
 
-    let client = reqwest::Client::new();
     let api_url = build_api_url(&instance_url, "user");
+    let client = api_client(&api_url)?;
 
     // Try Bearer auth first (for OAuth tokens)
     let response = client

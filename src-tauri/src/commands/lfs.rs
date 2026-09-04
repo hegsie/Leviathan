@@ -481,6 +481,9 @@ pub async fn get_lfs_files(path: String) -> Result<Vec<LfsFile>> {
 /// Pull (download) LFS files
 #[command]
 pub async fn lfs_pull(path: String, token: Option<String>) -> Result<String> {
+    // LFS transfers ride the repository's remote, so they belong behind the
+    // same offline/allowlist gate as fetch and pull.
+    crate::services::security::guard_remote(&path, None)?;
     let repo_path = Path::new(&path);
 
     run_lfs_command_with_token(repo_path, &["pull"], token.as_deref())
@@ -493,6 +496,7 @@ pub async fn lfs_fetch(
     refs: Option<Vec<String>>,
     token: Option<String>,
 ) -> Result<String> {
+    crate::services::security::guard_remote(&path, None)?;
     let repo_path = Path::new(&path);
     let token = token.as_deref();
 

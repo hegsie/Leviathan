@@ -132,6 +132,7 @@ import { workspaceStore } from './stores/workspace.store.ts';
 import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
+import { emitSecuritySettings } from './services/security-sync.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import {
@@ -4882,6 +4883,10 @@ export class AppShell extends LitElement {
 
     // Send initial tray settings to backend
     emit('update-tray-settings', { minimizeToTray: settings.minimizeToTray });
+    // ...and the security settings the backend enforces for itself. The Rust
+    // side keeps its own copy so the very first operation after launch is
+    // guarded, but this push is what makes it agree with what Settings shows.
+    emitSecuritySettings(settings);
 
     // Subscribe to settings changes to start/stop auto-fetch and update tray.
     // Newly OPENED repos get auto-fetch from the store subscription's
@@ -4930,6 +4935,10 @@ export class AppShell extends LitElement {
       }
       // Update tray settings
       emit('update-tray-settings', { minimizeToTray: state.minimizeToTray });
+      // Offline mode and the allowlist are enforced in Rust as well as here,
+      // so every change has to reach it — the backend has no way to read the
+      // frontend's persisted settings.
+      emitSecuritySettings(state);
     });
   }
 
