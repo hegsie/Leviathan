@@ -11,7 +11,7 @@
 import { test, expect } from '@playwright/test';
 import { setupOpenRepository, defaultMockData, withConflicts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
-import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, waitForCommand } from '../fixtures/test-helpers';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandHang, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
 // Helper function to create branches with ahead/behind status
@@ -818,5 +818,73 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     // The pull badge should still show 7 (unchanged because pull failed)
     await expect(pullBadge).toBeVisible();
     await expect(pullBadge).toHaveText('7');
+  });
+});
+
+// ============================================================================
+// One runner behind every surface
+//
+// The dashboard's three buttons and the keyboard shortcuts / command palette
+// used to be two separate implementations. The dashboard's never called the
+// progress service, so a slow push showed nothing but a greyed-out button, and
+// it guarded on a component-local flag the other surface could not see — so
+// two gestures reached IPC and the backend refused the second with
+// "A fetch is already running for this repository".
+// ============================================================================
+
+test.describe('Shared remote-operation runner', () => {
+  test('a dashboard fetch shows a progress row while it runs', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    // The same labelled row the shortcut has always produced.
+    await expect(page.locator('.progress-message')).toHaveText('Fetching from remote...');
+    // And every remote control is refused for the duration, rather than left
+    // lit and doing nothing but raising a refusal toast.
+    await expect(fetchButton).toBeDisabled();
+    await expect(page.getByRole('button', { name: /Pull/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /^Push/i })).toBeDisabled();
+  });
+
+  test('the progress row is torn down when the fetch lands', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, { fetch: null });
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    await expect(page.locator('.progress-message')).toHaveCount(0);
+    await expect(fetchButton).toBeEnabled();
+  });
+
+  test('a second attempt from another surface is not a duplicate command', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+    await expect(fetchButton).toBeDisabled();
+
+    // Ctrl+Shift+F is the OTHER surface for the very same operation — the one
+    // the dashboard's component-local flag could not see.
+    await page.keyboard.press('Control+Shift+F');
+    // Ctrl+Shift+P is pull, which shares the one per-repository slot the
+    // backend also keys on. Its refusal toast is the settle point: once it is
+    // on screen, both keypresses have been fully processed.
+    await page.keyboard.press('Control+Shift+P');
+    await expect(page.locator('.toast')).toContainText(
+      /Another operation is already running/i
+    );
+
+    expect((await findCommand(page, 'fetch')).length, 'one fetch, not two').toBe(1);
+    expect((await findCommand(page, 'pull')).length, 'and no pull behind it').toBe(0);
   });
 });

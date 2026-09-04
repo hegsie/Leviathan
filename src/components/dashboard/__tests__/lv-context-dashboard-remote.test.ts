@@ -1,23 +1,36 @@
 /**
  * The dashboard's Fetch / Pull / Push buttons.
  *
- * These are a THIRD surface for the same three operations the toolbar and the
- * command palette expose, and they had drifted: failures came out as a raw
- * git.service toast with no recovery action, the failure was additionally
- * written to `repositoryStore.setError` (which nothing in the app renders), and
- * a pull that produced conflicts was reported as a plain red failure and left
- * the repository mid-merge with no route to the resolution dialog.
+ * These are the only mouse-reachable route to the three operations the
+ * shortcuts and the command palette also expose, and they had drifted: no
+ * progress row at all, so a slow push showed nothing but a disabled button;
+ * an in-flight flag private to this component, so a fetch started anywhere
+ * else was invisible here and the two reached IPC together; failures reported
+ * without the recovery action the other surface offered.
+ *
+ * They now call the shared runner in remote-operations.service, which is what
+ * these tests are really pinning: the same locks, the same progress row and
+ * the same reporting as every other surface.
  */
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
 const invoked: Array<{ command: string; args?: unknown }> = [];
 let failures = new Map<string, { code?: string; message: string }>();
 
+/** Commands parked until the test releases them, to hold an operation open. */
+let parked = new Map<string, Array<(value: unknown) => void>>();
+
 (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {
   invoke: (command: string, args?: unknown) => {
     invoked.push({ command, args });
     const failure = failures.get(command);
     if (failure) return Promise.reject(failure);
+    const waiting = parked.get(command);
+    if (waiting) {
+      return new Promise((resolve) => {
+        waiting.push(resolve);
+      });
+    }
     if (command === 'get_remote_status') {
       return Promise.resolve({ ahead: 0, behind: 0 });
     }
@@ -32,6 +45,9 @@ import type { LvContextDashboard } from '../lv-context-dashboard.ts';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
+import { progressService } from '../../../services/progress.service.ts';
+import { runFetch } from '../../../services/remote-operations.service.ts';
+import { resetRefOpLocks } from '../../../utils/ref-lock.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -72,15 +88,63 @@ function toastText(): string {
   return uiStore.getState().toasts.map((t) => `${t.type}:${t.message}`).join(' | ');
 }
 
+function counts(command: string): number {
+  return invoked.filter((c) => c.command === command).length;
+}
+
+/** Park `command` so the operation that calls it stays in flight. */
+function hang(command: string): void {
+  parked.set(command, []);
+}
+
+/** Let every parked call of `command` finish successfully. */
+function release(command: string): void {
+  for (const resolve of parked.get(command) ?? []) resolve(null);
+  parked.delete(command);
+}
+
+/**
+ * Wait until `command` has been sent.
+ *
+ * git.service resolves the remote, checks the security gate and looks up a
+ * credential before it reaches `invoke`, each behind its own await.
+ */
+async function sent(command: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (counts(command) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${command}`);
+}
+
+/**
+ * The app-shell element the runner opens the conflict dialog through.
+ *
+ * `merge-conflict` is bound on that element, not on window, so the runner
+ * dispatches it there — the same lookup git.service's late-pull path uses.
+ */
+function mountShell(): HTMLElement {
+  const shell = document.createElement('lv-app-shell');
+  document.body.appendChild(shell);
+  return shell;
+}
+
 describe('dashboard remote operations', () => {
+  let shell: HTMLElement;
+
   beforeEach(() => {
     invoked.length = 0;
     failures = new Map();
+    parked = new Map();
+    resetRefOpLocks();
     uiStore.setState({ toasts: [] });
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+    shell = mountShell();
   });
 
   afterEach(() => {
+    shell.remove();
+    resetRefOpLocks();
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
   });
 
@@ -125,11 +189,11 @@ describe('dashboard remote operations', () => {
     const handler = (e: Event): void => {
       detail = (e as CustomEvent<{ repositoryPath?: string; operationType?: string }>).detail;
     };
-    el.addEventListener('merge-conflict', handler);
+    shell.addEventListener('merge-conflict', handler);
     try {
       await (el as any).handlePull();
     } finally {
-      el.removeEventListener('merge-conflict', handler);
+      shell.removeEventListener('merge-conflict', handler);
     }
 
     expect(detail, 'the resolution dialog is asked for').to.not.be.null;
@@ -147,11 +211,11 @@ describe('dashboard remote operations', () => {
     const handler = (e: Event): void => {
       detail = (e as CustomEvent<{ operationType?: string }>).detail;
     };
-    el.addEventListener('merge-conflict', handler);
+    shell.addEventListener('merge-conflict', handler);
     try {
       await (el as any).handlePull();
     } finally {
-      el.removeEventListener('merge-conflict', handler);
+      shell.removeEventListener('merge-conflict', handler);
     }
 
     // Continuing a rebase is not committing a merge — the dialog's Complete and
@@ -171,5 +235,89 @@ describe('dashboard remote operations', () => {
       "the user's own offline setting is not a failure",
     ).to.equal(false);
     expect(invoked.some((c) => c.command === 'fetch')).to.equal(false);
+  });
+
+  it('shows a progress row for the whole operation', async () => {
+    // The dashboard never called progressService at all, so a slow push showed
+    // nothing but a disabled button while the shortcut's identical push showed
+    // a labelled row.
+    const el = await dashboard();
+    hang('push');
+    const running = (el as any).handlePush();
+    await sent('push');
+
+    expect(progressService.getOperations().map((op) => op.message)).to.deep.equal([
+      'Pushing to remote...',
+    ]);
+
+    release('push');
+    await running;
+    expect(progressService.getOperations(), 'and torn down when it lands').to.have.lengthOf(0);
+  });
+
+  it('coalesces with an operation started from another surface', async () => {
+    // The old guard was a component-local `isFetching`, which a fetch started
+    // by Ctrl+Shift+F or the command palette could not set — so both reached
+    // IPC and the backend refused the second with a RemoteOperationInFlight
+    // error the user did nothing to deserve.
+    const el = await dashboard();
+    hang('fetch');
+    const fromShortcut = runFetch('/repo/a');
+    await sent('fetch');
+
+    await (el as any).handleFetch();
+    expect(counts('fetch'), 'no duplicate command').to.equal(1);
+
+    release('fetch');
+    await fromShortcut;
+  });
+
+  it('disables its three buttons while any surface is fetching, and spins the right one', async () => {
+    const el = await dashboard();
+    hang('fetch');
+    const fromShortcut = runFetch('/repo/a');
+    await sent('fetch');
+    await el.updateComplete;
+
+    const buttons = Array.from(
+      el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.remote-btn'),
+    );
+    expect(buttons, 'Fetch, Pull and Push').to.have.lengthOf(3);
+    expect(
+      buttons.every((b) => b.disabled),
+      'a dead control that only raises a refusal toast is what this removes',
+    ).to.equal(true);
+    expect(
+      buttons.filter((b) => b.classList.contains('loading')).map((b) => b.textContent?.trim()),
+      'the running operation is the one that spins',
+    ).to.deep.equal(['Fetch']);
+
+    release('fetch');
+    await fromShortcut;
+    await el.updateComplete;
+    expect(
+      Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.remote-btn')).some(
+        (b) => b.disabled,
+      ),
+      'and they come back when it finishes',
+    ).to.equal(false);
+  });
+
+  it('asks for a refresh of the repo the button was clicked in', async () => {
+    // Pinned by path: a fetch is slow, and the user can switch tabs while it
+    // runs. app-shell answers this by refreshing that repository — the branch
+    // list, the graph, the search index and these badges.
+    const el = await dashboard();
+    const seen: Array<string | undefined> = [];
+    const listener = (e: Event): void => {
+      seen.push((e as CustomEvent<{ repoPath?: string }>).detail?.repoPath);
+    };
+    window.addEventListener('remote-operation-refresh', listener);
+    try {
+      await (el as any).handleFetch();
+    } finally {
+      window.removeEventListener('remote-operation-refresh', listener);
+    }
+    expect(seen).to.deep.equal(['/repo/a']);
   });
 });

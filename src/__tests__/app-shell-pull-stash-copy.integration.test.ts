@@ -27,6 +27,13 @@ let mockInvoke: MockInvoke = () => Promise.resolve(null);
   transformCallback: () => cbId++,
 };
 
+// A mounted shell tears its backend listeners down in disconnectedCallback,
+// and @tauri-apps/api reaches for this to do it. Without the stub every
+// unmount raises an unhandled rejection that has nothing to do with the test.
+(globalThis as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+  unregisterListener: () => {},
+};
+
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
 import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
@@ -116,6 +123,31 @@ function createAppShell(): AppShell {
   return el;
 }
 
+const mountedShells: AppShell[] = [];
+
+/**
+ * A CONNECTED shell, for the handlers that reach it through an event.
+ *
+ * Fetch, pull and push run in remote-operations.service — the one runner both
+ * this surface and the context dashboard's buttons call — which asks for the
+ * refresh and for the conflict dialog with events rather than by reaching into
+ * a component it cannot see. app-shell registers those listeners in
+ * `connectedCallback`, so a detached element receives neither. Mounting is
+ * also what the app really does.
+ *
+ * The invoke history and the toasts are cleared after mounting so the shell's
+ * own start-up chatter cannot be mistaken for the handler's work.
+ */
+async function mountAppShell(): Promise<AppShell> {
+  const el = createAppShell();
+  document.body.appendChild(el);
+  mountedShells.push(el);
+  await el.updateComplete;
+  clearHistory();
+  uiStore.setState({ toasts: [] });
+  return el;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 describe('app-shell pull/stash/copy handlers (integration)', () => {
   beforeEach(() => {
@@ -127,11 +159,12 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
 
   afterEach(() => {
     cleanupMockPrompt();
+    for (const shell of mountedShells.splice(0)) shell.remove();
   });
 
   describe('handlePull', () => {
     it('refreshes the repository on success', async () => {
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePull();
 
@@ -149,7 +182,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePull();
 
@@ -168,7 +201,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePull();
 
@@ -184,7 +217,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePull();
 
@@ -197,7 +230,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
 
   describe('handleFetch', () => {
     it('completes and refreshes on success', async () => {
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handleFetch();
 
@@ -213,7 +246,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handleFetch();
 
@@ -225,7 +258,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
 
   describe('handlePush', () => {
     it('completes and refreshes on success', async () => {
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePush();
 
@@ -241,7 +274,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePush();
 
@@ -264,7 +297,7 @@ describe('app-shell pull/stash/copy handlers (integration)', () => {
         return null;
       };
 
-      const el = createAppShell();
+      const el = await mountAppShell();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handlePush();
 
