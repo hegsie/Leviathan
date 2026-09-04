@@ -104,6 +104,32 @@ export const sharedStyles = css`
   .attach-breadcrumb strong {
     color: var(--color-text-primary);
   }
+
+  /* ===========================================================
+     Forced colors (Windows High Contrast Mode)
+     The OS replaces author colors with its own palette, which
+     silently drops focus rings and any state shown only through a
+     custom background. Restate them with system color keywords.
+     =========================================================== */
+  @media (forced-colors: active) {
+    :focus-visible,
+    input:focus-visible,
+    textarea:focus-visible,
+    select:focus-visible {
+      outline: 2px solid Highlight;
+      outline-offset: 2px;
+    }
+
+    /* Disabled state is conveyed by opacity, which forced colors does not
+       adjust — a faded-but-still-forced color reads as enabled. */
+    button:disabled,
+    .btn:disabled,
+    .input:disabled {
+      opacity: 1;
+      color: GrayText;
+      border-color: GrayText;
+    }
+  }
 `;
 
 /**

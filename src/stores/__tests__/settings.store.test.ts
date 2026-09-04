@@ -1,5 +1,11 @@
 import { expect } from '@open-wc/testing';
-import { settingsStore, getGraphColorSchemes } from '../settings.store.ts';
+import {
+  settingsStore,
+  getGraphColorSchemes,
+  migrateSettings,
+  watchSystemContrast,
+} from '../settings.store.ts';
+import type { SettingsState } from '../settings.store.ts';
 
 describe('settings.store', () => {
   beforeEach(() => {
@@ -467,6 +473,189 @@ describe('settings.store', () => {
       rehydrate();
 
       expect(settingsStore.getState().wordWrap, 'a real setting is not clobbered').to.be.true;
+    });
+  });
+
+  describe('system high contrast (forced colors)', () => {
+    afterEach(() => {
+      // Leave the store the way the real environment reports it.
+      settingsStore.getState().resetToDefaults();
+      settingsStore.getState().applySystemContrast(false);
+    });
+
+    it('auto-selects the high-contrast palette when the OS asks for it', () => {
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+      expect(settingsStore.getState().systemHighContrast).to.be.true;
+      expect(settingsStore.getState().graphColorSchemeAuto, 'still automatic').to.be.true;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('high-contrast');
+    });
+
+    it('reverts to the default palette when the OS setting turns off again', () => {
+      settingsStore.getState().applySystemContrast(true);
+      settingsStore.getState().applySystemContrast(false);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      expect(settingsStore.getState().systemHighContrast).to.be.false;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('default');
+    });
+
+    it('a scheme picked by the user pins it and survives a contrast change', () => {
+      settingsStore.getState().setGraphColorScheme('vibrant');
+      expect(settingsStore.getState().graphColorSchemeAuto, 'picking pins the choice').to.be.false;
+
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme, 'the choice wins').to.equal('vibrant');
+      expect(settingsStore.getState().systemHighContrast, 'but the OS state is tracked').to.be.true;
+
+      settingsStore.getState().applySystemContrast(false);
+      expect(settingsStore.getState().graphColorScheme).to.equal('vibrant');
+    });
+
+    it('keeps following the OS again after a reset to defaults', () => {
+      settingsStore.getState().setGraphColorScheme('pastel');
+      settingsStore.getState().applySystemContrast(true);
+      expect(settingsStore.getState().graphColorScheme).to.equal('pastel');
+
+      settingsStore.getState().resetToDefaults();
+
+      expect(settingsStore.getState().graphColorSchemeAuto).to.be.true;
+      expect(settingsStore.getState().graphColorScheme, 'reset re-reads the OS').to.equal(
+        'high-contrast'
+      );
+    });
+
+    describe('watchSystemContrast', () => {
+      interface FakeQuery {
+        media: string;
+        matches: boolean;
+        listeners: Set<() => void>;
+        addEventListener: (type: string, fn: () => void) => void;
+        removeEventListener: (type: string, fn: () => void) => void;
+      }
+
+      let originalMatchMedia: typeof window.matchMedia;
+      let queries: Map<string, FakeQuery>;
+
+      const makeQuery = (media: string): FakeQuery => ({
+        media,
+        matches: false,
+        listeners: new Set<() => void>(),
+        addEventListener(_type, fn) {
+          this.listeners.add(fn);
+        },
+        removeEventListener(_type, fn) {
+          this.listeners.delete(fn);
+        },
+      });
+
+      const fire = (media: string, matches: boolean): void => {
+        const q = queries.get(media);
+        if (!q) throw new Error(`no query registered for ${media}`);
+        q.matches = matches;
+        q.listeners.forEach((fn) => fn());
+      };
+
+      beforeEach(() => {
+        originalMatchMedia = window.matchMedia;
+        queries = new Map();
+        window.matchMedia = ((media: string) => {
+          let q = queries.get(media);
+          if (!q) {
+            q = makeQuery(media);
+            queries.set(media, q);
+          }
+          return q as unknown as MediaQueryList;
+        }) as typeof window.matchMedia;
+      });
+
+      afterEach(() => {
+        window.matchMedia = originalMatchMedia;
+      });
+
+      it('watches both forced-colors and prefers-contrast', () => {
+        const stop = watchSystemContrast();
+
+        expect([...queries.keys()]).to.have.members([
+          '(forced-colors: active)',
+          '(prefers-contrast: more)',
+        ]);
+
+        stop();
+      });
+
+      it('applies the palette on either query matching, and on later changes', () => {
+        const stop = watchSystemContrast();
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(prefers-contrast: more)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        fire('(prefers-contrast: more)', false);
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(forced-colors: active)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        stop();
+      });
+
+      it('applies immediately when the OS is already in high contrast at startup', () => {
+        queries.set('(forced-colors: active)', {
+          ...makeQuery('(forced-colors: active)'),
+          matches: true,
+        });
+
+        const stop = watchSystemContrast();
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+        stop();
+      });
+
+      it('stops listening once disposed', () => {
+        const stop = watchSystemContrast();
+        stop();
+
+        fire('(forced-colors: active)', true);
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      });
+    });
+  });
+
+  describe('migrateSettings', () => {
+    it('leaves existing users who never picked a scheme on automatic', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', theme: 'light' } as Partial<SettingsState>,
+        3
+      );
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+      expect(migrated.theme, 'unrelated settings are untouched').to.equal('light');
+    });
+
+    it('treats a stored non-default scheme as a deliberate choice and pins it', () => {
+      const migrated = migrateSettings({ graphColorScheme: 'pastel' } as Partial<SettingsState>, 3);
+
+      expect(migrated.graphColorSchemeAuto).to.be.false;
+      expect(migrated.graphColorScheme).to.equal('pastel');
+    });
+
+    it('treats a state with no stored scheme at all as automatic', () => {
+      const migrated = migrateSettings({}, 1);
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+    });
+
+    it('does not re-run the rule for state already at the current version', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', graphColorSchemeAuto: false } as Partial<SettingsState>,
+        4
+      );
+
+      expect(migrated.graphColorSchemeAuto, 'a pinned default stays pinned').to.be.false;
     });
   });
 });
