@@ -184,7 +184,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **AI Merge Conflict Resolution** - per-conflict and batch AI suggestions with explanations in the 3-way merge editor
 - **Automatic Changelog Generation** - AI-powered release notes from commit history between any two refs
 - **Semantic Search** - embedding-based commit search using ONNX Runtime and sqlite-vec vector storage
-- **MCP Server** - Model Context Protocol server exposing Git tools for external AI tools (Cursor, VS Code, etc.)
+- **MCP Server** - Model Context Protocol server exposing Git tools for external AI tools (Cursor, VS Code, etc.), protected by a generated access token that every client must send as `Authorization: Bearer <token>` (copy the token and a ready-made client configuration from Settings → MCP Server)
 - **7 AI Providers** - Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot, Google Gemini, and embedded local inference
 - **Adaptive Model Selection** - detects system VRAM/GPU and recommends optimal model (4 curated models)
 - **Embedded LLM (Default)** - runs entirely on your machine with Metal (macOS) or CUDA (Windows/Linux) GPU acceleration
@@ -210,7 +210,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **Hardware**:
   - 4 GB RAM (8 GB recommended for large repositories)
   - 500 MB disk space (+~2 GB for AI model if using commit message generation)
-  - Any x64 or ARM64 processor
+  - x64 (Windows, Linux) or Apple Silicon (macOS)
   
 - **Software**:
   - Git 2.20+ (automatically uses system Git installation)
@@ -231,8 +231,7 @@ Pre-built binaries are available from the [Releases](https://github.com/hegsie/L
 
 | Platform | Download |
 |----------|----------|
-| macOS (Universal) | `.dmg` |
-| macOS (ARM64) | `.dmg` |
+| macOS (Apple Silicon) | `.dmg` |
 | Windows | `.msi` or `.exe` |
 | Linux | `.deb` or `.AppImage` |
 | Arch Linux | [AUR](https://aur.archlinux.org/packages/leviathan-bin) |
@@ -281,7 +280,7 @@ This package is community-maintained and is not an official Leviathan release ch
 #### Prerequisites
 
 - [Node.js](https://nodejs.org/) 20+
-- [Rust](https://rustup.rs/) 1.70+
+- [Rust](https://rustup.rs/) 1.95+
 - Platform-specific dependencies (see below)
 
 #### macOS
@@ -686,7 +685,7 @@ A: Yes! Leviathan has full support for GPG signing of commits and tags, includin
 A: Leviathan provides `.deb` packages (Debian/Ubuntu) and `.AppImage` (universal). Additional formats (Flatpak, Snap, RPM) are on the roadmap.
 
 **Q: Does Leviathan work on Apple Silicon (M1/M2/M3)?**  
-A: Yes! Leviathan provides universal macOS binaries that work on both Intel and Apple Silicon. Apple Silicon Macs get Metal GPU acceleration for AI features.
+A: Yes! Leviathan builds are Apple Silicon (ARM64) only — Metal GPU acceleration for AI features works out of the box. There is no Intel or universal build, and none is planned: Apple is winding down Intel support across macOS.
 
 **Q: Can I install Leviathan on Windows ARM?**  
 A: Not currently. Leviathan only supports x64 Windows. ARM64 Windows support may be added in the future.

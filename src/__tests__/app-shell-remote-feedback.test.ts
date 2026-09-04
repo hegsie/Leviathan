@@ -257,6 +257,129 @@ describe('app-shell remote-operation feedback', () => {
     });
   });
 
+  // ── cancelling a remote operation ────────────────────────────────────────
+  //
+  // Fetch/pull/push advertised cancellation that did not exist: no call site
+  // passed `{cancellable: true}`, so the indicator's Cancel button never
+  // rendered, and no `operationId` reached the backend, so `cancel_operation`
+  // could never find the operation to stop.
+
+  describe('cancellable remote operations', () => {
+    async function progress() {
+      return (await import('../services/progress.service.ts')).progressService;
+    }
+
+    const handlerFor = (op: 'fetch' | 'pull' | 'push') =>
+      `handle${op[0].toUpperCase()}${op.slice(1)}` as 'handleFetch' | 'handlePull' | 'handlePush';
+
+    for (const op of ['fetch', 'pull', 'push'] as const) {
+      it(`${op} runs under a cancellable progress row`, async () => {
+        const service = await progress();
+        const rows: Array<{ id: string; cancellable?: boolean }> = [];
+        const unsubscribe = service.subscribe((ops) => {
+          for (const o of ops) if (!rows.some((r) => r.id === o.id)) rows.push({ ...o });
+        });
+        try {
+          const el = shellOnRepo();
+          await (el as any)[handlerFor(op)]();
+
+          expect(rows.length, `${op} shows a progress row`).to.be.greaterThan(0);
+          expect(
+            rows.every((r) => r.cancellable === true),
+            `${op}'s row must render the Cancel button`,
+          ).to.equal(true);
+        } finally {
+          unsubscribe();
+        }
+      });
+
+      it(`${op} hands the backend the id its Cancel button will use`, async () => {
+        const service = await progress();
+        const ids: string[] = [];
+        const unsubscribe = service.subscribe((ops) => {
+          for (const o of ops) if (!ids.includes(o.id)) ids.push(o.id);
+        });
+        try {
+          const el = shellOnRepo();
+          await (el as any)[handlerFor(op)]();
+
+          const call = invokeCallArgs.find((c) => c.command === op);
+          expect(call, `${op} invoked`).to.not.be.undefined;
+          expect(
+            ids,
+            `${op} must pass the very id the progress row was started with`,
+          ).to.contain(call!.args.operationId);
+        } finally {
+          unsubscribe();
+        }
+      });
+
+      it(`a cancelled ${op} reports "cancelled", not an error`, async () => {
+        failures[op] = { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' };
+        const el = shellOnRepo();
+
+        await (el as any)[handlerFor(op)]();
+
+        const toasts = uiStore.getState().toasts;
+        expect(
+          toasts.filter((t) => t.type === 'error').length,
+          `a cancel the user asked for is not a red ${op} failure`,
+        ).to.equal(0);
+        expect(
+          toasts.some((t) => /cancelled/i.test(t.message)),
+          'the user is told the cancel took effect',
+        ).to.equal(true);
+      });
+
+      it(`a real ${op} failure still shows its error after the cancel path exists`, async () => {
+        failures[op] = { code: 'COMMAND_ERROR', message: 'remote hung up' };
+        const el = shellOnRepo();
+
+        await (el as any)[handlerFor(op)]();
+
+        const errors = uiStore.getState().toasts.filter((t) => t.type === 'error');
+        expect(errors.length, `a genuine ${op} failure is still an error`).to.equal(1);
+        expect(errors[0].message).to.contain('remote hung up');
+      });
+
+      it(`a cancelled ${op} releases the per-repo lock`, async () => {
+        // The lock is what stops a second fetch/pull/push on the same repo.
+        // Leaking it on a cancellation would wedge the repository until the
+        // app restarted, which is worse than not being able to cancel at all.
+        failures[op] = { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' };
+        const el = shellOnRepo();
+
+        await (el as any)[handlerFor(op)]();
+
+        invokeCallArgs.length = 0;
+        delete failures[op];
+        await (el as any)[handlerFor(op)]();
+
+        expect(
+          invokeCallArgs.some((c) => c.command === op),
+          `a retry after a cancelled ${op} must not be refused by a stale lock`,
+        ).to.equal(true);
+      });
+    }
+
+    it('the indicator cancel event reaches the backend cancel command', async () => {
+      const service = await progress();
+      const el = shellOnRepo();
+      const id = service.startOperation('fetch', 'Fetching...', { cancellable: true });
+      invokeCallArgs.length = 0;
+
+      (el as any).handleCancelOperation(new CustomEvent('cancel-operation', { detail: { id } }));
+
+      const cancel = invokeCallArgs.find((c) => c.command === 'cancel_operation');
+      expect(cancel, 'clicking Cancel must reach the backend').to.not.be.undefined;
+      expect(cancel!.args.operationId).to.equal(id);
+      expect(
+        service.getOperations().some((o) => o.id === id),
+        'the row is dismissed immediately',
+      ).to.equal(false);
+    });
+  });
+
   describe('a rejected push offers the recovery the app already implements', () => {
     it('being behind the remote carries a Pull Now action', async () => {
       failures['push'] = {
@@ -399,6 +522,44 @@ describe('app-shell remote-operation feedback', () => {
         uiStore.getState().toasts.some((t) => t.action?.label === 'Force Push'),
         'no unbounded loop through the destructive action',
       ).to.equal(false);
+    });
+
+    it('is cancellable and passes its progress row id to the backend', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      const { progressService } = await import('../services/progress.service.ts');
+      const rows: Array<{ id: string; cancellable?: boolean }> = [];
+      const unsubscribe = progressService.subscribe((ops) => {
+        for (const o of ops) if (!rows.some((r) => r.id === o.id)) rows.push({ ...o });
+      });
+      try {
+        const el = shellWithStoreRepo();
+
+        await (el as any).forcePush('/repo/one');
+
+        const push = invokeCallArgs.find((c) => c.command === 'push');
+        expect(push, 'the push runs once confirmed').to.not.be.undefined;
+        expect(
+          rows.some((r) => r.id === push!.args.operationId && r.cancellable === true),
+          'force push must be cancellable through the same row it reports on',
+        ).to.equal(true);
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it('a cancelled force push is not reported as a failure', async () => {
+      mockResponses['plugin:dialog|confirm'] = () => 'Ok';
+      mockResponses['plugin:dialog|message'] = () => 'Ok';
+      failures['push'] = { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' };
+      const el = shellWithStoreRepo();
+      uiStore.setState({ toasts: [] });
+
+      await (el as any).forcePush('/repo/one');
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.filter((t) => t.type === 'error').length).to.equal(0);
+      expect(toasts.some((t) => /cancelled/i.test(t.message))).to.equal(true);
     });
 
     it('force pushing a tag asks first and sends the force flag', async () => {

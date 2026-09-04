@@ -12,7 +12,8 @@ import { sharedStyles, animationStyles } from '../../styles/shared-styles.ts';
 import { unifiedProfileStore, type AccountConnectionStatus, type ConnectionStatus } from '../../stores/unified-profile.store.ts';
 import { repositoryStore, type OpenRepository } from '../../stores/repository.store.ts';
 import * as unifiedProfileService from '../../services/unified-profile.service.ts';
-import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus, isNetworkGateRefusal } from '../../services/git.service.ts';
+import { fetch as gitFetch, pull as gitPull, push as gitPush, getRemoteStatus, isNetworkGateRefusal, isOperationCancelled } from '../../services/git.service.ts';
+import { progressService } from '../../services/progress.service.ts';
 import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
 import { showToast } from '../../services/notification.service.ts';
 import {
@@ -738,6 +739,12 @@ export class LvContextDashboard extends LitElement {
     // A security-gate block or a declined confirm already spoke for itself; a
     // red error on top tells the user their own settings failed.
     if (isNetworkGateRefusal(result.error)) return;
+    // Neither is a cancel the user asked for — but it must still be
+    // acknowledged, or the row simply vanishes with no explanation.
+    if (isOperationCancelled(result.error)) {
+      showToast(`${operation[0].toUpperCase()}${operation.slice(1)} cancelled`, 'info');
+      return;
+    }
     showErrorWithSuggestion(result.error?.message ?? '', fallback, {
       operation,
       repoPath,
@@ -756,11 +763,19 @@ export class LvContextDashboard extends LitElement {
     // is active when the network call returns.
     const repoPath = this.activeRepository.repository.path;
     this.isFetching = true;
+    // Cancellable, like every other fetch surface: the row's Cancel button
+    // sends this id back through `cancel_operation`, which is what lets the
+    // backend abort the transfer.
+    const opId = progressService.startOperation('fetch', 'Fetching from remote...', {
+      cancellable: true,
+    });
     try {
-      const result = await gitFetch({ path: repoPath, silent: true });
+      const result = await gitFetch({ path: repoPath, silent: true, operationId: opId });
       if (!result.success) {
+        progressService.failOperation(opId);
         this.reportRemoteFailure(result, 'fetch', 'Fetch failed', repoPath);
       } else {
+        progressService.completeOperation(opId);
         // Refresh repository data after fetch
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -774,6 +789,9 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } finally {
+      // Belt and braces: a throw between start and the branches above would
+      // otherwise leave the row spinning forever.
+      progressService.completeOperation(opId);
       this.isFetching = false;
     }
   }
@@ -791,8 +809,14 @@ export class LvContextDashboard extends LitElement {
     // discard does not produce.
     if (!tryAcquireRefOpOrWarn(repoPath)) return;
     this.isPulling = true;
+    // Cancellable only up to the point the merge starts — see
+    // commands/remote.rs::pull_branch.
+    const opId = progressService.startOperation('pull', 'Pulling from remote...', {
+      cancellable: true,
+    });
     try {
-      const result = await gitPull({ path: repoPath, silent: true });
+      const result = await gitPull({ path: repoPath, silent: true, operationId: opId });
+      progressService.completeOperation(opId);
       if (result.success) {
         this.dispatchEvent(new CustomEvent('repository-refresh', {
           bubbles: true,
@@ -831,6 +855,7 @@ export class LvContextDashboard extends LitElement {
         this.reportRemoteFailure(result, 'pull', 'Pull failed', repoPath);
       }
     } finally {
+      progressService.completeOperation(opId);
       this.isPulling = false;
       releaseRefOp(repoPath);
     }
@@ -853,8 +878,12 @@ export class LvContextDashboard extends LitElement {
     // authorising — and this button could not see a flag private to app-shell.
     if (!this.tryAcquirePushOrWarn(repoPath)) return;
     this.isPushing = true;
+    const opId = progressService.startOperation('push', 'Pushing to remote...', {
+      cancellable: true,
+    });
     try {
-      const result = await gitPush({ path: repoPath, silent: true });
+      const result = await gitPush({ path: repoPath, silent: true, operationId: opId });
+      progressService.completeOperation(opId);
       if (!result.success) {
         this.reportRemoteFailure(result, 'push', 'Push failed', repoPath);
       } else {
@@ -870,6 +899,7 @@ export class LvContextDashboard extends LitElement {
         await this.loadRemoteStatus();
       }
     } finally {
+      progressService.completeOperation(opId);
       this.isPushing = false;
       releasePush(repoPath);
     }

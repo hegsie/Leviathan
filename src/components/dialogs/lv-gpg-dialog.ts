@@ -11,6 +11,7 @@ import type { GpgConfig, GpgKey, SshKey } from '../../services/git.service.ts';
 import { getPlatform, type Platform } from '../../utils/platform.ts';
 import { openExternalUrl } from '../../utils/external-link.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import '../common/lv-toggle.ts';
 
 type SetupStep = 'install-guide' | 'generate-guide' | 'configure' | 'complete';
 
@@ -165,49 +166,13 @@ export class LvGpgDialog extends LitElement {
         margin-top: 2px;
       }
 
-      .toggle {
-        position: relative;
-        width: 40px;
-        height: 22px;
-        flex-shrink: 0;
-      }
-
-      .toggle input {
-        opacity: 0;
-        width: 0;
-        height: 0;
-      }
-
-      .toggle-slider {
-        position: absolute;
-        cursor: pointer;
-        inset: 0;
-        background: var(--color-bg-tertiary);
-        border: 1px solid var(--color-border);
-        border-radius: 11px;
-        transition: all var(--transition-fast);
-      }
-
-      .toggle-slider::before {
-        position: absolute;
-        content: "";
-        height: 16px;
-        width: 16px;
-        left: 2px;
-        bottom: 2px;
-        background: var(--color-text-muted);
-        border-radius: 50%;
-        transition: all var(--transition-fast);
-      }
-
-      .toggle input:checked + .toggle-slider {
-        background: var(--color-primary);
-        border-color: var(--color-primary);
-      }
-
-      .toggle input:checked + .toggle-slider::before {
-        transform: translateX(18px);
-        background: white;
+      /* Keep the switch's previous look: a tinted track with a border and a
+         muted knob that turns white once the switch is on. */
+      lv-toggle {
+        --lv-toggle-track-bg: var(--color-bg-tertiary);
+        --lv-toggle-track-border: var(--color-border);
+        --lv-toggle-knob-bg: var(--color-text-muted);
+        --lv-toggle-knob-bg-checked: #ffffff;
       }
 
       /* Key list */
@@ -1398,15 +1363,13 @@ export class LvGpgDialog extends LitElement {
               ${this.isSshFormat ? 'your SSH key' : 'GPG'}
             </div>
           </div>
-          <label class="toggle">
-            <input
-              type="checkbox"
-              .checked=${this.config.signCommits}
-              @change=${this.handleToggleCommitSigning}
-              ?disabled=${this.loading}
-            />
-            <span class="toggle-slider"></span>
-          </label>
+          <lv-toggle
+            label="Sign commits"
+            description=${`Automatically sign all commits with ${this.isSshFormat ? 'your SSH key' : 'GPG'}`}
+            .checked=${this.config.signCommits}
+            ?disabled=${this.loading}
+            @change=${this.handleToggleCommitSigning}
+          ></lv-toggle>
         </div>
         <div class="toggle-row">
           <div>
@@ -1416,15 +1379,13 @@ export class LvGpgDialog extends LitElement {
               ${this.isSshFormat ? 'your SSH key' : 'GPG'}
             </div>
           </div>
-          <label class="toggle">
-            <input
-              type="checkbox"
-              .checked=${this.config.signTags}
-              @change=${this.handleToggleTagSigning}
-              ?disabled=${this.loading}
-            />
-            <span class="toggle-slider"></span>
-          </label>
+          <lv-toggle
+            label="Sign tags"
+            description=${`Automatically sign all tags with ${this.isSshFormat ? 'your SSH key' : 'GPG'}`}
+            .checked=${this.config.signTags}
+            ?disabled=${this.loading}
+            @change=${this.handleToggleTagSigning}
+          ></lv-toggle>
         </div>
       </div>
 
