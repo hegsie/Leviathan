@@ -71,7 +71,10 @@ export class LvBranchList extends LitElement {
         border-bottom: none;
       }
 
+      /* Full-bleed row inside a scrolling list: draw the shared keyboard
+         focus ring inside the row so the scroll container cannot clip it. */
       .group-header {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         gap: 4px;
@@ -142,7 +145,10 @@ export class LvBranchList extends LitElement {
         margin-left: 0;
       }
 
+      /* Full-bleed row inside a scrolling list: draw the shared keyboard
+         focus ring inside the row so the scroll container cannot clip it. */
       .subgroup-header {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         gap: 6px;

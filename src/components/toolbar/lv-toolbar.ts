@@ -225,7 +225,10 @@ export class LvToolbar extends LitElement {
         color: #0052cc;
       }
 
+      /* Sits flush inside the tab, which clips its overflow: draw the shared
+         keyboard focus ring inside the hit area so it is not cut off. */
       .tab-close {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         justify-content: center;

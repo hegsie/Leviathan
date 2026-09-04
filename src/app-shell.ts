@@ -231,6 +231,18 @@ export class AppShell extends LitElement {
         100% { transform: translateX(350%); }
       }
 
+      /* The shared reduced-motion rules clamp every animation to one 0.01ms
+         iteration, which would park this bar at its final keyframe — 350% to
+         the right, i.e. completely off-screen — and the app would look idle
+         during long operations. Paint a static full-width bar instead so the
+         "busy" state is still visible without motion. */
+      @media (prefers-reduced-motion: reduce) {
+        .global-loading-bar::after {
+          width: 100%;
+          transform: none;
+        }
+      }
+
       .skip-link:focus {
         top: 0;
       }

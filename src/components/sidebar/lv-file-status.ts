@@ -88,7 +88,10 @@ export class LvFileStatus extends LitElement {
         border-bottom: none;
       }
 
+      /* Full-bleed row inside a scrolling list: draw the shared keyboard
+         focus ring inside the row so the scroll container cannot clip it. */
       .section-header {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         gap: 6px;
