@@ -1727,6 +1727,8 @@ export class AppShell extends LitElement {
       for (const path of openPaths) {
         if (!this.watchedRepoPaths.has(path)) {
           watcherService.startWatching(path).catch((err) => {
+            // watcher.service already warns the user that auto-refresh is
+            // unavailable (with the actionable cause); don't toast twice
             log.warn('Failed to start file watcher:', err);
           });
           const autoFetchInterval = settingsStore.getState().autoFetchInterval;
