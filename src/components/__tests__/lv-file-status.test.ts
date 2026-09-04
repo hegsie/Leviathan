@@ -891,6 +891,368 @@ describe('lv-file-status', () => {
   });
 
   // ── Multi-repo behavior ──────────────────────────────────────────────
+  // ── Path filter ──────────────────────────────────────────────────────
+  describe('path filter', () => {
+    function filterInput(el: LvFileStatus): HTMLInputElement {
+      const input = el.shadowRoot!.querySelector('.filter-input');
+      expect(input, 'filter input is rendered').to.not.be.null;
+      return input as HTMLInputElement;
+    }
+
+    async function typeFilter(el: LvFileStatus, value: string): Promise<void> {
+      const input = filterInput(el);
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      await el.updateComplete;
+    }
+
+    function filePaths(el: LvFileStatus, sectionIndex?: number): string[] {
+      const root =
+        sectionIndex === undefined
+          ? (el.shadowRoot! as ParentNode)
+          : el.shadowRoot!.querySelectorAll('.section')[sectionIndex];
+      return Array.from(root.querySelectorAll('.file-item')).map((item) =>
+        (item.getAttribute('title') ?? '').replace(' (partially staged)', ''),
+      );
+    }
+
+    async function switchToTree(el: LvFileStatus): Promise<void> {
+      const viewToggle = el.shadowRoot!.querySelector('.view-toggle')!;
+      viewToggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+    }
+
+    it('narrows the flat list to files whose path matches, case-insensitively', async () => {
+      const el = await renderFileStatus();
+
+      await typeFilter(el, 'HELP');
+
+      expect(filePaths(el)).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('matches on the full path so a directory fragment narrows the list', async () => {
+      const el = await renderFileStatus();
+
+      await typeFilter(el, 'src/utils/');
+
+      expect(filePaths(el)).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('keeps a file whose basename matches even with no directory in the query', async () => {
+      const el = await renderFileStatus();
+
+      await typeFilter(el, 'readme.md');
+
+      expect(filePaths(el)).to.deep.equal(['README.md']);
+    });
+
+    it('keeps ancestor directories and shows no empty ones in tree view', async () => {
+      const el = await renderFileStatus();
+      await switchToTree(el);
+
+      await typeFilter(el, 'helper');
+
+      const folderNames = Array.from(
+        el.shadowRoot!.querySelectorAll('.folder-item'),
+      ).map((item) => item.querySelector('.folder-name')!.textContent!.trim());
+      // src and utils are the ancestors of the single match; no other folder
+      // (and no empty folder) survives.
+      expect(folderNames).to.deep.equal(['src', 'utils']);
+      expect(filePaths(el)).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('reveals matches buried in collapsed folders in tree view', async () => {
+      const el = await renderFileStatus();
+      await switchToTree(el);
+
+      // Collapse every folder first, so a match would otherwise stay hidden.
+      const folders = el.shadowRoot!.querySelectorAll('.folder-item');
+      for (const folder of Array.from(folders)) {
+        folder.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await el.updateComplete;
+      }
+
+      await typeFilter(el, 'helper');
+
+      expect(filePaths(el)).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('shows "matches of total" counts without hiding the real totals', async () => {
+      const el = await renderFileStatus();
+
+      await typeFilter(el, 'helper');
+
+      const sections = el.shadowRoot!.querySelectorAll('.section');
+      const stagedCount = sections[0].querySelector('.section-count')!;
+      const unstagedCount = sections[1].querySelector('.section-count')!;
+      expect(stagedCount.textContent!.trim()).to.equal('0 of 4');
+      expect(unstagedCount.textContent!.trim()).to.equal('1 of 4');
+
+      // Header labels stay truthful for assistive tech too
+      const unstagedHeader = sections[1].querySelector('.section-header')!;
+      expect(unstagedHeader.getAttribute('aria-label')).to.equal(
+        'Unstaged changes, 1 of 4 files match the filter',
+      );
+    });
+
+    it('restores the plain totals once the filter is cleared', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+      await typeFilter(el, '');
+
+      const sections = el.shadowRoot!.querySelectorAll('.section');
+      expect(sections[0].querySelector('.section-count')!.textContent!.trim()).to.equal(
+        '4',
+      );
+      expect(sections[1].querySelector('.section-count')!.textContent!.trim()).to.equal(
+        '4',
+      );
+      expect(filePaths(el).length).to.equal(8);
+    });
+
+    it('clears the filter with the x button', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+      expect(filePaths(el).length).to.equal(1);
+
+      const clearBtn = el.shadowRoot!.querySelector('.filter-clear');
+      expect(clearBtn).to.not.be.null;
+      clearBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      expect(filterInput(el).value).to.equal('');
+      expect(filePaths(el).length).to.equal(8);
+      expect(el.shadowRoot!.querySelector('.filter-clear')).to.be.null;
+    });
+
+    it('clears the filter when Escape is pressed in the input', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+
+      const input = filterInput(el);
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true }),
+      );
+      await el.updateComplete;
+
+      expect(filterInput(el).value).to.equal('');
+      expect(filePaths(el).length).to.equal(8);
+    });
+
+    it('lets Escape through when the filter is already empty', async () => {
+      const el = await renderFileStatus();
+
+      const input = filterInput(el);
+      const escape = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      input.dispatchEvent(escape);
+      await el.updateComplete;
+
+      expect(escape.defaultPrevented).to.be.false;
+    });
+
+    it('does not treat typing in the filter as a bare keyboard shortcut', async () => {
+      const el = await renderFileStatus();
+      clearHistory();
+
+      const input = filterInput(el);
+      // "s" and "u" are the bare stage/unstage shortcuts on the host element.
+      for (const key of ['s', 'u']) {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', { key, bubbles: true, composed: true }),
+        );
+      }
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(findCommands('stage_files').length).to.equal(0);
+      expect(findCommands('unstage_files').length).to.equal(0);
+    });
+
+    it('shows an empty-result state with a clear action when nothing matches', async () => {
+      const el = await renderFileStatus();
+
+      await typeFilter(el, 'nothing-here');
+
+      const empty = el.shadowRoot!.querySelector('.no-match-state');
+      expect(empty).to.not.be.null;
+      expect(empty!.textContent).to.include('No files match');
+      expect(empty!.textContent).to.include('nothing-here');
+      expect(filePaths(el).length).to.equal(0);
+
+      const clear = empty!.querySelector('.no-match-clear')!;
+      clear.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.no-match-state')).to.be.null;
+      expect(filePaths(el).length).to.equal(8);
+    });
+
+    it('announces the match count in the polite live region', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+
+      const live = el.shadowRoot!.querySelector('[aria-live="polite"]')!;
+      expect(live.textContent).to.include('1 of 8 files match helper');
+
+      await typeFilter(el, 'nothing-here');
+      const liveAfter = el.shadowRoot!.querySelector('[aria-live="polite"]')!;
+      expect(liveAfter.textContent).to.include('No files match nothing-here');
+    });
+
+    it('exposes a labelled, focusable filter input', async () => {
+      const el = await renderFileStatus();
+      const input = filterInput(el);
+
+      expect(input.getAttribute('aria-label')).to.equal(
+        'Filter changed files by path',
+      );
+      input.focus();
+      expect(el.shadowRoot!.activeElement).to.equal(input);
+    });
+
+    it('resets the filter when the repository changes', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+      expect(filePaths(el).length).to.equal(1);
+
+      el.repositoryPath = '/other/repo';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 60));
+      await el.updateComplete;
+
+      expect(filterInput(el).value).to.equal('');
+      expect(filePaths(el).length).to.equal(8);
+    });
+
+    it('scopes the section Stage-all button to the filtered files only', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+      clearHistory();
+
+      const unstagedSection = el.shadowRoot!.querySelectorAll('.section')[1];
+      const stageAllBtn = unstagedSection.querySelector(
+        '.section-actions .section-action',
+      )!;
+      // The label says what it will act on, so the scope is not a surprise
+      expect(stageAllBtn.getAttribute('title')).to.equal(
+        'Stage 1 file matching the filter',
+      );
+
+      stageAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const stageCalls = findCommands('stage_files');
+      expect(stageCalls.length).to.equal(1);
+      const args = stageCalls[0].args as { paths: string[] };
+      expect(args.paths).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('scopes the section Unstage-all button to the filtered files only', async () => {
+      const el = await renderFileStatus();
+      await typeFilter(el, 'app.ts');
+      clearHistory();
+
+      const stagedSection = el.shadowRoot!.querySelectorAll('.section')[0];
+      const unstageAllBtn = stagedSection.querySelector(
+        '.section-actions .section-action',
+      )!;
+      expect(unstageAllBtn.getAttribute('title')).to.equal(
+        'Unstage 1 file matching the filter',
+      );
+
+      unstageAllBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const args = findCommands('unstage_files')[0].args as { paths: string[] };
+      expect(args.paths).to.deep.equal(['src/app.ts']);
+    });
+
+    it('leaves the global "Stage all changes" command on the full set', async () => {
+      // The command palette entry and the global shortcut say ALL, and they
+      // are invoked from outside this panel — they must not be silently
+      // narrowed by a filter typed here.
+      const el = await renderFileStatus();
+      await typeFilter(el, 'helper');
+      clearHistory();
+
+      window.dispatchEvent(new CustomEvent('stage-all'));
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const args = findCommands('stage_files')[0].args as { paths: string[] };
+      expect(args.paths.length).to.equal(4);
+    });
+
+    it('drops selected files the filter hides, so batch actions cannot reach them', async () => {
+      const el = await renderFileStatus();
+
+      const unstagedSection = el.shadowRoot!.querySelectorAll('.section')[1];
+      const items = Array.from(unstagedSection.querySelectorAll('.file-item'));
+      for (const item of items) {
+        item.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        await el.updateComplete;
+      }
+      expect(
+        el
+          .shadowRoot!.querySelectorAll('.section')[1]
+          .querySelector('.selection-count')!.textContent,
+      ).to.include(`${items.length} selected`);
+
+      await typeFilter(el, 'helper');
+
+      const sectionAfter = el.shadowRoot!.querySelectorAll('.section')[1];
+      expect(sectionAfter.querySelector('.selection-count')!.textContent).to.include(
+        '1 selected',
+      );
+
+      clearHistory();
+      const stageSelected = Array.from(
+        sectionAfter.querySelectorAll('.selection-action-btn'),
+      ).find((b) => b.textContent!.trim() === 'Stage')!;
+      stageSelected.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const args = findCommands('stage_files')[0].args as { paths: string[] };
+      expect(args.paths).to.deep.equal(['src/utils/helper.ts']);
+    });
+
+    it('scopes a tree-view directory action to the filtered files under it', async () => {
+      const el = await renderFileStatus();
+      await switchToTree(el);
+      await typeFilter(el, 'helper');
+      clearHistory();
+
+      const unstagedSection = el.shadowRoot!.querySelectorAll('.section')[1];
+      const srcFolder = Array.from(
+        unstagedSection.querySelectorAll('.folder-item'),
+      ).find(
+        (f) => f.querySelector('.folder-name')!.textContent!.trim() === 'src',
+      )!;
+      // The folder count reflects the filtered subtree
+      expect(srcFolder.querySelector('.folder-count')!.textContent!.trim()).to.equal(
+        '1',
+      );
+
+      const stageDirBtn = Array.from(
+        srcFolder.querySelectorAll('.file-action'),
+      ).find((b) => b.getAttribute('title') === 'Stage directory')!;
+      stageDirBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 100));
+      await el.updateComplete;
+
+      const args = findCommands('stage_files')[0].args as { paths: string[] };
+      expect(args.paths).to.deep.equal(['src/utils/helper.ts']);
+    });
+  });
+
   describe('multi-repo behavior', () => {
     function openRepoInStore(path: string): void {
       repositoryStore.getState().addRepository({
