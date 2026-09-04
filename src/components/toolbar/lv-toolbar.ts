@@ -23,6 +23,21 @@ import type { LvCloneDialog } from '../dialogs/lv-clone-dialog.ts';
 import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
+import { RefLockController, isPushRunning } from '../../utils/ref-lock.ts';
+
+/** The three remote operations the toolbar exposes. */
+type RemoteOp = 'fetch' | 'pull' | 'push';
+
+/**
+ * The shortcut key registered for each operation in keyboard.service.ts
+ * (Ctrl+Shift+F/P/U). Kept next to the buttons so the tooltip and the
+ * aria-keyshortcuts value can never drift apart.
+ */
+const REMOTE_SHORTCUT_KEYS: Record<RemoteOp, string> = {
+  fetch: 'F',
+  pull: 'P',
+  push: 'U',
+};
 
 @customElement('lv-toolbar')
 export class LvToolbar extends LitElement {
@@ -347,6 +362,64 @@ export class LvToolbar extends LitElement {
         margin: var(--spacing-xs) 0;
         background: var(--color-border);
       }
+
+      /* Fetch / Pull / Push — the same 32px menu-btn density as every other
+         toolbar button, plus room for the ahead/behind count badge. */
+      .remote-actions {
+        gap: var(--spacing-xs);
+        padding: 0 var(--spacing-sm);
+        border-left: 1px solid var(--color-border);
+      }
+
+      .remote-btn {
+        position: relative;
+      }
+
+      /* Nothing to pull/push right now: still clickable (the counts are only
+         as fresh as the last fetch), but visibly not calling for a click. */
+      .remote-btn.idle {
+        opacity: 0.55;
+      }
+
+      .remote-btn.idle:hover {
+        opacity: 1;
+      }
+
+      .remote-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+
+      .remote-btn:disabled:hover {
+        background: transparent;
+        color: var(--color-text-secondary);
+      }
+
+      /* Same shape and the same two colours the dashboard badges use, so the
+         two surfaces read as one thing: primary for incoming, success for
+         outgoing. */
+      .remote-count {
+        position: absolute;
+        top: -1px;
+        right: -1px;
+        min-width: 14px;
+        height: 14px;
+        padding: 0 3px;
+        border-radius: var(--radius-full, 7px);
+        color: white;
+        font-size: 9px;
+        font-weight: 600;
+        line-height: 14px;
+        text-align: center;
+      }
+
+      .remote-btn.pull .remote-count {
+        background: var(--color-primary);
+      }
+
+      .remote-btn.push .remote-count {
+        background: var(--color-success);
+      }
     `,
   ];
 
@@ -573,6 +646,154 @@ export class LvToolbar extends LitElement {
     return this.openRepositories[this.activeIndex];
   }
 
+  /**
+   * Observe the shared operation locks so the remote buttons re-render when
+   * an operation starts or ends anywhere in the app.
+   *
+   * The locks are module state Lit cannot see (src/utils/ref-lock.ts); the
+   * controller's subscription fires on every claim and release of BOTH the
+   * working-tree lock and the push slot, which is what makes the in-flight
+   * disabled states below reactive. `busy` itself is the working-tree lock —
+   * the one a pull claims.
+   */
+  private lock = new RefLockController(this, () => this.activeRepo?.repository.path);
+
+  /**
+   * The keyboard shortcut for each remote operation, formatted the way
+   * keyboard.service.ts formats it, so the tooltip teaches the shortcut.
+   */
+  private remoteShortcut(op: RemoteOp): string {
+    const isMac = navigator.platform.includes('Mac');
+    const key = REMOTE_SHORTCUT_KEYS[op];
+    return isMac ? `⌘⇧${key}` : `Ctrl+Shift+${key}`;
+  }
+
+  /**
+   * Label, tooltip, count badge and disabled state for one remote button.
+   *
+   * The ahead/behind numbers come from the SAME place the repository tabs
+   * already read them (repo.currentBranch.aheadBehind — see renderTabBadges),
+   * so the toolbar never asks the backend for them twice and the two can
+   * never disagree.
+   *
+   * The in-flight flags read the shared slots app-shell claims for these very
+   * operations: the working-tree lock for pull, the push slot for push, and
+   * the `fetch:<repo>` push-slot key app-shell's handleFetch uses. Reading the
+   * same locks is what keeps the buttons from staying lit through an operation
+   * started from the dashboard, the palette or a keyboard shortcut.
+   */
+  private remoteButtonState(op: RemoteOp): {
+    disabled: boolean;
+    idle: boolean;
+    count: number;
+    label: string;
+  } {
+    const repo = this.activeRepo;
+    const path = repo?.repository.path;
+    const shortcut = this.remoteShortcut(op);
+    const name = { fetch: 'Fetch', pull: 'Pull', push: 'Push' }[op];
+
+    if (!repo) {
+      return { disabled: true, idle: false, count: 0, label: `${name} — open a repository first` };
+    }
+    if (repo.remotes.length === 0) {
+      return {
+        disabled: true,
+        idle: false,
+        count: 0,
+        label: `${name} — this repository has no remote configured`,
+      };
+    }
+
+    const inFlight =
+      op === 'fetch'
+        ? isPushRunning(`fetch:${path}`)
+        : op === 'pull'
+          ? this.lock.busy
+          : isPushRunning(path);
+    if (inFlight) {
+      // Pull rides the working-tree lock, which ANY ref operation in this repo
+      // can hold (a checkout, a reset, a discard) — so its busy tooltip must
+      // not claim a pull specifically.
+      const reason =
+        op === 'pull'
+          ? 'Pull — an operation is already running in this repository'
+          : `${name} already in progress…`;
+      return { disabled: true, idle: false, count: 0, label: reason };
+    }
+
+    const ab = repo.currentBranch?.aheadBehind;
+    const ahead = ab?.ahead ?? 0;
+    const behind = ab?.behind ?? 0;
+    const branch = repo.currentBranch?.shorthand ?? 'HEAD';
+
+    if (op === 'fetch') {
+      return { disabled: false, idle: false, count: 0, label: `Fetch from remote (${shortcut})` };
+    }
+    if (op === 'pull') {
+      return {
+        disabled: false,
+        idle: behind === 0,
+        count: behind,
+        label:
+          behind > 0
+            ? `Pull ${behind} incoming commit${behind === 1 ? '' : 's'} into ${branch} (${shortcut})`
+            : `Pull from remote — nothing to pull right now (${shortcut})`,
+      };
+    }
+    // Push. A branch with no upstream has no ahead count and is never "up to
+    // date": pushing it publishes it (the backend sets the upstream), so it
+    // must not be dimmed as if there were nothing to do.
+    const hasUpstream = Boolean(repo.currentBranch?.upstream);
+    if (!hasUpstream) {
+      return {
+        disabled: false,
+        idle: false,
+        count: 0,
+        label: `Push ${branch} to remote — it has no upstream yet (${shortcut})`,
+      };
+    }
+    return {
+      disabled: false,
+      idle: ahead === 0,
+      count: ahead,
+      label:
+        ahead > 0
+          ? `Push ${ahead} local commit${ahead === 1 ? '' : 's'} from ${branch} (${shortcut})`
+          : `Push to remote — nothing to push (${shortcut})`,
+    };
+  }
+
+  /**
+   * Run a remote operation through the path that already owns it.
+   *
+   * These three operations are implemented once, in app-shell
+   * (handleFetch/handlePull/handlePush): they claim the shared locks, drive
+   * the progress service, route failures through the suggestion service, and
+   * end in handleRefresh(). The toolbar must not grow a second copy of any of
+   * that — it dispatches, app-shell runs it.
+   */
+  private handleRemoteAction(op: RemoteOp): void {
+    const repo = this.activeRepo;
+    // The buttons carry ?disabled for both of these, so they are only
+    // reachable in the race window between a render and the click — but a
+    // silent return there would look like a dead button.
+    if (!repo) {
+      showToast('Please open a repository first', 'warning');
+      return;
+    }
+    if (repo.remotes.length === 0) {
+      showToast('No remote configured for this repository — add one first.', 'warning');
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent(`remote-${op}`, {
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   private handleToggleSearch(): void {
     this.showSearch = !this.showSearch;
     if (this.showSearch) {
@@ -761,6 +982,50 @@ export class LvToolbar extends LitElement {
       ${dirty
         ? html`<span class="tab-dirty" title="Uncommitted changes" aria-label="Uncommitted changes"></span>`
         : nothing}
+    `;
+  }
+
+  private renderRemoteButton(op: RemoteOp) {
+    const { disabled, idle, count, label } = this.remoteButtonState(op);
+    const icon = {
+      fetch: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+        <path d="M3 3v5h5"></path>
+        <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"></path>
+        <path d="M16 16h5v5"></path>
+      </svg>`,
+      pull: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 3v18"></path>
+        <path d="M5 16l7 7 7-7"></path>
+      </svg>`,
+      push: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M12 3v18"></path>
+        <path d="M5 8l7-7 7 7"></path>
+      </svg>`,
+    }[op];
+    return html`
+      <button
+        class="menu-btn remote-btn ${op} ${idle ? 'idle' : ''}"
+        title="${label}"
+        aria-label="${label}"
+        aria-keyshortcuts="Control+Shift+${REMOTE_SHORTCUT_KEYS[op]}"
+        ?disabled=${disabled}
+        @click=${() => this.handleRemoteAction(op)}
+      >
+        ${icon}
+        ${count > 0
+          ? html`<span class="remote-count" aria-hidden="true">${count}</span>`
+          : nothing}
+      </button>
+    `;
+  }
+
+  private renderRemoteActions() {
+    return html`
+      <div class="toolbar-section remote-actions" role="group" aria-label="Remote operations">
+        ${this.renderRemoteButton('fetch')} ${this.renderRemoteButton('pull')}
+        ${this.renderRemoteButton('push')}
+      </div>
     `;
   }
 
@@ -990,6 +1255,8 @@ export class LvToolbar extends LitElement {
             `
           : nothing}
       </div>
+
+      ${this.renderRemoteActions()}
 
       ${this.renderTabListMenu()} ${this.renderTabContextMenu()}
 
