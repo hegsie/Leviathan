@@ -115,7 +115,25 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             }))
-            .plugin(tauri_plugin_deep_link::init());
+            .plugin(tauri_plugin_deep_link::init())
+            // Remembers window size, position and maximised state across launches.
+            // VISIBLE is intentionally excluded: the tray "minimize to tray" feature
+            // hides the window via `Window::hide`, and if visibility were persisted
+            // the app would relaunch hidden with no obvious way to bring it back.
+            // minWidth/minHeight from tauri.conf.json still apply since Tauri clamps
+            // any restored size to those constraints. A restored position that no
+            // longer matches a connected monitor is left alone by the plugin (it
+            // only repositions the window when the saved coordinates intersect an
+            // available monitor), so the window can never restore off-screen.
+            .plugin(
+                tauri_plugin_window_state::Builder::new()
+                    .with_state_flags(
+                        tauri_plugin_window_state::StateFlags::SIZE
+                            | tauri_plugin_window_state::StateFlags::POSITION
+                            | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                    )
+                    .build(),
+            );
     }
 
     let app = builder

@@ -76,6 +76,7 @@ rand = "0.8"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
+tauri-plugin-window-state = "2"
 
 # Keyring crate only used on non-macOS; macOS uses `security` CLI directly
 # to avoid keychain ACL prompts that the keyring crate triggers on dev builds
