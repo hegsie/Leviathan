@@ -642,4 +642,93 @@ test.describe('Commit Panel - UI Outcome Verification', () => {
     // Verify the commit message textarea remains unchanged (pre-existing text preserved)
     await expect(rightPanel.commitMessage).toHaveValue('existing draft message');
   });
+
+  test('offline mode refuses AI generation for a cloud provider', async ({ page }) => {
+    // Offline mode promises nothing leaves the machine. Generating a commit
+    // message posts the staged diff to the configured provider, so with a
+    // cloud provider selected that promise was broken silently.
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([{ path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false }])
+    );
+
+    await injectCommandMock(page, {
+      is_ai_available: true,
+      get_active_ai_provider: 'open_ai',
+    });
+
+    // The panel checks availability while still online — the state a user is
+    // in when they turn offline mode on with the panel already open.
+    await page.locator('lv-commit-panel').evaluate(async (el: any) => {
+      if (typeof el.checkAiAvailability === 'function') {
+        await el.checkAiAvailability();
+        await el.updateComplete;
+      }
+    });
+    await expect(page.locator('lv-commit-panel .generate-btn')).toHaveAttribute('title', 'Generate commit message using AI');
+
+    await page.evaluate(() => {
+      (window as any).__LEVIATHAN_STORES__.settingsStore.getState().setOfflineMode(true);
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      generate_commit_message: { summary: 'feat: leaked message', body: null },
+      is_ai_available: true,
+      get_active_ai_provider: 'open_ai',
+    });
+
+    await rightPanel.aiGenerateButton.click();
+
+    // The refusal names the setting and the provider, so the user can act on it.
+    const inlineError = page.locator('lv-commit-panel .error');
+    await expect(inlineError).toBeVisible();
+    await expect(inlineError).toContainText(/Offline mode/i);
+    await expect(inlineError).toContainText(/OpenAI/i);
+
+    // The staged diff never left.
+    expect(await findCommand(page, 'generate_commit_message')).toHaveLength(0);
+
+    // The button is usable again rather than stuck spinning.
+    await expect(rightPanel.aiGenerateButton).toBeEnabled();
+  });
+
+  test('offline mode leaves a local AI provider working', async ({ page }) => {
+    // Ollama listens on localhost, so nothing leaves the machine and offline
+    // mode has no business refusing it.
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withStagedFiles([{ path: 'src/main.ts', status: 'modified', isStaged: true, isConflicted: false }])
+    );
+
+    await injectCommandMock(page, {
+      is_ai_available: true,
+      get_active_ai_provider: 'ollama',
+    });
+
+    await page.evaluate(() => {
+      (window as any).__LEVIATHAN_STORES__.settingsStore.getState().setOfflineMode(true);
+    });
+
+    await page.locator('lv-commit-panel').evaluate(async (el: any) => {
+      if (typeof el.checkAiAvailability === 'function') {
+        await el.checkAiAvailability();
+        await el.updateComplete;
+      }
+    });
+    await expect(page.locator('lv-commit-panel .generate-btn')).toHaveAttribute('title', 'Generate commit message using AI');
+
+    await startCommandCaptureWithMocks(page, {
+      generate_commit_message: { summary: 'feat: local model message', body: null },
+      is_ai_available: true,
+      get_active_ai_provider: 'ollama',
+    });
+
+    await rightPanel.aiGenerateButton.click();
+
+    await waitForCommand(page, 'generate_commit_message');
+    await expect(rightPanel.commitMessage).toHaveValue(/local model message/);
+    await expect(page.locator('lv-commit-panel .error')).toHaveCount(0);
+  });
 });
