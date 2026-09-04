@@ -178,7 +178,7 @@ export class SettingsDialogPage extends BaseDialog {
     this.themeSelect = page.locator('lv-settings-dialog select').first();
     // Toggle switches for boolean settings (showAvatars, showCommitSize, wordWrap, confirmBeforeDiscard)
     // Note: vim mode toggle is in keyboard shortcuts dialog, not settings
-    this.vimModeToggle = page.locator('lv-settings-dialog .toggle-switch').first();
+    this.vimModeToggle = page.locator('lv-settings-dialog lv-toggle').first();
     this.doneButton = page.locator('lv-settings-dialog button:has-text("Done")');
     this.resetButton = page.locator('lv-settings-dialog button:has-text("Reset to Defaults")');
   }
@@ -715,8 +715,10 @@ export class KeyboardShortcutsDialogPage extends BaseDialog {
     this.dialog = page.locator('lv-keyboard-shortcuts-dialog[open]');
     // Shortcuts are in .content > .category > .shortcuts-list with .shortcut-row items
     this.shortcutList = page.locator('lv-keyboard-shortcuts-dialog[open] .content');
-    // Vim toggle is in footer with .toggle-switch
-    this.vimModeToggle = page.locator('lv-keyboard-shortcuts-dialog[open] .toggle-switch');
+    // Vim toggle is the lv-toggle switch in the footer
+    this.vimModeToggle = page
+      .locator('lv-keyboard-shortcuts-dialog[open]')
+      .getByRole('switch', { name: 'Vim-style navigation' });
   }
 
   async getShortcutCount(): Promise<number> {

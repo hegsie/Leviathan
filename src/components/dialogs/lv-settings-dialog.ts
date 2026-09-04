@@ -15,6 +15,7 @@ import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.t
 import type { SystemCapabilities, ModelEntry, DownloadedModel, DownloadProgress, LocalModelStatus } from '../../services/local-ai.service.ts';
 import type { McpStatus } from '../../services/mcp.service.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import '../common/lv-toggle.ts';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -88,50 +89,6 @@ export class LvSettingsDialog extends LitElement {
         width: 16px;
         height: 16px;
         accent-color: var(--accent-color);
-      }
-
-      .toggle-switch {
-        position: relative;
-        width: 40px;
-        height: 22px;
-      }
-
-      .toggle-switch input {
-        opacity: 0;
-        width: 0;
-        height: 0;
-      }
-
-      .toggle-slider {
-        position: absolute;
-        cursor: pointer;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background-color: var(--border-color);
-        transition: 0.2s;
-        border-radius: 22px;
-      }
-
-      .toggle-slider:before {
-        position: absolute;
-        content: "";
-        height: 16px;
-        width: 16px;
-        left: 3px;
-        bottom: 3px;
-        background-color: var(--toggle-knob-color, #ffffff);
-        transition: 0.2s;
-        border-radius: 50%;
-      }
-
-      input:checked + .toggle-slider {
-        background-color: var(--accent-color);
-      }
-
-      input:checked + .toggle-slider:before {
-        transform: translateX(18px);
       }
 
       .footer {
@@ -876,9 +833,7 @@ export class LvSettingsDialog extends LitElement {
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
-  private handleToggle(setting: string, e: Event): void {
-    const input = e.target as HTMLInputElement;
-    const value = input.checked;
+  private handleToggle(setting: string, value: boolean): void {
     const store = settingsStore.getState();
 
     switch (setting) {
@@ -1196,16 +1151,31 @@ export class LvSettingsDialog extends LitElement {
     this.handleClose();
   }
 
-  private renderToggle(checked: boolean, setting: string): unknown {
+  /**
+   * A labelled boolean setting row. The visible name/description and the
+   * switch's accessible name come from the same strings, so the switch can
+   * never go unnamed the way the previous bare checkbox did.
+   */
+  private renderToggleRow(
+    name: string,
+    description: string,
+    checked: boolean,
+    setting: string
+  ): unknown {
     return html`
-      <label class="toggle-switch">
-        <input
-          type="checkbox"
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-name">${name}</span>
+          <span class="setting-description">${description}</span>
+        </div>
+        <lv-toggle
+          .label=${name}
+          .description=${description}
           .checked=${checked}
-          @change=${(e: Event) => this.handleToggle(setting, e)}
-        />
-        <span class="toggle-slider"></span>
-      </label>
+          @change=${(e: CustomEvent<{ checked: boolean }>) =>
+            this.handleToggle(setting, e.detail.checked)}
+        ></lv-toggle>
+      </div>
     `;
   }
 
@@ -1255,21 +1225,19 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Graph</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Show Avatars</span>
-              <span class="setting-description">Display author avatars in commit nodes</span>
-            </div>
-            ${this.renderToggle(this.showAvatars, 'showAvatars')}
-          </div>
+          ${this.renderToggleRow(
+            'Show Avatars',
+            'Display author avatars in commit nodes',
+            this.showAvatars,
+            'showAvatars'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Show Commit Size</span>
-              <span class="setting-description">Scale node size based on changes</span>
-            </div>
-            ${this.renderToggle(this.showCommitSize, 'showCommitSize')}
-          </div>
+          ${this.renderToggleRow(
+            'Show Commit Size',
+            'Scale node size based on changes',
+            this.showCommitSize,
+            'showCommitSize'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1351,13 +1319,12 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Editor</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Word Wrap</span>
-              <span class="setting-description">Wrap long lines in diff view</span>
-            </div>
-            ${this.renderToggle(this.wordWrap, 'wordWrap')}
-          </div>
+          ${this.renderToggleRow(
+            'Word Wrap',
+            'Wrap long lines in diff view',
+            this.wordWrap,
+            'wordWrap'
+          )}
         </div>
 
         <div class="settings-section">
@@ -1462,33 +1429,30 @@ export class LvSettingsDialog extends LitElement {
             />
           </div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Fetch on Window Focus</span>
-              <span class="setting-description">Automatically fetch when the app window regains focus</span>
-            </div>
-            ${this.renderToggle(this.fetchOnFocus, 'fetchOnFocus')}
-          </div>
+          ${this.renderToggleRow(
+            'Fetch on Window Focus',
+            'Automatically fetch when the app window regains focus',
+            this.fetchOnFocus,
+            'fetchOnFocus'
+          )}
         </div>
 
         <div class="settings-section">
           <div class="section-title">Security</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Offline Mode</span>
-              <span class="setting-description">Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)</span>
-            </div>
-            ${this.renderToggle(this.offlineMode, 'offlineMode')}
-          </div>
+          ${this.renderToggleRow(
+            'Offline Mode',
+            'Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)',
+            this.offlineMode,
+            'offlineMode'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Confirm Network Operations</span>
-              <span class="setting-description">Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.</span>
-            </div>
-            ${this.renderToggle(this.confirmNetworkOps, 'confirmNetworkOps')}
-          </div>
+          ${this.renderToggleRow(
+            'Confirm Network Operations',
+            'Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.',
+            this.confirmNetworkOps,
+            'confirmNetworkOps'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1508,21 +1472,19 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Behavior</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Confirm Before Discard</span>
-              <span class="setting-description">Ask for confirmation when discarding changes. Deleting untracked files always asks.</span>
-            </div>
-            ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
-          </div>
+          ${this.renderToggleRow(
+            'Confirm Before Discard',
+            'Ask for confirmation when discarding changes. Deleting untracked files always asks.',
+            this.confirmBeforeDiscard,
+            'confirmBeforeDiscard'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Auto-Stash on Checkout</span>
-              <span class="setting-description">Automatically stash and re-apply changes when switching branches</span>
-            </div>
-            ${this.renderToggle(this.autoStashOnCheckout, 'autoStashOnCheckout')}
-          </div>
+          ${this.renderToggleRow(
+            'Auto-Stash on Checkout',
+            'Automatically stash and re-apply changes when switching branches',
+            this.autoStashOnCheckout,
+            'autoStashOnCheckout'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1552,21 +1514,19 @@ export class LvSettingsDialog extends LitElement {
             />
           </div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Minimize to Tray</span>
-              <span class="setting-description">Minimize to system tray instead of closing</span>
-            </div>
-            ${this.renderToggle(this.minimizeToTray, 'minimizeToTray')}
-          </div>
+          ${this.renderToggleRow(
+            'Minimize to Tray',
+            'Minimize to system tray instead of closing',
+            this.minimizeToTray,
+            'minimizeToTray'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Native Notifications</span>
-              <span class="setting-description">Show system notifications for background events</span>
-            </div>
-            ${this.renderToggle(this.showNativeNotifications, 'showNativeNotifications')}
-          </div>
+          ${this.renderToggleRow(
+            'Native Notifications',
+            'Show system notifications for background events',
+            this.showNativeNotifications,
+            'showNativeNotifications'
+          )}
         </div>
 
         <div class="settings-section">
