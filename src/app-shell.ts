@@ -1799,6 +1799,7 @@ export class AppShell extends LitElement {
     window.addEventListener('trigger-pull', this.handleTriggerPull);
     window.addEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.addEventListener('open-settings', this.handleOpenSettings);
+    window.addEventListener('open-git-config', this.handleOpenGitConfig);
     window.addEventListener('trigger-abort', this.handleTriggerAbort);
     window.addEventListener('force-push', this.handleForcePush);
     window.addEventListener('force-push-tag', this.handleForcePushTag);
@@ -1959,6 +1960,7 @@ export class AppShell extends LitElement {
     window.removeEventListener('trigger-pull', this.handleTriggerPull);
     window.removeEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.removeEventListener('open-settings', this.handleOpenSettings);
+    window.removeEventListener('open-git-config', this.handleOpenGitConfig);
     window.removeEventListener('trigger-abort', this.handleTriggerAbort);
     window.removeEventListener('force-push', this.handleForcePush);
     window.removeEventListener('force-push-tag', this.handleForcePushTag);
@@ -3060,6 +3062,15 @@ export class AppShell extends LitElement {
 
   private handleOpenSettings = (): void => {
     this.showSettings = true;
+  };
+
+  /**
+   * Open the Git Configuration dialog — where user.name/user.email are set.
+   * Dispatched by the commit panel when there is no identity to sign off with,
+   * so the warning it shows leads somewhere.
+   */
+  private handleOpenGitConfig = (): void => {
+    this.showConfig = true;
   };
 
   // True while any integration dialog is open.

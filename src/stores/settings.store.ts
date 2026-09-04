@@ -40,6 +40,7 @@ export interface SettingsState {
   confirmBeforeDiscard: boolean;
   openLastRepository: boolean;
   autoStashOnCheckout: boolean; // Automatically stash/pop when switching branches
+  alwaysSignOff: boolean; // Start every new commit message with Sign off enabled
 
   // Branch settings
   staleBranchDays: number; // Days without commits before a branch is considered stale (0 = disabled)
@@ -76,6 +77,7 @@ export interface SettingsState {
   setConfirmBeforeDiscard: (confirm: boolean) => void;
   setOpenLastRepository: (open: boolean) => void;
   setAutoStashOnCheckout: (enabled: boolean) => void;
+  setAlwaysSignOff: (enabled: boolean) => void;
   setStaleBranchDays: (days: number) => void;
   setNetworkOperationTimeout: (timeout: number) => void;
   setOfflineMode: (enabled: boolean) => void;
@@ -111,6 +113,9 @@ const defaultSettings = {
   // checkout auto-stashed, so `false` here would silently change behaviour for
   // every existing user — turning a seamless branch switch into a refusal.
   autoStashOnCheckout: true,
+  // Defaults OFF: sign-off is a project requirement, not a universal one, and
+  // adding a trailer nobody asked for would rewrite every commit message.
+  alwaysSignOff: false,
   staleBranchDays: 90,
   networkOperationTimeout: 300,
   offlineMode: false,
@@ -194,6 +199,8 @@ export const settingsStore = createStore<SettingsState>()(
       setOpenLastRepository: (openLastRepository) => set({ openLastRepository }),
 
       setAutoStashOnCheckout: (autoStashOnCheckout) => set({ autoStashOnCheckout }),
+
+      setAlwaysSignOff: (alwaysSignOff) => set({ alwaysSignOff }),
 
       setStaleBranchDays: (staleBranchDays) => set({ staleBranchDays }),
 

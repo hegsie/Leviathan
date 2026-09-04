@@ -332,6 +332,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private confirmNetworkOps = false;
   @state() private remoteAllowlist: string[] = [];
   @state() private autoStashOnCheckout = false;
+  @state() private alwaysSignOff = false;
   @state() private staleBranchDays = 90;
   @state() private networkOperationTimeout = 300;
 
@@ -530,6 +531,7 @@ export class LvSettingsDialog extends LitElement {
     this.confirmNetworkOps = settings.confirmNetworkOps;
     this.remoteAllowlist = settings.remoteAllowlist;
     this.autoStashOnCheckout = settings.autoStashOnCheckout;
+    this.alwaysSignOff = settings.alwaysSignOff;
     this.staleBranchDays = settings.staleBranchDays;
     this.networkOperationTimeout = settings.networkOperationTimeout;
     this.autoFetchInterval = settings.autoFetchInterval;
@@ -909,6 +911,10 @@ export class LvSettingsDialog extends LitElement {
       case 'autoStashOnCheckout':
         this.autoStashOnCheckout = value;
         store.setAutoStashOnCheckout(value);
+        break;
+      case 'alwaysSignOff':
+        this.alwaysSignOff = value;
+        store.setAlwaysSignOff(value);
         break;
       case 'fetchOnFocus':
         this.fetchOnFocus = value;
@@ -1522,6 +1528,14 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Automatically stash and re-apply changes when switching branches</span>
             </div>
             ${this.renderToggle(this.autoStashOnCheckout, 'autoStashOnCheckout')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Always Sign Off Commits</span>
+              <span class="setting-description">Start each new commit message with Sign off enabled, adding a Signed-off-by trailer</span>
+            </div>
+            ${this.renderToggle(this.alwaysSignOff, 'alwaysSignOff')}
           </div>
 
           <div class="setting-row">
