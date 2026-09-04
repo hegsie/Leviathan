@@ -317,6 +317,40 @@ describe('lv-toolbar repository tabs', () => {
     });
   });
 
+  describe('event surface', () => {
+    // app-shell used to carry an `@repository-refresh` binding on <lv-toolbar>
+    // that could never fire: neither the toolbar nor the clone/init dialogs it
+    // hosts dispatch that event, so the binding was dead code. This pins the
+    // toolbar's outgoing event surface — if a toolbar action ever does need to
+    // ask the shell to refresh, this test fails and whoever adds the dispatch
+    // must also restore the binding in app-shell's render().
+    it('never dispatches repository-refresh from any toolbar action', async () => {
+      mockInvoke = (command: string) => {
+        // The folder picker is cancelled, so "Open Repository" is a no-op.
+        if (command === 'plugin:dialog|open') return Promise.resolve(null);
+        return Promise.resolve(null);
+      };
+
+      const el = await createToolbar();
+      let refreshes = 0;
+      el.addEventListener('repository-refresh', () => {
+        refreshes += 1;
+      });
+
+      const buttons = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.menu-btn')
+      );
+      expect(buttons.length, 'the toolbar renders its menu buttons').to.be.greaterThan(0);
+
+      for (const button of buttons) {
+        button.click();
+        await el.updateComplete;
+      }
+
+      expect(refreshes, 'no toolbar action asks the shell to refresh').to.equal(0);
+    });
+  });
+
   describe('open repository failures', () => {
     it('shows a toast (not just a silent store error) when opening fails', async () => {
       // Dialog returns a folder; the open then fails (e.g. not a git repo).

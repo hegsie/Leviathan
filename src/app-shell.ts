@@ -5597,7 +5597,6 @@ export class AppShell extends LitElement {
           }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
-        @repository-refresh=${() => this.handleRefresh()}
         @search-change=${this.handleSearchChange}
       ></lv-toolbar>
 
