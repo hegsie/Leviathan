@@ -9,9 +9,50 @@ use crate::models::{
     RemoteOperationResult, RemotePushResult,
 };
 use crate::services::cancellation::CancellationRegistry;
-use crate::services::credentials_service;
+use crate::services::credentials_service::{self, TransferAbort};
 use crate::services::remote_ops::{self, RemoteOp, RemoteOpRegistry};
+use crate::services::transfer_monitor::{OperationProgress, ProgressSink, TransferMonitor};
 use crate::utils::{create_command, reject_flag_like};
+
+/// The sink that turns a transfer snapshot into the `operation-progress` event
+/// `src/services/progress.service.ts` listens for.
+fn progress_sink(app_handle: &AppHandle) -> ProgressSink {
+    let app = app_handle.clone();
+    std::sync::Arc::new(move |progress: OperationProgress| {
+        let _ = app.emit("operation-progress", progress);
+    })
+}
+
+/// The monitor a user-initiated remote operation runs under: cancellable via
+/// `operation_id`, and reporting progress to the row that id belongs to.
+fn operation_monitor(
+    app_handle: &AppHandle,
+    operation_id: Option<String>,
+    message: impl Into<String>,
+    token: crate::services::cancellation::CancellationToken,
+) -> TransferMonitor {
+    TransferMonitor::new(operation_id, message, token, progress_sink(app_handle))
+}
+
+/// Name the reason a git2 transfer stopped.
+///
+/// A cancelled and a timed-out transfer both surface from libgit2 as a
+/// generic error, and the two flags are the only way to tell either of them
+/// from a real failure that merely happened to land at the same moment — see
+/// `credentials_service::TransferAbort`.
+fn transfer_failure(
+    abort: &TransferAbort,
+    error: git2::Error,
+    timeout_message: &str,
+) -> LeviathanError {
+    if abort.cancelled() {
+        LeviathanError::OperationCancelled
+    } else if abort.timed_out() {
+        LeviathanError::OperationTimeout(timeout_message.to_string())
+    } else {
+        error.into()
+    }
+}
 
 /// Add a new remote
 #[command]
@@ -160,13 +201,14 @@ pub async fn get_remotes(path: String) -> Result<Vec<Remote>> {
 pub async fn fetch(
     app_handle: AppHandle,
     remote_ops_registry: State<'_, RemoteOpRegistry>,
+    cancellation_registry: State<'_, CancellationRegistry>,
     path: String,
     remote: Option<String>,
     prune: Option<bool>,
     token: Option<String>,
     timeout_secs: Option<u64>,
     quiet: Option<bool>,
-    _operation_id: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<()> {
     // A fetch the user did not ask for must not announce itself. The
     // window-focus refresh runs this same command, and the success event below
@@ -205,46 +247,33 @@ pub async fn fetch(
     let prune_val = prune.unwrap_or(false);
     let remote_name_for_event = remote_name_owned.clone();
 
+    // Registered so `cancel_operation` can actually find this fetch. The guard
+    // rides into the blocking task below and deregisters the id when the fetch
+    // really ends — on success, on an error, and on the late completion of a
+    // fetch whose caller already timed out.
+    let op_guard = cancellation_registry.guard(operation_id.clone());
+    let monitor = operation_monitor(
+        &app_handle,
+        operation_id,
+        format!("Fetching from {}", remote_name_owned),
+        op_guard.token(),
+    );
+
     // git2 fetch is blocking network I/O; offload to a blocking thread so
     // it doesn't starve the Tokio runtime. spawn_holding carries the slot into
     // that thread, so the claim is released when the fetch really ends rather
     // than when a timed-out caller drops this future.
     let handle = remote_ops::spawn_holding(slot, move || -> Result<()> {
-        let repo = git2::Repository::open(Path::new(&path_clone))?;
-        let mut git_remote = repo
-            .find_remote(&remote_name_owned)
-            .map_err(|_| LeviathanError::RemoteNotFound(remote_name_owned.clone()))?;
-
-        let (mut fetch_opts, aborted) =
-            credentials_service::get_fetch_options_with_deadline(token, deadline);
-        if prune_val {
-            fetch_opts.prune(git2::FetchPrune::On);
-        }
-
-        let refspecs: Vec<String> = git_remote
-            .fetch_refspecs()?
-            .iter()
-            .filter_map(|s| s.ok().flatten().map(|s| s.to_string()))
-            .collect();
-        let refspec_strs: Vec<&str> = refspecs.iter().map(|s| s.as_str()).collect();
-
-        git_remote
-            .fetch(&refspec_strs, Some(&mut fetch_opts), None)
-            .map_err(|e| {
-                // libgit2 reports a deadline abort as a generic error; name it.
-                // ONLY a transfer the deadline callback actually aborted, though
-                // — asking `deadline_passed` here relabelled every failure that
-                // happened to surface after the deadline (a wrong credential, a
-                // protocol error, a full disk) as "timed out", and on the pull
-                // path such an error is then dropped as an already-reported
-                // timeout, so the real cause never reached the user.
-                if aborted.load(std::sync::atomic::Ordering::SeqCst) {
-                    LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
-                } else {
-                    e.into()
-                }
-            })?;
-        Ok(())
+        // Dropped when this closure returns, however it returns.
+        let _op_guard = op_guard;
+        fetch_internal(
+            &path_clone,
+            &remote_name_owned,
+            prune_val,
+            token,
+            deadline,
+            monitor,
+        )
     });
 
     let app_late = app_handle.clone();
@@ -804,6 +833,7 @@ pub(crate) fn pull_branch(
     rebase: Option<bool>,
     token: Option<String>,
     deadline: Option<std::time::Instant>,
+    monitor: TransferMonitor,
 ) -> Result<(String, String)> {
     // Refuse before the network round trip if another operation is
     // unresolved. merge() has always had this guard; pull never
@@ -836,15 +866,37 @@ pub(crate) fn pull_branch(
 
     // Fetch (network I/O) the remote we actually resolved. A transfer the
     // deadline aborted is this pull's timeout, and must read as one.
-    fetch_internal(path_for_task, &effective_remote, false, token, deadline).map_err(
-        |e| match e {
-            LeviathanError::OperationTimeout(_) => {
-                LeviathanError::OperationTimeout("Pull operation timed out".to_string())
-            }
-            other => other,
-        },
-    )?;
+    //
+    // THE FETCH IS THE ONLY CANCELLATION POINT OF A PULL. Everything after it
+    // — the fast-forward checkout, the merge, the rebase loop — rewrites the
+    // index and the working tree, and there is no point inside those at which
+    // stopping leaves a state a user could reason about (a half-applied
+    // rebase, a merged-but-unmarked tree). Cancelling during the fetch is
+    // safe because a fetch writes nothing but remote-tracking refs and
+    // FETCH_HEAD, which is exactly what a plain `Fetch` does and leaves the
+    // working tree untouched. So: cancel here, or let the merge finish.
+    fetch_internal(
+        path_for_task,
+        &effective_remote,
+        false,
+        token,
+        deadline,
+        monitor.with_message(format!("Pulling from {}", effective_remote)),
+    )
+    .map_err(|e| match e {
+        LeviathanError::OperationTimeout(_) => {
+            LeviathanError::OperationTimeout("Pull operation timed out".to_string())
+        }
+        other => other,
+    })?;
     let repo = git2::Repository::open(Path::new(path_for_task))?;
+
+    // The last moment a pull can be stopped (see the comment above the fetch).
+    // Reported as a plain cancellation, not a "cancelled after change": the
+    // repository is in exactly the state a fetch would have left it in.
+    if monitor.is_cancelled() {
+        return Err(LeviathanError::OperationCancelled);
+    }
 
     // Do NOT start the merge or rebase once the caller has already been told
     // the pull timed out. The outer timeout only drops the future, so this
@@ -961,13 +1013,14 @@ pub(crate) fn pull_branch(
 pub async fn pull(
     app_handle: AppHandle,
     remote_ops_registry: State<'_, RemoteOpRegistry>,
+    cancellation_registry: State<'_, CancellationRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
     rebase: Option<bool>,
     token: Option<String>,
     timeout_secs: Option<u64>,
-    _operation_id: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<()> {
     // Claimed before the timeout wrapper and released by the blocking task,
     // not by this future — see services/remote_ops.rs. The ensure_pullable
@@ -983,10 +1036,21 @@ pub async fn pull(
     let requested_remote = remote.clone();
     let branch_for_task = branch.clone();
 
+    // Registered so `cancel_operation` can find this pull; the guard rides
+    // into the blocking task and deregisters when the pull really ends.
+    let op_guard = cancellation_registry.guard(operation_id.clone());
+    let monitor = operation_monitor(
+        &app_handle,
+        operation_id,
+        "Pulling from remote",
+        op_guard.token(),
+    );
+
     // Whole pull is git2 / blocking network I/O. Run it on a blocking
     // thread so the Tokio runtime stays responsive; the slot rides into that
     // thread so it is released when the pull really ends.
     let handle = remote_ops::spawn_holding(Some(slot), move || {
+        let _op_guard = op_guard;
         pull_branch(
             &path_for_task,
             requested_remote,
@@ -994,6 +1058,7 @@ pub async fn pull(
             rebase,
             token,
             deadline,
+            monitor,
         )
     });
 
@@ -1057,22 +1122,40 @@ pub async fn pull(
     Ok(())
 }
 
-/// Internal fetch without event emission (used by pull)
-fn fetch_internal(
+/// Internal fetch without event emission (used by `fetch` and by pull).
+///
+/// `monitor` carries the user's cancellation token and the progress sink;
+/// pass `TransferMonitor::disabled()` for a fetch that is neither cancellable
+/// nor reported (the background fetch, an internal one).
+pub(crate) fn fetch_internal(
     path: &str,
     remote_name: &str,
     prune: bool,
     token: Option<String>,
     deadline: Option<std::time::Instant>,
+    monitor: TransferMonitor,
 ) -> Result<()> {
+    // Checked before anything opens a socket: a cancel that arrived while the
+    // operation was still queued must not produce a network round trip at all.
+    // The in-transfer check lives in the git2 callback, which is the only
+    // abort point libgit2 offers.
+    if monitor.is_cancelled() {
+        return Err(LeviathanError::OperationCancelled);
+    }
+
     let repo = git2::Repository::open(Path::new(path))?;
 
     let mut git_remote = repo
         .find_remote(remote_name)
         .map_err(|_| LeviathanError::RemoteNotFound(remote_name.to_string()))?;
 
-    let (mut fetch_opts, aborted) =
-        credentials_service::get_fetch_options_with_deadline(token, deadline);
+    let (mut fetch_opts, abort) = credentials_service::get_fetch_options_with_monitor(
+        token, deadline,
+        // The message is the CALLER's: a pull's fetch phase must keep saying
+        // "Pulling from origin" rather than relabelling the row half-way
+        // through an operation the user asked for by another name.
+        monitor,
+    );
 
     if prune {
         fetch_opts.prune(git2::FetchPrune::On);
@@ -1088,16 +1171,15 @@ fn fetch_internal(
 
     git_remote
         .fetch(&refspec_strs, Some(&mut fetch_opts), None)
-        .map_err(|e| {
-            // libgit2 reports a deadline abort as a generic indexer error;
-            // name it for what it is — but only when the deadline callback is
-            // what aborted this transfer. See the same guard in `fetch`.
-            if aborted.load(std::sync::atomic::Ordering::SeqCst) {
-                LeviathanError::OperationTimeout("Fetch operation timed out".to_string())
-            } else {
-                e.into()
-            }
-        })?;
+        // libgit2 reports both a cancelled and a deadline-aborted transfer as
+        // a generic indexer error; name each for what it is — but only when
+        // the callback really aborted this transfer. Asking the condition here
+        // instead relabelled every failure that happened to surface after the
+        // deadline (a wrong credential, a protocol error, a full disk) as
+        // "timed out", and on the pull path such an error is then dropped as
+        // an already-reported timeout, so the real cause never reached the
+        // user.
+        .map_err(|e| transfer_failure(&abort, e, "Fetch operation timed out"))?;
 
     Ok(())
 }
@@ -1145,7 +1227,16 @@ pub(crate) fn push_branch(
     use_push_tags: bool,
     set_upstream_val: bool,
     token: Option<String>,
+    monitor: TransferMonitor,
 ) -> Result<(String, String)> {
+    // A cancel that arrived while the push was still queued must not reach the
+    // remote at all. The later checks are the branch-rule gate and, for the
+    // git2 path, `push_negotiation` — see `get_push_options_with_monitor` for
+    // why that is the last one git2 offers.
+    if monitor.is_cancelled() {
+        return Err(LeviathanError::OperationCancelled);
+    }
+
     let repo = git2::Repository::open(Path::new(path_for_task))?;
 
     // Resolve the remote from the branch's upstream, then the sole
@@ -1208,6 +1299,8 @@ pub(crate) fn push_branch(
         && !upstream_is_configured(&repo, &branch_name);
     let should_set_upstream = set_upstream_val || branch_lacks_upstream;
 
+    let monitor = monitor.with_message(format!("Pushing to {}", remote_for_task));
+
     if use_force_with_lease || use_push_tags {
         push_via_cli(
             path_for_task,
@@ -1218,17 +1311,25 @@ pub(crate) fn push_branch(
             use_push_tags,
             should_set_upstream,
             token,
+            &monitor,
         )?;
     } else {
         // Run pre-push like canonical git — the git2 push path
         // otherwise bypasses it. A non-zero exit aborts the push.
         crate::commands::hooks::run_pre_push_branch(&repo, &remote_for_task, &branch_name)?;
 
+        // The pre-push hook can take a while (test suites are a common one),
+        // so re-check before opening a connection.
+        if monitor.is_cancelled() {
+            return Err(LeviathanError::OperationCancelled);
+        }
+
         let mut git_remote = repo
             .find_remote(&remote_for_task)
             .map_err(|_| LeviathanError::RemoteNotFound(remote_for_task.clone()))?;
 
-        let mut push_opts = credentials_service::get_push_options(token);
+        let (mut push_opts, abort) =
+            credentials_service::get_push_options_with_monitor(token, monitor);
 
         let refspec = if force_val {
             format!("+refs/heads/{}:refs/heads/{}", branch_name, branch_name)
@@ -1236,7 +1337,9 @@ pub(crate) fn push_branch(
             format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name)
         };
 
-        git_remote.push(&[&refspec], Some(&mut push_opts))?;
+        git_remote
+            .push(&[&refspec], Some(&mut push_opts))
+            .map_err(|e| transfer_failure(&abort, e, "Push operation timed out"))?;
 
         if should_set_upstream {
             let upstream_name = format!("{}/{}", remote_for_task, branch_name);
@@ -1285,6 +1388,7 @@ fn push_message(
 pub async fn push(
     app_handle: AppHandle,
     remote_ops_registry: State<'_, RemoteOpRegistry>,
+    cancellation_registry: State<'_, CancellationRegistry>,
     path: String,
     remote: Option<String>,
     branch: Option<String>,
@@ -1294,7 +1398,7 @@ pub async fn push(
     set_upstream: Option<bool>,
     token: Option<String>,
     timeout_secs: Option<u64>,
-    _operation_id: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<()> {
     // Reject branch values that could be parsed as a flag by `git push`
     // (e.g. `--receive-pack=/tmp/evil`). The remote name is safer because
@@ -1322,9 +1426,20 @@ pub async fn push(
     let use_push_tags = push_tags.unwrap_or(false);
     let set_upstream_val = set_upstream.unwrap_or(false);
 
+    // Registered so `cancel_operation` can find this push; the guard rides
+    // into the blocking task and deregisters when the push really ends.
+    let op_guard = cancellation_registry.guard(operation_id.clone());
+    let monitor = operation_monitor(
+        &app_handle,
+        operation_id,
+        "Pushing to remote",
+        op_guard.token(),
+    );
+
     // git2/git-CLI push is blocking network I/O; offload so the runtime
     // stays responsive during slow remotes.
     let handle = remote_ops::spawn_holding(Some(slot), move || {
+        let _op_guard = op_guard;
         push_branch(
             &path_for_task,
             requested_remote,
@@ -1334,6 +1449,7 @@ pub async fn push(
             use_push_tags,
             set_upstream_val,
             token,
+            monitor,
         )
     });
 
@@ -1424,7 +1540,89 @@ fn push_remote_url(path: &str, remote_name: &str) -> Option<String> {
         .map(|u| u.to_string())
 }
 
+/// Run a prepared `git push` to completion, killing it if the user cancels.
+///
+/// `Command::output()` blocks until the child exits, which is why the force
+/// push had no cancellation point at all. Spawning and polling gives it one.
+/// Both pipes are drained on their own threads: git push writes its progress
+/// to stderr, and leaving a piped stream unread deadlocks the child once the
+/// pipe buffer fills — the same trap `clone_repository` documents.
+fn run_push_command(
+    mut cmd: std::process::Command,
+    monitor: &TransferMonitor,
+) -> Result<std::process::Output> {
+    if monitor.is_cancelled() {
+        return Err(LeviathanError::OperationCancelled);
+    }
+
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        LeviathanError::OperationFailed(format!("Failed to execute git push: {}", e))
+    })?;
+
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use std::io::Read;
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout_reader = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr_reader = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+
+    let status = loop {
+        if monitor.is_cancelled() {
+            // Killed and reaped before returning: an orphaned `git push` would
+            // keep talking to the remote after the user was told it stopped.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(LeviathanError::OperationCancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(LeviathanError::OperationFailed(format!(
+                    "Failed to wait for git push: {}",
+                    e
+                )));
+            }
+        }
+    };
+
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
+}
+
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
+///
+/// Unlike the git2 path this one CAN be stopped mid-transfer: the child is
+/// spawned rather than run to completion, and a cancellation kills it — the
+/// same shape `clone_repository`'s CLI path uses.
 #[allow(clippy::too_many_arguments)]
 fn push_via_cli(
     path: &str,
@@ -1435,6 +1633,7 @@ fn push_via_cli(
     push_tags: bool,
     set_upstream: bool,
     token: Option<String>,
+    monitor: &TransferMonitor,
 ) -> Result<()> {
     let mut cmd = create_command("git");
     cmd.arg("-C").arg(path).arg("push");
@@ -1494,9 +1693,7 @@ fn push_via_cli(
         }
     }
 
-    let output = cmd.output().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to execute git push: {}", e))
-    })?;
+    let output = run_push_command(cmd, monitor)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1557,6 +1754,9 @@ fn push_single_remote(
             push_tags,
             false,
             token,
+            // The multi-remote push has no progress row and no operation id of
+            // its own, so nothing can cancel it — see `push_to_multiple_remotes`.
+            &TransferMonitor::disabled(),
         )
         .map_err(|e| e.to_string())
     } else {
@@ -2212,8 +2412,15 @@ mod tests {
             .checked_sub(Duration::from_secs(60))
             .expect("a deadline in the past");
 
-        let err = fetch_internal(&local.path_str(), "origin", false, None, Some(past))
-            .expect_err("fetching a remote that does not exist must fail");
+        let err = fetch_internal(
+            &local.path_str(),
+            "origin",
+            false,
+            None,
+            Some(past),
+            TransferMonitor::disabled(),
+        )
+        .expect_err("fetching a remote that does not exist must fail");
 
         assert!(
             !matches!(err, LeviathanError::OperationTimeout(_)),
@@ -2247,7 +2454,15 @@ mod tests {
         let upstream = TestRepo::with_initial_commit();
         let local = TestRepo::new();
         local.add_remote("origin", &upstream.path_str());
-        fetch_internal(&local.path_str(), "origin", false, None, None).expect("fixture fetch");
+        fetch_internal(
+            &local.path_str(),
+            "origin",
+            false,
+            None,
+            None,
+            TransferMonitor::disabled(),
+        )
+        .expect("fixture fetch");
 
         let branch = upstream.current_branch();
         let repo = local.repo();
@@ -2270,6 +2485,15 @@ mod tests {
         branch: &str,
         deadline: Option<Instant>,
     ) -> Result<(String, String)> {
+        pull_with_monitor(local, branch, deadline, TransferMonitor::disabled())
+    }
+
+    fn pull_with_monitor(
+        local: &TestRepo,
+        branch: &str,
+        deadline: Option<Instant>,
+        monitor: TransferMonitor,
+    ) -> Result<(String, String)> {
         pull_branch(
             &local.path_str(),
             Some("origin".to_string()),
@@ -2277,6 +2501,7 @@ mod tests {
             Some(false),
             None,
             deadline,
+            monitor,
         )
     }
 
@@ -2317,7 +2542,15 @@ mod tests {
         upstream.create_commit("second", &[("b.txt", "b")]);
         // Bring the remote-tracking ref (and its objects) over first, so the
         // pull's own fetch has nothing to transfer and runs to completion.
-        fetch_internal(&local.path_str(), "origin", false, None, None).expect("pre-fetch");
+        fetch_internal(
+            &local.path_str(),
+            "origin",
+            false,
+            None,
+            None,
+            TransferMonitor::disabled(),
+        )
+        .expect("pre-fetch");
         let before = local.head_oid();
         assert_ne!(before, upstream.head_oid(), "fixture must be behind");
 
@@ -2386,6 +2619,7 @@ mod tests {
             Some(true),
             None,
             None,
+            TransferMonitor::disabled(),
         )
     }
 
@@ -3561,6 +3795,7 @@ mod tests {
             false,
             false,
             None,
+            &TransferMonitor::disabled(),
         );
 
         assert!(
@@ -3615,6 +3850,7 @@ mod tests {
             false,
             false,
             None,
+            &TransferMonitor::disabled(),
         )
         .expect("an uncontested force push must still go through");
 
@@ -3744,6 +3980,7 @@ mod tests {
             false,
             false,
             None,
+            TransferMonitor::disabled(),
         )
         .expect("push should succeed");
 
@@ -3778,6 +4015,7 @@ mod tests {
             false,
             false,
             None,
+            TransferMonitor::disabled(),
         )
         .expect("first push should succeed");
         assert_eq!(
@@ -3803,6 +4041,7 @@ mod tests {
             false,
             false,
             None,
+            TransferMonitor::disabled(),
         )
         .expect("second push should succeed");
 
@@ -3835,6 +4074,7 @@ mod tests {
             false,
             false,
             None,
+            TransferMonitor::disabled(),
         )
         .expect("first push should succeed");
         assert_eq!(
@@ -3851,6 +4091,7 @@ mod tests {
             false,
             false,
             None,
+            TransferMonitor::disabled(),
         )
         .expect("second push should succeed");
 
@@ -4489,6 +4730,217 @@ mod tests {
 
         let json2 = serde_json::to_string(&result_no_msg).unwrap();
         assert!(json2.contains("\"message\":null"));
+    }
+
+    // ---- cancelling a fetch / pull / push ----
+    //
+    // A REAL cancelled network transfer is not reproducible offline, so these
+    // pin down everything around it that is: that a cancelled operation never
+    // reaches the network at all, that libgit2's generic abort error is
+    // reported as a cancellation rather than a failure, that the registry is
+    // left empty afterwards, and that a cancelled pull leaves the repository
+    // in the state a plain fetch would have.
+
+    use crate::services::cancellation::{CancellationRegistry, CancellationToken};
+    use crate::services::transfer_monitor::OperationProgress;
+
+    /// A monitor wired to a live token, plus the events it emitted.
+    fn cancellable_monitor(
+        operation_id: &str,
+    ) -> (
+        TransferMonitor,
+        CancellationToken,
+        Arc<Mutex<Vec<OperationProgress>>>,
+    ) {
+        let events: Arc<Mutex<Vec<OperationProgress>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = Arc::clone(&events);
+        let token = CancellationToken::new();
+        let monitor = TransferMonitor::new(
+            Some(operation_id.to_string()),
+            "Fetching",
+            token.clone(),
+            Arc::new(move |p| sink_events.lock().unwrap().push(p)),
+        );
+        (monitor, token, events)
+    }
+
+    /// The mapping the UI depends on: a cancelled transfer must read as a
+    /// cancellation, not as a timeout and not as a raw libgit2 failure.
+    #[test]
+    fn a_cancelled_transfer_is_reported_as_a_cancellation() {
+        let abort = TransferAbort::default();
+        let raw = || git2::Error::from_str("early EOF");
+
+        // Neither flag: the real error survives untouched.
+        let plain = transfer_failure(&abort, raw(), "Fetch operation timed out");
+        assert!(matches!(plain, LeviathanError::Git(_)));
+
+        abort
+            .timed_out
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let timed_out = transfer_failure(&abort, raw(), "Fetch operation timed out");
+        assert!(matches!(timed_out, LeviathanError::OperationTimeout(_)));
+
+        // Cancellation wins over a deadline that also expired: the user is
+        // told what they did, not what the clock did.
+        abort
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let cancelled = transfer_failure(&abort, raw(), "Fetch operation timed out");
+        assert!(matches!(cancelled, LeviathanError::OperationCancelled));
+        assert_eq!(
+            crate::error::ErrorResponse::from(cancelled).code,
+            "OPERATION_CANCELLED",
+            "the frontend keys its 'Cancelled' toast off this code"
+        );
+    }
+
+    /// A cancel that arrives while the fetch is still queued must stop it
+    /// before it opens a socket. The remote here is a URL that would take a
+    /// long time to fail; the test passing instantly is the assertion.
+    #[test]
+    fn a_pre_cancelled_fetch_never_reaches_the_network() {
+        let local = TestRepo::with_initial_commit();
+        local.add_remote("origin", "https://192.0.2.1/unreachable.git");
+
+        let (monitor, token, events) = cancellable_monitor("op-1");
+        token.cancel();
+
+        let err = fetch_internal(&local.path_str(), "origin", false, None, None, monitor)
+            .expect_err("a cancelled fetch must not succeed");
+
+        assert!(matches!(err, LeviathanError::OperationCancelled));
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "nothing transferred, so nothing to report"
+        );
+    }
+
+    /// The same for push: nothing may reach the remote.
+    #[test]
+    fn a_pre_cancelled_push_never_reaches_the_network() {
+        let local = TestRepo::with_initial_commit();
+        local.add_remote("origin", "https://192.0.2.1/unreachable.git");
+
+        let (monitor, token, _events) = cancellable_monitor("op-2");
+        token.cancel();
+
+        let err = push_branch(
+            &local.path_str(),
+            Some("origin".to_string()),
+            None,
+            false,
+            false,
+            false,
+            false,
+            None,
+            monitor,
+        )
+        .expect_err("a cancelled push must not succeed");
+
+        assert!(matches!(err, LeviathanError::OperationCancelled));
+    }
+
+    /// And for the git-CLI push path force push uses — there the child process
+    /// is what has to not be spawned.
+    #[test]
+    fn a_pre_cancelled_cli_push_never_spawns_git() {
+        let local = TestRepo::with_initial_commit();
+        local.add_remote("origin", "https://192.0.2.1/unreachable.git");
+
+        let (monitor, token, _events) = cancellable_monitor("op-3");
+        token.cancel();
+
+        let err = push_via_cli(
+            &local.path_str(),
+            "origin",
+            "main",
+            false,
+            true,
+            false,
+            false,
+            None,
+            &monitor,
+        )
+        .expect_err("a cancelled force push must not succeed");
+
+        assert!(matches!(err, LeviathanError::OperationCancelled));
+    }
+
+    /// A cancelled pull must leave the working tree exactly where it was —
+    /// never half-merged. Cancelling before the fetch is the easy half of
+    /// that; the merge itself is deliberately not interruptible.
+    #[test]
+    fn a_cancelled_pull_leaves_the_working_tree_alone() {
+        let (upstream, local, branch) = pull_fixture();
+        upstream.create_commit("second", &[("b.txt", "b")]);
+        let before = local.head_oid();
+
+        let (monitor, token, _events) = cancellable_monitor("op-4");
+        token.cancel();
+
+        let err = pull_with_monitor(&local, &branch, None, monitor)
+            .expect_err("a cancelled pull must not succeed");
+
+        assert!(matches!(err, LeviathanError::OperationCancelled));
+        assert_eq!(local.head_oid(), before, "HEAD must not have moved");
+        assert!(
+            !local.path.join("b.txt").exists(),
+            "the upstream commit must not have been merged into the tree"
+        );
+        assert_eq!(
+            local.repo().state(),
+            git2::RepositoryState::Clean,
+            "no half-finished merge may be left behind"
+        );
+    }
+
+    /// The registration half of the contract: while a fetch is registered
+    /// `cancel_operation` finds it, and once the operation ends nothing is
+    /// left behind for a later id to collide with.
+    #[tokio::test]
+    async fn cancel_operation_finds_a_registered_operation_and_the_registry_empties() {
+        let registry = CancellationRegistry::default();
+
+        // Nothing registered: this is the state that made every Cancel click a
+        // no-op before this change.
+        assert!(!registry.cancel("op-5"));
+
+        {
+            let guard = registry.guard(Some("op-5".to_string()));
+            assert!(registry.cancel("op-5"), "a registered id is cancellable");
+            assert!(guard.is_cancelled());
+        }
+
+        assert!(
+            registry.is_empty(),
+            "the operation must be deregistered when it ends"
+        );
+        assert!(!registry.cancel("op-5"));
+    }
+
+    /// The guard travels into the blocking task, so the id stays cancellable
+    /// for as long as the work is really running — including after a caller
+    /// that timed out has gone away — and is released when it ends.
+    #[tokio::test]
+    async fn the_registration_outlives_a_caller_that_gave_up() {
+        let registry = CancellationRegistry::default();
+        let guard = registry.guard(Some("op-6".to_string()));
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            rx.recv().ok();
+        });
+
+        assert!(
+            registry.cancel("op-6"),
+            "still cancellable while the work runs"
+        );
+
+        tx.send(()).unwrap();
+        handle.await.unwrap();
+        assert!(registry.is_empty(), "released when the work really ends");
     }
 }
 

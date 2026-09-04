@@ -144,14 +144,50 @@ export class LvProgressIndicator extends LitElement {
       }
 
       .progress-percentage {
+        display: flex;
+        gap: 8px;
         font-size: var(--font-size-xs);
         color: var(--color-text-muted);
         margin-top: 2px;
+      }
+
+      .progress-counts {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
     `,
   ];
 
   @property({ type: Array }) operations: ProgressOperation[] = [];
+
+  /** Bytes as the transfer line shows them — the units git itself uses. */
+  private formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ['KiB', 'MiB', 'GiB'];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    return `${value.toFixed(value < 10 ? 2 : 1)} ${units[unit]}`;
+  }
+
+  /**
+   * The "1,234 / 5,000 objects · 2.30 MiB" line, or '' when the backend has
+   * not reported any counts for this operation yet (a local operation, or a
+   * transfer the remote has not started).
+   */
+  private transferDetail(op: ProgressOperation): string {
+    const { receivedObjects, totalObjects, receivedBytes } = op;
+    if (receivedObjects === undefined) return '';
+    const objects =
+      totalObjects && totalObjects > 0
+        ? `${receivedObjects.toLocaleString()} / ${totalObjects.toLocaleString()} objects`
+        : `${receivedObjects.toLocaleString()} objects`;
+    return receivedBytes ? `${objects} · ${this.formatBytes(receivedBytes)}` : objects;
+  }
 
   private handleCancel(id: string): void {
     this.dispatchEvent(new CustomEvent('cancel-operation', {
@@ -228,8 +264,11 @@ export class LvProgressIndicator extends LitElement {
                   style="width: ${op.progress ?? 0}%"
                 ></div>
               </div>
-              ${op.progress !== undefined ? html`
-                <div class="progress-percentage">${Math.round(op.progress)}%</div>
+              ${op.progress !== undefined || this.transferDetail(op) ? html`
+                <div class="progress-percentage">
+                  ${op.progress !== undefined ? html`<span class="progress-percent-value">${Math.round(op.progress)}%</span>` : ''}
+                  ${this.transferDetail(op) ? html`<span class="progress-counts">${this.transferDetail(op)}</span>` : ''}
+                </div>
               ` : ''}
             </div>
             ${op.cancellable ? html`
@@ -237,6 +276,7 @@ export class LvProgressIndicator extends LitElement {
                 class="cancel-btn"
                 @click=${() => this.handleCancel(op.id)}
                 title="Cancel"
+                aria-label="Cancel ${op.type}"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="18" y1="6" x2="6" y2="18"></line>
