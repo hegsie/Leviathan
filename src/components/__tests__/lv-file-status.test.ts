@@ -735,6 +735,188 @@ describe('lv-file-status', () => {
     });
   });
 
+  // ── 8b. File history and blame ───────────────────────────────────────
+  describe('file history and blame', () => {
+    function openMenuFor(el: LvFileStatus, pathText: string): void {
+      const item = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLElement>('.file-item'),
+      ).find((row) => row.getAttribute('title')?.startsWith(pathText));
+      expect(item, `no file row for ${pathText}`).to.not.be.undefined;
+      item!.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }),
+      );
+    }
+
+    function menuItem(el: LvFileStatus, label: string): HTMLButtonElement | undefined {
+      return Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.context-menu-item'),
+      ).find((item) => item.textContent!.trim().startsWith(label));
+    }
+
+    it('offers "File history" and "Blame" for a tracked modified file', async () => {
+      const el = await renderFileStatus();
+
+      openMenuFor(el, 'src/utils/helper.ts');
+      await el.updateComplete;
+
+      const history = menuItem(el, 'File history');
+      const blame = menuItem(el, 'Blame');
+      expect(history).to.not.be.undefined;
+      expect(blame).to.not.be.undefined;
+      expect(history!.getAttribute('aria-disabled')).to.equal('false');
+      expect(blame!.getAttribute('aria-disabled')).to.equal('false');
+    });
+
+    it('dispatches show-file-history with the file path', async () => {
+      const el = await renderFileStatus();
+      let detail: { filePath: string } | null = null;
+      el.addEventListener('show-file-history', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      openMenuFor(el, 'src/utils/helper.ts');
+      await el.updateComplete;
+      menuItem(el, 'File history')!.click();
+      await el.updateComplete;
+
+      expect(detail).to.not.be.null;
+      expect(detail!.filePath).to.equal('src/utils/helper.ts');
+      // The menu closes on the same gesture, like every sibling item.
+      expect(el.shadowRoot!.querySelector('.context-menu')).to.be.null;
+    });
+
+    it('dispatches show-blame with the file path and no commit oid', async () => {
+      const el = await renderFileStatus();
+      let detail: { filePath: string; commitOid?: string } | null = null;
+      el.addEventListener('show-blame', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      openMenuFor(el, 'src/utils/helper.ts');
+      await el.updateComplete;
+      menuItem(el, 'Blame')!.click();
+      await el.updateComplete;
+
+      expect(detail).to.not.be.null;
+      expect(detail!.filePath).to.equal('src/utils/helper.ts');
+      // No oid: the backend blames the working copy against HEAD.
+      expect(detail!.commitOid).to.equal(undefined);
+      expect(el.shadowRoot!.querySelector('.context-menu')).to.be.null;
+    });
+
+    it('offers both on a staged tracked file too', async () => {
+      const el = await renderFileStatus();
+      let detail: { filePath: string } | null = null;
+      el.addEventListener('show-file-history', (e) => {
+        detail = (e as CustomEvent).detail;
+      });
+
+      openMenuFor(el, 'src/app.ts');
+      await el.updateComplete;
+      expect(menuItem(el, 'Blame')).to.not.be.undefined;
+      menuItem(el, 'File history')!.click();
+      await el.updateComplete;
+
+      expect(detail!.filePath).to.equal('src/app.ts');
+    });
+
+    it('marks both unavailable for an untracked file', async () => {
+      const el = await renderFileStatus();
+
+      openMenuFor(el, 'temp.log');
+      await el.updateComplete;
+
+      const history = menuItem(el, 'File history')!;
+      const blame = menuItem(el, 'Blame')!;
+      expect(history.getAttribute('aria-disabled')).to.equal('true');
+      expect(blame.getAttribute('aria-disabled')).to.equal('true');
+      expect(history.classList.contains('disabled')).to.be.true;
+      expect(blame.classList.contains('disabled')).to.be.true;
+      expect(history.getAttribute('title')).to.contain('no history');
+    });
+
+    it('explains rather than dispatching when an untracked file is picked', async () => {
+      const el = await renderFileStatus();
+      uiStore.setState({ toasts: [] });
+      let dispatched = false;
+      el.addEventListener('show-file-history', () => {
+        dispatched = true;
+      });
+
+      openMenuFor(el, 'temp.log');
+      await el.updateComplete;
+      menuItem(el, 'File history')!.click();
+      await el.updateComplete;
+
+      expect(dispatched).to.be.false;
+      const toasts = uiStore.getState().toasts;
+      expect(toasts).to.have.length(1);
+      expect(toasts[0].type).to.equal('warning');
+      expect(toasts[0].message).to.contain('temp.log');
+      expect(toasts[0].message).to.contain('no history');
+    });
+
+    it('marks both unavailable for a path staged as new', async () => {
+      const el = await renderFileStatus();
+
+      openMenuFor(el, 'src/new-file.ts');
+      await el.updateComplete;
+
+      expect(menuItem(el, 'File history')!.getAttribute('aria-disabled')).to.equal('true');
+      expect(menuItem(el, 'Blame')!.getAttribute('aria-disabled')).to.equal('true');
+    });
+
+    it('offers history but not blame for a deleted file', async () => {
+      const el = await renderFileStatus();
+
+      openMenuFor(el, 'README.md');
+      await el.updateComplete;
+
+      expect(menuItem(el, 'File history')).to.not.be.undefined;
+      expect(menuItem(el, 'Blame')).to.be.undefined;
+    });
+
+    it('h and b open history and blame for the focused file', async () => {
+      const el = await renderFileStatus();
+      let historyPath: string | null = null;
+      let blamePath: string | null = null;
+      el.addEventListener('show-file-history', (e) => {
+        historyPath = (e as CustomEvent).detail.filePath;
+      });
+      el.addEventListener('show-blame', (e) => {
+        blamePath = (e as CustomEvent).detail.filePath;
+      });
+
+      // First press moves focus onto the first row (the staged src/app.ts).
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await el.updateComplete;
+
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'h', bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
+      await el.updateComplete;
+
+      expect(historyPath).to.equal('src/app.ts');
+      expect(blamePath).to.equal('src/app.ts');
+    });
+
+    it('leaves Ctrl+B to the panel shortcut instead of opening blame', async () => {
+      const el = await renderFileStatus();
+      let dispatched = false;
+      el.addEventListener('show-blame', () => {
+        dispatched = true;
+      });
+
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await el.updateComplete;
+      el.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true }),
+      );
+      await el.updateComplete;
+
+      expect(dispatched).to.be.false;
+    });
+  });
+
   // ── 9. Error handling ────────────────────────────────────────────────
   describe('error handling', () => {
     it('shows error element when get_status throws', async () => {

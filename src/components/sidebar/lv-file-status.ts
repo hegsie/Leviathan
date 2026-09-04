@@ -56,6 +56,14 @@ function gitignoreExtensionPattern(path: string): string | null {
 }
 
 /**
+ * Why "File history" and "Blame" are refused on some working-tree rows.
+ *
+ * Both views read from HEAD, so a path that has never been committed has
+ * nothing to show: its log is empty and `blame_file` fails outright.
+ */
+const NO_HISTORY_REASON = "Not committed yet, so there is no history to show";
+
+/**
  * File status component
  * Displays staged and unstaged changes with staging functionality
  */
@@ -526,6 +534,17 @@ export class LvFileStatus extends LitElement {
         color: var(--color-error);
       }
 
+      .context-menu-item[disabled],
+      .context-menu-item.disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .context-menu-item[disabled]:hover,
+      .context-menu-item.disabled:hover {
+        background: none;
+      }
+
       .context-menu-item svg {
         width: 14px;
         height: 14px;
@@ -968,6 +987,25 @@ export class LvFileStatus extends LitElement {
           if (this.stagedFiles.some((f) => f.path === file.path)) {
             this.handleUnstageFile(file, e);
           }
+        }
+        break;
+
+      case "h":
+        // File history for the focused file, the keyboard twin of the context
+        // menu item. Selection is deliberately ignored: both views take one
+        // path, so acting on a multi-file selection has no meaning.
+        e.preventDefault();
+        if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+          this.requestFileHistory(allFiles[this.focusedIndex]);
+        }
+        break;
+
+      case "b":
+        // Blame for the focused file. Bare "b" only: Ctrl+B toggles the left
+        // panel, and the modifier guard above already let that press through.
+        e.preventDefault();
+        if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+          this.requestBlame(allFiles[this.focusedIndex]);
         }
         break;
 
@@ -1843,6 +1881,96 @@ export class LvFileStatus extends LitElement {
     );
   }
 
+  /**
+   * True when the row's path is already in HEAD, and so has something for the
+   * history and blame views to read.
+   *
+   * An untracked row obviously has none. Neither does a path staged as new:
+   * `get_status` reports that as a staged "new" entry, and if the file was
+   * edited again after `git add` it ALSO produces an unstaged "modified" row
+   * for the same path — that second row is just as historyless, so both are
+   * judged by the same test rather than by the row's own status alone.
+   */
+  private fileHasHistory(file: StatusEntry): boolean {
+    if (file.status === "untracked") return false;
+    return !this.stagedFiles.some(
+      (f) => f.path === file.path && f.status === "new",
+    );
+  }
+
+  /**
+   * Blame renders the working copy, so a file that is gone from the worktree
+   * has nothing to render — the same reason the commit file list hides blame
+   * for a deleted path.
+   */
+  private fileCanBlame(file: StatusEntry): boolean {
+    return this.fileHasHistory(file) && file.status !== "deleted";
+  }
+
+  /**
+   * Open the file-history pane for a working-tree row.
+   *
+   * Same event and detail shape the commit file list raises, so app-shell's
+   * existing `show-file-history` handler serves both. The right panel that
+   * hosts this component already listens for it.
+   */
+  private requestFileHistory(file: StatusEntry): void {
+    if (!this.fileHasHistory(file)) {
+      showToast(`"${file.path}": ${NO_HISTORY_REASON}`, "warning");
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("show-file-history", {
+        detail: { filePath: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Open blame for a working-tree row.
+   *
+   * No `commitOid` on purpose: `get_file_blame` without one blames the working
+   * copy against HEAD and attributes uncommitted lines to the zero OID, which
+   * is exactly what a Changes row is asking about. The commit file list passes
+   * its commit instead, and the detail shape is otherwise identical.
+   */
+  private requestBlame(file: StatusEntry): void {
+    if (!this.fileHasHistory(file)) {
+      showToast(`"${file.path}": ${NO_HISTORY_REASON}`, "warning");
+      return;
+    }
+    if (file.status === "deleted") {
+      showToast(
+        `"${file.path}" is deleted from the working tree, so there is nothing to blame`,
+        "warning",
+      );
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("show-blame", {
+        detail: { filePath: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private handleContextViewHistory(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.requestFileHistory(file);
+  }
+
+  private handleContextViewBlame(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.requestBlame(file);
+  }
+
   private async handleContextOpenInEditor(): Promise<void> {
     const file = this.contextMenu.file;
     if (!file) return;
@@ -2344,6 +2472,11 @@ export class LvFileStatus extends LitElement {
     // Non-null past the early return above.
     const file = this.contextMenu.file;
     const extensionPattern = gitignoreExtensionPattern(file.path);
+    // Untracked (and staged-new) paths are not in HEAD: both views would come
+    // back empty or error, so the items stay visible — they are part of the
+    // menu's vocabulary — but are marked unavailable and say why.
+    const hasHistory = this.fileHasHistory(file);
+    const canBlame = this.fileCanBlame(file);
 
     return html`
       <div class="context-menu" role="menu" aria-label="File actions" style="left: ${x}px; top: ${y}px"
@@ -2396,6 +2529,44 @@ export class LvFileStatus extends LitElement {
           </svg>
           View diff
         </button>
+        <button
+          class="context-menu-item ${hasHistory ? "" : "disabled"}"
+          role="menuitem"
+          aria-disabled=${hasHistory ? "false" : "true"}
+          title=${hasHistory ? "Show every commit that touched this file (H)" : NO_HISTORY_REASON}
+          @click=${this.handleContextViewHistory}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          File history
+        </button>
+        ${file.status !== "deleted"
+          ? html`<button
+              class="context-menu-item ${canBlame ? "" : "disabled"}"
+              role="menuitem"
+              aria-disabled=${canBlame ? "false" : "true"}
+              title=${canBlame ? "Show who last changed each line (B)" : NO_HISTORY_REASON}
+              @click=${this.handleContextViewBlame}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              Blame
+            </button>`
+          : nothing}
         <button
           class="context-menu-item"
           role="menuitem"
