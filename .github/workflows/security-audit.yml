@@ -1,0 +1,141 @@
+name: Weekly Security Audit
+
+# The CI gate only blocks on advisories in dependencies that ship inside the
+# app. Dev-only advisories still matter, they just should not red-line an
+# unrelated pull request while everyone waits for an upstream release. This
+# job chases them on a schedule and keeps a single issue up to date.
+
+on:
+  schedule:
+    # Mondays at 07:00 UTC.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: Full dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit npm dependencies
+        id: npm_audit
+        continue-on-error: true
+        run: |
+          {
+            echo 'report<<AUDIT_EOF'
+            npm audit --audit-level=moderate 2>&1 || true
+            echo 'AUDIT_EOF'
+          } >> "$GITHUB_OUTPUT"
+          npm audit --audit-level=moderate > /dev/null 2>&1 && echo "clean=true" >> "$GITHUB_OUTPUT" || echo "clean=false" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit Rust dependencies
+        id: cargo_audit
+        continue-on-error: true
+        working-directory: src-tauri
+        run: |
+          {
+            echo 'report<<AUDIT_EOF'
+            cargo audit 2>&1 || true
+            echo 'AUDIT_EOF'
+          } >> "$GITHUB_OUTPUT"
+          cargo audit > /dev/null 2>&1 && echo "clean=true" >> "$GITHUB_OUTPUT" || echo "clean=false" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the advisory issue
+        uses: actions/github-script@v8
+        env:
+          NPM_CLEAN: ${{ steps.npm_audit.outputs.clean }}
+          NPM_REPORT: ${{ steps.npm_audit.outputs.report }}
+          CARGO_CLEAN: ${{ steps.cargo_audit.outputs.clean }}
+          CARGO_REPORT: ${{ steps.cargo_audit.outputs.report }}
+        with:
+          script: |
+            const title = 'Dependency advisories';
+            const clean =
+              process.env.NPM_CLEAN === 'true' && process.env.CARGO_CLEAN === 'true';
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'dependencies',
+              per_page: 100,
+            });
+            const issue = existing.find((i) => i.title === title);
+
+            if (clean) {
+              if (issue) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: 'All dependency advisories are resolved. Closing.',
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                  state_reason: 'completed',
+                });
+              }
+              return;
+            }
+
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              'The weekly audit found outstanding advisories. Production dependencies are',
+              'gated in CI; anything listed here that is dev-only does not block pull requests.',
+              '',
+              '## npm',
+              '',
+              '```',
+              (process.env.NPM_REPORT || '').trim() || 'no output',
+              '```',
+              '',
+              '## cargo',
+              '',
+              '```',
+              (process.env.CARGO_REPORT || '').trim() || 'no output',
+              '```',
+              '',
+              `[Workflow run](${run})`,
+            ].join('\n');
+
+            if (issue) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['dependencies', 'security'],
+              });
+            }
