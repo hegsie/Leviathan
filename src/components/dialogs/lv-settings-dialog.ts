@@ -279,6 +279,32 @@ export class LvSettingsDialog extends LitElement {
         border-radius: 2px;
       }
 
+      .auto-scheme-note {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm, 4px);
+        font-size: 11px;
+        color: var(--color-text-secondary);
+        white-space: nowrap;
+      }
+
+      /* Forced colors would flatten every swatch to the same system color,
+         turning the palette preview into a row of identical squares. These
+         squares ARE the information, so opt them out and outline them. */
+      @media (forced-colors: active) {
+        .color-swatch {
+          forced-color-adjust: none;
+          border: 1px solid CanvasText;
+        }
+
+        .auto-scheme-note {
+          border-color: CanvasText;
+        }
+      }
+
       .scheme-option {
         display: flex;
         align-items: center;
@@ -312,6 +338,8 @@ export class LvSettingsDialog extends LitElement {
   @state() private fontSize: FontSize = 'medium';
   @state() private density: Density = 'comfortable';
   @state() private graphColorScheme: GraphColorScheme = 'default';
+  @state() private graphColorSchemeAuto = true;
+  @state() private systemHighContrast = false;
   @state() private defaultBranchName = 'main';
   @state() private defaultClonePath = '';
   @state() private showAvatars = true;
@@ -392,9 +420,18 @@ export class LvSettingsDialog extends LitElement {
   private mergeToolWriteToken = 0;
   private diffToolWriteToken = 0;
 
+  private settingsUnsubscribe: (() => void) | null = null;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
+    // The graph colour scheme can change underneath an open dialog when the OS
+    // high-contrast setting flips, so mirror it from the store.
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.graphColorScheme = state.graphColorScheme;
+      this.graphColorSchemeAuto = state.graphColorSchemeAuto;
+      this.systemHighContrast = state.systemHighContrast;
+    });
     this.loadVersion();
     this.loadAiProviders();
     this.loadExternalToolsConfig();
@@ -405,6 +442,8 @@ export class LvSettingsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
     this.downloadProgressUnlisten?.();
     this.downloadCompleteUnlisten?.();
     this.downloadErrorUnlisten?.();
@@ -417,6 +456,10 @@ export class LvSettingsDialog extends LitElement {
     // selects once their options exist.
     this.syncSelectValue('#merge-tool-select', this.mergeToolName);
     this.syncSelectValue('#diff-tool-select', this.diffToolName);
+    // Same hazard: the graph scheme select and its options render in one
+    // update, and the automatic high-contrast scheme is a value that is only
+    // ever set before the options exist.
+    this.syncSelectValue('#graph-scheme-select', this.graphColorScheme);
   }
 
   private syncSelectValue(selector: string, value: string | null): void {
@@ -519,6 +562,8 @@ export class LvSettingsDialog extends LitElement {
     this.fontSize = settings.fontSize;
     this.density = settings.density;
     this.graphColorScheme = settings.graphColorScheme;
+    this.graphColorSchemeAuto = settings.graphColorSchemeAuto;
+    this.systemHighContrast = settings.systemHighContrast;
     this.defaultBranchName = settings.defaultBranchName;
     this.defaultClonePath = settings.defaultClonePath;
     this.showAvatars = settings.showAvatars;
@@ -561,7 +606,10 @@ export class LvSettingsDialog extends LitElement {
   private handleGraphColorSchemeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.graphColorScheme = select.value as GraphColorScheme;
+    // Picking a scheme by hand pins it — the OS high-contrast watcher stops
+    // overriding it from here on.
     settingsStore.getState().setGraphColorScheme(this.graphColorScheme);
+    this.graphColorSchemeAuto = settingsStore.getState().graphColorSchemeAuto;
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
@@ -1364,10 +1412,22 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Graph Color Scheme</span>
-              <span class="setting-description">Color palette for branch lanes</span>
+              <span class="setting-description">
+                ${this.graphColorSchemeAuto && this.systemHighContrast
+                  ? 'Following your system high contrast setting — the graph is drawn on a canvas, so it cannot be recolored by the OS. Choose a scheme to override.'
+                  : 'Color palette for branch lanes'}
+              </span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <select .value=${this.graphColorScheme} @change=${this.handleGraphColorSchemeChange}>
+              ${this.graphColorSchemeAuto && this.systemHighContrast
+                ? html`<span class="auto-scheme-note" data-testid="graph-scheme-auto-note">Auto (high contrast)</span>`
+                : ''}
+              <select
+                id="graph-scheme-select"
+                aria-label="Graph color scheme"
+                .value=${this.graphColorScheme}
+                @change=${this.handleGraphColorSchemeChange}
+              >
                 ${getGraphColorSchemes().map(scheme => html`
                   <option value=${scheme.id}>${scheme.name}</option>
                 `)}

@@ -590,6 +590,52 @@ export class LvGraphCanvas extends LitElement {
         background: var(--color-primary);
         opacity: 0.5;
       }
+
+      /* ===========================================================
+         Forced colors (Windows High Contrast Mode)
+         The graph itself is canvas pixels the OS cannot recolor —
+         that is handled by auto-selecting the high-contrast palette
+         in settings.store.ts. This block only keeps the DOM chrome
+         around the canvas usable: focus rings and the states that
+         are otherwise shown by a custom background alone.
+         =========================================================== */
+      @media (forced-colors: active) {
+        canvas:focus,
+        canvas:focus-visible {
+          outline: 3px solid Highlight;
+          outline-offset: -3px;
+        }
+
+        .toolbar-btn:focus-visible,
+        .export-menu-item:focus-visible,
+        .branch-item:focus-within {
+          outline: 2px solid Highlight;
+          outline-offset: -2px;
+        }
+
+        .toolbar-btn.active,
+        .toolbar-btn:hover,
+        .branch-item:hover,
+        .export-menu-item:hover,
+        .branch-panel-actions button:hover {
+          background: Highlight;
+          color: HighlightText;
+        }
+
+        /* The minimap is a canvas overlay: forced colors leaves its pixels
+           alone, so give it a real edge and full opacity instead of the
+           translucent seam that disappears against a forced background. */
+        .minimap-canvas {
+          opacity: 1;
+          border-left: 1px solid CanvasText;
+        }
+
+        .resize-handle:hover,
+        .resize-handle.dragging {
+          background: Highlight;
+          opacity: 1;
+        }
+      }
     `,
   ];
 
@@ -1084,7 +1130,11 @@ export class LvGraphCanvas extends LitElement {
       this.scheduleRender();
     });
 
-    // Listen for theme changes via data-theme attribute
+    // Listen for theme changes via data-theme attribute, and for graph colour
+    // scheme changes via data-graph-scheme — the lane colours live in CSS
+    // variables the canvas only re-reads through setTheme(), so without this
+    // the palette (including the automatic high-contrast switch) would not
+    // reach the already-painted graph.
     this.themeObserver = new MutationObserver(() => {
       this.renderer?.setTheme(getThemeFromCSS());
       this.rebuildMinimapDots();
@@ -1092,7 +1142,7 @@ export class LvGraphCanvas extends LitElement {
     });
     this.themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-theme'],
+      attributeFilter: ['data-theme', 'data-graph-scheme'],
     });
 
     // Also listen for system theme changes
