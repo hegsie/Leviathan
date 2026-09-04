@@ -328,6 +328,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
   @state() private confirmBeforeDiscard = true;
+  @state() private openLastRepository = true;
   @state() private offlineMode = false;
   @state() private confirmNetworkOps = false;
   @state() private remoteAllowlist: string[] = [];
@@ -526,6 +527,7 @@ export class LvSettingsDialog extends LitElement {
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
+    this.openLastRepository = settings.openLastRepository;
     this.offlineMode = settings.offlineMode;
     this.confirmNetworkOps = settings.confirmNetworkOps;
     this.remoteAllowlist = settings.remoteAllowlist;
@@ -897,6 +899,10 @@ export class LvSettingsDialog extends LitElement {
       case 'confirmBeforeDiscard':
         this.confirmBeforeDiscard = value;
         store.setConfirmBeforeDiscard(value);
+        break;
+      case 'openLastRepository':
+        this.openLastRepository = value;
+        store.setOpenLastRepository(value);
         break;
       case 'offlineMode':
         this.offlineMode = value;
@@ -1507,6 +1513,14 @@ export class LvSettingsDialog extends LitElement {
 
         <div class="settings-section">
           <div class="section-title">Behavior</div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Reopen Last Repositories</span>
+              <span class="setting-description">Reopen the repository tabs from your last session when Leviathan starts. Turn this off to start on the welcome screen — the tabs are remembered, so turning it back on restores them.</span>
+            </div>
+            ${this.renderToggle(this.openLastRepository, 'openLastRepository')}
+          </div>
 
           <div class="setting-row">
             <div class="setting-label">

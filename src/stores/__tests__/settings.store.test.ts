@@ -23,8 +23,13 @@ describe('settings.store', () => {
       expect(settingsStore.getState().defaultBranchName).to.equal('main');
     });
 
-    it('should have origin as default remote name', () => {
-      expect(settingsStore.getState().defaultRemoteName).to.equal('origin');
+    it('no longer exposes a default remote name', () => {
+      // Removed rather than wired: fetch/pull/push resolve their remote from
+      // the branch's upstream and git's push config, so an app-level default
+      // would only ever override that resolution.
+      const state = settingsStore.getState() as unknown as Record<string, unknown>;
+      expect(state).to.not.have.property('defaultRemoteName');
+      expect(state).to.not.have.property('setDefaultRemoteName');
     });
 
     it('should have empty default clone path by default', () => {
@@ -162,11 +167,6 @@ describe('settings.store', () => {
     it('should set default branch name', () => {
       settingsStore.getState().setDefaultBranchName('master');
       expect(settingsStore.getState().defaultBranchName).to.equal('master');
-    });
-
-    it('should set default remote name', () => {
-      settingsStore.getState().setDefaultRemoteName('upstream');
-      expect(settingsStore.getState().defaultRemoteName).to.equal('upstream');
     });
 
     it('should set default clone path', () => {
@@ -414,6 +414,39 @@ describe('settings.store', () => {
 
       expect(migrated.wordWrap, 'a persisted wordWrap was never a user choice').to.equal(false);
       expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
+    });
+
+    it('drops a persisted defaultRemoteName — the setting no longer exists', () => {
+      // Nothing ever read it; which remote fetch/pull/push contact comes from
+      // git's own config, so the key is stale rather than a user choice.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ defaultRemoteName: 'upstream', theme: 'light' }, 3) as Record<
+        string,
+        unknown
+      >;
+
+      expect(migrated).to.not.have.property('defaultRemoteName');
+      expect(migrated.theme, 'other settings survive').to.equal('light');
+    });
+
+    it('leaves a v4 state alone', () => {
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ wordWrap: true, theme: 'light' }, 4) as Record<string, unknown>;
+
+      expect(migrated.wordWrap, 'a v4 value is a real user choice').to.equal(true);
+      expect(migrated.theme).to.equal('light');
     });
 
     it('leaves a v3 wordWrap alone', () => {

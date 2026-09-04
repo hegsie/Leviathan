@@ -20,7 +20,6 @@ export interface SettingsState {
 
   // Git defaults
   defaultBranchName: string;
-  defaultRemoteName: string;
   defaultClonePath: string;
 
   // Graph settings
@@ -63,7 +62,6 @@ export interface SettingsState {
   setDensity: (density: Density) => void;
   setGraphColorScheme: (scheme: GraphColorScheme) => void;
   setDefaultBranchName: (name: string) => void;
-  setDefaultRemoteName: (name: string) => void;
   setDefaultClonePath: (path: string) => void;
   setShowAvatars: (show: boolean) => void;
   setShowCommitSize: (show: boolean) => void;
@@ -92,7 +90,6 @@ const defaultSettings = {
   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
   density: 'comfortable' as Density,
   defaultBranchName: 'main',
-  defaultRemoteName: 'origin',
   defaultClonePath: '',
   showAvatars: true,
   showCommitSize: true,
@@ -169,8 +166,6 @@ export const settingsStore = createStore<SettingsState>()(
 
       setDefaultBranchName: (defaultBranchName) => set({ defaultBranchName }),
 
-      setDefaultRemoteName: (defaultRemoteName) => set({ defaultRemoteName }),
-
       setDefaultClonePath: (defaultClonePath) => set({ defaultClonePath }),
 
       setShowAvatars: (showAvatars) => set({ showAvatars }),
@@ -217,7 +212,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 3,
+      version: 4,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -235,6 +230,14 @@ export const settingsStore = createStore<SettingsState>()(
         }
         if (fromVersion < 3) {
           state.wordWrap = false;
+        }
+        if (fromVersion < 4) {
+          // `defaultRemoteName` was removed: nothing ever read it, and which
+          // remote fetch/pull/push contact is answered by git's own config
+          // (the branch's upstream, branch.<name>.pushRemote,
+          // remote.pushDefault) rather than by an app preference. Drop the
+          // stale key so it stops riding along in every persisted blob.
+          delete (state as Record<string, unknown>).defaultRemoteName;
         }
         return state as SettingsState;
       },

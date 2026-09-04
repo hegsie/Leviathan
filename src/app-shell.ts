@@ -4759,6 +4759,13 @@ export class AppShell extends LitElement {
   }
 
   private async restorePersistedRepositories(): Promise<void> {
+    // "Reopen Last Repositories" off means start on the welcome screen. The
+    // persisted list is deliberately LEFT ALONE — not pruned, not cleared — so
+    // turning the setting back on brings the same tabs (and the same active
+    // one) back. Clearing it here would make the toggle destructive and
+    // one-way.
+    if (!settingsStore.getState().openLastRepository) return;
+
     const persistedRepos = repositoryStore.getState().getPersistedOpenRepos();
     if (persistedRepos.length === 0) return;
 
