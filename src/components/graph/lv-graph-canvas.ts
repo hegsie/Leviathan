@@ -2982,11 +2982,23 @@ export class LvGraphCanvas extends LitElement {
       })
     );
 
-    // Announce the selection to assistive technology
+    // Announce the selection to assistive technology.
+    //
+    // A multi-selection is announced as a COUNT first: Ctrl/Shift+click is the
+    // gesture that builds one, and naming only the commit that happens to be
+    // primary made every added commit sound like a plain single selection —
+    // the size of the set (the thing the batch actions in the context menu act
+    // on) was invisible to a screen reader.
     if (this.selectedNode && commit) {
       const position = this.selectedNode.row + 1;
       const total = this.layout?.totalRows ?? this.sortedNodesByRow.length;
-      this.srAnnouncement = `Commit ${position} of ${total}: ${commit.summary} by ${commit.author.name}`;
+      const selectedCount = this.selectedNodes.size;
+      const prefix = selectedCount > 1 ? `${selectedCount} commits selected. ` : '';
+      this.srAnnouncement = `${prefix}Commit ${position} of ${total}: ${commit.summary} by ${commit.author.name}`;
+    } else if (this.selectedNodes.size > 1) {
+      // No primary (its commit is not loaded) but the set is not empty — say
+      // so rather than going silent while the graph paints a highlight.
+      this.srAnnouncement = `${this.selectedNodes.size} commits selected`;
     } else {
       this.srAnnouncement = '';
     }
