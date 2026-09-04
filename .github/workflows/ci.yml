@@ -258,15 +258,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit npm dependencies
+      # Blocking: advisories in dependencies that ship inside the app. These
+      # reach users, so a moderate advisory here is a release blocker.
+      - name: Audit npm production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      # Advisory: dev-only tooling (test runner, linter, bundler) never ships.
+      # A moderate advisory in a transitive dev dependency used to red-line
+      # every unrelated PR until an upstream release landed, so it is reported
+      # here and chased by the weekly security-audit workflow instead.
+      - name: Audit npm dev dependencies (advisory)
+        continue-on-error: true
         run: npm audit --audit-level=moderate
 
       - name: Install Rust stable
+        if: always()
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-audit
+        if: always()
         run: cargo install cargo-audit
 
+      # `if: always()` so a failing npm audit cannot silently skip the Rust
+      # audit, which is what used to happen.
       - name: Audit Rust dependencies
+        if: always()
         working-directory: src-tauri
         run: cargo audit
