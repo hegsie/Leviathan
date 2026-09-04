@@ -56,6 +56,14 @@ function gitignoreExtensionPattern(path: string): string | null {
 }
 
 /**
+ * Why "File history" and "Blame" are refused on some working-tree rows.
+ *
+ * Both views read from HEAD, so a path that has never been committed has
+ * nothing to show: its log is empty and `blame_file` fails outright.
+ */
+const NO_HISTORY_REASON = "Not committed yet, so there is no history to show";
+
+/**
  * File status component
  * Displays staged and unstaged changes with staging functionality
  */
@@ -80,7 +88,10 @@ export class LvFileStatus extends LitElement {
         border-bottom: none;
       }
 
+      /* Full-bleed row inside a scrolling list: draw the shared keyboard
+         focus ring inside the row so the scroll container cannot clip it. */
       .section-header {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         gap: 6px;
@@ -430,6 +441,93 @@ export class LvFileStatus extends LitElement {
         background: var(--color-bg-secondary);
       }
 
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-bg-tertiary);
+      }
+
+      .filter-icon {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        color: var(--color-text-muted);
+      }
+
+      .filter-input {
+        flex: 1;
+        min-width: 0;
+        border: none;
+        background: transparent;
+        color: var(--color-text-primary);
+        font-size: var(--font-size-sm);
+        outline: none;
+        padding: 2px 0;
+      }
+
+      .filter-input::placeholder {
+        color: var(--color-text-muted);
+      }
+
+      .filter-clear {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .filter-clear:hover {
+        color: var(--color-text-primary);
+        background: var(--color-bg-hover);
+      }
+
+      .filter-clear svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .no-match-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 24px 12px;
+        text-align: center;
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+      }
+
+      .no-match-state .no-match-query {
+        color: var(--color-text-primary);
+        font-weight: var(--font-weight-medium);
+        word-break: break-all;
+      }
+
+      .no-match-clear {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-tertiary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-xs);
+        padding: 3px 10px;
+        cursor: pointer;
+      }
+
+      .no-match-clear:hover {
+        background: var(--color-bg-hover);
+      }
+
       .view-toggle {
         display: flex;
         align-items: center;
@@ -526,6 +624,17 @@ export class LvFileStatus extends LitElement {
         color: var(--color-error);
       }
 
+      .context-menu-item[disabled],
+      .context-menu-item.disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      .context-menu-item[disabled]:hover,
+      .context-menu-item.disabled:hover {
+        background: none;
+      }
+
       .context-menu-item svg {
         width: 14px;
         height: 14px;
@@ -557,6 +666,8 @@ export class LvFileStatus extends LitElement {
   @state() private focusedIndex: number = -1;
   @state() private viewMode: "flat" | "tree" = "flat";
   @state() private expandedFolders: Set<string> = new Set();
+  /** Working-tree path filter. Empty string means "no filter". */
+  @state() private filterQuery = "";
   @state() private contextMenu: FileContextMenuState = {
     visible: false,
     x: 0,
@@ -642,6 +753,133 @@ export class LvFileStatus extends LitElement {
     }
 
     return root;
+  }
+
+  /** The query actually applied — trimmed and lowercased; "" when inactive. */
+  private get filterTerm(): string {
+    return this.filterQuery.trim().toLowerCase();
+  }
+
+  private get isFiltering(): boolean {
+    return this.filterTerm.length > 0;
+  }
+
+  /**
+   * Case-insensitive substring match against the FULL repo-relative path, so
+   * `src/ut` narrows by directory. A basename match needs no separate arm:
+   * the basename is a substring of the path, so `helper.ts` matches
+   * `src/utils/helper.ts` through the same test.
+   */
+  private matchesFilter(file: StatusEntry): boolean {
+    const term = this.filterTerm;
+    if (!term) return true;
+    return file.path.toLowerCase().includes(term);
+  }
+
+  /**
+   * The filtered view of a section. Returns the SAME array instance when no
+   * filter is active, so an inactive filter costs nothing and cannot make
+   * `areStatusEntriesEqual`-style identity checks see spurious changes.
+   */
+  private applyFilter(files: StatusEntry[]): StatusEntry[] {
+    return this.isFiltering ? files.filter((f) => this.matchesFilter(f)) : files;
+  }
+
+  private get filteredStagedFiles(): StatusEntry[] {
+    return this.applyFilter(this.stagedFiles);
+  }
+
+  private get filteredUnstagedFiles(): StatusEntry[] {
+    return this.applyFilter(this.unstagedFiles);
+  }
+
+  private handleFilterInput(e: Event): void {
+    this.setFilterQuery((e.target as HTMLInputElement).value);
+  }
+
+  /** Clear from the × button or the empty-result state, keeping focus usable. */
+  private clearFilter(): void {
+    if (this.filterQuery === "") return;
+    this.setFilterQuery("");
+    this.focusFilterInput();
+  }
+
+  private focusFilterInput(): void {
+    this.updateComplete.then(() => {
+      const input = this.renderRoot.querySelector(
+        ".filter-input",
+      ) as HTMLInputElement | null;
+      input?.focus();
+    });
+  }
+
+  private handleFilterKeydown(e: KeyboardEvent): void {
+    if (e.key !== "Escape") return;
+    // An empty box has nothing to clear, so Escape belongs to whatever is
+    // above this panel (context menu, dialog) — let it through.
+    if (this.filterQuery === "") return;
+    e.preventDefault();
+    // Stop here: the same keypress would otherwise reach the document-level
+    // Escape handlers and close a menu/overlay the user never aimed at.
+    e.stopPropagation();
+    this.setFilterQuery("");
+  }
+
+  /**
+   * Single entry point for changing the query, because three things have to
+   * move together with it.
+   */
+  private setFilterQuery(value: string): void {
+    if (this.filterQuery === value) return;
+    this.filterQuery = value;
+
+    // 1. The multi-file selection drives the batch Stage/Unstage/DISCARD
+    //    buttons. A selection that outlived the filter would let "Discard"
+    //    delete files that are no longer on screen — exactly the bulk hazard
+    //    the filter must not introduce. Selection is therefore always a
+    //    subset of what the filter shows.
+    if (this.selectedFiles.size > 0) {
+      const visible = new Set<string>();
+      for (const f of this.filteredStagedFiles) visible.add(f.path);
+      for (const f of this.filteredUnstagedFiles) visible.add(f.path);
+      const pruned = new Set(
+        Array.from(this.selectedFiles).filter((path) => visible.has(path)),
+      );
+      if (pruned.size !== this.selectedFiles.size) {
+        this.selectedFiles = pruned;
+        if (this.lastSelectedFile && !pruned.has(this.lastSelectedFile)) {
+          this.lastSelectedFile = null;
+        }
+      }
+    }
+
+    // 2. Row indices are positional, so the keyboard cursor no longer points
+    //    at the row it did before the list was re-cut.
+    this.focusedIndex = -1;
+
+    // 3. In tree view a match buried in a collapsed folder would leave the
+    //    panel looking empty. Reveal the ancestors of everything that matches.
+    if (this.isFiltering) this.expandAncestorsOfMatches();
+  }
+
+  private expandAncestorsOfMatches(): void {
+    const next = new Set(this.expandedFolders);
+    let added = false;
+    for (const file of [
+      ...this.filteredStagedFiles,
+      ...this.filteredUnstagedFiles,
+    ]) {
+      const parts = file.path.split("/");
+      let path = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        path = path ? `${path}/${parts[i]}` : parts[i];
+        if (!next.has(path)) {
+          next.add(path);
+          added = true;
+        }
+      }
+    }
+    if (added) this.expandedFolders = next;
   }
 
   private toggleFolder(folderPath: string): void {
@@ -735,7 +973,13 @@ export class LvFileStatus extends LitElement {
     return visible.length;
   }
 
-  /** Collect all file paths under a given directory prefix */
+  /**
+   * Collect all file paths under a given directory prefix.
+   *
+   * Callers pass the FILTERED section list: a folder row rendered under an
+   * active filter shows (and counts) only matching files, so its stage /
+   * unstage / discard buttons must not reach the ones the filter hid.
+   */
   private getFilesUnderPath(
     files: StatusEntry[],
     dirPath: string,
@@ -752,7 +996,10 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    const filesToStage = this.getFilesUnderPath(this.unstagedFiles, dirPath);
+    const filesToStage = this.getFilesUnderPath(
+      this.filteredUnstagedFiles,
+      dirPath,
+    );
     if (filesToStage.length === 0) return;
 
     const paths = this.stageablePaths(filesToStage);
@@ -771,7 +1018,10 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    const filesToUnstage = this.getFilesUnderPath(this.stagedFiles, dirPath);
+    const filesToUnstage = this.getFilesUnderPath(
+      this.filteredStagedFiles,
+      dirPath,
+    );
     if (filesToUnstage.length === 0) return;
 
     const paths = filesToUnstage.map((f) => f.path);
@@ -791,7 +1041,10 @@ export class LvFileStatus extends LitElement {
     e: Event,
   ): Promise<void> {
     e.stopPropagation();
-    const filesToDiscard = this.getFilesUnderPath(this.unstagedFiles, dirPath);
+    const filesToDiscard = this.getFilesUnderPath(
+      this.filteredUnstagedFiles,
+      dirPath,
+    );
     if (filesToDiscard.length === 0) return;
 
     const entries = this.discardableEntries(filesToDiscard);
@@ -885,6 +1138,19 @@ export class LvFileStatus extends LitElement {
   }
 
   private handleKeyDown = (e: KeyboardEvent): void => {
+    // Keystrokes aimed at the filter box are text, not commands: the bare
+    // shortcuts below are single letters, so typing "status" into the filter
+    // would otherwise stage (s) and unstage (u) the focused file. The path is
+    // read from composedPath() because the host listener retargets e.target
+    // to this element.
+    const origin = e.composedPath()[0];
+    if (
+      origin instanceof HTMLInputElement ||
+      origin instanceof HTMLTextAreaElement
+    ) {
+      return;
+    }
+
     const allFiles = this.getAllVisibleFiles();
     if (allFiles.length === 0) return;
 
@@ -971,6 +1237,25 @@ export class LvFileStatus extends LitElement {
         }
         break;
 
+      case "h":
+        // File history for the focused file, the keyboard twin of the context
+        // menu item. Selection is deliberately ignored: both views take one
+        // path, so acting on a multi-file selection has no meaning.
+        e.preventDefault();
+        if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+          this.requestFileHistory(allFiles[this.focusedIndex]);
+        }
+        break;
+
+      case "b":
+        // Blame for the focused file. Bare "b" only: Ctrl+B toggles the left
+        // panel, and the modifier guard above already let that press through.
+        e.preventDefault();
+        if (this.focusedIndex >= 0 && this.focusedIndex < allFiles.length) {
+          this.requestBlame(allFiles[this.focusedIndex]);
+        }
+        break;
+
       case "Home":
         e.preventDefault();
         this.focusedIndex = 0;
@@ -985,20 +1270,27 @@ export class LvFileStatus extends LitElement {
     }
   };
 
+  /**
+   * The rows the panel actually renders, in render order — the filter cuts
+   * this list too, so `focusedIndex` keeps addressing the row it highlights
+   * and Enter/s/u never act on a file the filter hid.
+   */
   private getAllVisibleFiles(): StatusEntry[] {
+    const staged = this.filteredStagedFiles;
+    const unstaged = this.filteredUnstagedFiles;
     const files: StatusEntry[] = [];
     if (this.stagedExpanded) {
       if (this.viewMode === "tree") {
-        this.collectVisibleTreeFiles(this.stagedFiles, files);
+        this.collectVisibleTreeFiles(staged, files);
       } else {
-        files.push(...this.stagedFiles);
+        files.push(...staged);
       }
     }
     if (this.unstagedExpanded) {
       if (this.viewMode === "tree") {
-        this.collectVisibleTreeFiles(this.unstagedFiles, files);
+        this.collectVisibleTreeFiles(unstaged, files);
       } else {
-        files.push(...this.unstagedFiles);
+        files.push(...unstaged);
       }
     }
     return files;
@@ -1149,6 +1441,12 @@ export class LvFileStatus extends LitElement {
       // discard of files never selected here.
       this.selectedFiles = new Set();
       this.lastSelectedFile = null;
+      // The filter is a view of ONE repo's paths. Carrying it across a tab
+      // switch would open the new repo on a silently narrowed list — and the
+      // section counts would read "0 of 128" for a query the user typed
+      // against a different working tree.
+      this.filterQuery = "";
+      this.focusedIndex = -1;
       // Reset for new repository so we show loading on first load
       this.hasInitiallyLoaded = false;
       this.statusDirtySeq++;
@@ -1590,8 +1888,30 @@ export class LvFileStatus extends LitElement {
     }
   }
 
+  /**
+   * The `stage-all` / `unstage-all` window events — the command palette's
+   * "Stage all changes" and the global s/u shortcuts. Those are invoked from
+   * outside this panel and their labels say ALL, so they deliberately ignore
+   * the path filter. The in-panel section buttons are the filter-aware pair
+   * below: they sit next to the list and act only on what that list shows.
+   */
   private async handleStageAll(): Promise<void> {
-    const paths = this.stageablePaths(this.unstagedFiles);
+    await this.stageFileSet(this.unstagedFiles);
+  }
+
+  private async handleUnstageAll(): Promise<void> {
+    await this.unstageFileSet(this.stagedFiles);
+  }
+
+  /** Section header button: only ever the rows the filter is showing. */
+  private handleStageAllShown = (): Promise<void> =>
+    this.stageFileSet(this.filteredUnstagedFiles);
+
+  private handleUnstageAllShown = (): Promise<void> =>
+    this.unstageFileSet(this.filteredStagedFiles);
+
+  private async stageFileSet(files: StatusEntry[]): Promise<void> {
+    const paths = this.stageablePaths(files);
     if (paths.length === 0) return;
 
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
@@ -1602,8 +1922,8 @@ export class LvFileStatus extends LitElement {
     }
   }
 
-  private async handleUnstageAll(): Promise<void> {
-    const paths = this.stagedFiles.map((f) => f.path);
+  private async unstageFileSet(files: StatusEntry[]): Promise<void> {
+    const paths = files.map((f) => f.path);
     if (paths.length === 0) return;
 
     const result = await gitService.unstageFiles(this.repositoryPath, {
@@ -1617,8 +1937,13 @@ export class LvFileStatus extends LitElement {
   }
 
   // Multi-select helper methods
+  /**
+   * Selected files in a section, read from the FILTERED list. setFilterQuery
+   * already prunes the selection, so this is belt and braces: no batch button
+   * can count — or act on — a file the filter is hiding.
+   */
   private getSelectedFilesInSection(staged: boolean): StatusEntry[] {
-    const files = staged ? this.stagedFiles : this.unstagedFiles;
+    const files = staged ? this.filteredStagedFiles : this.filteredUnstagedFiles;
     return files.filter((f) => this.selectedFiles.has(f.path));
   }
 
@@ -1670,7 +1995,7 @@ export class LvFileStatus extends LitElement {
   // Batch operation handlers
   private async handleStageSelected(): Promise<void> {
     const paths = this.stageablePaths(
-      this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
+      this.filteredUnstagedFiles.filter((f) => this.selectedFiles.has(f.path))
     );
     if (paths.length === 0) return;
 
@@ -1687,7 +2012,7 @@ export class LvFileStatus extends LitElement {
   }
 
   private async handleUnstageSelected(): Promise<void> {
-    const paths = this.stagedFiles
+    const paths = this.filteredStagedFiles
       .filter((f) => this.selectedFiles.has(f.path))
       .map((f) => f.path);
     if (paths.length === 0) return;
@@ -1707,7 +2032,7 @@ export class LvFileStatus extends LitElement {
 
   private async handleDiscardSelected(): Promise<void> {
     const entries = this.discardableEntries(
-      this.unstagedFiles.filter((f) => this.selectedFiles.has(f.path))
+      this.filteredUnstagedFiles.filter((f) => this.selectedFiles.has(f.path))
     );
     if (entries.length === 0) return;
     const paths = entries.map((f) => f.path);
@@ -1841,6 +2166,96 @@ export class LvFileStatus extends LitElement {
         composed: true,
       }),
     );
+  }
+
+  /**
+   * True when the row's path is already in HEAD, and so has something for the
+   * history and blame views to read.
+   *
+   * An untracked row obviously has none. Neither does a path staged as new:
+   * `get_status` reports that as a staged "new" entry, and if the file was
+   * edited again after `git add` it ALSO produces an unstaged "modified" row
+   * for the same path — that second row is just as historyless, so both are
+   * judged by the same test rather than by the row's own status alone.
+   */
+  private fileHasHistory(file: StatusEntry): boolean {
+    if (file.status === "untracked") return false;
+    return !this.stagedFiles.some(
+      (f) => f.path === file.path && f.status === "new",
+    );
+  }
+
+  /**
+   * Blame renders the working copy, so a file that is gone from the worktree
+   * has nothing to render — the same reason the commit file list hides blame
+   * for a deleted path.
+   */
+  private fileCanBlame(file: StatusEntry): boolean {
+    return this.fileHasHistory(file) && file.status !== "deleted";
+  }
+
+  /**
+   * Open the file-history pane for a working-tree row.
+   *
+   * Same event and detail shape the commit file list raises, so app-shell's
+   * existing `show-file-history` handler serves both. The right panel that
+   * hosts this component already listens for it.
+   */
+  private requestFileHistory(file: StatusEntry): void {
+    if (!this.fileHasHistory(file)) {
+      showToast(`"${file.path}": ${NO_HISTORY_REASON}`, "warning");
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("show-file-history", {
+        detail: { filePath: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /**
+   * Open blame for a working-tree row.
+   *
+   * No `commitOid` on purpose: `get_file_blame` without one blames the working
+   * copy against HEAD and attributes uncommitted lines to the zero OID, which
+   * is exactly what a Changes row is asking about. The commit file list passes
+   * its commit instead, and the detail shape is otherwise identical.
+   */
+  private requestBlame(file: StatusEntry): void {
+    if (!this.fileHasHistory(file)) {
+      showToast(`"${file.path}": ${NO_HISTORY_REASON}`, "warning");
+      return;
+    }
+    if (file.status === "deleted") {
+      showToast(
+        `"${file.path}" is deleted from the working tree, so there is nothing to blame`,
+        "warning",
+      );
+      return;
+    }
+    this.dispatchEvent(
+      new CustomEvent("show-blame", {
+        detail: { filePath: file.path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private handleContextViewHistory(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.requestFileHistory(file);
+  }
+
+  private handleContextViewBlame(): void {
+    const file = this.contextMenu.file;
+    if (!file) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.requestBlame(file);
   }
 
   private async handleContextOpenInEditor(): Promise<void> {
@@ -2344,6 +2759,11 @@ export class LvFileStatus extends LitElement {
     // Non-null past the early return above.
     const file = this.contextMenu.file;
     const extensionPattern = gitignoreExtensionPattern(file.path);
+    // Untracked (and staged-new) paths are not in HEAD: both views would come
+    // back empty or error, so the items stay visible — they are part of the
+    // menu's vocabulary — but are marked unavailable and say why.
+    const hasHistory = this.fileHasHistory(file);
+    const canBlame = this.fileCanBlame(file);
 
     return html`
       <div class="context-menu" role="menu" aria-label="File actions" style="left: ${x}px; top: ${y}px"
@@ -2396,6 +2816,44 @@ export class LvFileStatus extends LitElement {
           </svg>
           View diff
         </button>
+        <button
+          class="context-menu-item ${hasHistory ? "" : "disabled"}"
+          role="menuitem"
+          aria-disabled=${hasHistory ? "false" : "true"}
+          title=${hasHistory ? "Show every commit that touched this file (H)" : NO_HISTORY_REASON}
+          @click=${this.handleContextViewHistory}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          File history
+        </button>
+        ${file.status !== "deleted"
+          ? html`<button
+              class="context-menu-item ${canBlame ? "" : "disabled"}"
+              role="menuitem"
+              aria-disabled=${canBlame ? "false" : "true"}
+              title=${canBlame ? "Show who last changed each line (B)" : NO_HISTORY_REASON}
+              @click=${this.handleContextViewBlame}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              Blame
+            </button>`
+          : nothing}
         <button
           class="context-menu-item"
           role="menuitem"
@@ -2522,6 +2980,83 @@ export class LvFileStatus extends LitElement {
     `;
   }
 
+  /**
+   * The path filter. Rendered from its own method at a FIXED position in the
+   * outer template so Lit keeps the same <input> element across every list
+   * change — re-cloning it mid-render would drop focus on the keystroke that
+   * emptied the list.
+   */
+  private renderFilterBar() {
+    return html`
+      <div class="filter-bar">
+        <svg
+          class="filter-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input
+          class="filter-input"
+          type="text"
+          placeholder="Filter changed files..."
+          aria-label="Filter changed files by path"
+          .value=${this.filterQuery}
+          @input=${this.handleFilterInput}
+          @keydown=${this.handleFilterKeydown}
+        />
+        ${this.filterQuery
+          ? html`
+              <button
+                class="filter-clear"
+                aria-label="Clear filter"
+                title="Clear filter (Esc)"
+                @click=${() => this.clearFilter()}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  aria-hidden="true"
+                >
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  /** Polite announcement of what the filter did, for screen readers. */
+  private filterAnnouncement(matches: number, total: number): string {
+    if (!this.isFiltering) return "";
+    if (matches === 0) {
+      return `No files match ${this.filterQuery.trim()}`;
+    }
+    return `${matches} of ${total} file${total === 1 ? "" : "s"} match ${this.filterQuery.trim()}`;
+  }
+
+  private renderNoMatches() {
+    return html`
+      <div class="no-match-state">
+        <div>
+          No files match
+          <span class="no-match-query">${this.filterQuery.trim()}</span>
+        </div>
+        <button class="no-match-clear" @click=${() => this.clearFilter()}>
+          Clear filter
+        </button>
+      </div>
+    `;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">Loading changes...</div>`;
@@ -2549,12 +3084,19 @@ export class LvFileStatus extends LitElement {
       `;
     }
 
+    // Everything below renders the FILTERED view. Building the trees from the
+    // filtered lists is what keeps ancestor directories of a match (and only
+    // those) in tree view: a directory exists in the tree only because a
+    // matching file underneath put it there, so no empty folders appear.
+    const staged = this.filteredStagedFiles;
+    const unstaged = this.filteredUnstagedFiles;
+    const filtering = this.isFiltering;
+    const noMatches = filtering && staged.length === 0 && unstaged.length === 0;
+
     // The staged tree is needed twice below — once to render the staged rows,
     // once to count them for the unstaged section's index offset. Build it once.
     const stagedTree =
-      this.viewMode === "tree"
-        ? this.buildFileTree(this.stagedFiles)
-        : undefined;
+      this.viewMode === "tree" ? this.buildFileTree(staged) : undefined;
 
     return html`
       <!-- Toolbar -->
@@ -2586,14 +3128,27 @@ export class LvFileStatus extends LitElement {
         </button>
       </div>
 
+      ${this.renderFilterBar()}
+
+      <div class="visually-hidden" role="status" aria-live="polite">
+        ${this.filterAnnouncement(
+          staged.length + unstaged.length,
+          this.stagedFiles.length + this.unstagedFiles.length,
+        )}
+      </div>
+
+      ${noMatches ? this.renderNoMatches() : nothing}
+
       <!-- Staged changes -->
-      <div class="section">
+      <div class="section" ?hidden=${noMatches}>
         <div
           class="section-header"
           role="button"
           tabindex="0"
           aria-expanded=${this.stagedExpanded}
-          aria-label="Staged changes, ${this.stagedFiles.length} files"
+          aria-label=${filtering
+            ? `Staged changes, ${staged.length} of ${this.stagedFiles.length} files match the filter`
+            : `Staged changes, ${this.stagedFiles.length} files`}
           @click=${() => (this.stagedExpanded = !this.stagedExpanded)}
           @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.stagedExpanded = !this.stagedExpanded; } }}
         >
@@ -2607,8 +3162,16 @@ export class LvFileStatus extends LitElement {
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
           <span class="section-title">Staged</span>
-          <span class="section-count">${this.stagedFiles.length}</span>
-          ${this.stagedFiles.length > 0
+          <span
+            class="section-count"
+            title=${filtering
+              ? `${staged.length} of ${this.stagedFiles.length} staged files match the filter`
+              : `${this.stagedFiles.length} staged files`}
+            >${filtering
+              ? `${staged.length} of ${this.stagedFiles.length}`
+              : this.stagedFiles.length}</span
+          >
+          ${staged.length > 0
             ? html`
                 <div
                   class="section-actions"
@@ -2616,9 +3179,13 @@ export class LvFileStatus extends LitElement {
                 >
                   <button
                     class="section-action"
-                    title="Unstage all"
-                    aria-label="Unstage all files"
-                    @click=${this.handleUnstageAll}
+                    title=${filtering
+                      ? `Unstage ${staged.length} file${staged.length === 1 ? "" : "s"} matching the filter`
+                      : "Unstage all"}
+                    aria-label=${filtering
+                      ? `Unstage ${staged.length} file${staged.length === 1 ? "" : "s"} matching the filter`
+                      : "Unstage all files"}
+                    @click=${this.handleUnstageAllShown}
                   >
                     <svg
                       width="12"
@@ -2636,19 +3203,21 @@ export class LvFileStatus extends LitElement {
             : nothing}
         </div>
         ${this.stagedExpanded ? this.renderSelectionActions(true) : nothing}
-        ${this.stagedFiles.length > 0 && this.stagedExpanded
-          ? this.renderFileList(this.stagedFiles, true, 0, stagedTree)
+        ${staged.length > 0 && this.stagedExpanded
+          ? this.renderFileList(staged, true, 0, stagedTree)
           : nothing}
       </div>
 
       <!-- Unstaged changes -->
-      <div class="section">
+      <div class="section" ?hidden=${noMatches}>
         <div
           class="section-header"
           role="button"
           tabindex="0"
           aria-expanded=${this.unstagedExpanded}
-          aria-label="Unstaged changes, ${this.unstagedFiles.length} files"
+          aria-label=${filtering
+            ? `Unstaged changes, ${unstaged.length} of ${this.unstagedFiles.length} files match the filter`
+            : `Unstaged changes, ${this.unstagedFiles.length} files`}
           @click=${() => (this.unstagedExpanded = !this.unstagedExpanded)}
           @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.unstagedExpanded = !this.unstagedExpanded; } }}
         >
@@ -2662,8 +3231,16 @@ export class LvFileStatus extends LitElement {
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
           <span class="section-title">Changes</span>
-          <span class="section-count">${this.unstagedFiles.length}</span>
-          ${this.unstagedFiles.length > 0
+          <span
+            class="section-count"
+            title=${filtering
+              ? `${unstaged.length} of ${this.unstagedFiles.length} changed files match the filter`
+              : `${this.unstagedFiles.length} changed files`}
+            >${filtering
+              ? `${unstaged.length} of ${this.unstagedFiles.length}`
+              : this.unstagedFiles.length}</span
+          >
+          ${unstaged.length > 0
             ? html`
                 <div
                   class="section-actions"
@@ -2671,9 +3248,13 @@ export class LvFileStatus extends LitElement {
                 >
                   <button
                     class="section-action"
-                    title="Stage all"
-                    aria-label="Stage all files"
-                    @click=${this.handleStageAll}
+                    title=${filtering
+                      ? `Stage ${unstaged.length} file${unstaged.length === 1 ? "" : "s"} matching the filter`
+                      : "Stage all"}
+                    aria-label=${filtering
+                      ? `Stage ${unstaged.length} file${unstaged.length === 1 ? "" : "s"} matching the filter`
+                      : "Stage all files"}
+                    @click=${this.handleStageAllShown}
                   >
                     <svg
                       width="12"
@@ -2692,12 +3273,12 @@ export class LvFileStatus extends LitElement {
             : nothing}
         </div>
         ${this.unstagedExpanded ? this.renderSelectionActions(false) : nothing}
-        ${this.unstagedFiles.length > 0 && this.unstagedExpanded
+        ${unstaged.length > 0 && this.unstagedExpanded
           ? this.renderFileList(
-              this.unstagedFiles,
+              unstaged,
               false,
               this.stagedExpanded
-                ? this.visibleFileCount(this.stagedFiles, stagedTree)
+                ? this.visibleFileCount(staged, stagedTree)
                 : 0,
             )
           : nothing}

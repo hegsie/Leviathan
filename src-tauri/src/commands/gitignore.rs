@@ -275,7 +275,7 @@ fn parse_check_ignore_z(stdout: &[u8]) -> Vec<IgnoreCheckVerboseResult> {
     }
 
     let mut results = Vec::with_capacity(fields.len() / 4);
-    for record in fields.chunks_exact(4) {
+    for record in fields.as_chunks::<4>().0 {
         let source = &record[0];
         let line_num_str = &record[1];
         let pattern = &record[2];

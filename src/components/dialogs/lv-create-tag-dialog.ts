@@ -8,6 +8,7 @@ import { customElement, state, property, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { createTag } from '../../services/git.service.ts';
 import { containsDeepActiveElement } from '../../utils/focus.ts';
+import '../common/lv-toggle.ts';
 import './lv-modal.ts';
 import type { LvModal } from './lv-modal.ts';
 
@@ -72,51 +73,6 @@ export class LvCreateTagDialog extends LitElement {
         display: flex;
         align-items: center;
         gap: var(--spacing-sm);
-      }
-
-      .toggle-switch {
-        position: relative;
-        width: 40px;
-        height: 22px;
-        flex-shrink: 0;
-      }
-
-      .toggle-switch input {
-        opacity: 0;
-        width: 0;
-        height: 0;
-      }
-
-      .toggle-slider {
-        position: absolute;
-        cursor: pointer;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background-color: var(--color-border);
-        transition: 0.2s;
-        border-radius: 22px;
-      }
-
-      .toggle-slider:before {
-        position: absolute;
-        content: "";
-        height: 16px;
-        width: 16px;
-        left: 3px;
-        bottom: 3px;
-        background-color: var(--toggle-knob-color, #ffffff);
-        transition: 0.2s;
-        border-radius: 50%;
-      }
-
-      input:checked + .toggle-slider {
-        background-color: var(--color-primary);
-      }
-
-      input:checked + .toggle-slider:before {
-        transform: translateX(18px);
       }
 
       .toggle-label {
@@ -310,10 +266,9 @@ export class LvCreateTagDialog extends LitElement {
     this.error = '';
   }
 
-  private handleAnnotatedChange(e: Event): void {
-    const input = e.target as HTMLInputElement;
-    this.isAnnotated = input.checked;
-    if (!input.checked) {
+  private handleAnnotatedChange(e: CustomEvent<{ checked: boolean }>): void {
+    this.isAnnotated = e.detail.checked;
+    if (!this.isAnnotated) {
       this.message = '';
     }
   }
@@ -443,15 +398,15 @@ export class LvCreateTagDialog extends LitElement {
           </div>
 
           <div class="toggle-field">
-            <label class="toggle-switch">
-              <input
-                type="checkbox"
-                .checked=${this.isAnnotated}
-                @change=${this.handleAnnotatedChange}
-                ?disabled=${this.isCreating}
-              />
-              <span class="toggle-slider"></span>
-            </label>
+            <lv-toggle
+              label="Annotated Tag"
+              description=${this.isAnnotated
+                ? 'Includes message, author, and date'
+                : 'Lightweight tag (just a reference to a commit)'}
+              .checked=${this.isAnnotated}
+              ?disabled=${this.isCreating}
+              @change=${this.handleAnnotatedChange}
+            ></lv-toggle>
             <div class="toggle-label">
               <span class="toggle-label-main">Annotated Tag</span>
               <span class="toggle-label-hint">

@@ -471,3 +471,82 @@ describe('lv-gpg-dialog SSH signing key picker', () => {
     expect(invoked.some((c) => c.command === 'get_ssh_keys')).to.equal(false);
   });
 });
+
+// The signing switches used to be a bare <input type="checkbox"> whose visible
+// "Sign commits" / "Sign tags" text was an unlinked sibling, so they reached
+// the accessibility tree unnamed and could not be described.
+describe('lv-gpg-dialog signing switches', () => {
+  const REPO = '/repo/signing';
+
+  beforeEach(() => {
+    failingCommands = new Set();
+    configByRepo.clear();
+    configByRepo.set(
+      REPO,
+      makeConfig({ gpgAvailable: true, gpgVersion: 'gpg (GnuPG) 2.2.27', signingKey: 'KEY1' }),
+    );
+  });
+
+  async function openOn(path: string): Promise<LvGpgDialog> {
+    const el = await fixture<LvGpgDialog>(
+      html`<lv-gpg-dialog ?open=${true} .repositoryPath=${path}></lv-gpg-dialog>`,
+    );
+    for (let i = 0; i < 200; i++) {
+      if ((el as unknown as DialogInternals).config) break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await el.updateComplete;
+    return el;
+  }
+
+  function switchNamed(el: LvGpgDialog, name: string): HTMLButtonElement {
+    const toggle = Array.from(el.shadowRoot!.querySelectorAll('lv-toggle')).find(
+      (t) => t.label === name,
+    );
+    expect(toggle, `the "${name}" switch is named`).to.exist;
+    return toggle!.shadowRoot!.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+  }
+
+  it('names and describes both switches', async () => {
+    const el = await openOn(REPO);
+    expect(switchNamed(el, 'Sign commits').getAttribute('role')).to.equal('switch');
+    expect(switchNamed(el, 'Sign tags').getAttribute('role')).to.equal('switch');
+
+    const commits = Array.from(el.shadowRoot!.querySelectorAll('lv-toggle')).find(
+      (t) => t.label === 'Sign commits',
+    );
+    expect(commits!.description).to.contain('Automatically sign all commits');
+  });
+
+  it('turns the switch on only once the backend has accepted the change', async () => {
+    const el = await openOn(REPO);
+    const commits = switchNamed(el, 'Sign commits');
+    expect(commits.getAttribute('aria-checked')).to.equal('false');
+
+    commits.click();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (el as any).updateComplete;
+    for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect(switchNamed(el, 'Sign commits').getAttribute('aria-checked')).to.equal('true');
+  });
+
+  it('leaves the switch off when the config write fails', async () => {
+    const el = await openOn(REPO);
+    failingCommands.add('set_commit_signing');
+
+    switchNamed(el, 'Sign commits').click();
+    for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect(
+      switchNamed(el, 'Sign commits').getAttribute('aria-checked'),
+      'the switch does not run ahead of the backend',
+    ).to.equal('false');
+    expect(
+      el.shadowRoot!.querySelector('.message.error'),
+      'and the failure is reported',
+    ).to.not.be.null;
+  });
+});

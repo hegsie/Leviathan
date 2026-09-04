@@ -52,15 +52,6 @@ import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 
-function toggleEvent(checked: boolean): Event {
-  const input = document.createElement('input');
-  input.type = 'checkbox';
-  input.checked = checked;
-  const event = new Event('change', { bubbles: true });
-  Object.defineProperty(event, 'target', { value: input, writable: false });
-  return event;
-}
-
 function textEvent(value: string): Event {
   const input = document.createElement('input');
   input.value = value;
@@ -91,16 +82,36 @@ describe('lv-settings-dialog Security section', () => {
     expect(titles).to.include('Security');
   });
 
-  it('the offline-mode toggle writes to the store', () => {
-    (el as any).handleToggle('offlineMode', toggleEvent(true));
+  it('the Security switches carry an accessible name and reach the store when clicked', async () => {
+    // The switches used to be a bare <input type="checkbox"> whose visible
+    // label was an unlinked sibling, so a screen reader announced them as
+    // unnamed. lv-toggle names them and reports through a `change` event.
+    const toggles = Array.from(el.shadowRoot!.querySelectorAll('lv-toggle'));
+    const offline = toggles.find((t) => t.label === 'Offline Mode');
+    expect(offline, 'the Offline Mode switch is named').to.exist;
+    expect(offline!.description).to.contain('Block every operation');
+
+    const button = offline!.shadowRoot!.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+    expect(button.getAttribute('aria-checked')).to.equal('false');
+
+    button.click();
     expect(settingsStore.getState().offlineMode).to.equal(true);
 
-    (el as any).handleToggle('offlineMode', toggleEvent(false));
+    await el.updateComplete;
+    await offline!.updateComplete;
+    expect(button.getAttribute('aria-checked')).to.equal('true');
+  });
+
+  it('the offline-mode toggle writes to the store', () => {
+    (el as any).handleToggle('offlineMode', true);
+    expect(settingsStore.getState().offlineMode).to.equal(true);
+
+    (el as any).handleToggle('offlineMode', false);
     expect(settingsStore.getState().offlineMode).to.equal(false);
   });
 
   it('the confirm-network-operations toggle writes to the store', () => {
-    (el as any).handleToggle('confirmNetworkOps', toggleEvent(true));
+    (el as any).handleToggle('confirmNetworkOps', true);
     expect(settingsStore.getState().confirmNetworkOps).to.equal(true);
   });
 
@@ -120,8 +131,8 @@ describe('lv-settings-dialog Security section', () => {
     const onChange = (): void => { fired++; };
     window.addEventListener('settings-changed', onChange);
     try {
-      (el as any).handleToggle('offlineMode', toggleEvent(true));
-      (el as any).handleToggle('confirmNetworkOps', toggleEvent(true));
+      (el as any).handleToggle('offlineMode', true);
+      (el as any).handleToggle('confirmNetworkOps', true);
       (el as any).handleRemoteAllowlistChange(textEvent('github.com'));
     } finally {
       window.removeEventListener('settings-changed', onChange);
@@ -137,13 +148,13 @@ describe('lv-settings-dialog Security section', () => {
     const onChange = (): void => { fired++; };
     window.addEventListener('ai-settings-changed', onChange);
     try {
-      (el as any).handleToggle('offlineMode', toggleEvent(true));
+      (el as any).handleToggle('offlineMode', true);
       expect(fired, 'the offline toggle invalidates AI availability').to.equal(1);
 
       (el as any).handleRemoteAllowlistChange(textEvent('github.com'));
       expect(fired, 'the allowlist invalidates AI availability').to.equal(2);
 
-      (el as any).handleToggle('confirmNetworkOps', toggleEvent(true));
+      (el as any).handleToggle('confirmNetworkOps', true);
       expect(fired, 'the confirm prompt has no say over AI').to.equal(2);
     } finally {
       window.removeEventListener('ai-settings-changed', onChange);

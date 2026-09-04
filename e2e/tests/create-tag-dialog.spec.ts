@@ -75,8 +75,8 @@ test.describe('Create Tag Dialog', () => {
   }) => {
     const dialog = await openCreateTagDialog(page);
 
-    const annotatedCheckbox = dialog.locator('.toggle-switch input[type="checkbox"]');
-    await expect(annotatedCheckbox).toBeChecked();
+    const annotatedToggle = dialog.getByRole('switch', { name: 'Annotated Tag' });
+    await expect(annotatedToggle).toBeChecked();
 
     const messageTextarea = dialog.locator('#message-input');
     await expect(messageTextarea).toBeVisible();
@@ -85,9 +85,9 @@ test.describe('Create Tag Dialog', () => {
   test('disabling annotated tag hides message textarea', async ({ page }) => {
     const dialog = await openCreateTagDialog(page);
 
-    // Click the visible toggle slider to uncheck (the hidden input has zero dimensions)
-    const toggleSlider = dialog.locator('.toggle-slider');
-    await toggleSlider.click();
+    const annotatedToggle = dialog.getByRole('switch', { name: 'Annotated Tag' });
+    await annotatedToggle.click();
+    await expect(annotatedToggle).not.toBeChecked();
 
     const messageTextarea = dialog.locator('#message-input');
     await expect(messageTextarea).not.toBeVisible();
@@ -95,14 +95,14 @@ test.describe('Create Tag Dialog', () => {
 
   test('re-enabling annotated tag shows message textarea again', async ({ page }) => {
     const dialog = await openCreateTagDialog(page);
-    const toggleSlider = dialog.locator('.toggle-slider');
+    const annotatedToggle = dialog.getByRole('switch', { name: 'Annotated Tag' });
 
     // Click to uncheck (disable annotated)
-    await toggleSlider.click();
+    await annotatedToggle.click();
     await expect(dialog.locator('#message-input')).not.toBeVisible();
 
     // Click again to re-check (enable annotated)
-    await toggleSlider.click();
+    await annotatedToggle.click();
     await expect(dialog.locator('#message-input')).toBeVisible();
   });
 
@@ -138,12 +138,25 @@ test.describe('Create Tag Dialog', () => {
     await expect(createBtn).toBeEnabled();
   });
 
+  test('the annotated toggle can be operated from the keyboard', async ({ page }) => {
+    const dialog = await openCreateTagDialog(page);
+    const annotatedToggle = dialog.getByRole('switch', { name: 'Annotated Tag' });
+
+    await annotatedToggle.focus();
+    await page.keyboard.press('Space');
+    await expect(annotatedToggle).not.toBeChecked();
+    await expect(dialog.locator('#message-input')).not.toBeVisible();
+
+    await page.keyboard.press('Enter');
+    await expect(annotatedToggle).toBeChecked();
+    await expect(dialog.locator('#message-input')).toBeVisible();
+  });
+
   test('lightweight tag (annotated off) only needs name to be valid', async ({ page }) => {
     const dialog = await openCreateTagDialog(page);
 
-    // Click the visible toggle slider to uncheck (disable annotated)
-    const toggleSlider = dialog.locator('.toggle-slider');
-    await toggleSlider.click();
+    // Turn the annotated switch off
+    await dialog.getByRole('switch', { name: 'Annotated Tag' }).click();
 
     const nameInput = dialog.locator('#tag-name-input');
     await nameInput.fill('v2.0.0');
@@ -299,9 +312,8 @@ test.describe('Create Tag Dialog', () => {
     const nameInput = dialog.locator('#tag-name-input');
     await nameInput.fill('-invalid-tag');
 
-    // Click the visible toggle slider to uncheck (disable annotated)
-    const toggleSlider = dialog.locator('.toggle-slider');
-    await toggleSlider.click();
+    // Turn the annotated switch off
+    await dialog.getByRole('switch', { name: 'Annotated Tag' }).click();
 
     const createBtn = dialog.locator('button.btn-primary', { hasText: /Create Tag/ });
     await createBtn.click();

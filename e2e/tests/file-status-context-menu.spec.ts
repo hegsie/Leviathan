@@ -489,3 +489,169 @@ test.describe('File Status Context Menu - Extended Tests', () => {
     }
   });
 });
+
+/**
+ * "File history" and "Blame" on a working-tree row.
+ *
+ * lv-file-status raises the same `show-file-history` / `show-blame` events the
+ * commit file list raises, and app-shell's right-panel listener turns them into
+ * the centre-pane panels — so these tests assert the panel actually opens on
+ * the clicked path, not merely that a command fired.
+ */
+test.describe('File Status Context Menu - History and Blame', () => {
+  let rightPanel: RightPanelPage;
+
+  const commit = {
+    oid: 'aaa111bbb222ccc333',
+    shortId: 'aaa111b',
+    message: 'Tidy the tracked file',
+    summary: 'Tidy the tracked file',
+    body: null,
+    author: { name: 'Ada', email: 'ada@example.com', timestamp: Math.floor(Date.now() / 1000) - 3600 },
+    committer: { name: 'Ada', email: 'ada@example.com', timestamp: Math.floor(Date.now() / 1000) - 3600 },
+    parentIds: [],
+    timestamp: Math.floor(Date.now() / 1000) - 3600,
+  };
+
+  const HISTORY_ENTRIES = [{ commit, pathAtCommit: 'src/tracked.ts' }];
+
+  const BLAME_DATA = {
+    path: 'src/tracked.ts',
+    lines: [
+      {
+        lineNumber: 1,
+        content: 'export const answer = 42;',
+        commitOid: commit.oid,
+        commitShortId: commit.shortId,
+        authorName: 'Ada',
+        authorEmail: 'ada@example.com',
+        timestamp: commit.timestamp,
+        summary: commit.summary,
+        isBoundary: false,
+      },
+    ],
+    totalLines: 1,
+  };
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+
+    await setupOpenRepository(page, {
+      status: {
+        staged: [
+          { path: 'src/staged-mod.ts', status: 'modified', isStaged: true, isConflicted: false },
+          { path: 'src/added.ts', status: 'new', isStaged: true, isConflicted: false },
+        ],
+        unstaged: [
+          { path: 'src/tracked.ts', status: 'modified', isStaged: false, isConflicted: false },
+          { path: 'src/gone.ts', status: 'deleted', isStaged: false, isConflicted: false },
+          { path: 'notes.txt', status: 'untracked', isStaged: false, isConflicted: false },
+        ],
+      },
+    });
+
+    await startCommandCaptureWithMocks(page, {
+      get_file_history: HISTORY_ENTRIES,
+      get_file_blame: BLAME_DATA,
+      'plugin:dialog|confirm': true,
+    });
+  });
+
+  test('File history on a tracked file opens the file history panel', async ({ page }) => {
+    await rightPanel.getUnstagedFile('src/tracked.ts').click({ button: 'right' });
+
+    const historyItem = page.locator('.context-menu-item', { hasText: 'File history' });
+    await expect(historyItem).toBeVisible();
+    await historyItem.click();
+
+    await expect(page.locator('lv-file-history')).toBeVisible();
+    await expect(page.locator('lv-file-history .file-path')).toHaveText('src/tracked.ts');
+    await expect(page.locator('lv-file-history .commit-item')).toHaveCount(1);
+
+    const calls = await findCommand(page, 'get_file_history');
+    expect(calls.length).toBeGreaterThan(0);
+    expect((calls[0].args as Record<string, unknown>).filePath).toBe('src/tracked.ts');
+  });
+
+  test('Blame on a tracked file opens the blame view for the working copy', async ({ page }) => {
+    await rightPanel.getUnstagedFile('src/tracked.ts').click({ button: 'right' });
+
+    const blameItem = page.locator('.context-menu-item', { hasText: 'Blame' });
+    await expect(blameItem).toBeVisible();
+    await blameItem.click();
+
+    await expect(page.locator('lv-blame-view')).toBeVisible();
+    await expect(page.locator('lv-blame-view .blame-line')).toHaveCount(1);
+
+    const calls = await findCommand(page, 'get_file_blame');
+    expect(calls.length).toBeGreaterThan(0);
+    const args = calls[0].args as Record<string, unknown>;
+    expect(args.filePath).toBe('src/tracked.ts');
+    // No commit oid: the working copy is blamed against HEAD.
+    expect(args.commitOid ?? null).toBeNull();
+  });
+
+  test('both entries stay available on a staged modification', async ({ page }) => {
+    await rightPanel.getStagedFile('src/staged-mod.ts').click({ button: 'right' });
+
+    await expect(page.locator('.context-menu-item', { hasText: 'File history' })).toHaveAttribute(
+      'aria-disabled',
+      'false',
+    );
+    await expect(page.locator('.context-menu-item', { hasText: 'Blame' })).toHaveAttribute(
+      'aria-disabled',
+      'false',
+    );
+  });
+
+  test('a file staged as new has no history either', async ({ page }) => {
+    await rightPanel.getStagedFile('src/added.ts').click({ button: 'right' });
+
+    await expect(page.locator('.context-menu-item', { hasText: 'File history' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    await expect(page.locator('.context-menu-item', { hasText: 'Blame' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  });
+
+  test('an untracked file marks both entries unavailable and explains why', async ({ page }) => {
+    await rightPanel.getUnstagedFile('notes.txt').click({ button: 'right' });
+
+    const historyItem = page.locator('.context-menu-item', { hasText: 'File history' });
+    await expect(historyItem).toHaveAttribute('aria-disabled', 'true');
+    await expect(page.locator('.context-menu-item', { hasText: 'Blame' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+
+    // force: the item is aria-disabled, which Playwright treats as unclickable.
+    // It is deliberately still a live button so that a click (or Enter from
+    // keyboard menu navigation) gets an explanation instead of nothing.
+    await historyItem.click({ force: true });
+
+    // No panel opens, and the refusal is spoken rather than silent.
+    await expect(page.locator('lv-toast-container .toast')).toContainText('no history');
+    await expect(page.locator('lv-file-history')).toHaveCount(0);
+  });
+
+  test('a deleted file offers history but not blame', async ({ page }) => {
+    await rightPanel.getUnstagedFile('src/gone.ts').click({ button: 'right' });
+
+    await expect(page.locator('.context-menu-item', { hasText: 'File history' })).toBeVisible();
+    await expect(page.locator('.context-menu-item', { hasText: 'Blame' })).toHaveCount(0);
+  });
+
+  test('a failing history load reports the error instead of an empty panel', async ({ page }) => {
+    await injectCommandError(page, 'get_file_history', 'fatal: bad revision');
+
+    await rightPanel.getUnstagedFile('src/tracked.ts').click({ button: 'right' });
+    await page.locator('.context-menu-item', { hasText: 'File history' }).click();
+
+    await expect(
+      page.locator('lv-file-history .error, lv-file-history .error-message, lv-toast-container .toast').first(),
+    ).toBeVisible();
+  });
+});

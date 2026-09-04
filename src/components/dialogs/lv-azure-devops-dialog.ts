@@ -217,9 +217,12 @@ export class LvAzureDevOpsDialog extends LitElement {
         background: #f5f5f5;
       }
 
-      .ms-signin-btn:focus-visible {
-        outline: 2px solid #0067b8;
-        outline-offset: 1px;
+      /* Keeps the Microsoft-blue ring on the branded sign-in button. Expressed
+         through the shared focus-ring properties rather than an outline
+         declaration, because the shared rule in sharedStyles is !important. */
+      .ms-signin-btn {
+        --lv-focus-ring-color: #0067b8;
+        --lv-focus-ring-offset: 1px;
       }
 
       .ms-signin-btn:disabled {
