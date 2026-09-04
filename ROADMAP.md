@@ -351,9 +351,9 @@ pass against the current code (2026-09-04) and not yet tracked elsewhere in this
 - **Localisation** — no i18n framework is wired in; every UI string in `src/` is hard-coded English.
 - **Inline PR review comments** — the GitHub/GitLab/Azure DevOps/Bitbucket dialogs generate PR/MR
   descriptions but cannot post or view line-level review comments on a pull request.
-- **macOS Intel/universal release builds** — `.github/workflows/build.yml` builds only the
-  `aarch64-apple-darwin` target; there is no `x86_64-apple-darwin` build or a `lipo` step to produce
-  a universal binary, though README.md previously advertised a "macOS (Universal)" download.
+Apple Silicon only on macOS is a deliberate choice, not a gap: Apple is winding down Intel
+support across macOS, so `.github/workflows/build.yml` targets `aarch64-apple-darwin` alone and
+there are no plans for an `x86_64-apple-darwin` or universal build.
 
 ---
 
