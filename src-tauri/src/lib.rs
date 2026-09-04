@@ -682,6 +682,7 @@ pub fn run() {
             commands::mcp::get_mcp_status,
             commands::mcp::get_mcp_config,
             commands::mcp::set_mcp_config,
+            commands::mcp::regenerate_mcp_token,
             // OAuth authentication
             commands::oauth::oauth_get_authorize_url,
             commands::oauth::oauth_start_github_flow,

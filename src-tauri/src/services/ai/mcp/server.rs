@@ -5,10 +5,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -17,15 +19,43 @@ use super::tools;
 
 const MCP_CONFIG_FILE: &str = "mcp_config.json";
 
+/// Number of characters in a generated bearer token
+const AUTH_TOKEN_LEN: usize = 43;
+
+/// The message every rejected-authentication response carries.
+///
+/// It is deliberately identical for a missing header, a wrong scheme and a
+/// wrong token so a caller cannot learn which half it got wrong, and it names
+/// the exact fix because clients configured before authentication existed will
+/// start failing with it.
+pub const UNAUTHORIZED_MESSAGE: &str =
+    "Unauthorized: this MCP server requires an 'Authorization: Bearer <token>' header. \
+     An MCP client configured before Leviathan added authentication must add that header. \
+     Copy the token from Leviathan Settings -> MCP Server.";
+
+/// Generate a new random bearer token for the MCP server
+pub fn generate_auth_token() -> String {
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(AUTH_TOKEN_LEN)
+        .map(char::from)
+        .collect()
+}
+
 /// MCP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpConfig {
     pub enabled: bool,
     pub port: u16,
-    /// Allowed origins for CORS (empty = localhost only)
+    /// Allowed origins for CORS and for the request-path origin check
+    /// (empty = localhost only, and no `Origin` requirement)
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Bearer token every request must present. Generated on first start and
+    /// persisted with the rest of the configuration; never sent to any remote.
+    #[serde(default)]
+    pub auth_token: String,
 }
 
 impl Default for McpConfig {
@@ -34,6 +64,7 @@ impl Default for McpConfig {
             enabled: false,
             port: 3001,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         }
     }
 }
@@ -66,6 +97,179 @@ impl McpConfig {
         std::fs::write(&config_path, contents)
             .map_err(|e| format!("Failed to write MCP config: {}", e))
     }
+}
+
+/// The part of the configuration the request path enforces on every request.
+///
+/// It is shared with the running accept loop, so a regenerated token or an
+/// edited origin list takes effect immediately instead of at the next restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthSettings {
+    /// Expected bearer token. Empty means "no token yet": every request is
+    /// refused rather than let through unauthenticated.
+    pub token: String,
+    /// Origins allowed to talk to the server (empty = localhost-only posture)
+    pub allowed_origins: Vec<String>,
+}
+
+impl AuthSettings {
+    fn from_config(config: &McpConfig) -> Self {
+        Self {
+            token: config.auth_token.clone(),
+            allowed_origins: config.allowed_origins.clone(),
+        }
+    }
+}
+
+/// A request refused before it reached the JSON-RPC dispatcher
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthRejection {
+    /// HTTP status to answer with
+    pub status: u16,
+    /// JSON-RPC error code carried in the body
+    pub code: i32,
+    /// Human-readable explanation, safe to show to the caller
+    pub message: String,
+}
+
+impl AuthRejection {
+    fn unauthorized() -> Self {
+        Self {
+            status: 401,
+            code: -32001,
+            message: UNAUTHORIZED_MESSAGE.to_string(),
+        }
+    }
+
+    fn forbidden(message: String) -> Self {
+        Self {
+            status: 403,
+            code: -32002,
+            message,
+        }
+    }
+}
+
+/// Read a header value out of a raw HTTP request.
+///
+/// Only the head is scanned: the loop stops at the blank line, so a body that
+/// happens to contain something header-shaped can never be mistaken for one.
+fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    for line in request.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(name) {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+/// Compare a presented secret against the expected one without leaking its
+/// contents through timing.
+///
+/// Both sides are hashed first, so the comparison always walks exactly 32
+/// bytes with no early exit and reveals neither the length nor the position of
+/// the first differing byte.
+fn constant_time_eq(presented: &str, expected: &str) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(presented.as_bytes());
+    let presented_hash = hasher.finalize();
+
+    let mut hasher = Sha256::new();
+    hasher.update(expected.as_bytes());
+    let expected_hash = hasher.finalize();
+
+    let mut diff = 0u8;
+    for (a, b) in presented_hash.iter().zip(expected_hash.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Decide whether a raw HTTP request may reach the MCP tools.
+///
+/// Origin is checked first so a browser page from an unlisted origin is turned
+/// away before it can probe the token, then the bearer token is verified.
+pub fn authorize_request(request: &str, settings: &AuthSettings) -> Result<(), AuthRejection> {
+    if !settings.allowed_origins.is_empty() {
+        match header_value(request, "origin") {
+            Some(origin) if settings.allowed_origins.iter().any(|a| a == origin) => {}
+            Some(_) => {
+                return Err(AuthRejection::forbidden(
+                    "Forbidden: this origin is not in the MCP allowed origins list.".to_string(),
+                ));
+            }
+            None => {
+                return Err(AuthRejection::forbidden(
+                    "Forbidden: this MCP server only accepts requests from its configured \
+                     allowed origins, and the request sent no Origin header."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // No token generated yet: refuse everything rather than serve repository
+    // contents unauthenticated.
+    if settings.token.is_empty() {
+        return Err(AuthRejection::unauthorized());
+    }
+
+    let Some(header) = header_value(request, "authorization") else {
+        return Err(AuthRejection::unauthorized());
+    };
+
+    let mut parts = header.splitn(2, ' ');
+    let scheme = parts.next().unwrap_or("");
+    let presented = parts.next().unwrap_or("").trim();
+
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(AuthRejection::unauthorized());
+    }
+
+    if !constant_time_eq(presented, &settings.token) {
+        return Err(AuthRejection::unauthorized());
+    }
+
+    Ok(())
+}
+
+/// The `Access-Control-Allow-Origin` value for a response, reflecting the
+/// configured origins instead of a hard-coded one.
+///
+/// With no configured origins the server keeps its localhost-only posture.
+/// With configured origins the request's own origin is echoed when it is
+/// listed, and otherwise the first configured origin is named so a browser can
+/// never read a response from an origin that is not allowed.
+fn cors_allow_origin(request: &str, settings: &AuthSettings) -> String {
+    if settings.allowed_origins.is_empty() {
+        return "http://localhost".to_string();
+    }
+
+    match header_value(request, "origin") {
+        Some(origin) if settings.allowed_origins.iter().any(|a| a == origin) => origin.to_string(),
+        _ => settings.allowed_origins[0].clone(),
+    }
+}
+
+/// Strip the value of any `Authorization` header so a request head can be
+/// logged without ever writing the token to disk or to the console.
+pub fn redact_authorization(request: &str) -> String {
+    request
+        .lines()
+        .map(|line| match line.split_once(':') {
+            Some((key, _)) if key.trim().eq_ignore_ascii_case("authorization") => {
+                format!("{}: <redacted>", key.trim())
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// MCP server status information
@@ -138,6 +342,8 @@ pub struct McpServer {
     open_repos: Arc<RwLock<Vec<String>>>,
     /// Error from the last failed start attempt, surfaced in the status
     last_error: Option<String>,
+    /// Token and origin rules enforced by the running accept loop
+    auth: Arc<StdRwLock<AuthSettings>>,
 }
 
 /// Shared MCP server state
@@ -151,15 +357,31 @@ pub fn create_mcp_state(config_dir: PathBuf) -> McpState {
 impl McpServer {
     /// Create a new MCP server, restoring the configuration saved on disk
     pub fn new(config_dir: PathBuf) -> Self {
-        let config = McpConfig::load(&config_dir).unwrap_or_default();
-        Self {
+        let mut config = McpConfig::load(&config_dir).unwrap_or_default();
+
+        // First start — or an upgrade from a version that had no
+        // authentication — gets a token generated and persisted here, so the
+        // server is never reachable without one.
+        let needs_token = config.auth_token.is_empty();
+        if needs_token {
+            config.auth_token = generate_auth_token();
+        }
+
+        let server = Self {
+            auth: Arc::new(StdRwLock::new(AuthSettings::from_config(&config))),
             config,
             config_dir,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             open_repos: Arc::new(RwLock::new(Vec::new())),
             last_error: None,
+        };
+
+        if needs_token {
+            server.persist_config();
         }
+
+        server
     }
 
     /// Persist the current configuration, logging (but not failing on) write errors
@@ -167,6 +389,26 @@ impl McpServer {
         if let Err(e) = self.config.save(&self.config_dir) {
             tracing::warn!("Failed to persist MCP config: {}", e);
         }
+    }
+
+    /// Publish the current token and origin rules to the running accept loop
+    fn sync_auth(&self) {
+        let mut auth = self
+            .auth
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *auth = AuthSettings::from_config(&self.config);
+    }
+
+    /// Replace the bearer token with a freshly generated one and persist it.
+    /// Existing clients stop working until they are given the new token.
+    pub fn regenerate_auth_token(&mut self) -> Result<String, String> {
+        let token = generate_auth_token();
+        self.config.auth_token = token.clone();
+        self.config.save(&self.config_dir)?;
+        self.sync_auth();
+        tracing::info!("MCP access token regenerated");
+        Ok(token)
     }
 
     /// Start the MCP server
@@ -192,9 +434,10 @@ impl McpServer {
         running.store(true, Ordering::SeqCst);
 
         let open_repos = self.open_repos.clone();
+        let auth = self.auth.clone();
 
         tokio::spawn(async move {
-            Self::run_server(listener, running, shutdown_rx, open_repos).await;
+            Self::run_server(listener, running, shutdown_rx, open_repos, auth).await;
         });
 
         // Remember that the server should come back up on the next launch
@@ -247,10 +490,25 @@ impl McpServer {
         &self.config
     }
 
-    /// Set the server configuration and persist it to disk
+    /// Set the server configuration and persist it to disk.
+    ///
+    /// The token is owned by the backend: a saved configuration never replaces
+    /// it, so a caller that round-trips the config (or a stale one that predates
+    /// authentication) cannot blank it and reopen the server to anyone.
     pub fn set_config(&mut self, config: McpConfig) -> Result<(), String> {
-        self.config = config;
-        self.config.save(&self.config_dir)
+        let token = if self.config.auth_token.is_empty() {
+            generate_auth_token()
+        } else {
+            self.config.auth_token.clone()
+        };
+
+        self.config = McpConfig {
+            auth_token: token,
+            ..config
+        };
+        self.config.save(&self.config_dir)?;
+        self.sync_auth();
+        Ok(())
     }
 
     /// Update the list of open repositories
@@ -265,6 +523,7 @@ impl McpServer {
         running: Arc<AtomicBool>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         open_repos: Arc<RwLock<Vec<String>>>,
+        auth: Arc<StdRwLock<AuthSettings>>,
     ) {
         loop {
             tokio::select! {
@@ -276,8 +535,9 @@ impl McpServer {
                     match accept_result {
                         Ok((stream, _addr)) => {
                             let repos = open_repos.clone();
+                            let auth = auth.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, repos).await {
+                                if let Err(e) = Self::handle_connection(stream, repos, auth).await {
                                     tracing::warn!("MCP connection error: {}", e);
                                 }
                             });
@@ -295,7 +555,15 @@ impl McpServer {
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
         open_repos: Arc<RwLock<Vec<String>>>,
+        auth: Arc<StdRwLock<AuthSettings>>,
     ) -> Result<(), String> {
+        // Snapshot the auth rules once per connection so the lock is never held
+        // across an await
+        let settings = auth
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
         // Read until we find the end of headers, then read the body based on Content-Length
         let mut buf = Vec::with_capacity(65536);
         let mut tmp = vec![0u8; 8192];
@@ -349,12 +617,14 @@ impl McpServer {
                         "Request too large".to_string(),
                     ))
                     .unwrap_or_default(),
+                    &cors_allow_origin("", &settings),
                 )
                 .await;
             }
         }
 
         let request_str = String::from_utf8_lossy(&buf);
+        let allow_origin = cors_allow_origin(&request_str, &settings);
 
         // Parse HTTP request - find the body after the blank line
         let body = if let Some(idx) = request_str.find("\r\n\r\n") {
@@ -371,6 +641,7 @@ impl McpServer {
                     "Invalid HTTP request".to_string(),
                 ))
                 .unwrap_or_default(),
+                &allow_origin,
             )
             .await;
         };
@@ -378,9 +649,35 @@ impl McpServer {
         // Check if it's a POST request (MCP uses POST)
         let is_post = request_str.starts_with("POST ");
 
-        // Handle OPTIONS for CORS preflight
+        // Handle OPTIONS for CORS preflight. Browsers never send credentials on
+        // a preflight, so it is answered without a token — the actual POST that
+        // follows is still authenticated.
         if request_str.starts_with("OPTIONS ") {
-            return Self::send_cors_response(&mut stream).await;
+            return Self::send_cors_response(&mut stream, &allow_origin).await;
+        }
+
+        // Every other request must authenticate before it can reach the tools,
+        // which expose the contents and history of every open repository
+        if let Err(rejection) = authorize_request(&request_str, &settings) {
+            // The head is logged with the Authorization value stripped: the
+            // token must never reach the log
+            tracing::warn!(
+                "MCP request rejected ({}): {}",
+                rejection.status,
+                redact_authorization(request_str.lines().next().unwrap_or(""))
+            );
+            return Self::send_http_response(
+                &mut stream,
+                rejection.status,
+                &serde_json::to_string(&JsonRpcResponse::error(
+                    Value::Null,
+                    rejection.code,
+                    rejection.message,
+                ))
+                .unwrap_or_default(),
+                &allow_origin,
+            )
+            .await;
         }
 
         if !is_post {
@@ -393,6 +690,7 @@ impl McpServer {
                     "Method not allowed. Use POST.".to_string(),
                 ))
                 .unwrap_or_default(),
+                &allow_origin,
             )
             .await;
         }
@@ -404,7 +702,8 @@ impl McpServer {
                 let response =
                     JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {}", e));
                 let response_json = serde_json::to_string(&response).unwrap_or_default();
-                return Self::send_http_response(&mut stream, 200, &response_json).await;
+                return Self::send_http_response(&mut stream, 200, &response_json, &allow_origin)
+                    .await;
             }
         };
 
@@ -413,7 +712,7 @@ impl McpServer {
         let response = Self::handle_rpc_request(&rpc_request, &repos).await;
         let response_json = serde_json::to_string(&response).unwrap_or_default();
 
-        Self::send_http_response(&mut stream, 200, &response_json).await
+        Self::send_http_response(&mut stream, 200, &response_json, &allow_origin).await
     }
 
     /// Route a JSON-RPC request to the appropriate handler
@@ -509,15 +808,18 @@ impl McpServer {
         }
     }
 
-    /// Send an HTTP response with CORS headers (localhost only)
+    /// Send an HTTP response, allowing the configured origin
     async fn send_http_response(
         stream: &mut tokio::net::TcpStream,
         status: u16,
         body: &str,
+        allow_origin: &str,
     ) -> Result<(), String> {
         let status_text = match status {
             200 => "OK",
             400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
             _ => "Error",
@@ -527,12 +829,19 @@ impl McpServer {
             "HTTP/1.1 {status} {status_text}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
-             Access-Control-Allow-Origin: http://localhost\r\n\
+             {}\
+             Access-Control-Allow-Origin: {allow_origin}\r\n\
              Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-             Access-Control-Allow-Headers: Content-Type\r\n\
+             Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+             Vary: Origin\r\n\
              Connection: close\r\n\
              \r\n{body}",
             body.len(),
+            if status == 401 {
+                "WWW-Authenticate: Bearer realm=\"Leviathan MCP\"\r\n"
+            } else {
+                ""
+            },
         );
 
         stream
@@ -548,15 +857,21 @@ impl McpServer {
         Ok(())
     }
 
-    /// Send a CORS preflight response (localhost only)
-    async fn send_cors_response(stream: &mut tokio::net::TcpStream) -> Result<(), String> {
-        let response = "HTTP/1.1 204 No Content\r\n\
-             Access-Control-Allow-Origin: http://localhost\r\n\
+    /// Send a CORS preflight response for the configured origin
+    async fn send_cors_response(
+        stream: &mut tokio::net::TcpStream,
+        allow_origin: &str,
+    ) -> Result<(), String> {
+        let response = format!(
+            "HTTP/1.1 204 No Content\r\n\
+             Access-Control-Allow-Origin: {allow_origin}\r\n\
              Access-Control-Allow-Methods: POST, OPTIONS\r\n\
-             Access-Control-Allow-Headers: Content-Type\r\n\
+             Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
              Access-Control-Max-Age: 86400\r\n\
+             Vary: Origin\r\n\
              Connection: close\r\n\
-             \r\n";
+             \r\n"
+        );
 
         stream
             .write_all(response.as_bytes())
@@ -641,6 +956,7 @@ mod tests {
             enabled: true,
             port: 8080,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         };
         server.set_config(config).expect("Failed to set config");
         assert!(server.config.enabled);
@@ -660,6 +976,7 @@ mod tests {
             enabled: true,
             port: 4000,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         };
         let json = serde_json::to_string(&config).expect("Failed to serialize");
         assert!(json.contains("\"enabled\":true"));
@@ -822,6 +1139,7 @@ mod tests {
                 enabled: true,
                 port: 19876,
                 allowed_origins: Vec::new(),
+                auth_token: String::new(),
             })
             .expect("Failed to set config");
 
@@ -873,6 +1191,7 @@ mod tests {
             enabled: true,
             port: 4321,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         };
 
         config.save(dir.path()).expect("Failed to save config");
@@ -897,6 +1216,7 @@ mod tests {
             enabled: true,
             port: 4321,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         }
         .save(dir.path())
         .expect("Failed to save config");
@@ -917,6 +1237,7 @@ mod tests {
                     enabled: true,
                     port: 4321,
                     allowed_origins: Vec::new(),
+                    auth_token: String::new(),
                 })
                 .expect("Failed to set config");
         }
@@ -957,6 +1278,7 @@ mod tests {
                 enabled: false,
                 port,
                 allowed_origins: Vec::new(),
+                auth_token: String::new(),
             })
             .expect("Failed to set config");
 
@@ -988,6 +1310,7 @@ mod tests {
                 enabled: true,
                 port,
                 allowed_origins: Vec::new(),
+                auth_token: String::new(),
             })
             .expect("Failed to set config");
 
@@ -1004,5 +1327,561 @@ mod tests {
         );
 
         drop(blocker);
+    }
+
+    // =====================================================
+    // Access token: generation and persistence
+    // =====================================================
+
+    #[test]
+    fn test_new_generates_a_token_on_first_start() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let server = McpServer::new(dir.path().to_path_buf());
+
+        let token = server.get_config().auth_token.clone();
+        assert_eq!(token.len(), AUTH_TOKEN_LEN);
+        assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
+
+        // ...and it is persisted, so the same token survives a restart
+        let saved = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert_eq!(saved.auth_token, token);
+
+        let restarted = McpServer::new(dir.path().to_path_buf());
+        assert_eq!(restarted.get_config().auth_token, token);
+    }
+
+    #[test]
+    fn test_upgrade_from_a_config_without_a_token_generates_one() {
+        // A config written by a version that had no authentication at all
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        std::fs::write(
+            dir.path().join(MCP_CONFIG_FILE),
+            r#"{"enabled":true,"port":4321,"allowedOrigins":[]}"#,
+        )
+        .expect("Failed to write legacy config");
+
+        let server = McpServer::new(dir.path().to_path_buf());
+        assert_eq!(server.get_config().port, 4321, "existing settings are kept");
+        assert!(server.get_config().enabled);
+        assert!(
+            !server.get_config().auth_token.is_empty(),
+            "an upgrading user must get a token"
+        );
+
+        let saved = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert_eq!(saved.auth_token, server.get_config().auth_token);
+    }
+
+    #[test]
+    fn test_generate_auth_token_is_random() {
+        assert_ne!(generate_auth_token(), generate_auth_token());
+    }
+
+    #[test]
+    fn test_set_config_never_clears_the_token() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        let token = server.get_config().auth_token.clone();
+
+        // The frontend saves the config without echoing the secret back
+        server
+            .set_config(McpConfig {
+                enabled: true,
+                port: 4321,
+                allowed_origins: vec!["http://localhost:5173".to_string()],
+                auth_token: String::new(),
+            })
+            .expect("Failed to set config");
+
+        assert_eq!(server.get_config().auth_token, token);
+        assert_eq!(server.get_config().port, 4321);
+
+        let saved = McpConfig::load(dir.path()).expect("Failed to load config");
+        assert_eq!(saved.auth_token, token);
+    }
+
+    #[test]
+    fn test_set_config_cannot_replace_the_token() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        let token = server.get_config().auth_token.clone();
+
+        server
+            .set_config(McpConfig {
+                enabled: false,
+                port: 3001,
+                allowed_origins: Vec::new(),
+                auth_token: "caller-chosen-token".to_string(),
+            })
+            .expect("Failed to set config");
+
+        assert_eq!(server.get_config().auth_token, token);
+    }
+
+    #[test]
+    fn test_set_config_publishes_origins_to_the_request_path() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        server
+            .set_config(McpConfig {
+                enabled: false,
+                port: 3001,
+                allowed_origins: vec!["http://localhost:5173".to_string()],
+                auth_token: String::new(),
+            })
+            .expect("Failed to set config");
+
+        let settings = server.auth.read().expect("auth lock").clone();
+        assert_eq!(settings.allowed_origins, vec!["http://localhost:5173"]);
+        assert_eq!(settings.token, server.get_config().auth_token);
+    }
+
+    #[test]
+    fn test_regenerate_auth_token_replaces_and_persists() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        let original = server.get_config().auth_token.clone();
+
+        let new_token = server
+            .regenerate_auth_token()
+            .expect("Failed to regenerate token");
+
+        assert_ne!(new_token, original);
+        assert_eq!(server.get_config().auth_token, new_token);
+        assert_eq!(
+            McpConfig::load(dir.path())
+                .expect("Failed to load config")
+                .auth_token,
+            new_token
+        );
+        // The running request path sees the new token immediately
+        assert_eq!(server.auth.read().expect("auth lock").token, new_token);
+    }
+
+    // =====================================================
+    // Request authorization
+    // =====================================================
+
+    fn settings_with(token: &str, origins: &[&str]) -> AuthSettings {
+        AuthSettings {
+            token: token.to_string(),
+            allowed_origins: origins.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+
+    fn request_with_headers(headers: &[&str]) -> String {
+        let mut request = String::from("POST / HTTP/1.1\r\nHost: 127.0.0.1:3001\r\n");
+        for header in headers {
+            request.push_str(header);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+        request
+    }
+
+    #[test]
+    fn test_authorize_accepts_the_configured_token() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&["Authorization: Bearer s3cret-token"]);
+        assert!(authorize_request(&request, &settings).is_ok());
+    }
+
+    #[test]
+    fn test_authorize_accepts_a_lowercase_header_and_scheme() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&["authorization: bearer s3cret-token"]);
+        assert!(authorize_request(&request, &settings).is_ok());
+    }
+
+    #[test]
+    fn test_authorize_rejects_a_missing_header() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&[]);
+        let rejection = authorize_request(&request, &settings).expect_err("must be rejected");
+        assert_eq!(rejection.status, 401);
+        assert_eq!(rejection.message, UNAUTHORIZED_MESSAGE);
+    }
+
+    #[test]
+    fn test_authorize_rejects_a_wrong_scheme() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&["Authorization: Basic s3cret-token"]);
+        let rejection = authorize_request(&request, &settings).expect_err("must be rejected");
+        assert_eq!(rejection.status, 401);
+    }
+
+    #[test]
+    fn test_authorize_rejects_a_bare_token_without_a_scheme() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&["Authorization: s3cret-token"]);
+        assert_eq!(
+            authorize_request(&request, &settings)
+                .expect_err("must be rejected")
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn test_authorize_rejects_a_wrong_token() {
+        let settings = settings_with("s3cret-token", &[]);
+        // Same length, differs in the last character
+        let request = request_with_headers(&["Authorization: Bearer s3cret-tokeN"]);
+        assert_eq!(
+            authorize_request(&request, &settings)
+                .expect_err("must be rejected")
+                .status,
+            401
+        );
+    }
+
+    #[test]
+    fn test_authorize_rejects_a_token_prefix() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&["Authorization: Bearer s3cret"]);
+        assert!(authorize_request(&request, &settings).is_err());
+    }
+
+    #[test]
+    fn test_authorize_rejects_everything_when_no_token_is_configured() {
+        // An empty stored token must never read as "authentication is off"
+        let settings = settings_with("", &[]);
+        assert!(authorize_request(&request_with_headers(&[]), &settings).is_err());
+        assert!(authorize_request(
+            &request_with_headers(&["Authorization: Bearer "]),
+            &settings
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_authorize_ignores_an_authorization_line_in_the_body() {
+        let settings = settings_with("s3cret-token", &[]);
+        let request = "POST / HTTP/1.1\r\nHost: x\r\n\r\nAuthorization: Bearer s3cret-token";
+        assert!(authorize_request(request, &settings).is_err());
+    }
+
+    #[test]
+    fn test_authorize_allows_a_listed_origin() {
+        let settings = settings_with("s3cret-token", &["http://localhost:5173"]);
+        let request = request_with_headers(&[
+            "Origin: http://localhost:5173",
+            "Authorization: Bearer s3cret-token",
+        ]);
+        assert!(authorize_request(&request, &settings).is_ok());
+    }
+
+    #[test]
+    fn test_authorize_rejects_an_unlisted_origin() {
+        let settings = settings_with("s3cret-token", &["http://localhost:5173"]);
+        let request = request_with_headers(&[
+            "Origin: https://not-allowed.example",
+            "Authorization: Bearer s3cret-token",
+        ]);
+        let rejection = authorize_request(&request, &settings).expect_err("must be rejected");
+        assert_eq!(rejection.status, 403);
+        assert!(rejection.message.contains("allowed origins"));
+    }
+
+    #[test]
+    fn test_authorize_rejects_an_absent_origin_when_a_list_is_configured() {
+        let settings = settings_with("s3cret-token", &["http://localhost:5173"]);
+        let request = request_with_headers(&["Authorization: Bearer s3cret-token"]);
+        assert_eq!(
+            authorize_request(&request, &settings)
+                .expect_err("must be rejected")
+                .status,
+            403
+        );
+    }
+
+    #[test]
+    fn test_authorize_ignores_the_origin_when_the_list_is_empty() {
+        // Empty list keeps today's posture: any local caller with the token
+        let settings = settings_with("s3cret-token", &[]);
+        let request = request_with_headers(&[
+            "Origin: https://anything.example",
+            "Authorization: Bearer s3cret-token",
+        ]);
+        assert!(authorize_request(&request, &settings).is_ok());
+    }
+
+    #[test]
+    fn test_authorize_checks_the_origin_before_the_token() {
+        // An unlisted origin never learns whether its token guess was right
+        let settings = settings_with("s3cret-token", &["http://localhost:5173"]);
+        let request = request_with_headers(&[
+            "Origin: https://not-allowed.example",
+            "Authorization: Bearer wrong",
+        ]);
+        assert_eq!(
+            authorize_request(&request, &settings)
+                .expect_err("must be rejected")
+                .status,
+            403
+        );
+    }
+
+    #[test]
+    fn test_unauthorized_message_tells_the_user_how_to_fix_it() {
+        assert!(UNAUTHORIZED_MESSAGE.contains("Authorization: Bearer"));
+        assert!(UNAUTHORIZED_MESSAGE.contains("Settings"));
+    }
+
+    // =====================================================
+    // Constant-time comparison
+    // =====================================================
+
+    #[test]
+    fn test_constant_time_eq_matches_only_the_exact_token() {
+        assert!(constant_time_eq("token", "token"));
+        assert!(!constant_time_eq("tokes", "token"));
+        assert!(!constant_time_eq("Token", "token"));
+        // Differences at the very first and very last byte are both caught,
+        // which a comparison that stopped early could not guarantee
+        assert!(!constant_time_eq("aoken", "token"));
+        assert!(!constant_time_eq("tokem", "token"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_is_length_independent() {
+        // Hashing both sides means the work is fixed at 32 bytes whatever the
+        // inputs, so neither the length nor the first differing position leaks
+        assert!(!constant_time_eq("", "token"));
+        assert!(!constant_time_eq("token-with-a-much-longer-tail", "token"));
+        assert!(!constant_time_eq("tok", "token"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    // =====================================================
+    // CORS and logging
+    // =====================================================
+
+    #[test]
+    fn test_cors_origin_defaults_to_localhost() {
+        let settings = settings_with("t", &[]);
+        assert_eq!(
+            cors_allow_origin(&request_with_headers(&[]), &settings),
+            "http://localhost"
+        );
+    }
+
+    #[test]
+    fn test_cors_origin_reflects_a_configured_origin() {
+        let settings = settings_with("t", &["http://localhost:5173", "http://localhost:4200"]);
+        assert_eq!(
+            cors_allow_origin(
+                &request_with_headers(&["Origin: http://localhost:4200"]),
+                &settings
+            ),
+            "http://localhost:4200"
+        );
+    }
+
+    #[test]
+    fn test_cors_origin_never_echoes_an_unlisted_origin() {
+        let settings = settings_with("t", &["http://localhost:5173"]);
+        assert_eq!(
+            cors_allow_origin(
+                &request_with_headers(&["Origin: https://not-allowed.example"]),
+                &settings
+            ),
+            "http://localhost:5173"
+        );
+    }
+
+    #[test]
+    fn test_redact_authorization_removes_the_token() {
+        let head = "POST / HTTP/1.1\r\nHost: 127.0.0.1:3001\r\nAuthorization: Bearer s3cret-token\r\nContent-Type: application/json";
+        let redacted = redact_authorization(head);
+        assert!(
+            !redacted.contains("s3cret-token"),
+            "the token must never reach a log: {}",
+            redacted
+        );
+        assert!(redacted.contains("Authorization: <redacted>"));
+        // The rest of the head is untouched, so the log is still useful
+        assert!(redacted.contains("Host: 127.0.0.1:3001"));
+        assert!(redacted.contains("Content-Type: application/json"));
+    }
+
+    #[test]
+    fn test_redact_authorization_is_case_insensitive() {
+        let redacted = redact_authorization("POST / HTTP/1.1\nauthorization: bearer s3cret-token");
+        assert!(!redacted.contains("s3cret-token"));
+    }
+
+    #[test]
+    fn test_request_line_logged_on_rejection_carries_no_token() {
+        // The rejection path logs only the redacted request line
+        let request = request_with_headers(&["Authorization: Bearer s3cret-token"]);
+        let logged = redact_authorization(request.lines().next().unwrap_or(""));
+        assert!(!logged.contains("s3cret-token"));
+        assert_eq!(logged, "POST / HTTP/1.1");
+    }
+
+    // =====================================================
+    // End-to-end over a real socket
+    // =====================================================
+
+    /// Send a raw HTTP request to the running server and return the response
+    async fn send_raw(port: u16, request: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("Failed to connect to the MCP server");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("Failed to write request");
+        stream.flush().await.expect("Failed to flush request");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("Failed to read response");
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    /// A `tools/list` request, optionally carrying headers
+    fn tools_list_request(headers: &[String]) -> String {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let mut request = format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for header in headers {
+            request.push_str(header);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+        request
+    }
+
+    /// Start a server on a free port with the given allowed origins,
+    /// returning the server, its port and its token
+    async fn started_server(
+        dir: &TempDir,
+        allowed_origins: Vec<String>,
+    ) -> (McpServer, u16, String) {
+        let port = free_port().await;
+        let mut server = McpServer::new(dir.path().to_path_buf());
+        server
+            .set_config(McpConfig {
+                enabled: true,
+                port,
+                allowed_origins,
+                auth_token: String::new(),
+            })
+            .expect("Failed to set config");
+        let token = server.get_config().auth_token.clone();
+        server.start().await.expect("Failed to start server");
+        (server, port, token)
+    }
+
+    #[tokio::test]
+    async fn test_running_server_rejects_requests_without_a_token() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let (mut server, port, token) = started_server(&dir, Vec::new()).await;
+
+        let response = send_raw(port, &tools_list_request(&[])).await;
+        assert!(response.starts_with("HTTP/1.1 401"), "got: {}", response);
+        assert!(response.contains("Authorization: Bearer"));
+        assert!(
+            !response.contains("get_commit_history"),
+            "an unauthenticated caller must not see the tool list"
+        );
+
+        let wrong = tools_list_request(&["Authorization: Bearer not-the-token".to_string()]);
+        let response = send_raw(port, &wrong).await;
+        assert!(response.starts_with("HTTP/1.1 401"), "got: {}", response);
+
+        let right = tools_list_request(&[format!("Authorization: Bearer {}", token)]);
+        let response = send_raw(port, &right).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "got: {}", response);
+        assert!(response.contains("get_commit_history"));
+
+        server.stop().await.expect("Failed to stop server");
+    }
+
+    #[tokio::test]
+    async fn test_regenerating_the_token_invalidates_the_old_one_immediately() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let (mut server, port, old_token) = started_server(&dir, Vec::new()).await;
+
+        let new_token = server
+            .regenerate_auth_token()
+            .expect("Failed to regenerate token");
+
+        let old = tools_list_request(&[format!("Authorization: Bearer {}", old_token)]);
+        assert!(
+            send_raw(port, &old).await.starts_with("HTTP/1.1 401"),
+            "the previous token must stop working without a restart"
+        );
+
+        let new = tools_list_request(&[format!("Authorization: Bearer {}", new_token)]);
+        assert!(send_raw(port, &new).await.starts_with("HTTP/1.1 200"));
+
+        server.stop().await.expect("Failed to stop server");
+    }
+
+    #[tokio::test]
+    async fn test_running_server_enforces_allowed_origins() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let (mut server, port, token) =
+            started_server(&dir, vec!["http://localhost:5173".to_string()]).await;
+
+        // Right token, wrong origin
+        let denied = tools_list_request(&[
+            "Origin: https://not-allowed.example".to_string(),
+            format!("Authorization: Bearer {}", token),
+        ]);
+        let response = send_raw(port, &denied).await;
+        assert!(response.starts_with("HTTP/1.1 403"), "got: {}", response);
+        assert!(!response.contains("Access-Control-Allow-Origin: https://not-allowed.example"));
+
+        // Right token, listed origin
+        let allowed = tools_list_request(&[
+            "Origin: http://localhost:5173".to_string(),
+            format!("Authorization: Bearer {}", token),
+        ]);
+        let response = send_raw(port, &allowed).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "got: {}", response);
+        assert!(response.contains("Access-Control-Allow-Origin: http://localhost:5173"));
+
+        server.stop().await.expect("Failed to stop server");
+    }
+
+    #[tokio::test]
+    async fn test_preflight_is_answered_without_a_token() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let (mut server, port, _token) = started_server(&dir, Vec::new()).await;
+
+        let response = send_raw(port, "OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 204"), "got: {}", response);
+        // Browser clients must be allowed to send the Authorization header
+        assert!(response.contains("Access-Control-Allow-Headers: Content-Type, Authorization"));
+        assert!(response.contains("Access-Control-Allow-Origin: http://localhost"));
+
+        server.stop().await.expect("Failed to stop server");
+    }
+
+    #[tokio::test]
+    async fn test_non_post_requests_still_require_a_token() {
+        let dir = TempDir::new().expect("Failed to create temp dir");
+        let (mut server, port, token) = started_server(&dir, Vec::new()).await;
+
+        let response = send_raw(port, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 401"), "got: {}", response);
+
+        let authenticated = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n",
+            token
+        );
+        let response = send_raw(port, &authenticated).await;
+        assert!(response.starts_with("HTTP/1.1 405"), "got: {}", response);
+
+        server.stop().await.expect("Failed to stop server");
     }
 }

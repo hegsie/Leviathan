@@ -240,6 +240,39 @@ export class LvSettingsDialog extends LitElement {
         margin-top: 4px;
       }
 
+      .mcp-token-controls {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .mcp-token-value {
+        font-family: monospace;
+        font-size: 12px;
+        color: var(--text-primary);
+        background: var(--input-background);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 4px 8px;
+        max-width: 280px;
+        overflow-wrap: anywhere;
+      }
+
+      .mcp-client-config {
+        margin: 0;
+        padding: 8px 10px;
+        background: var(--input-background);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 11px;
+        color: var(--text-secondary);
+        overflow-x: auto;
+        white-space: pre;
+      }
+
       .status-indicator {
         display: inline-flex;
         align-items: center;
@@ -372,6 +405,15 @@ export class LvSettingsDialog extends LitElement {
   @state() private mcpEnabled = false;
   @state() private mcpToggling = false;
   @state() private mcpError: string | null = null;
+  /** Bearer token required by every MCP request. Treated as a secret: masked unless revealed. */
+  @state() private mcpToken = '';
+  @state() private mcpTokenRevealed = false;
+  @state() private mcpRegenerating = false;
+  /**
+   * Origins the backend enforces on the MCP request path. Carried through every
+   * save so persisting the port or the enabled flag cannot wipe the list.
+   */
+  @state() private mcpAllowedOrigins: string[] = [];
 
   // Event listener cleanup
   private downloadProgressUnlisten: UnlistenFn | null = null;
@@ -1078,6 +1120,8 @@ export class LvSettingsDialog extends LitElement {
     if (configResult.success && configResult.data) {
       this.mcpPort = configResult.data.port;
       this.mcpEnabled = configResult.data.enabled;
+      this.mcpToken = configResult.data.authToken ?? '';
+      this.mcpAllowedOrigins = configResult.data.allowedOrigins ?? [];
     }
   }
 
@@ -1095,7 +1139,7 @@ export class LvSettingsDialog extends LitElement {
       const saved = await mcpService.setMcpConfig({
         enabled: true,
         port: this.mcpPort,
-        allowedOrigins: [],
+        allowedOrigins: this.mcpAllowedOrigins,
       });
       if (!saved.success) {
         this.mcpError = saved.error?.message ?? 'Failed to save MCP settings';
@@ -1125,7 +1169,7 @@ export class LvSettingsDialog extends LitElement {
     const result = await mcpService.setMcpConfig({
       enabled: false,
       port: this.mcpPort,
-      allowedOrigins: [],
+      allowedOrigins: this.mcpAllowedOrigins,
     });
     if (!result.success) {
       this.mcpError = result.error?.message ?? 'Failed to disable the MCP server';
@@ -1145,11 +1189,89 @@ export class LvSettingsDialog extends LitElement {
     const result = await mcpService.setMcpConfig({
       enabled: this.mcpEnabled,
       port: this.mcpPort,
-      allowedOrigins: [],
+      allowedOrigins: this.mcpAllowedOrigins,
     });
     this.mcpError = result.success
       ? null
       : (result.error?.message ?? 'Failed to save MCP port');
+  }
+
+  /**
+   * The MCP client configuration block a user pastes into Cursor, VS Code or any
+   * other MCP client. The token is masked in the rendered snippet; Copy always
+   * puts the real one on the clipboard.
+   */
+  private mcpClientConfigSnippet(reveal: boolean): string {
+    const token = reveal ? this.mcpToken : this.maskedMcpToken();
+    return JSON.stringify(
+      {
+        mcpServers: {
+          leviathan: {
+            url: `http://127.0.0.1:${this.mcpPort}`,
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        },
+      },
+      null,
+      2
+    );
+  }
+
+  /** The token as shown while it is hidden — never a partial of the real value */
+  private maskedMcpToken(): string {
+    return this.mcpToken ? '•'.repeat(this.mcpToken.length) : '';
+  }
+
+  private handleMcpTokenReveal(): void {
+    this.mcpTokenRevealed = !this.mcpTokenRevealed;
+  }
+
+  /** Copy a secret to the clipboard, always telling the user what happened */
+  private async copyMcpValue(value: string, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(`${label} copied to clipboard`, 'success');
+    } catch {
+      showToast(`Failed to copy ${label.toLowerCase()} to clipboard`, 'error');
+    }
+  }
+
+  private async handleMcpTokenCopy(): Promise<void> {
+    await this.copyMcpValue(this.mcpToken, 'MCP access token');
+  }
+
+  private async handleMcpSnippetCopy(): Promise<void> {
+    await this.copyMcpValue(this.mcpClientConfigSnippet(true), 'MCP client configuration');
+  }
+
+  /**
+   * Replace the access token. Every client still using the old one starts
+   * failing immediately, so the confirmation says so before anything changes.
+   */
+  private async handleMcpRegenerateToken(): Promise<void> {
+    if (this.mcpRegenerating) return;
+    this.mcpRegenerating = true;
+
+    try {
+      const confirmed = await showConfirm(
+        'Regenerate MCP Token',
+        'Generate a new MCP access token? Every MCP client configured with the current token will stop working until you paste the new token into its configuration.',
+        'warning'
+      );
+      if (!confirmed) return;
+
+      const result = await mcpService.regenerateMcpToken();
+      if (result.success && result.data) {
+        this.mcpToken = result.data;
+        this.mcpError = null;
+        showToast('MCP access token regenerated — update your MCP clients', 'success');
+      } else {
+        this.mcpError = result.error?.message ?? 'Failed to regenerate the MCP access token';
+        showToast(this.mcpError, 'error');
+      }
+    } finally {
+      this.mcpRegenerating = false;
+    }
   }
 
   private async handleReset(): Promise<void> {
@@ -1873,6 +1995,66 @@ export class LvSettingsDialog extends LitElement {
               </div>
             </div>
           ` : nothing}
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Access Token</span>
+              <span class="setting-description">
+                Every MCP request must send this token. Keep it secret: anyone who has it can
+                read the history and contents of your open repositories.
+              </span>
+            </div>
+            <div class="mcp-token-controls">
+              <code class="mcp-token-value">
+                ${this.mcpToken
+                  ? this.mcpTokenRevealed
+                    ? this.mcpToken
+                    : this.maskedMcpToken()
+                  : 'Not generated yet'}
+              </code>
+              <button
+                class="mcp-token-reveal"
+                @click=${this.handleMcpTokenReveal}
+                ?disabled=${!this.mcpToken}
+              >
+                ${this.mcpTokenRevealed ? 'Hide' : 'Reveal'}
+              </button>
+              <button
+                class="mcp-token-copy"
+                @click=${this.handleMcpTokenCopy}
+                ?disabled=${!this.mcpToken}
+              >
+                Copy
+              </button>
+              <button
+                class="mcp-token-regenerate"
+                @click=${this.handleMcpRegenerateToken}
+                ?disabled=${this.mcpRegenerating}
+              >
+                ${this.mcpRegenerating ? '...' : 'Regenerate'}
+              </button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">MCP Client Configuration</span>
+              <span class="setting-description">
+                Paste this into your MCP client. A client set up before Leviathan required a token
+                must add the Authorization header, or its requests are refused with 401.
+              </span>
+            </div>
+            <button
+              class="mcp-snippet-copy"
+              @click=${this.handleMcpSnippetCopy}
+              ?disabled=${!this.mcpToken}
+            >
+              Copy
+            </button>
+          </div>
+          <pre class="mcp-client-config"><code>${this.mcpClientConfigSnippet(
+            this.mcpTokenRevealed
+          )}</code></pre>
         </div>
 
         <div class="settings-section">

@@ -13,6 +13,12 @@ export interface McpConfig {
   enabled: boolean;
   port: number;
   allowedOrigins: string[];
+  /**
+   * Bearer token every MCP request must present.
+   * Owned by the backend: it is returned by `getMcpConfig` and changed only by
+   * `regenerateMcpToken`, never by saving a configuration.
+   */
+  authToken?: string;
 }
 
 /**
@@ -56,7 +62,19 @@ export async function getMcpConfig(): Promise<CommandResult<McpConfig>> {
 
 /**
  * Update MCP server configuration
+ *
+ * The access token is deliberately not sent: the backend keeps the stored one,
+ * so a save can never leak or clear the secret.
  */
 export async function setMcpConfig(config: McpConfig): Promise<CommandResult<void>> {
-  return invokeCommand<void>('set_mcp_config', { config });
+  const { enabled, port, allowedOrigins } = config;
+  return invokeCommand<void>('set_mcp_config', { config: { enabled, port, allowedOrigins } });
+}
+
+/**
+ * Generate a new MCP access token, invalidating the previous one.
+ * Returns the new token.
+ */
+export async function regenerateMcpToken(): Promise<CommandResult<string>> {
+  return invokeCommand<string>('regenerate_mcp_token');
 }
