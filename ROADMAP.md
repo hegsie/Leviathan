@@ -78,8 +78,8 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
   - Compact/comfortable/spacious density settings
 
 - ✅ **Responsiveness & feedback**
-  - Clear progress indicators for long operations
-  - Cancellation support for fetch/clone/push
+  - Clear progress indicators for clone, with live byte/object counts; fetch/pull/push show an indeterminate spinner with no counts — no backend command emits the `operation-progress` event they listen for (planned: real progress data for fetch/pull/push)
+  - Cancellation support for clone only — fetch/pull/push accept an operation ID but never register it with the cancellation registry, and no call site marks them cancellable, so their Cancel button never renders (planned)
   - Better error messages with suggested fixes
   - Toast notifications for background operations
 
@@ -177,11 +177,11 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 - ✅ Focus indicators — global `:focus-visible` styles in shared stylesheet, keyboard-only outlines via `:focus:not(:focus-visible)` suppression
 - ✅ Skip link — "Skip to main content" link appears on Tab, jumps past toolbar
 - ✅ Focus trap in modals — Tab cycles within dialog, focus restored on close
-- ✅ Accessibility audit — addressed WCAG 2.4.7 (Focus Visible), 4.1.3 (Status Messages), 2.4.3 (Focus Order)
+- ✅ Accessibility audit *(partial)* — addressed WCAG 2.4.7 (Focus Visible), 4.1.3 (Status Messages), 2.4.3 (Focus Order). Not yet covered: `prefers-reduced-motion` (zero rules anywhere in `src/`), `focus-visible` styling beyond the shared global rule and a handful of components, `forced-colors`/high-contrast support for the canvas-rendered commit graph, and accessible names for the hand-rolled toggle switches (no `aria-label`/`aria-labelledby` linking their visible setting text to the checkbox)
 
 #### Security Hardening
 
-- ✅ **Paranoid mode** — offline mode toggle blocks all network operations (fetch/push/pull/clone), confirmation prompts before network operations, remote domain allowlist. Guards enforced in the git service layer before any Tauri command.
+- ✅ **Paranoid mode** *(partial — frontend only)* — offline mode toggle blocks fetch/push/pull/clone, confirmation prompts before network operations, and a remote domain allowlist, all enforced in the frontend git service layer before a Tauri command is invoked. There is no matching Rust-side check: a call that reaches a command directly is not blocked. Two open PRs close the known AI-provider and avatar-fetch leaks around this gate; backend enforcement in `src-tauri` itself remains open work.
 - ✅ **Supply chain transparency** — build info command exposes app version, Rust version, build target, and profile. Settings stored in Zustand with localStorage persistence.
 
 ---
@@ -258,7 +258,7 @@ Our north star: *A privacy-first, AI-native Git workstation where intelligence r
 
 - ✅ **GPU-Accelerated Local Inference** — Rust-native GGUF inference via `llama-cpp-2` with hardware acceleration: Metal on macOS ARM64, CUDA on Linux/Windows, CPU fallback. Supports llama, gemma, phi, mistral, and qwen architectures.
 
-- ✅ **The "Context Proxy" (MCP)** — Local-first implementation of the **Model Context Protocol**. Leviathan serves as an MCP host with HTTP/JSON-RPC server, exposing 6+ Git tools (`get_commit_history`, `get_branches`, `get_status`, `get_diff`, `get_file_blame`, `get_diff_stats`) for external tools to query.
+- ✅ **The "Context Proxy" (MCP)** — Local-first implementation of the **Model Context Protocol**. Leviathan serves as an MCP host with HTTP/JSON-RPC server, exposing 7 Git tools (`get_commit_history`, `get_branches`, `get_status`, `get_diff`, `get_file_blame`, `search_commits`, `get_open_repositories`) for external tools to query.
 
 - ✅ **Local Model Management** — Download models from HuggingFace with SHA-256 verification, progress tracking, cancellation support. Load/unload/delete models. Settings UI with system capabilities display and model browser.
 
@@ -325,10 +325,35 @@ By Q2 2027, Leviathan's primary advantage is that **it costs $0 in API credits**
 
 ### Testing & Quality Assurance
 
-- ✅ **Unit tests** — 127+ test files, 2635+ tests via web-test-runner, 36+ Rust AI tests
-- ✅ **E2E tests** — 38 Playwright test files covering dialogs, git operations, UI components, OAuth flows
+- ✅ **Unit tests** — 261+ test files, 5,200+ tests via web-test-runner, 228+ Rust AI tests
+- ✅ **E2E tests** — 61 Playwright test files covering dialogs, git operations, UI components, OAuth flows
 - ✅ **Rust tests** — integration tests for Tauri commands with TestRepo helpers
 - ✅ **CI/CD** — GitHub Actions build workflow with signing for tagged releases
+
+---
+
+## Open Work
+
+Items with no checkmark above, or marked *(partial)*, still have real gaps. Found during a truth
+pass against the current code (2026-09-04) and not yet tracked elsewhere in this document:
+
+- **Native application menu bar** — only the system tray menu is built (`MenuBuilder` +
+  `TrayIconBuilder::menu`, `src-tauri/src/lib.rs:203-222`). No `set_menu` call attaches a menu to
+  the main window, so there is no native File/Edit/View menu bar.
+- **Signed-off-by / Co-authored-by commit trailers** — the commit UI and backend have no option to
+  append these trailers automatically.
+- **Embedded terminal** — `open_terminal` (`src-tauri/src/commands/terminal.rs:26`) shells out to
+  the OS's own terminal application (Terminal.app, cmd.exe, or the first available Linux emulator).
+  There is no in-app terminal panel or pty.
+- **Recursive submodule clone** — submodule add/init/update/sync/remove all exist
+  (`src-tauri/src/commands/submodule.rs`), but the clone command has no `--recurse-submodules`
+  equivalent; a freshly cloned repo with submodules needs a manual init/update afterward.
+- **Localisation** — no i18n framework is wired in; every UI string in `src/` is hard-coded English.
+- **Inline PR review comments** — the GitHub/GitLab/Azure DevOps/Bitbucket dialogs generate PR/MR
+  descriptions but cannot post or view line-level review comments on a pull request.
+- **macOS Intel/universal release builds** — `.github/workflows/build.yml` builds only the
+  `aarch64-apple-darwin` target; there is no `x86_64-apple-darwin` build or a `lipo` step to produce
+  a universal binary, though README.md previously advertised a "macOS (Universal)" download.
 
 ---
 
@@ -345,4 +370,4 @@ Remember: Leviathan's core value proposition is **privacy-first, offline-capable
 
 ---
 
-Last updated: 2026-03-22
+Last updated: 2026-09-04
