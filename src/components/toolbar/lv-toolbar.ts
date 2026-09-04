@@ -10,6 +10,11 @@ import { repositoryStore, type OpenRepository } from '../../stores/index.ts';
 import { openRepository } from '../../services/git.service.ts';
 import { openRepositoryDialog } from '../../services/dialog.service.ts';
 import { showToast } from '../../services/notification.service.ts';
+import {
+  openRepositoryInTerminal,
+  openRepositoryInFileManager,
+  openRepositoryInEditor,
+} from '../../services/open-location.service.ts';
 import { searchIndexService } from '../../services/search-index.service.ts';
 import { embeddingIndexService } from '../../services/embedding-index.service.ts';
 import { loggers } from '../../utils/logger.ts';
@@ -533,6 +538,34 @@ export class LvToolbar extends LitElement {
     }
   }
 
+  /**
+   * The three "open this repository elsewhere" tab actions. Like Copy Path
+   * they act on the CLICKED tab, not the active one, so the path is read from
+   * the store by the context menu's index before the menu closes.
+   * Success is the OS opening something; only failures are reported, by the
+   * shared service, using the backend's own message.
+   */
+  private async handleOpenTabInTerminal(index: number): Promise<void> {
+    const path = repositoryStore.getState().openRepositories[index]?.repository.path;
+    this.tabContextMenu = null;
+    if (!path) return;
+    await openRepositoryInTerminal(path);
+  }
+
+  private async handleRevealTabInFileManager(index: number): Promise<void> {
+    const path = repositoryStore.getState().openRepositories[index]?.repository.path;
+    this.tabContextMenu = null;
+    if (!path) return;
+    await openRepositoryInFileManager(path);
+  }
+
+  private async handleOpenTabInEditor(index: number): Promise<void> {
+    const path = repositoryStore.getState().openRepositories[index]?.repository.path;
+    this.tabContextMenu = null;
+    if (!path) return;
+    await openRepositoryInEditor(path);
+  }
+
   private handleToggleTabList(e: MouseEvent): void {
     if (this.tabListAnchor) {
       this.tabListAnchor = null;
@@ -842,6 +875,28 @@ export class LvToolbar extends LitElement {
         </button>
         <button class="context-menu-item" role="menuitem" @click=${() => this.handleCloseAllTabs()}>
           Close All
+        </button>
+        <div class="context-menu-separator"></div>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => void this.handleOpenTabInTerminal(index)}
+        >
+          Open in Terminal
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => void this.handleRevealTabInFileManager(index)}
+        >
+          Reveal in File Manager
+        </button>
+        <button
+          class="context-menu-item"
+          role="menuitem"
+          @click=${() => void this.handleOpenTabInEditor(index)}
+        >
+          Open in Editor
         </button>
         <div class="context-menu-separator"></div>
         <button class="context-menu-item" role="menuitem" @click=${() => this.handleCopyTabPath(index)}>
