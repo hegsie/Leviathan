@@ -184,7 +184,7 @@ Leviathan is built for developers who value **privacy, performance, and control*
 - **AI Merge Conflict Resolution** - per-conflict and batch AI suggestions with explanations in the 3-way merge editor
 - **Automatic Changelog Generation** - AI-powered release notes from commit history between any two refs
 - **Semantic Search** - embedding-based commit search using ONNX Runtime and sqlite-vec vector storage
-- **MCP Server** - Model Context Protocol server exposing Git tools for external AI tools (Cursor, VS Code, etc.)
+- **MCP Server** - Model Context Protocol server exposing Git tools for external AI tools (Cursor, VS Code, etc.), protected by a generated access token that every client must send as `Authorization: Bearer <token>` (copy the token and a ready-made client configuration from Settings → MCP Server)
 - **7 AI Providers** - Ollama, LM Studio, OpenAI, Anthropic, GitHub Copilot, Google Gemini, and embedded local inference
 - **Adaptive Model Selection** - detects system VRAM/GPU and recommends optimal model (4 curated models)
 - **Embedded LLM (Default)** - runs entirely on your machine with Metal (macOS) or CUDA (Windows/Linux) GPU acceleration
