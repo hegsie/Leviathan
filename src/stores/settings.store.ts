@@ -5,11 +5,35 @@
 
 import { createStore } from 'zustand/vanilla';
 import { persist } from 'zustand/middleware';
+import type { DiffWhitespaceMode } from '../types/api.types.ts';
 
 export type Theme = 'dark' | 'light' | 'system';
 export type FontSize = 'small' | 'medium' | 'large';
 export type Density = 'compact' | 'comfortable' | 'spacious';
 export type GraphColorScheme = 'default' | 'pastel' | 'vibrant' | 'monochrome' | 'high-contrast';
+
+/**
+ * Bounds for `diffContextLines`. git's own default is 3; 20 is plenty of
+ * surrounding context for reading a hunk and keeps a mistyped number from
+ * asking the backend to render most of the file. The backend has no
+ * "whole file" context option, so neither does the UI.
+ */
+export const MIN_DIFF_CONTEXT_LINES = 0;
+export const MAX_DIFF_CONTEXT_LINES = 20;
+
+/** Clamp any user- or storage-supplied context-line value into range. */
+export function clampDiffContextLines(value: number): number {
+  if (!Number.isFinite(value)) return 3;
+  return Math.min(MAX_DIFF_CONTEXT_LINES, Math.max(MIN_DIFF_CONTEXT_LINES, Math.trunc(value)));
+}
+
+/** Labels for the whitespace modes the backend implements, in menu order. */
+export const DIFF_WHITESPACE_MODES: { value: DiffWhitespaceMode; label: string }[] = [
+  { value: 'none', label: 'Show all whitespace' },
+  { value: 'eol', label: 'Ignore trailing whitespace' },
+  { value: 'change', label: 'Ignore whitespace changes' },
+  { value: 'all', label: 'Ignore all whitespace' },
+];
 
 export interface SettingsState {
   // Appearance
@@ -32,7 +56,8 @@ export interface SettingsState {
   // Diff settings
   diffContextLines: number;
   wordWrap: boolean;
-  showWhitespace: boolean;
+  /** Whitespace mode sent to the diff commands ('none' shows every change). */
+  diffIgnoreWhitespace: DiffWhitespaceMode;
 
   // Behavior
   autoFetchInterval: number; // 0 = disabled, in minutes
@@ -70,7 +95,7 @@ export interface SettingsState {
   setGraphRowHeight: (height: number) => void;
   setDiffContextLines: (lines: number) => void;
   setWordWrap: (wrap: boolean) => void;
-  setShowWhitespace: (show: boolean) => void;
+  setDiffIgnoreWhitespace: (mode: DiffWhitespaceMode) => void;
   setAutoFetchInterval: (minutes: number) => void;
   setFetchOnFocus: (enabled: boolean) => void;
   setConfirmBeforeDiscard: (confirm: boolean) => void;
@@ -102,7 +127,8 @@ const defaultSettings = {
   // Defaults OFF: until it was wired up nothing read this, and the diff view's
   // own copy — the only word wrap anyone has ever seen — defaulted to off.
   wordWrap: false,
-  showWhitespace: false,
+  // 'none' is the behaviour every diff has always had, so it stays the default.
+  diffIgnoreWhitespace: 'none' as DiffWhitespaceMode,
   autoFetchInterval: 0,
   fetchOnFocus: false,
   confirmBeforeDiscard: true,
@@ -179,11 +205,15 @@ export const settingsStore = createStore<SettingsState>()(
 
       setGraphRowHeight: (graphRowHeight) => set({ graphRowHeight }),
 
-      setDiffContextLines: (diffContextLines) => set({ diffContextLines }),
+      // Clamped here rather than at each control, so a stepper, the Settings
+      // dialog and a hand-edited persisted value can never disagree about what
+      // is in range.
+      setDiffContextLines: (diffContextLines) =>
+        set({ diffContextLines: clampDiffContextLines(diffContextLines) }),
 
       setWordWrap: (wordWrap) => set({ wordWrap }),
 
-      setShowWhitespace: (showWhitespace) => set({ showWhitespace }),
+      setDiffIgnoreWhitespace: (diffIgnoreWhitespace) => set({ diffIgnoreWhitespace }),
 
       setAutoFetchInterval: (autoFetchInterval) => set({ autoFetchInterval }),
 
@@ -217,7 +247,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 3,
+      version: 4,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -235,6 +265,19 @@ export const settingsStore = createStore<SettingsState>()(
         }
         if (fromVersion < 3) {
           state.wordWrap = false;
+        }
+        if (fromVersion < 4) {
+          // `showWhitespace` had the same story again: persisted, never read,
+          // so its stored value was never a user choice. It is replaced by the
+          // four-mode `diffIgnoreWhitespace`, which starts at the behaviour
+          // every diff has always had.
+          delete (state as Record<string, unknown>).showWhitespace;
+          state.diffIgnoreWhitespace = 'none';
+        }
+        // A persisted context-line count predates any bound being enforced, and
+        // is also the one setting a user could have hand-edited in storage.
+        if (state.diffContextLines !== undefined) {
+          state.diffContextLines = clampDiffContextLines(Number(state.diffContextLines));
         }
         return state as SettingsState;
       },

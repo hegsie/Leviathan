@@ -1,6 +1,18 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
+import {
+  settingsStore,
+  getGraphColorSchemes,
+  clampDiffContextLines,
+  DIFF_WHITESPACE_MODES,
+  MIN_DIFF_CONTEXT_LINES,
+  MAX_DIFF_CONTEXT_LINES,
+  type Theme,
+  type FontSize,
+  type Density,
+  type GraphColorScheme,
+} from '../../stores/settings.store.ts';
+import type { DiffWhitespaceMode } from '../../types/api.types.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import { openCloneDestinationDialog, showConfirm } from '../../services/dialog.service.ts';
@@ -327,6 +339,8 @@ export class LvSettingsDialog extends LitElement {
   @state() private showAvatars = true;
   @state() private showCommitSize = true;
   @state() private wordWrap = true;
+  @state() private diffIgnoreWhitespace: DiffWhitespaceMode = 'none';
+  @state() private diffContextLines = 3;
   @state() private confirmBeforeDiscard = true;
   @state() private offlineMode = false;
   @state() private confirmNetworkOps = false;
@@ -418,6 +432,7 @@ export class LvSettingsDialog extends LitElement {
     // selects once their options exist.
     this.syncSelectValue('#merge-tool-select', this.mergeToolName);
     this.syncSelectValue('#diff-tool-select', this.diffToolName);
+    this.syncSelectValue('#diff-whitespace-select', this.diffIgnoreWhitespace);
   }
 
   private syncSelectValue(selector: string, value: string | null): void {
@@ -525,6 +540,8 @@ export class LvSettingsDialog extends LitElement {
     this.showAvatars = settings.showAvatars;
     this.showCommitSize = settings.showCommitSize;
     this.wordWrap = settings.wordWrap;
+    this.diffIgnoreWhitespace = settings.diffIgnoreWhitespace;
+    this.diffContextLines = settings.diffContextLines;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
     this.offlineMode = settings.offlineMode;
     this.confirmNetworkOps = settings.confirmNetworkOps;
@@ -852,6 +869,30 @@ export class LvSettingsDialog extends LitElement {
     const value = Math.max(0, parseInt(input.value, 10) || 0);
     this.networkOperationTimeout = value;
     settingsStore.getState().setNetworkOperationTimeout(value);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
+  }
+
+  /**
+   * Diff render options. The diff view's toolbar writes the same two settings
+   * and re-reads them from the store, so a change here shows up in an open diff
+   * immediately — there is no second copy of either preference.
+   */
+  private handleDiffIgnoreWhitespaceChange(e: Event): void {
+    const select = e.target as HTMLSelectElement;
+    const mode = select.value as DiffWhitespaceMode;
+    this.diffIgnoreWhitespace = mode;
+    settingsStore.getState().setDiffIgnoreWhitespace(mode);
+    window.dispatchEvent(new CustomEvent('settings-changed'));
+  }
+
+  private handleDiffContextLinesChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    const value = clampDiffContextLines(parseInt(input.value, 10));
+    // Write the clamped number back so an out-of-range entry does not sit in
+    // the field claiming to be in effect.
+    input.value = String(value);
+    this.diffContextLines = value;
+    settingsStore.getState().setDiffContextLines(value);
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
@@ -1349,7 +1390,7 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Editor</div>
+          <div class="section-title">Diff</div>
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1357,6 +1398,48 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-description">Wrap long lines in diff view</span>
             </div>
             ${this.renderToggle(this.wordWrap, 'wordWrap')}
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name" id="diff-whitespace-label">Whitespace</span>
+              <span class="setting-description">
+                How whitespace-only changes are treated when rendering a diff
+              </span>
+            </div>
+            <select
+              id="diff-whitespace-select"
+              aria-labelledby="diff-whitespace-label"
+              .value=${this.diffIgnoreWhitespace}
+              @change=${this.handleDiffIgnoreWhitespaceChange}
+            >
+              ${DIFF_WHITESPACE_MODES.map(mode => html`
+                <option value=${mode.value} ?selected=${mode.value === this.diffIgnoreWhitespace}>
+                  ${mode.label}
+                </option>
+              `)}
+            </select>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name" id="diff-context-label">Context Lines</span>
+              <span class="setting-description">
+                Unchanged lines shown around each change
+                (${MIN_DIFF_CONTEXT_LINES}-${MAX_DIFF_CONTEXT_LINES}, git's default is 3)
+              </span>
+            </div>
+            <input
+              id="diff-context-lines-input"
+              type="number"
+              min=${MIN_DIFF_CONTEXT_LINES}
+              max=${MAX_DIFF_CONTEXT_LINES}
+              step="1"
+              aria-labelledby="diff-context-label"
+              .value=${String(this.diffContextLines)}
+              @change=${this.handleDiffContextLinesChange}
+              style="width: 80px;"
+            />
           </div>
         </div>
 

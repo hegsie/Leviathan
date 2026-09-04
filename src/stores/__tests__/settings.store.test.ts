@@ -1,9 +1,33 @@
 import { expect } from '@open-wc/testing';
-import { settingsStore, getGraphColorSchemes } from '../settings.store.ts';
+import {
+  settingsStore,
+  getGraphColorSchemes,
+  clampDiffContextLines,
+  MIN_DIFF_CONTEXT_LINES,
+  MAX_DIFF_CONTEXT_LINES,
+} from '../settings.store.ts';
 
 describe('settings.store', () => {
   beforeEach(() => {
     settingsStore.getState().resetToDefaults();
+  });
+
+  describe('clampDiffContextLines', () => {
+    it('keeps in-range integers untouched', () => {
+      expect(clampDiffContextLines(0)).to.equal(MIN_DIFF_CONTEXT_LINES);
+      expect(clampDiffContextLines(3)).to.equal(3);
+      expect(clampDiffContextLines(20)).to.equal(MAX_DIFF_CONTEXT_LINES);
+    });
+
+    it('clamps out-of-range values to the bounds', () => {
+      expect(clampDiffContextLines(-1)).to.equal(MIN_DIFF_CONTEXT_LINES);
+      expect(clampDiffContextLines(21)).to.equal(MAX_DIFF_CONTEXT_LINES);
+    });
+
+    it('falls back to git’s default for a non-numeric value', () => {
+      expect(clampDiffContextLines(Number.NaN)).to.equal(3);
+      expect(clampDiffContextLines(Number.POSITIVE_INFINITY)).to.equal(3);
+    });
   });
 
   describe('initial state / defaults', () => {
@@ -49,8 +73,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().wordWrap).to.be.false;
     });
 
-    it('should not show whitespace by default', () => {
-      expect(settingsStore.getState().showWhitespace).to.be.false;
+    it('should not ignore any whitespace by default', () => {
+      // 'none' is what every diff has always rendered, so it must stay the
+      // default when the setting became live.
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('none');
     });
 
     it('should have auto fetch disabled by default', () => {
@@ -194,14 +220,32 @@ describe('settings.store', () => {
       expect(settingsStore.getState().diffContextLines).to.equal(5);
     });
 
+    it('should clamp diff context lines into range', () => {
+      settingsStore.getState().setDiffContextLines(999);
+      expect(settingsStore.getState().diffContextLines).to.equal(MAX_DIFF_CONTEXT_LINES);
+
+      settingsStore.getState().setDiffContextLines(-4);
+      expect(settingsStore.getState().diffContextLines).to.equal(MIN_DIFF_CONTEXT_LINES);
+
+      // A cleared number input yields NaN; fall back to git's default.
+      settingsStore.getState().setDiffContextLines(Number.NaN);
+      expect(settingsStore.getState().diffContextLines).to.equal(3);
+
+      settingsStore.getState().setDiffContextLines(4.7);
+      expect(settingsStore.getState().diffContextLines).to.equal(4);
+    });
+
     it('should set word wrap', () => {
       settingsStore.getState().setWordWrap(false);
       expect(settingsStore.getState().wordWrap).to.be.false;
     });
 
-    it('should set show whitespace', () => {
-      settingsStore.getState().setShowWhitespace(true);
-      expect(settingsStore.getState().showWhitespace).to.be.true;
+    it('should set the diff whitespace mode', () => {
+      settingsStore.getState().setDiffIgnoreWhitespace('all');
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('all');
+
+      settingsStore.getState().setDiffIgnoreWhitespace('none');
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('none');
     });
 
     it('should set auto fetch interval', () => {

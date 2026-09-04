@@ -385,6 +385,7 @@ import type {
   DescribeResult,
   GetDiffCommand,
   GetDiffWithOptionsCommand,
+  DiffWhitespaceMode,
   GetAvatarUrlCommand,
   GetAvatarUrlsCommand,
   CheckoutFileFromCommitCommand,
@@ -2373,17 +2374,32 @@ export async function getDiffWithOptions(
   return invokeCommand<DiffFile[]>("get_diff_with_options", options);
 }
 
+/**
+ * Per-view diff rendering options shared by the single-file diff commands.
+ * Both are optional: omitting them keeps git's defaults (3 context lines, no
+ * whitespace ignored).
+ */
+export interface DiffRenderOptions {
+  /** Lines of unchanged context around each hunk. */
+  contextLines?: number;
+  /** Whitespace handling mode ("none" shows every change). */
+  ignoreWhitespace?: DiffWhitespaceMode;
+}
+
 export async function getFileDiff(
   repoPath: string,
   filePath: string,
   staged?: boolean,
   maxLines?: number,
+  options?: DiffRenderOptions,
 ): Promise<CommandResult<DiffFile>> {
   return invokeCommand<DiffFile>("get_file_diff", {
     path: repoPath,
     filePath,
     staged,
     maxLines,
+    contextLines: options?.contextLines,
+    ignoreWhitespace: options?.ignoreWhitespace,
   });
 }
 
@@ -2402,12 +2418,15 @@ export async function getCommitFileDiff(
   commitOid: string,
   filePath: string,
   maxLines?: number,
+  options?: DiffRenderOptions,
 ): Promise<CommandResult<DiffFile>> {
   return invokeCommand<DiffFile>("get_commit_file_diff", {
     path: repoPath,
     commitOid,
     filePath,
     maxLines,
+    contextLines: options?.contextLines,
+    ignoreWhitespace: options?.ignoreWhitespace,
   });
 }
 
