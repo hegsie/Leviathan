@@ -1082,6 +1082,123 @@ test.describe('Graph refresh while scrolled deep', () => {
   });
 });
 
+test.describe('Graph Empty Repository', () => {
+  let graph: GraphPanelPage;
+
+  test.beforeEach(async ({ page }) => {
+    graph = new GraphPanelPage(page);
+    // A freshly initialised repository: the walk returns no commits
+    await setupOpenRepository(page, { commits: [] });
+    await expect(graph.canvas).toBeVisible();
+  });
+
+  test('shows the empty state instead of a blank canvas', async ({ page }) => {
+    const emptyState = page.locator('lv-graph-canvas .graph-overlay.empty-state');
+    await expect(emptyState).toBeVisible();
+    await expect(emptyState).toContainText('No commits yet');
+    await expect(emptyState).toContainText('Commit panel');
+  });
+
+  test('announces "No commits" rather than a permanent loading label', async ({ page }) => {
+    const canvasElement = page.locator('lv-graph-canvas canvas[role="img"]');
+    await expect(canvasElement).toHaveAttribute('aria-label', 'No commits');
+  });
+
+  test('does not show the error panel for an empty repository', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas .graph-overlay.empty-state')).toBeVisible();
+    await expect(page.locator('lv-graph-canvas .info-panel.error-panel')).toHaveCount(0);
+  });
+
+  test('replaces the empty state once a commit exists', async ({ page }) => {
+    await expect(page.locator('lv-graph-canvas .graph-overlay.empty-state')).toBeVisible();
+
+    await injectCommandMock(page, { get_commit_history: [makeCommit(0)] });
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate((el) => {
+      (el as HTMLElement & { refresh(): void }).refresh();
+    }, handle);
+
+    await waitForNodeCount(page, 1);
+    await expect(page.locator('lv-graph-canvas .graph-overlay.empty-state')).toHaveCount(0);
+  });
+});
+
+test.describe('Graph Load Error Retry', () => {
+  let graph: GraphPanelPage;
+
+  const commits = [makeCommit(0, ['commit1']), makeCommit(1, [])];
+
+  /** Make the next commit walk fail and force a reload */
+  async function failNextLoad(page: import('@playwright/test').Page, message: string) {
+    await injectCommandError(page, 'get_commit_history', message);
+    const handle = await getGraphCanvasHandle(page);
+    await page.evaluate((el) => {
+      (el as HTMLElement & { refresh(): void }).refresh();
+    }, handle);
+  }
+
+  test.beforeEach(async ({ page }) => {
+    graph = new GraphPanelPage(page);
+    await setupOpenRepository(page, { commits });
+    await expect(graph.canvas).toBeVisible();
+    await waitForNodeCount(page, 2);
+  });
+
+  test('shows a Retry button when the commit walk fails', async ({ page }) => {
+    await failNextLoad(page, 'unable to read the object database');
+
+    const errorPanel = page.locator('lv-graph-canvas .info-panel.error-panel');
+    await expect(errorPanel).toBeVisible();
+    await expect(errorPanel).toContainText('unable to read the object database');
+    await expect(errorPanel.locator('.retry-btn')).toBeVisible();
+    await expect(errorPanel.locator('.retry-btn')).toBeEnabled();
+
+    // The previously loaded commits are still painted, so the canvas keeps
+    // announcing them — the failure is announced by the panel's role="alert"
+    const canvasElement = page.locator('lv-graph-canvas canvas[role="img"]');
+    await expect(canvasElement).toHaveAttribute('aria-label', /showing 2/);
+  });
+
+  test('Retry reloads the graph and clears the error on success', async ({ page }) => {
+    await failNextLoad(page, 'unable to read the object database');
+    const errorPanel = page.locator('lv-graph-canvas .info-panel.error-panel');
+    await expect(errorPanel).toBeVisible();
+
+    // The repository becomes readable again
+    await startCommandCaptureWithMocks(page, { get_commit_history: commits });
+
+    await errorPanel.locator('.retry-btn').click();
+
+    await expect(errorPanel).toHaveCount(0);
+    await waitForNodeCount(page, 2);
+    const retryCalls = await findCommand(page, 'get_commit_history');
+    expect(retryCalls.length).toBeGreaterThan(0);
+  });
+
+  test('Retry keeps the error panel when the reload fails again', async ({ page }) => {
+    await failNextLoad(page, 'unable to read the object database');
+    const errorPanel = page.locator('lv-graph-canvas .info-panel.error-panel');
+    await expect(errorPanel).toBeVisible();
+
+    await injectCommandError(page, 'get_commit_history', 'still unreadable');
+    await errorPanel.locator('.retry-btn').click();
+
+    await expect(errorPanel).toContainText('still unreadable');
+    await expect(errorPanel.locator('.retry-btn')).toBeEnabled();
+  });
+
+  test('Retry on a repository that is now empty shows the empty state', async ({ page }) => {
+    await failNextLoad(page, 'unable to read the object database');
+    const errorPanel = page.locator('lv-graph-canvas .info-panel.error-panel');
+    await expect(errorPanel).toBeVisible();
+
+    await injectCommandMock(page, { get_commit_history: [] });
+    await errorPanel.locator('.retry-btn').click();
+
+    await expect(errorPanel).toHaveCount(0);
+    await expect(page.locator('lv-graph-canvas .graph-overlay.empty-state')).toBeVisible();
+  });
+});
 
 /**
  * Ctrl+clicking several commits and acting on the whole set.

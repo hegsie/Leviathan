@@ -114,6 +114,89 @@ describe('progress.service backend events', () => {
     progressService.completeOperation(repoB);
   });
 
+  // ---- operation-progress carries the real transfer counts ----
+  //
+  // Nothing in the backend used to emit this event at all, so every
+  // fetch/pull/push row showed an indeterminate stripe with no counts for as
+  // long as it ran.
+
+  it('updates the named row from an operation-progress event', () => {
+    const id = progressService.startOperation('fetch', 'Fetching from remote...', {
+      cancellable: true,
+    });
+
+    emit('operation-progress', {
+      operationId: id,
+      message: 'Fetching from origin',
+      progress: 42,
+      receivedObjects: 420,
+      totalObjects: 1000,
+      receivedBytes: 2048,
+    });
+
+    const [op] = progressService.getOperations();
+    expect(op.message).to.equal('Fetching from origin');
+    expect(op.progress).to.equal(42);
+    expect(op.receivedObjects).to.equal(420);
+    expect(op.totalObjects).to.equal(1000);
+    expect(op.receivedBytes).to.equal(2048);
+
+    progressService.completeOperation(id);
+  });
+
+  it('routes progress to the row it names and no other', () => {
+    const fetching = progressService.startOperation('fetch', 'Fetching...');
+    const pushing = progressService.startOperation('push', 'Pushing...');
+
+    emit('operation-progress', {
+      operationId: pushing,
+      progress: 10,
+      receivedObjects: 5,
+      totalObjects: 50,
+      receivedBytes: 100,
+    });
+
+    const rows = progressService.getOperations();
+    expect(rows.find((op) => op.id === fetching)?.receivedObjects).to.equal(undefined);
+    expect(rows.find((op) => op.id === pushing)?.receivedObjects).to.equal(5);
+
+    progressService.completeOperation(fetching);
+    progressService.completeOperation(pushing);
+  });
+
+  it('notifies subscribers so the indicator re-renders on progress', () => {
+    const id = progressService.startOperation('pull', 'Pulling...');
+    let seen = 0;
+    const unsubscribe = progressService.subscribe(() => {
+      seen++;
+    });
+    const afterSubscribe = seen;
+
+    emit('operation-progress', {
+      operationId: id,
+      progress: 5,
+      receivedObjects: 1,
+      totalObjects: 20,
+      receivedBytes: 64,
+    });
+
+    expect(seen).to.be.greaterThan(afterSubscribe);
+
+    unsubscribe();
+    progressService.completeOperation(id);
+  });
+
+  it('ignores progress for a row that has already gone', () => {
+    const id = progressService.startOperation('fetch', 'Fetching...');
+    progressService.completeOperation(id);
+
+    // A late event from a transfer that has already finished must not
+    // resurrect its row.
+    emit('operation-progress', { operationId: id, progress: 90 });
+
+    expect(progressService.getOperations()).to.have.length(0);
+  });
+
   it('still lets the caller that started a row remove it', () => {
     // The rows are owned by their callers (app-shell completes on success and
     // fails on error, on every branch), which is why nothing else needs to
