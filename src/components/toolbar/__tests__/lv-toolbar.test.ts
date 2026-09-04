@@ -305,6 +305,148 @@ describe('lv-toolbar repository tabs', () => {
       expect(el.shadowRoot!.querySelector('.tab-list-menu')).to.not.exist;
     });
 
+    describe('open this repository elsewhere', () => {
+      /** Let the click handler's awaited service call settle. */
+      async function settle(el: LvToolbar): Promise<void> {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+
+      let invoked: Array<{ command: string; args: Record<string, unknown> }>;
+
+      beforeEach(() => {
+        invoked = [];
+        uiStore.setState({ toasts: [] });
+        mockInvoke = (command: string, args?: unknown) => {
+          invoked.push({ command, args: (args as Record<string, unknown>) ?? {} });
+          // open_in_configured_editor resolves with an OpenResult payload.
+          if (command === 'open_in_configured_editor') {
+            return Promise.resolve({ success: true, message: 'Opened in code' });
+          }
+          return Promise.resolve(null);
+        };
+      });
+
+      function errorToasts(): Array<{ message: string; type: string }> {
+        return uiStore.getState().toasts.filter((t) => t.type === 'error') as Array<{
+          message: string;
+          type: string;
+        }>;
+      }
+
+      it('offers all three actions on the menu', async () => {
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 1);
+
+        expect(menuItem(menu, 'Open in Terminal')).to.exist;
+        expect(menuItem(menu, 'Reveal in File Manager')).to.exist;
+        expect(menuItem(menu, 'Open in Editor')).to.exist;
+      });
+
+      it('Open in Terminal opens the CLICKED tab, not the active one', async () => {
+        const el = await createToolbar();
+        // The third tab is active; the menu is opened on the second.
+        expect(repositoryStore.getState().activeIndex).to.equal(2);
+        const menu = await openContextMenu(el, 1);
+
+        menuItem(menu, 'Open in Terminal').click();
+        await settle(el);
+
+        const call = invoked.find((c) => c.command === 'open_terminal');
+        expect(call, 'open_terminal should be invoked').to.exist;
+        expect(call!.args.path).to.equal('/repo/two');
+        expect(errorToasts()).to.have.lengthOf(0);
+        expect(el.shadowRoot!.querySelector('.tab-context-menu')).to.not.exist;
+      });
+
+      it('Reveal in File Manager opens the clicked tab in the file manager', async () => {
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 0);
+
+        menuItem(menu, 'Reveal in File Manager').click();
+        await settle(el);
+
+        const call = invoked.find((c) => c.command === 'open_file_manager');
+        expect(call, 'open_file_manager should be invoked').to.exist;
+        expect(call!.args.path).to.equal('/repo/one');
+        expect(errorToasts()).to.have.lengthOf(0);
+      });
+
+      it('Open in Editor targets the repository root of the clicked tab', async () => {
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 2);
+
+        menuItem(menu, 'Open in Editor').click();
+        await settle(el);
+
+        const call = invoked.find((c) => c.command === 'open_in_configured_editor');
+        expect(call, 'open_in_configured_editor should be invoked').to.exist;
+        expect(call!.args.path).to.equal('/repo/three');
+        expect(call!.args.filePath).to.equal('/repo/three');
+        expect(errorToasts()).to.have.lengthOf(0);
+      });
+
+      it('surfaces the backend reason when no terminal emulator is found', async () => {
+        mockInvoke = (command: string) => {
+          if (command === 'open_terminal') {
+            return Promise.reject({
+              code: 'OPERATION_FAILED',
+              message: 'Operation failed: No terminal emulator found',
+            });
+          }
+          return Promise.resolve(null);
+        };
+
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 0);
+
+        menuItem(menu, 'Open in Terminal').click();
+        await settle(el);
+
+        const errors = errorToasts();
+        expect(errors, 'a failed terminal launch must not be silent').to.have.lengthOf(1);
+        expect(errors[0].message).to.contain('No terminal emulator found');
+      });
+
+      it('surfaces the backend reason when the file manager cannot open', async () => {
+        mockInvoke = (command: string) => {
+          if (command === 'open_file_manager') {
+            return Promise.reject({ code: 'INVALID_PATH', message: 'Invalid path: /repo/one' });
+          }
+          return Promise.resolve(null);
+        };
+
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 0);
+
+        menuItem(menu, 'Reveal in File Manager').click();
+        await settle(el);
+
+        const errors = errorToasts();
+        expect(errors).to.have.lengthOf(1);
+        expect(errors[0].message).to.contain('Invalid path: /repo/one');
+      });
+
+      it('reports an editor that resolves with success:false', async () => {
+        mockInvoke = (command: string) => {
+          if (command === 'open_in_configured_editor') {
+            return Promise.resolve({ success: false, message: 'No editor configured' });
+          }
+          return Promise.resolve(null);
+        };
+
+        const el = await createToolbar();
+        const menu = await openContextMenu(el, 0);
+
+        menuItem(menu, 'Open in Editor').click();
+        await settle(el);
+
+        const errors = errorToasts();
+        expect(errors, 'OpenResult.success === false must be reported').to.have.lengthOf(1);
+        expect(errors[0].message).to.contain('No editor configured');
+      });
+    });
+
     it('closes via the backdrop without touching any tab', async () => {
       const el = await createToolbar();
       await openContextMenu(el, 0);

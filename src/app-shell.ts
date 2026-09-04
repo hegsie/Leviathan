@@ -133,6 +133,11 @@ import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
+import {
+  openRepositoryInTerminal,
+  openRepositoryInFileManager,
+  openRepositoryInEditor,
+} from './services/open-location.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import {
   confirmGarbageCollection,
@@ -4752,6 +4757,37 @@ export class AppShell extends LitElement {
         category: 'action',
         icon: 'file',
         action: this.requiresRepository(() => { this.showGitignoreDialog = true; }),
+      },
+      // The palette acts on the ACTIVE repository; the same three actions are
+      // on the repository tab context menu for any open tab. Failures (no
+      // terminal emulator, a path that has gone away, an editor that cannot be
+      // spawned) are toasted by the shared service with the backend message.
+      {
+        id: 'open-in-terminal',
+        label: 'Open in Terminal',
+        category: 'action',
+        icon: 'terminal',
+        action: this.requiresRepository(() => {
+          void openRepositoryInTerminal(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'reveal-in-file-manager',
+        label: 'Reveal in File Manager',
+        category: 'action',
+        icon: 'folder',
+        action: this.requiresRepository(() => {
+          void openRepositoryInFileManager(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'open-in-editor',
+        label: 'Open in Editor',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() => {
+          void openRepositoryInEditor(this.activeRepository!.repository.path);
+        }),
       },
     ];
 
