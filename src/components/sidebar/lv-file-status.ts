@@ -1156,6 +1156,8 @@ export class LvFileStatus extends LitElement {
       try {
         await watcherService.startWatching(this.repositoryPath);
       } catch (err) {
+        // watcher.service already warns the user that auto-refresh is
+        // unavailable (with the actionable cause); don't toast twice
         console.warn("Failed to start file watcher:", err);
       }
       await this.loadStatus();

@@ -2,15 +2,105 @@
 //!
 //! Watches any number of repositories at once. Every event is tagged with the
 //! repository path it came from so consumers can route it to the right repo.
+//!
+//! # Watch scopes
+//!
+//! A repository is watched through TWO narrow scopes instead of one blanket
+//! recursive watch over the whole tree:
+//!
+//! 1. **The git directory** — the git dir itself, non-recursively (`HEAD`,
+//!    `index`, `config`, `packed-refs`, `ORIG_HEAD`, …) plus `refs/`
+//!    recursively. `objects/` and `lfs/` are therefore never watched at all: a
+//!    `fetch` or a `git gc` writes thousands of loose objects there and
+//!    nothing in the UI reacts to individual objects. Inside a linked worktree
+//!    the shared common dir is watched too, so branch changes made elsewhere
+//!    are still noticed.
+//! 2. **The working tree** — every directory except well-known heavy
+//!    build/dependency directories (`node_modules`, `target`, `dist`, `.venv`,
+//!    …) *that git also ignores*. Requiring the ignore match means a repo that
+//!    genuinely tracks a `dist/` or vendors `node_modules` keeps working.
+//!
+//! On Linux every watched directory costs one inotify watch descriptor, so a
+//! blanket recursive watch over a monorepo exhausts `fs.inotify.max_user_watches`
+//! and auto-refresh dies. Pruning keeps the descriptor count proportional to
+//! the source tree rather than to the build output.
+//!
+//! Raw back-end events are coalesced by `notify-debouncer-full`, and the
+//! debounced batches are further collapsed here into at most one event of each
+//! kind per repository, so a burst of thousands of file writes reaches the
+//! frontend as a handful of IPC messages.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, NoCache};
 
 use crate::error::{LeviathanError, Result};
+
+/// How long raw file system events are collected before a batch is delivered.
+/// A `git gc` or `fetch` fires its events far faster than this, so the whole
+/// burst arrives as one batch.
+const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Upper bound on how many working-tree paths are forwarded with a single
+/// `WorkdirChanged` event. Consumers only use the event to know *that*
+/// something changed, so truncating keeps the IPC payload bounded.
+const MAX_WORKDIR_PATHS: usize = 256;
+
+/// Safety valve on the number of watch roots registered for one repository.
+/// The pruning plan normally produces a few dozen; this only bites on
+/// pathological trees and stops us from melting the machine.
+const MAX_WATCH_ROOTS: usize = 4096;
+
+/// How deep the working-tree plan descends before it gives up and registers a
+/// plain recursive watch. Guards against unbounded recursion on deep trees.
+const MAX_PLAN_DEPTH: usize = 32;
+
+/// Directory names inside the git directory that are never worth watching.
+/// They are pure object storage: enormous, extremely high-churn, and nothing
+/// in the UI reacts to an individual object file.
+const EXCLUDED_GIT_DIRS: &[&str] = &["objects", "lfs"];
+
+/// Heavy build/dependency directory names skipped in the working tree — but
+/// only when git ignores them as well (see `should_skip_worktree_dir`).
+const HEAVY_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "bower_components",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "vendor",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".parcel-cache",
+    ".turbo",
+    ".gradle",
+    ".terraform",
+    ".cargo",
+];
+
+/// Platform-specific advice shown when the OS refuses more watches.
+#[cfg(target_os = "linux")]
+const WATCH_LIMIT_HINT: &str =
+    "Raise the inotify limit to restore it, e.g. `sudo sysctl fs.inotify.max_user_watches=524288`.";
+#[cfg(not(target_os = "linux"))]
+const WATCH_LIMIT_HINT: &str =
+    "Close some repositories or raise the operating system's file-watch limit to restore it.";
 
 /// Events emitted by the watcher
 #[derive(Debug, Clone)]
@@ -25,11 +115,149 @@ pub enum WatcherEvent {
     ConfigChanged,
 }
 
+/// Everything the event side needs to know about a watched repository. Sent
+/// along with each batch so classification never has to reach back into the
+/// (mutex-guarded) service.
+#[derive(Debug)]
+struct RepoScope {
+    /// Key events are tagged with — the repository path as the caller gave it
+    key: String,
+    /// Absolute path of this repository's git directory
+    git_dir: PathBuf,
+    /// Shared git directory; differs from `git_dir` inside a linked worktree
+    common_dir: PathBuf,
+}
+
+type WatchMessage = (Arc<RepoScope>, DebounceEventResult);
+
+/// One repository's debounced watcher plus the roots registered for it.
+struct RepoWatch {
+    debouncer: Debouncer<RecommendedWatcher, NoCache>,
+    /// Working tree root, re-opened lazily when new directories appear
+    worktree_root: PathBuf,
+    /// Every path currently registered with the debouncer, with its mode
+    roots: Vec<(PathBuf, RecursiveMode)>,
+}
+
+impl RepoWatch {
+    /// True when `path` already falls inside something we watch.
+    fn covers(&self, path: &Path) -> bool {
+        self.roots.iter().any(|(root, mode)| match mode {
+            RecursiveMode::Recursive => path.starts_with(root),
+            RecursiveMode::NonRecursive => path == root,
+        })
+    }
+
+    /// Register a planned set of watches, skipping anything already covered.
+    /// Individual failures are logged rather than fatal: a directory can
+    /// disappear between planning and registration.
+    fn apply(&mut self, plan: Vec<(PathBuf, RecursiveMode)>) {
+        for (path, mode) in plan {
+            if self.roots.len() >= MAX_WATCH_ROOTS {
+                tracing::warn!(
+                    "watcher: watch-root limit ({}) reached for {}; deeper directories are not watched",
+                    MAX_WATCH_ROOTS,
+                    self.worktree_root.display()
+                );
+                break;
+            }
+            if self.covers(&path) {
+                continue;
+            }
+            match self.debouncer.watch(&path, mode) {
+                Ok(()) => self.roots.push((path, mode)),
+                Err(e) => tracing::warn!("watcher: failed to watch {}: {}", path.display(), e),
+            }
+        }
+    }
+
+    /// Drop the watch on a path (and anything below it) that no longer exists.
+    fn forget(&mut self, path: &Path) {
+        if !self.roots.iter().any(|(root, _)| root.starts_with(path)) {
+            return;
+        }
+        let _ = self.debouncer.unwatch(path);
+        self.roots.retain(|(root, _)| !root.starts_with(path));
+    }
+
+    /// Keep the working-tree watch in step with directories created or removed
+    /// since registration. Directories under a recursive root are handled by
+    /// the back end itself; this only covers the non-recursive roots that the
+    /// pruning plan produces around excluded directories.
+    fn sync_directories(&mut self, paths: &[PathBuf]) {
+        // Opening the repository is only worth it if a new directory actually
+        // showed up, so do it lazily and at most once per batch.
+        let mut repo: Option<Option<git2::Repository>> = None;
+
+        for path in paths {
+            if path.is_dir() {
+                if self.covers(path) {
+                    continue;
+                }
+                let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                    continue;
+                };
+                let repo =
+                    repo.get_or_insert_with(|| git2::Repository::open(&self.worktree_root).ok());
+                let skip = |candidate: &Path, name: &str| {
+                    should_skip_worktree_dir(repo.as_ref(), candidate, name)
+                };
+                if skip(path, &name) {
+                    continue;
+                }
+                let plan = plan_worktree_watches(path, &skip);
+                self.apply(plan);
+            } else if !path.exists() {
+                self.forget(path);
+            }
+        }
+    }
+}
+
 /// Service for watching file system changes across open repositories
 pub struct WatcherService {
-    watchers: HashMap<String, RecommendedWatcher>,
-    event_tx: Sender<(String, Result<Event>)>,
-    event_rx: Receiver<(String, Result<Event>)>,
+    watchers: HashMap<String, RepoWatch>,
+    event_tx: Sender<WatchMessage>,
+    event_rx: Arc<Mutex<Receiver<WatchMessage>>>,
+}
+
+/// Blocking view onto the watcher's event queue.
+///
+/// Handed to the poller thread so it can wait for debounced batches WITHOUT
+/// holding the service mutex — the old implementation slept in a fixed 500 ms
+/// loop and forwarded every raw event individually.
+#[derive(Clone)]
+pub struct WatcherEventStream {
+    rx: Arc<Mutex<Receiver<WatchMessage>>>,
+}
+
+impl WatcherEventStream {
+    /// Wait up to `timeout` for the next debounced batch, then drain and
+    /// coalesce everything else already queued. Returns an empty vector when
+    /// nothing arrived.
+    pub fn wait_events(&self, timeout: Duration) -> Vec<(String, WatcherEvent)> {
+        let Ok(rx) = self.rx.lock() else {
+            // Poisoned queue: back off instead of spinning
+            std::thread::sleep(timeout);
+            return Vec::new();
+        };
+
+        let mut messages = Vec::new();
+        match rx.recv_timeout(timeout) {
+            Ok(message) => messages.push(message),
+            Err(RecvTimeoutError::Timeout) => return Vec::new(),
+            Err(RecvTimeoutError::Disconnected) => {
+                // The service is gone; back off so the caller can notice
+                std::thread::sleep(timeout);
+                return Vec::new();
+            }
+        }
+        while let Ok(message) = rx.try_recv() {
+            messages.push(message);
+        }
+
+        coalesce(messages)
+    }
 }
 
 impl WatcherService {
@@ -39,7 +267,7 @@ impl WatcherService {
         Self {
             watchers: HashMap::new(),
             event_tx,
-            event_rx,
+            event_rx: Arc::new(Mutex::new(event_rx)),
         }
     }
 
@@ -51,34 +279,82 @@ impl WatcherService {
             return Ok(());
         }
 
-        let config = Config::default().with_poll_interval(Duration::from_secs(1));
+        let repo = git2::Repository::open(repo_path).ok();
+        let (git_dir, common_dir) = resolve_git_dirs(repo.as_ref(), repo_path);
 
+        let scope = Arc::new(RepoScope {
+            key: key.clone(),
+            git_dir: git_dir.clone(),
+            common_dir: common_dir.clone(),
+        });
+
+        let config = Config::default().with_poll_interval(Duration::from_secs(1));
         let tx = self.event_tx.clone();
-        let event_key = key.clone();
-        let mut watcher = RecommendedWatcher::new(
-            move |result: std::result::Result<Event, notify::Error>| {
-                let event = result
-                    .map_err(|e| LeviathanError::OperationFailed(format!("Watch error: {}", e)));
-                let _ = tx.send((event_key.clone(), event));
+        let event_scope = Arc::clone(&scope);
+        let mut debouncer = new_debouncer_opt::<_, RecommendedWatcher, NoCache>(
+            DEBOUNCE_TIMEOUT,
+            None,
+            move |result: DebounceEventResult| {
+                let _ = tx.send((Arc::clone(&event_scope), result));
             },
+            NoCache::new(),
             config,
         )
         .map_err(|e| LeviathanError::OperationFailed(format!("Failed to create watcher: {}", e)))?;
 
-        watcher
-            .watch(repo_path, RecursiveMode::Recursive)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to watch: {}", e)))?;
+        let mut roots: Vec<(PathBuf, RecursiveMode)> = Vec::new();
 
-        self.watchers.insert(key, watcher);
+        // Scope 1: the git directory. The first target (the git dir itself) is
+        // mandatory — without it nothing would ever report a commit or a
+        // branch switch.
+        for (index, (path, mode)) in git_watch_targets(&git_dir, &common_dir)
+            .into_iter()
+            .enumerate()
+        {
+            match debouncer.watch(&path, mode) {
+                Ok(()) => roots.push((path, mode)),
+                Err(e) if index == 0 || is_watch_limit(&e) => return Err(watch_error(&path, &e)),
+                Err(e) => tracing::warn!("watcher: failed to watch {}: {}", path.display(), e),
+            }
+        }
+
+        // Scope 2: the working tree, pruned of heavy ignored directories.
+        let skip =
+            |candidate: &Path, name: &str| should_skip_worktree_dir(repo.as_ref(), candidate, name);
+        for (path, mode) in plan_worktree_watches(repo_path, &skip) {
+            if roots.len() >= MAX_WATCH_ROOTS {
+                tracing::warn!(
+                    "watcher: watch-root limit ({}) reached for {}; deeper directories are not watched",
+                    MAX_WATCH_ROOTS,
+                    repo_path.display()
+                );
+                break;
+            }
+            match debouncer.watch(&path, mode) {
+                Ok(()) => roots.push((path, mode)),
+                Err(e) if path == repo_path || is_watch_limit(&e) => {
+                    return Err(watch_error(&path, &e))
+                }
+                Err(e) => tracing::warn!("watcher: failed to watch {}: {}", path.display(), e),
+            }
+        }
+
+        self.watchers.insert(
+            key,
+            RepoWatch {
+                debouncer,
+                worktree_root: repo_path.to_path_buf(),
+                roots,
+            },
+        );
         Ok(())
     }
 
     /// Stop watching a repository. Other repositories keep their watchers.
     pub fn unwatch(&mut self, repo_path: &Path) -> Result<()> {
         let key = repo_path.to_string_lossy().to_string();
-        if let Some(mut watcher) = self.watchers.remove(&key) {
-            let _ = watcher.unwatch(repo_path);
-        }
+        // Dropping the debouncer stops its thread and releases every watch
+        self.watchers.remove(&key);
         Ok(())
     }
 
@@ -92,71 +368,847 @@ impl WatcherService {
         self.watchers.len()
     }
 
-    /// Get pending events (non-blocking), each tagged with the repository
-    /// path the event came from
-    pub fn poll_events(&self) -> Vec<(String, WatcherEvent)> {
-        let mut events = Vec::new();
-
-        while let Ok((repo_path, result)) = self.event_rx.try_recv() {
-            if let Ok(event) = result {
-                if let Some(watcher_event) = Self::classify_event(&event) {
-                    events.push((repo_path, watcher_event));
-                }
-            }
+    /// A blocking handle on the event queue for the poller thread.
+    pub fn event_stream(&self) -> WatcherEventStream {
+        WatcherEventStream {
+            rx: Arc::clone(&self.event_rx),
         }
-
-        events
     }
 
-    /// Classify a notify event into our event types
-    fn classify_event(event: &Event) -> Option<WatcherEvent> {
-        let paths: Vec<PathBuf> = event.paths.clone();
-
-        if paths.is_empty() {
-            return None;
+    /// Get pending events (non-blocking), each tagged with the repository
+    /// path the event came from.
+    pub fn poll_events(&self) -> Vec<(String, WatcherEvent)> {
+        let Ok(rx) = self.event_rx.lock() else {
+            return Vec::new();
+        };
+        let mut messages = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            messages.push(message);
         }
+        drop(rx);
+        coalesce(messages)
+    }
 
-        // Check if any path is in .git directory
-        let git_paths: Vec<&PathBuf> = paths
-            .iter()
-            .filter(|p| p.components().any(|c| c.as_os_str() == ".git"))
-            .collect();
-
-        if !git_paths.is_empty() {
-            // Check for specific git files
-            for path in &git_paths {
-                let path_str = path.to_string_lossy();
-
-                if path_str.contains("index") {
-                    return Some(WatcherEvent::IndexChanged);
-                }
-
-                if path_str.contains("refs") || path_str.contains("HEAD") {
-                    return Some(WatcherEvent::RefsChanged);
-                }
-
-                if path_str.contains("config") {
-                    return Some(WatcherEvent::ConfigChanged);
-                }
+    /// Extend or trim the working-tree watch after directories appeared or
+    /// disappeared. Call this with the events about to be forwarded.
+    pub fn sync_directories(&mut self, events: &[(String, WatcherEvent)]) {
+        for (key, event) in events {
+            let WatcherEvent::WorkdirChanged(paths) = event else {
+                continue;
+            };
+            if let Some(watch) = self.watchers.get_mut(key) {
+                watch.sync_directories(paths);
             }
         }
-
-        // Working directory changes
-        let workdir_paths: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|p| !p.components().any(|c| c.as_os_str() == ".git"))
-            .collect();
-
-        if !workdir_paths.is_empty() {
-            return Some(WatcherEvent::WorkdirChanged(workdir_paths));
-        }
-
-        None
     }
 }
 
 impl Default for WatcherService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Locate the git directory (and the shared common directory) for a path.
+/// Falls back to `<path>/.git` when the repository cannot be opened, so an
+/// unreadable or not-yet-created repository still produces a sane plan.
+fn resolve_git_dirs(repo: Option<&git2::Repository>, repo_path: &Path) -> (PathBuf, PathBuf) {
+    match repo {
+        Some(repo) => (repo.path().to_path_buf(), repo.commondir().to_path_buf()),
+        None => {
+            let git_dir = repo_path.join(".git");
+            (git_dir.clone(), git_dir)
+        }
+    }
+}
+
+/// The paths that make up the git scope. `objects/` and `lfs/` are excluded by
+/// construction: the git dir is watched non-recursively, so only its direct
+/// children (`HEAD`, `index`, `config`, `packed-refs`, …) plus `refs/` are
+/// registered.
+fn git_watch_targets(git_dir: &Path, common_dir: &Path) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut targets = vec![(git_dir.to_path_buf(), RecursiveMode::NonRecursive)];
+
+    let refs = git_dir.join("refs");
+    if refs.is_dir() {
+        targets.push((refs, RecursiveMode::Recursive));
+    }
+
+    // A linked worktree keeps HEAD/index in its own git dir but shares refs
+    // with the main repository, so both have to be watched.
+    if common_dir != git_dir {
+        targets.push((common_dir.to_path_buf(), RecursiveMode::NonRecursive));
+        let common_refs = common_dir.join("refs");
+        if common_refs.is_dir() {
+            targets.push((common_refs, RecursiveMode::Recursive));
+        }
+    }
+
+    targets
+}
+
+/// True for directory names that are pure build/dependency output.
+fn is_heavy_dir_name(name: &str) -> bool {
+    HEAVY_DIR_NAMES.contains(&name)
+}
+
+/// Whether a working-tree directory should be left unwatched.
+///
+/// `.git` always is (it has its own scope). A heavy directory is skipped only
+/// when git ignores it too — a repository that really does track `dist/` or
+/// vendors `node_modules` still gets live status for those files.
+fn should_skip_worktree_dir(repo: Option<&git2::Repository>, path: &Path, name: &str) -> bool {
+    if name == ".git" {
+        return true;
+    }
+    if !is_heavy_dir_name(name) {
+        return false;
+    }
+    git_ignores_dir(repo, path)
+}
+
+/// Ask git whether a directory is ignored.
+fn git_ignores_dir(repo: Option<&git2::Repository>, path: &Path) -> bool {
+    let Some(repo) = repo else {
+        return false;
+    };
+    let Some(workdir) = repo.workdir() else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(workdir) else {
+        return false;
+    };
+    if repo.is_path_ignored(relative).unwrap_or(false) {
+        return true;
+    }
+    // `node_modules/` style patterns only match when the candidate is
+    // presented as a directory.
+    let mut as_dir = relative.as_os_str().to_os_string();
+    as_dir.push("/");
+    repo.is_path_ignored(Path::new(&as_dir)).unwrap_or(false)
+}
+
+/// Plan the working-tree watches for `root`.
+///
+/// Directories whose whole subtree is watchable get a single recursive watch;
+/// only the ancestors of an excluded directory need a non-recursive watch of
+/// their own. That keeps the number of registered roots small (which matters:
+/// the debouncer scans its roots for every raw event) while still never
+/// registering a watch inside an excluded directory.
+fn plan_worktree_watches(
+    root: &Path,
+    skip: &dyn Fn(&Path, &str) -> bool,
+) -> Vec<(PathBuf, RecursiveMode)> {
+    let mut plan = Vec::new();
+    if plan_dir(root, 0, skip, &mut plan) {
+        plan.push((root.to_path_buf(), RecursiveMode::Recursive));
+    }
+    plan
+}
+
+/// Returns true when the whole subtree below `dir` can be covered by a single
+/// recursive watch on `dir`; otherwise pushes the needed watches into `plan`.
+fn plan_dir(
+    dir: &Path,
+    depth: usize,
+    skip: &dyn Fn(&Path, &str) -> bool,
+    plan: &mut Vec<(PathBuf, RecursiveMode)>,
+) -> bool {
+    if depth >= MAX_PLAN_DEPTH {
+        return true;
+    }
+    // An unreadable directory is watched recursively rather than dropped: the
+    // back end may still be able to watch it, and losing events is worse than
+    // one extra watch.
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+
+    let mut coverable = true;
+    let mut children = Vec::new();
+
+    for entry in entries.flatten() {
+        // `file_type()` does not follow symlinks, so symlinked directories are
+        // never descended into — the same rule the back end applies, and it
+        // keeps link cycles from hanging the plan.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if skip(&path, &name) {
+            coverable = false;
+            continue;
+        }
+        let mut nested = Vec::new();
+        if plan_dir(&path, depth + 1, skip, &mut nested) {
+            children.push((path, RecursiveMode::Recursive));
+        } else {
+            coverable = false;
+            children.extend(nested);
+        }
+    }
+
+    if coverable {
+        return true;
+    }
+
+    // Deepest first, so `RepoWatch::covers` and the debouncer's own root scan
+    // hit the most specific match first.
+    plan.extend(children);
+    plan.push((dir.to_path_buf(), RecursiveMode::NonRecursive));
+    false
+}
+
+/// True when the OS refused to register more watches.
+fn is_watch_limit(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::MaxFilesWatch => true,
+        // inotify reports an exhausted watch budget as ENOSPC
+        #[cfg(target_os = "linux")]
+        notify::ErrorKind::Io(io) => io.raw_os_error() == Some(28),
+        _ => false,
+    }
+}
+
+/// Build the error the frontend turns into a user-visible warning. The watch
+/// limit is called out by name because it is the one cause the user can
+/// actually fix.
+fn watch_error(path: &Path, error: &notify::Error) -> LeviathanError {
+    if is_watch_limit(error) {
+        LeviathanError::OperationFailed(format!(
+            "the system file-watch limit was reached while watching {}. {}",
+            path.display(),
+            WATCH_LIMIT_HINT
+        ))
+    } else {
+        LeviathanError::OperationFailed(format!("failed to watch {}: {}", path.display(), error))
+    }
+}
+
+/// The path of an event relative to the repository's git directory, if it is
+/// inside it.
+fn git_relative<'a>(scope: &RepoScope, path: &'a Path) -> Option<Cow<'a, Path>> {
+    if let Ok(relative) = path.strip_prefix(&scope.git_dir) {
+        return Some(Cow::Borrowed(relative));
+    }
+    if let Ok(relative) = path.strip_prefix(&scope.common_dir) {
+        return Some(Cow::Borrowed(relative));
+    }
+    // Some back ends report a differently normalised prefix than libgit2 hands
+    // us (`/private/var` vs `/var` on macOS, for one), so fall back to the
+    // last `.git` component in the path.
+    let mut split = None;
+    for (index, component) in path.components().enumerate() {
+        if component.as_os_str() == ".git" {
+            split = Some(index);
+        }
+    }
+    let split = split?;
+    Some(Cow::Owned(
+        path.components().skip(split + 1).collect::<PathBuf>(),
+    ))
+}
+
+/// True for git-dir-relative paths that are pure object storage.
+fn is_excluded_git_relative(relative: &Path) -> bool {
+    relative
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|first| EXCLUDED_GIT_DIRS.contains(&first))
+        .unwrap_or(false)
+}
+
+/// Classify a path expressed RELATIVE to the git directory.
+///
+/// Matching on the relative path (rather than the absolute one) keeps a
+/// repository that happens to live in `/home/me/index/` or `/srv/config/` from
+/// having every `.git` event misfiled.
+fn classify_git_relative(relative: &Path) -> Option<WatcherEvent> {
+    if is_excluded_git_relative(relative) {
+        return None;
+    }
+
+    let text = relative.to_string_lossy();
+    if text.contains("index") {
+        return Some(WatcherEvent::IndexChanged);
+    }
+    if text.contains("refs") || text.contains("HEAD") {
+        return Some(WatcherEvent::RefsChanged);
+    }
+    if text.contains("config") {
+        return Some(WatcherEvent::ConfigChanged);
+    }
+    None
+}
+
+/// Per-repository accumulator used while collapsing a batch.
+#[derive(Default)]
+struct RepoAccumulator {
+    index: bool,
+    refs: bool,
+    config: bool,
+    workdir: bool,
+    paths: Vec<PathBuf>,
+    seen: HashSet<PathBuf>,
+}
+
+impl RepoAccumulator {
+    fn push_workdir(&mut self, path: &Path) {
+        self.workdir = true;
+        if self.paths.len() >= MAX_WORKDIR_PATHS {
+            return;
+        }
+        if self.seen.insert(path.to_path_buf()) {
+            self.paths.push(path.to_path_buf());
+        }
+    }
+
+    fn drain(self) -> Vec<WatcherEvent> {
+        let mut events = Vec::new();
+        if self.index {
+            events.push(WatcherEvent::IndexChanged);
+        }
+        if self.refs {
+            events.push(WatcherEvent::RefsChanged);
+        }
+        if self.config {
+            events.push(WatcherEvent::ConfigChanged);
+        }
+        if self.workdir {
+            events.push(WatcherEvent::WorkdirChanged(self.paths));
+        }
+        events
+    }
+}
+
+/// Collapse a batch of debounced events into at most one event of each kind
+/// per repository. A `git gc` touching thousands of files becomes a couple of
+/// IPC messages instead of thousands.
+fn coalesce(messages: Vec<WatchMessage>) -> Vec<(String, WatcherEvent)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut per_repo: HashMap<String, RepoAccumulator> = HashMap::new();
+
+    for (scope, result) in messages {
+        let events = match result {
+            Ok(events) => events,
+            Err(errors) => {
+                for error in errors {
+                    tracing::warn!("watcher: error for {}: {}", scope.key, error);
+                }
+                continue;
+            }
+        };
+
+        for event in events {
+            for path in &event.paths {
+                let accumulator = match per_repo.get_mut(&scope.key) {
+                    Some(existing) => existing,
+                    None => {
+                        order.push(scope.key.clone());
+                        per_repo.entry(scope.key.clone()).or_default()
+                    }
+                };
+
+                match git_relative(&scope, path) {
+                    Some(relative) => match classify_git_relative(relative.as_ref()) {
+                        Some(WatcherEvent::IndexChanged) => accumulator.index = true,
+                        Some(WatcherEvent::RefsChanged) => accumulator.refs = true,
+                        Some(WatcherEvent::ConfigChanged) => accumulator.config = true,
+                        // Object churn and unclassified git files are dropped
+                        _ => {}
+                    },
+                    None => accumulator.push_workdir(path),
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for key in order {
+        if let Some(accumulator) = per_repo.remove(&key) {
+            for event in accumulator.drain() {
+                result.push((key.clone(), event));
+            }
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::{Event, EventKind};
+    use notify_debouncer_full::DebouncedEvent;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn scope(root: &Path) -> Arc<RepoScope> {
+        let git_dir = root.join(".git");
+        Arc::new(RepoScope {
+            key: root.to_string_lossy().to_string(),
+            git_dir: git_dir.clone(),
+            common_dir: git_dir,
+        })
+    }
+
+    fn debounced(paths: Vec<PathBuf>) -> DebouncedEvent {
+        let mut event = Event::new(EventKind::Any);
+        event.paths = paths;
+        DebouncedEvent::new(event, std::time::Instant::now())
+    }
+
+    fn classify_absolute(root: &Path, path: &Path) -> Option<WatcherEvent> {
+        let scope = scope(root);
+        let events = coalesce(vec![(scope, Ok(vec![debounced(vec![path.to_path_buf()])]))]);
+        events.into_iter().map(|(_, event)| event).next()
+    }
+
+    // ---- exclusion predicates -------------------------------------------
+
+    #[test]
+    fn git_objects_and_lfs_are_excluded() {
+        assert!(is_excluded_git_relative(Path::new("objects/ab/cdef")));
+        assert!(is_excluded_git_relative(Path::new(
+            "objects/pack/pack-1.pack"
+        )));
+        assert!(is_excluded_git_relative(Path::new("lfs/objects/00/11/abc")));
+    }
+
+    #[test]
+    fn git_metadata_is_not_excluded() {
+        assert!(!is_excluded_git_relative(Path::new("index")));
+        assert!(!is_excluded_git_relative(Path::new("config")));
+        assert!(!is_excluded_git_relative(Path::new("refs/heads/main")));
+        assert!(!is_excluded_git_relative(Path::new("HEAD")));
+        // A ref literally named `objects` lives under refs/, so it survives
+        assert!(!is_excluded_git_relative(Path::new("refs/heads/objects")));
+    }
+
+    #[test]
+    fn heavy_directory_names_are_recognised() {
+        for name in ["node_modules", "target", "dist", ".venv", "__pycache__"] {
+            assert!(is_heavy_dir_name(name), "{name} should be heavy");
+        }
+        for name in ["src", "node_modules.md", "targets", "distribution", "docs"] {
+            assert!(!is_heavy_dir_name(name), "{name} should not be heavy");
+        }
+    }
+
+    #[test]
+    fn dot_git_is_always_skipped_but_source_directories_are_not() {
+        assert!(should_skip_worktree_dir(
+            None,
+            Path::new("/repo/.git"),
+            ".git"
+        ));
+        // Without a repository there is no ignore information, so heavy names
+        // are kept rather than guessed at
+        assert!(!should_skip_worktree_dir(
+            None,
+            Path::new("/repo/node_modules"),
+            "node_modules"
+        ));
+        assert!(!should_skip_worktree_dir(
+            None,
+            Path::new("/repo/src"),
+            "src"
+        ));
+    }
+
+    #[test]
+    fn heavy_directories_are_skipped_only_when_git_ignores_them() {
+        let repo = crate::test_utils::TestRepo::with_initial_commit();
+        fs::write(repo.path.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(repo.path.join("node_modules")).unwrap();
+        fs::create_dir_all(repo.path.join("dist")).unwrap();
+
+        let git_repo = git2::Repository::open(&repo.path).unwrap();
+
+        assert!(should_skip_worktree_dir(
+            Some(&git_repo),
+            &repo.path.join("node_modules"),
+            "node_modules"
+        ));
+        // `dist` is heavy by name but tracked/not ignored here, so it stays
+        assert!(!should_skip_worktree_dir(
+            Some(&git_repo),
+            &repo.path.join("dist"),
+            "dist"
+        ));
+    }
+
+    // ---- working tree plan ----------------------------------------------
+
+    #[test]
+    fn plan_skips_excluded_directories_but_keeps_similar_names() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("node_modules/left-pad")).unwrap();
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir_all(root.join("node_modules_helpers")).unwrap();
+        // A FILE whose name starts with an excluded directory name must not be
+        // affected at all
+        fs::write(root.join("node_modules.md"), "docs").unwrap();
+
+        let skip = |_path: &Path, name: &str| name == "node_modules";
+        let plan = plan_worktree_watches(root, &skip);
+        let watched: Vec<&PathBuf> = plan.iter().map(|(p, _)| p).collect();
+
+        assert!(watched.iter().any(|p| *p == &root.to_path_buf()));
+        assert!(watched.iter().any(|p| *p == &root.join("src")));
+        assert!(watched
+            .iter()
+            .any(|p| *p == &root.join("node_modules_helpers")));
+        assert!(
+            !watched
+                .iter()
+                .any(|p| p.starts_with(root.join("node_modules"))),
+            "node_modules must not be watched: {watched:?}"
+        );
+    }
+
+    #[test]
+    fn plan_uses_one_recursive_watch_for_a_clean_tree() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("a/b/c")).unwrap();
+
+        let skip = |_path: &Path, _name: &str| false;
+        let plan = plan_worktree_watches(root, &skip);
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, root.to_path_buf());
+        assert_eq!(plan[0].1, RecursiveMode::Recursive);
+    }
+
+    #[test]
+    fn plan_only_walks_down_to_the_excluded_directory() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("packages/app/node_modules/dep")).unwrap();
+        fs::create_dir_all(root.join("packages/app/src")).unwrap();
+        fs::create_dir_all(root.join("docs/guide")).unwrap();
+
+        let skip = |_path: &Path, name: &str| name == "node_modules";
+        let plan = plan_worktree_watches(root, &skip);
+        let modes: HashMap<PathBuf, RecursiveMode> = plan.into_iter().collect();
+
+        // Ancestors of the excluded directory are non-recursive
+        assert_eq!(modes.get(root), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            modes.get(&root.join("packages")),
+            Some(&RecursiveMode::NonRecursive)
+        );
+        assert_eq!(
+            modes.get(&root.join("packages/app")),
+            Some(&RecursiveMode::NonRecursive)
+        );
+        // Everything clean is covered by a single recursive watch
+        assert_eq!(
+            modes.get(&root.join("packages/app/src")),
+            Some(&RecursiveMode::Recursive)
+        );
+        assert_eq!(
+            modes.get(&root.join("docs")),
+            Some(&RecursiveMode::Recursive)
+        );
+        assert!(!modes.contains_key(&root.join("docs/guide")));
+        assert!(!modes.contains_key(&root.join("packages/app/node_modules")));
+    }
+
+    #[test]
+    fn plan_does_not_descend_into_symlinked_directories() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("real/child")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+
+        let skip = |_path: &Path, name: &str| name == "nothing";
+        let plan = plan_worktree_watches(root, &skip);
+        assert!(!plan.iter().any(|(p, _)| p.ends_with("link")));
+    }
+
+    // ---- classification --------------------------------------------------
+
+    #[test]
+    fn git_paths_are_classified_relative_to_the_git_directory() {
+        let root = Path::new("/repo");
+        assert!(matches!(
+            classify_absolute(root, Path::new("/repo/.git/index")),
+            Some(WatcherEvent::IndexChanged)
+        ));
+        assert!(matches!(
+            classify_absolute(root, Path::new("/repo/.git/refs/heads/main")),
+            Some(WatcherEvent::RefsChanged)
+        ));
+        assert!(matches!(
+            classify_absolute(root, Path::new("/repo/.git/HEAD")),
+            Some(WatcherEvent::RefsChanged)
+        ));
+        assert!(matches!(
+            classify_absolute(root, Path::new("/repo/.git/config")),
+            Some(WatcherEvent::ConfigChanged)
+        ));
+    }
+
+    #[test]
+    fn repository_directory_names_do_not_leak_into_classification() {
+        // The repository lives in a directory literally called `index`; a
+        // config change must still classify as a config change.
+        let root = Path::new("/home/me/index");
+        assert!(matches!(
+            classify_absolute(root, Path::new("/home/me/index/.git/config")),
+            Some(WatcherEvent::ConfigChanged)
+        ));
+        // …and a working tree file must not be mistaken for git metadata
+        match classify_absolute(root, Path::new("/home/me/index/src/main.rs")) {
+            Some(WatcherEvent::WorkdirChanged(paths)) => {
+                assert_eq!(paths, vec![PathBuf::from("/home/me/index/src/main.rs")]);
+            }
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn object_churn_produces_no_events() {
+        let root = Path::new("/repo");
+        let paths: Vec<PathBuf> = (0..2000)
+            .map(|i| root.join(format!(".git/objects/{:02x}/{}", i % 256, i)))
+            .collect();
+        let events = coalesce(vec![(scope(root), Ok(vec![debounced(paths)]))]);
+        assert!(
+            events.is_empty(),
+            "object writes must not reach the frontend"
+        );
+    }
+
+    #[test]
+    fn lfs_churn_produces_no_events() {
+        let root = Path::new("/repo");
+        let paths: Vec<PathBuf> = (0..500)
+            .map(|i| root.join(format!(".git/lfs/objects/aa/bb/{i}")))
+            .collect();
+        let events = coalesce(vec![(scope(root), Ok(vec![debounced(paths)]))]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_file_named_like_an_excluded_directory_is_still_reported() {
+        let root = Path::new("/repo");
+        match classify_absolute(root, &root.join("node_modules.md")) {
+            Some(WatcherEvent::WorkdirChanged(paths)) => {
+                assert_eq!(paths, vec![root.join("node_modules.md")]);
+            }
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
+    }
+
+    // ---- coalescing ------------------------------------------------------
+
+    #[test]
+    fn a_burst_collapses_to_one_event_per_kind() {
+        let root = Path::new("/repo");
+        let mut paths = Vec::new();
+        for i in 0..5000 {
+            paths.push(root.join(format!(".git/objects/{:02x}/{}", i % 256, i)));
+        }
+        for i in 0..200 {
+            paths.push(root.join(format!(".git/refs/heads/branch-{i}")));
+        }
+        for i in 0..200 {
+            paths.push(root.join(format!("src/file-{i}.rs")));
+        }
+        paths.push(root.join(".git/index"));
+
+        let events = coalesce(vec![(scope(root), Ok(vec![debounced(paths)]))]);
+
+        assert_eq!(events.len(), 3, "got {events:?}");
+        assert!(matches!(events[0].1, WatcherEvent::IndexChanged));
+        assert!(matches!(events[1].1, WatcherEvent::RefsChanged));
+        match &events[2].1 {
+            WatcherEvent::WorkdirChanged(paths) => {
+                assert!(paths.len() <= MAX_WORKDIR_PATHS);
+                assert!(!paths.is_empty());
+            }
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coalescing_keeps_repositories_separate() {
+        let one = Path::new("/repo/one");
+        let two = Path::new("/repo/two");
+        let events = coalesce(vec![
+            (
+                scope(one),
+                Ok(vec![debounced(vec![one.join(".git/index")])]),
+            ),
+            (scope(two), Ok(vec![debounced(vec![two.join("a.txt")])])),
+            (
+                scope(one),
+                Ok(vec![debounced(vec![one.join(".git/index")])]),
+            ),
+        ]);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, one.to_string_lossy());
+        assert!(matches!(events[0].1, WatcherEvent::IndexChanged));
+        assert_eq!(events[1].0, two.to_string_lossy());
+        assert!(matches!(events[1].1, WatcherEvent::WorkdirChanged(_)));
+    }
+
+    #[test]
+    fn duplicate_workdir_paths_are_reported_once() {
+        let root = Path::new("/repo");
+        let path = root.join("src/main.rs");
+        let events = coalesce(vec![(
+            scope(root),
+            Ok(vec![
+                debounced(vec![path.clone()]),
+                debounced(vec![path.clone()]),
+                debounced(vec![path.clone()]),
+            ]),
+        )]);
+
+        assert_eq!(events.len(), 1);
+        match &events[0].1 {
+            WatcherEvent::WorkdirChanged(paths) => assert_eq!(paths, &vec![path]),
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
+    }
+
+    // ---- error surfacing -------------------------------------------------
+
+    #[test]
+    fn watch_limit_errors_name_the_actionable_cause() {
+        let error = notify::Error::new(notify::ErrorKind::MaxFilesWatch);
+        assert!(is_watch_limit(&error));
+
+        let message = watch_error(Path::new("/repo"), &error).to_string();
+        assert!(
+            message.contains("file-watch limit"),
+            "message should name the limit: {message}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            message.contains("max_user_watches"),
+            "Linux message should name the sysctl: {message}"
+        );
+    }
+
+    #[test]
+    fn other_watch_errors_keep_their_original_text() {
+        let error = notify::Error::new(notify::ErrorKind::PathNotFound);
+        assert!(!is_watch_limit(&error));
+        let message = watch_error(Path::new("/repo"), &error).to_string();
+        assert!(message.contains("/repo"), "{message}");
+        assert!(!message.contains("file-watch limit"), "{message}");
+    }
+
+    // ---- registration ----------------------------------------------------
+
+    #[test]
+    fn watching_a_repository_never_registers_a_watch_inside_git_objects() {
+        let repo = crate::test_utils::TestRepo::with_initial_commit();
+        fs::write(repo.path.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(repo.path.join("node_modules/dep")).unwrap();
+        fs::create_dir_all(repo.path.join("src")).unwrap();
+
+        let mut service = WatcherService::new();
+        service.watch(&repo.path).unwrap();
+
+        let key = repo.path.to_string_lossy().to_string();
+        let roots = &service.watchers.get(&key).unwrap().roots;
+
+        assert!(
+            !roots
+                .iter()
+                .any(|(p, _)| p.starts_with(repo.path.join(".git").join("objects"))),
+            "objects must never be watched: {roots:?}"
+        );
+        assert!(
+            !roots
+                .iter()
+                .any(|(p, _)| p.starts_with(repo.path.join("node_modules"))),
+            "ignored node_modules must not be watched: {roots:?}"
+        );
+        assert!(
+            roots.iter().any(|(p, _)| p == &repo.path),
+            "the working tree root must be watched: {roots:?}"
+        );
+        assert!(
+            roots
+                .iter()
+                .any(|(p, _)| p.ends_with("refs") && p.starts_with(repo.path.join(".git"))),
+            "refs must be watched: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn new_directories_are_picked_up_after_registration() {
+        let repo = crate::test_utils::TestRepo::with_initial_commit();
+        fs::write(repo.path.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(repo.path.join("node_modules/dep")).unwrap();
+
+        let mut service = WatcherService::new();
+        service.watch(&repo.path).unwrap();
+
+        let created = repo.path.join("brand-new");
+        fs::create_dir_all(created.join("nested")).unwrap();
+
+        let key = repo.path.to_string_lossy().to_string();
+        service.sync_directories(&[(
+            key.clone(),
+            WatcherEvent::WorkdirChanged(vec![created.clone()]),
+        )]);
+
+        let watch = service.watchers.get(&key).unwrap();
+        assert!(
+            watch.covers(&created.join("nested/file.txt")),
+            "{:?}",
+            watch.roots
+        );
+
+        // …and a removed directory is dropped again
+        fs::remove_dir_all(&created).unwrap();
+        service.sync_directories(&[(
+            key.clone(),
+            WatcherEvent::WorkdirChanged(vec![created.clone()]),
+        )]);
+        let watch = service.watchers.get(&key).unwrap();
+        assert!(!watch.roots.iter().any(|(p, _)| p.starts_with(&created)));
+    }
+
+    #[test]
+    fn a_newly_created_ignored_directory_is_not_watched() {
+        let repo = crate::test_utils::TestRepo::with_initial_commit();
+        fs::write(repo.path.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(repo.path.join("keep")).unwrap();
+
+        let mut service = WatcherService::new();
+        service.watch(&repo.path).unwrap();
+
+        let ignored = repo.path.join("node_modules");
+        fs::create_dir_all(ignored.join("dep")).unwrap();
+
+        let key = repo.path.to_string_lossy().to_string();
+        service.sync_directories(&[(
+            key.clone(),
+            WatcherEvent::WorkdirChanged(vec![ignored.clone()]),
+        )]);
+
+        let watch = service.watchers.get(&key).unwrap();
+        assert!(
+            !watch.roots.iter().any(|(p, _)| p.starts_with(&ignored)),
+            "{:?}",
+            watch.roots
+        );
     }
 }
