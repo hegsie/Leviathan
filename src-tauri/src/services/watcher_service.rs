@@ -29,6 +29,12 @@
 //! debounced batches are further collapsed here into at most one event of each
 //! kind per repository, so a burst of thousands of file writes reaches the
 //! frontend as a handful of IPC messages.
+//!
+//! Events inside a git directory are classified by their path RELATIVE to that
+//! directory, matching whole path components: a repository living in
+//! `~/dev/index-service` must not have every event misfiled as an index
+//! change, and `logs/HEAD` or `index.lock` must not be mistaken for the real
+//! `HEAD` or `index`.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -590,28 +596,40 @@ fn watch_error(path: &Path, error: &notify::Error) -> LeviathanError {
     }
 }
 
-/// The path of an event relative to the repository's git directory, if it is
-/// inside it.
-fn git_relative<'a>(scope: &RepoScope, path: &'a Path) -> Option<Cow<'a, Path>> {
-    if let Ok(relative) = path.strip_prefix(&scope.git_dir) {
-        return Some(Cow::Borrowed(relative));
-    }
-    if let Ok(relative) = path.strip_prefix(&scope.common_dir) {
-        return Some(Cow::Borrowed(relative));
-    }
-    // Some back ends report a differently normalised prefix than libgit2 hands
-    // us (`/private/var` vs `/var` on macOS, for one), so fall back to the
-    // last `.git` component in the path.
+/// The part of a path that follows its LAST `.git` component, so a nested
+/// repository or submodule is classified against its own git directory rather
+/// than an enclosing one. `None` when the path has no `.git` component.
+fn strip_to_last_git(path: &Path) -> Option<PathBuf> {
     let mut split = None;
     for (index, component) in path.components().enumerate() {
         if component.as_os_str() == ".git" {
             split = Some(index);
         }
     }
-    let split = split?;
-    Some(Cow::Owned(
-        path.components().skip(split + 1).collect::<PathBuf>(),
-    ))
+    Some(path.components().skip(split? + 1).collect::<PathBuf>())
+}
+
+/// The path of an event relative to the repository's git directory, if it is
+/// inside it.
+fn git_relative<'a>(scope: &RepoScope, path: &'a Path) -> Option<Cow<'a, Path>> {
+    let relative = if let Ok(relative) = path.strip_prefix(&scope.git_dir) {
+        Cow::Borrowed(relative)
+    } else if let Ok(relative) = path.strip_prefix(&scope.common_dir) {
+        Cow::Borrowed(relative)
+    } else {
+        // Some back ends report a differently normalised prefix than libgit2
+        // hands us (`/private/var` vs `/var` on macOS, for one), so fall back
+        // to the last `.git` component in the path.
+        Cow::Owned(strip_to_last_git(path)?)
+    };
+
+    // A submodule or nested repository below the git directory carries a
+    // `.git` of its own; classify against that innermost one.
+    let nested = strip_to_last_git(relative.as_ref());
+    Some(match nested {
+        Some(nested) => Cow::Owned(nested),
+        None => relative,
+    })
 }
 
 /// True for git-dir-relative paths that are pure object storage.
@@ -628,23 +646,37 @@ fn is_excluded_git_relative(relative: &Path) -> bool {
 ///
 /// Matching on the relative path (rather than the absolute one) keeps a
 /// repository that happens to live in `/home/me/index/` or `/srv/config/` from
-/// having every `.git` event misfiled.
+/// having every `.git` event misfiled, and matching whole path components
+/// (rather than substrings) keeps `logs/HEAD`, `index.lock` and
+/// `modules/sub/index` from being mistaken for a real ref or index change.
+///
+/// Returns `None` for the `.git` internals we do not act on (objects, logs,
+/// lock files, ...), which are then dropped rather than forwarded.
 fn classify_git_relative(relative: &Path) -> Option<WatcherEvent> {
     if is_excluded_git_relative(relative) {
         return None;
     }
 
-    let text = relative.to_string_lossy();
-    if text.contains("index") {
-        return Some(WatcherEvent::IndexChanged);
+    let components: Vec<Cow<'_, str>> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    let first = components.first()?;
+
+    match first.as_ref() {
+        // Anything under refs/ (heads, remotes, tags, ...) is a ref update.
+        "refs" => Some(WatcherEvent::RefsChanged),
+        // Whole-name matches only, so "HEADER.md" or "index.lock" inside the
+        // git directory are not mistaken for ref or index changes.
+        "HEAD" | "ORIG_HEAD" | "FETCH_HEAD" | "MERGE_HEAD" | "packed-refs"
+            if components.len() == 1 =>
+        {
+            Some(WatcherEvent::RefsChanged)
+        }
+        "index" if components.len() == 1 => Some(WatcherEvent::IndexChanged),
+        "config" if components.len() == 1 => Some(WatcherEvent::ConfigChanged),
+        _ => None,
     }
-    if text.contains("refs") || text.contains("HEAD") {
-        return Some(WatcherEvent::RefsChanged);
-    }
-    if text.contains("config") {
-        return Some(WatcherEvent::ConfigChanged);
-    }
-    None
 }
 
 /// Per-repository accumulator used while collapsing a batch.
@@ -763,10 +795,28 @@ mod tests {
         DebouncedEvent::new(event, std::time::Instant::now())
     }
 
+    /// Run one batch of absolute paths through the real pipeline and return
+    /// the first event it produces (git events sort before workdir ones).
+    fn classify_paths(root: &Path, paths: Vec<PathBuf>) -> Option<WatcherEvent> {
+        coalesce(vec![(scope(root), Ok(vec![debounced(paths)]))])
+            .into_iter()
+            .map(|(_, event)| event)
+            .next()
+    }
+
     fn classify_absolute(root: &Path, path: &Path) -> Option<WatcherEvent> {
-        let scope = scope(root);
-        let events = coalesce(vec![(scope, Ok(vec![debounced(vec![path.to_path_buf()])]))]);
-        events.into_iter().map(|(_, event)| event).next()
+        classify_paths(root, vec![path.to_path_buf()])
+    }
+
+    fn classify_in(root: &str, paths: &[&str]) -> Option<WatcherEvent> {
+        classify_paths(Path::new(root), paths.iter().map(PathBuf::from).collect())
+    }
+
+    fn workdir_paths(event: Option<WatcherEvent>) -> Vec<PathBuf> {
+        match event {
+            Some(WatcherEvent::WorkdirChanged(paths)) => paths,
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
     }
 
     // ---- exclusion predicates -------------------------------------------
@@ -1008,6 +1058,241 @@ mod tests {
             }
             other => panic!("expected WorkdirChanged, got {other:?}"),
         }
+    }
+
+    // ---- classification by path component (relative to the git dir) ------
+
+    #[test]
+    fn test_classify_empty_paths_is_none() {
+        assert!(classify_in("/repo", &[]).is_none());
+    }
+
+    // --- repository paths that used to poison the substring match ---
+
+    #[test]
+    fn test_repo_path_containing_index_still_classifies_refs() {
+        assert!(matches!(
+            classify_in(
+                "/home/user/dev/index-service",
+                &["/home/user/dev/index-service/.git/refs/heads/main"]
+            ),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_repo_path_containing_index_still_classifies_config() {
+        assert!(matches!(
+            classify_in(
+                "/home/user/dev/index-service",
+                &["/home/user/dev/index-service/.git/config"]
+            ),
+            Some(WatcherEvent::ConfigChanged)
+        ));
+    }
+
+    #[test]
+    fn test_repo_path_containing_refs_still_classifies_index() {
+        assert!(matches!(
+            classify_in(
+                "/home/user/prefs-editor",
+                &["/home/user/prefs-editor/.git/index"]
+            ),
+            Some(WatcherEvent::IndexChanged)
+        ));
+    }
+
+    #[test]
+    fn test_repo_path_containing_head_still_classifies_index() {
+        assert!(matches!(
+            classify_in("/home/user/HEADlines", &["/home/user/HEADlines/.git/index"]),
+            Some(WatcherEvent::IndexChanged)
+        ));
+    }
+
+    // --- refs ---
+
+    #[test]
+    fn test_refs_heads_is_refs_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/refs/heads/feature/login"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_refs_remotes_is_refs_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/refs/remotes/origin/main"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_refs_tags_is_refs_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/refs/tags/v1.0.0"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_packed_refs_is_refs_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/packed-refs"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_head_files_are_refs_changed() {
+        for path in [
+            "/repo/.git/HEAD",
+            "/repo/.git/ORIG_HEAD",
+            "/repo/.git/FETCH_HEAD",
+            "/repo/.git/MERGE_HEAD",
+        ] {
+            assert!(
+                matches!(
+                    classify_in("/repo", &[path]),
+                    Some(WatcherEvent::RefsChanged)
+                ),
+                "{} should be a ref change",
+                path
+            );
+        }
+    }
+
+    // --- index / config ---
+
+    #[test]
+    fn test_index_is_index_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/index"]),
+            Some(WatcherEvent::IndexChanged)
+        ));
+    }
+
+    #[test]
+    fn test_config_is_config_changed() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/config"]),
+            Some(WatcherEvent::ConfigChanged)
+        ));
+    }
+
+    // --- git internals we deliberately ignore ---
+
+    #[test]
+    fn test_other_git_internals_are_ignored() {
+        for path in [
+            "/repo/.git/objects/ab/cdef0123456789",
+            "/repo/.git/logs/HEAD",
+            "/repo/.git/index.lock",
+            "/repo/.git/config.lock",
+            "/repo/.git/COMMIT_EDITMSG",
+            "/repo/.git/modules/sub/index",
+        ] {
+            assert!(
+                classify_in("/repo", &[path]).is_none(),
+                "{} should not be classified",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn test_submodule_git_dir_classifies_against_its_own_git_dir() {
+        assert!(matches!(
+            classify_in("/repo", &["/repo/.git/modules/sub/.git/refs/heads/main"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    // --- working directory files that look like git files ---
+
+    #[test]
+    fn test_worktree_index_html_is_workdir_change() {
+        let paths = workdir_paths(classify_in("/repo", &["/repo/src/index.html"]));
+        assert_eq!(paths, vec![PathBuf::from("/repo/src/index.html")]);
+    }
+
+    #[test]
+    fn test_worktree_file_named_index_is_workdir_change() {
+        let paths = workdir_paths(classify_in("/repo", &["/repo/index"]));
+        assert_eq!(paths, vec![PathBuf::from("/repo/index")]);
+    }
+
+    #[test]
+    fn test_worktree_file_named_config_is_workdir_change() {
+        let paths = workdir_paths(classify_in("/repo", &["/repo/config"]));
+        assert_eq!(paths, vec![PathBuf::from("/repo/config")]);
+    }
+
+    #[test]
+    fn test_worktree_config_json_and_refs_dir_are_workdir_changes() {
+        let paths = workdir_paths(classify_in(
+            "/repo",
+            &["/repo/config.json", "/repo/refs/HEAD.md"],
+        ));
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/repo/config.json"),
+                PathBuf::from("/repo/refs/HEAD.md"),
+            ]
+        );
+    }
+
+    // --- mixed events ---
+
+    #[test]
+    fn test_git_classification_wins_over_workdir_paths() {
+        assert!(matches!(
+            classify_in(
+                "/repo",
+                &["/repo/src/main.rs", "/repo/.git/refs/heads/main"]
+            ),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn a_batch_reports_both_the_git_change_and_the_workdir_change() {
+        // Coalescing collects a whole debounce window, so a batch that mixes
+        // git metadata with working-tree writes reports BOTH kinds (the git
+        // event first) instead of dropping the working-tree paths.
+        let root = Path::new("/repo");
+        let events = coalesce(vec![(
+            scope(root),
+            Ok(vec![debounced(vec![
+                root.join("src/main.rs"),
+                root.join(".git/refs/heads/main"),
+            ])]),
+        )]);
+
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(matches!(events[0].1, WatcherEvent::RefsChanged));
+        match &events[1].1 {
+            WatcherEvent::WorkdirChanged(paths) => {
+                assert_eq!(paths, &vec![root.join("src/main.rs")]);
+            }
+            other => panic!("expected WorkdirChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unclassified_git_path_falls_through_to_workdir_paths() {
+        let paths = workdir_paths(classify_in(
+            "/repo",
+            &["/repo/.git/objects/ab/cdef0123456789", "/repo/src/main.rs"],
+        ));
+        assert_eq!(paths, vec![PathBuf::from("/repo/src/main.rs")]);
+    }
+
+    #[test]
+    fn test_git_only_unclassified_event_is_none() {
+        assert!(classify_in("/repo", &["/repo/.git/objects/pack/pack-abc.idx"]).is_none());
     }
 
     // ---- coalescing ------------------------------------------------------

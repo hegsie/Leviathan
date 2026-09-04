@@ -133,6 +133,11 @@ import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
+import {
+  openRepositoryInTerminal,
+  openRepositoryInFileManager,
+  openRepositoryInEditor,
+} from './services/open-location.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import {
   confirmGarbageCollection,
@@ -224,6 +229,18 @@ export class AppShell extends LitElement {
         0% { transform: translateX(-100%); }
         50% { transform: translateX(150%); }
         100% { transform: translateX(350%); }
+      }
+
+      /* The shared reduced-motion rules clamp every animation to one 0.01ms
+         iteration, which would park this bar at its final keyframe — 350% to
+         the right, i.e. completely off-screen — and the app would look idle
+         during long operations. Paint a static full-width bar instead so the
+         "busy" state is still visible without motion. */
+      @media (prefers-reduced-motion: reduce) {
+        .global-loading-bar::after {
+          width: 100%;
+          transform: none;
+        }
       }
 
       .skip-link:focus {
@@ -3193,11 +3210,14 @@ export class AppShell extends LitElement {
     );
     if (!confirmed) return;
 
-    const opId = progressService.startOperation('push', 'Force pushing to remote...');
+    const opId = progressService.startOperation('push', 'Force pushing to remote...', {
+      cancellable: true,
+    });
     const result = await gitService.push({
       path: repoPath,
       forceWithLease: true,
       silent: true,
+      operationId: opId,
     });
     if (result.success) {
       progressService.completeOperation(opId);
@@ -3208,7 +3228,9 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      if (!gitService.isNetworkGateRefusal(result.error)) {
+      if (gitService.isOperationCancelled(result.error)) {
+        showToast('Force push cancelled', 'info');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         // NOT through showErrorWithSuggestion: a force push that is itself
         // rejected would match the same branch that produced this toast and
         // offer Force Push again, an unbounded loop over the one action that
@@ -4755,6 +4777,37 @@ export class AppShell extends LitElement {
         icon: 'file',
         action: this.requiresRepository(() => { this.showGitignoreDialog = true; }),
       },
+      // The palette acts on the ACTIVE repository; the same three actions are
+      // on the repository tab context menu for any open tab. Failures (no
+      // terminal emulator, a path that has gone away, an editor that cannot be
+      // spawned) are toasted by the shared service with the backend message.
+      {
+        id: 'open-in-terminal',
+        label: 'Open in Terminal',
+        category: 'action',
+        icon: 'terminal',
+        action: this.requiresRepository(() => {
+          void openRepositoryInTerminal(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'reveal-in-file-manager',
+        label: 'Reveal in File Manager',
+        category: 'action',
+        icon: 'folder',
+        action: this.requiresRepository(() => {
+          void openRepositoryInFileManager(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'open-in-editor',
+        label: 'Open in Editor',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() => {
+          void openRepositoryInEditor(this.activeRepository!.repository.path);
+        }),
+      },
     ];
 
     return commands;
@@ -5071,7 +5124,9 @@ export class AppShell extends LitElement {
 
   private async fetchRepository(): Promise<void> {
     if (!this.activeRepository) return;
-    const opId = progressService.startOperation('fetch', 'Fetching from remote...');
+    const opId = progressService.startOperation('fetch', 'Fetching from remote...', {
+      cancellable: true,
+    });
     // gitService.fetch returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
@@ -5082,16 +5137,20 @@ export class AppShell extends LitElement {
     // silent: this handler owns the messaging (and the backend's
     // remote-operation-completed event toasts the success). Without it every
     // toolbar fetch stacked two toasts, and every failure two errors.
-    const result = await gitService.fetch({ path: repoPath, silent: true });
+    const result = await gitService.fetch({ path: repoPath, silent: true, operationId: opId });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      // A security-gate refusal already announced itself, and a declined
-      // confirm is the user's own decision — reporting either as a red error
-      // tells them their own click failed.
-      if (!gitService.isNetworkGateRefusal(result.error)) {
+      // A cancel the user asked for is not a failure — say it took effect
+      // rather than showing them a red error for their own click.
+      if (gitService.isOperationCancelled(result.error)) {
+        showToast('Fetch cancelled', 'info');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A security-gate refusal already announced itself, and a declined
+        // confirm is the user's own decision — reporting either as a red error
+        // tells them their own click failed.
         showToast(result.error?.message ?? 'Fetch failed', 'error');
       }
     }
@@ -5121,10 +5180,15 @@ export class AppShell extends LitElement {
   }
 
   private async pullRepository(repoPath: string): Promise<void> {
-    const opId = progressService.startOperation('pull', 'Pulling from remote...');
+    // Cancellable, but only up to the point the merge starts: the backend's
+    // pull aborts during its fetch phase and refuses to begin a merge it
+    // cannot safely stop halfway. See commands/remote.rs::pull_branch.
+    const opId = progressService.startOperation('pull', 'Pulling from remote...', {
+      cancellable: true,
+    });
     // gitService.pull returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — the old catch-only path always reported success.
-    const result = await gitService.pull({ path: repoPath, silent: true });
+    const result = await gitService.pull({ path: repoPath, silent: true, operationId: opId });
     if (result.success) {
       progressService.completeOperation(opId);
       // Pinned: a ref-only pull emits no working-tree watcher event, so a
@@ -5149,10 +5213,14 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      // A security-gate refusal already announced itself, and a declined
-      // confirm is the user's own decision — reporting either as a red error
-      // tells them their own click failed.
-      if (!gitService.isNetworkGateRefusal(result.error)) {
+      if (gitService.isOperationCancelled(result.error)) {
+        // Stopped during the fetch, so nothing was merged — the repository is
+        // exactly where a plain Fetch would have left it.
+        showToast('Pull cancelled', 'info');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A security-gate refusal already announced itself, and a declined
+        // confirm is the user's own decision — reporting either as a red error
+        // tells them their own click failed.
         showToast(result.error?.message ?? 'Pull failed', 'error');
       }
     }
@@ -5171,7 +5239,9 @@ export class AppShell extends LitElement {
 
   private async pushRepository(): Promise<void> {
     if (!this.activeRepository) return;
-    const opId = progressService.startOperation('push', 'Pushing to remote...');
+    const opId = progressService.startOperation('push', 'Pushing to remote...', {
+      cancellable: true,
+    });
     // gitService.push returns a CommandResult (invokeCommand never throws), so we
     // must inspect result.success — a catch-only path always reported success and
     // the backend emits remote-operation-completed only on success, so failures
@@ -5179,16 +5249,19 @@ export class AppShell extends LitElement {
     // Pinned: push is a slow network op; if the user switches tabs while it
     // runs, the refresh must target the repo that pushed, not the active tab.
     const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.push({ path: repoPath, silent: true });
+    const result = await gitService.push({ path: repoPath, silent: true, operationId: opId });
     if (result.success) {
       progressService.completeOperation(opId);
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      // A security-gate refusal already announced itself, and a declined
-      // confirm is the user's own decision — reporting either as a red error
-      // tells them their own click failed.
-      if (!gitService.isNetworkGateRefusal(result.error)) {
+      if (gitService.isOperationCancelled(result.error)) {
+        showToast('Push cancelled', 'info');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
+        // A security-gate refusal already announced itself, and a declined
+        // confirm is the user's own decision — reporting either as a red error
+        // tells them their own click failed.
+        //
         // Through the suggestion service so a non-fast-forward rejection offers
         // the Pull Now action the app already implements — a plain toast made
         // that recovery unreachable from the only push surface there is.
@@ -5599,7 +5672,6 @@ export class AppShell extends LitElement {
           }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
-        @repository-refresh=${() => this.handleRefresh()}
         @search-change=${this.handleSearchChange}
       ></lv-toolbar>
 

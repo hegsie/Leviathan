@@ -10,6 +10,7 @@ import { sharedStyles } from '../../styles/shared-styles.ts';
 import { keyboardService, type Shortcut, type ShortcutBinding } from '../../services/keyboard.service.ts';
 import { showConfirm } from '../../services/dialog.service.ts';
 import { pushOverlay, removeOverlay, isTopOverlay } from '../../utils/overlay-stack.ts';
+import '../common/lv-toggle.ts';
 
 @customElement('lv-keyboard-shortcuts-dialog')
 export class LvKeyboardShortcutsDialog extends LitElement {
@@ -204,36 +205,13 @@ export class LvKeyboardShortcutsDialog extends LitElement {
         cursor: pointer;
       }
 
-      .toggle-switch {
-        position: relative;
-        width: 36px;
-        height: 20px;
-        background: var(--color-bg-tertiary);
-        border: 1px solid var(--color-border);
-        border-radius: 10px;
-        cursor: pointer;
-        transition: all var(--transition-fast);
-      }
-
-      .toggle-switch.active {
-        background: var(--color-primary);
-        border-color: var(--color-primary);
-      }
-
-      .toggle-switch::after {
-        content: '';
-        position: absolute;
-        top: 2px;
-        left: 2px;
-        width: 14px;
-        height: 14px;
-        background: white;
-        border-radius: 50%;
-        transition: transform var(--transition-fast);
-      }
-
-      .toggle-switch.active::after {
-        transform: translateX(16px);
+      /* Keep the switch's previous look: 36x20 with a tinted, bordered track. */
+      lv-toggle {
+        --lv-toggle-width: 36px;
+        --lv-toggle-height: 20px;
+        --lv-toggle-track-bg: var(--color-bg-tertiary);
+        --lv-toggle-track-border: var(--color-border);
+        --lv-toggle-knob-bg: #ffffff;
       }
 
       /* Editable shortcut styles */
@@ -713,10 +691,11 @@ export class LvKeyboardShortcutsDialog extends LitElement {
           <span>Click a shortcut to edit • Press <span class="key">Esc</span> to cancel</span>
           <div class="vim-toggle">
             <label @click=${this.toggleVimMode}>Vim-style navigation</label>
-            <div
-              class="toggle-switch ${this.vimMode ? 'active' : ''}"
-              @click=${this.toggleVimMode}
-            ></div>
+            <lv-toggle
+              label="Vim-style navigation"
+              .checked=${this.vimMode}
+              @change=${this.toggleVimMode}
+            ></lv-toggle>
           </div>
         </div>
       </div>

@@ -3,7 +3,9 @@ import { setupOpenRepository } from '../fixtures/tauri-mock';
 import {
   startCommandCaptureWithMocks,
   injectCommandError,
+  injectCommandMock,
   findCommand,
+  autoConfirmDialogs,
 } from '../fixtures/test-helpers';
 
 /**
@@ -25,6 +27,7 @@ const defaultConfig = {
   enabled: false,
   port: 3001,
   allowedOrigins: [],
+  authToken: 'token-abc123',
 };
 
 function mcpMocks(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -34,6 +37,7 @@ function mcpMocks(overrides: Record<string, unknown> = {}): Record<string, unkno
     set_mcp_config: null,
     start_mcp_server: null,
     stop_mcp_server: null,
+    regenerate_mcp_token: 'token-new456',
     ...overrides,
   };
 }
@@ -56,6 +60,38 @@ function mcpToggleButton(page: Page) {
   return page
     .locator('lv-settings-dialog .setting-row', { hasText: 'Context Proxy' })
     .locator('button.mcp-toggle');
+}
+
+/** The masked/revealed access token value in the MCP section */
+function mcpTokenValue(page: Page) {
+  return page.locator('lv-settings-dialog .mcp-token-value');
+}
+
+/**
+ * Record clipboard writes on the page instead of touching the real clipboard,
+ * which headless Chromium refuses without a permission grant.
+ */
+async function captureClipboard(page: Page) {
+  await page.evaluate(() => {
+    const copied: string[] = [];
+    (window as unknown as { __COPIED__: string[] }).__COPIED__ = copied;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (value: string) => {
+          copied.push(value);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+}
+
+/** Everything copied to the clipboard so far */
+async function clipboardWrites(page: Page): Promise<string[]> {
+  return page.evaluate(
+    () => (window as unknown as { __COPIED__?: string[] }).__COPIED__ ?? []
+  );
 }
 
 /** The Disable button, shown only while the server is enabled but not running */
@@ -189,5 +225,120 @@ test.describe('Settings Dialog — MCP Server', () => {
 
     await expect(mcpToggleButton(page)).toHaveText('Start');
     await expect(mcpDisableButton(page)).toHaveCount(0);
+  });
+
+  test('masks the access token and reveals it on demand', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+
+    // The token is a secret: it must not be on screen until the user asks
+    await expect(mcpTokenValue(page)).toBeVisible();
+    await expect(mcpTokenValue(page)).not.toContainText('token-abc123');
+    await expect(page.locator('lv-settings-dialog .mcp-client-config')).not.toContainText(
+      'token-abc123'
+    );
+
+    const reveal = page.locator('lv-settings-dialog button.mcp-token-reveal');
+    await expect(reveal).toHaveText('Reveal');
+    await reveal.click();
+
+    await expect(mcpTokenValue(page)).toContainText('token-abc123');
+    await expect(page.locator('lv-settings-dialog .mcp-client-config')).toContainText(
+      'Bearer token-abc123'
+    );
+    await expect(reveal).toHaveText('Hide');
+
+    await reveal.click();
+    await expect(mcpTokenValue(page)).not.toContainText('token-abc123');
+  });
+
+  test('copies the token and a ready-made client configuration', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+    await captureClipboard(page);
+
+    await page.locator('lv-settings-dialog button.mcp-token-copy').click();
+    await expect
+      .poll(async () => (await clipboardWrites(page)).length)
+      .toBeGreaterThan(0);
+    expect((await clipboardWrites(page))[0]).toBe('token-abc123');
+    await expect(page.locator('lv-toast-container .toast.success')).toBeVisible();
+
+    await page.locator('lv-settings-dialog button.mcp-snippet-copy').click();
+    await expect
+      .poll(async () => (await clipboardWrites(page)).length)
+      .toBeGreaterThan(1);
+
+    const snippet = (await clipboardWrites(page))[1];
+    expect(snippet).toContain('"Authorization": "Bearer token-abc123"');
+    expect(snippet).toContain('http://127.0.0.1:3001');
+    expect(snippet).toContain('mcpServers');
+  });
+
+  test('regenerates the token after a confirmation that warns about clients', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+    await autoConfirmDialogs(page);
+    await captureClipboard(page);
+
+    await page.locator('lv-settings-dialog button.mcp-token-regenerate').click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'regenerate_mcp_token')).length)
+      .toBe(1);
+
+    // The confirmation must say what breaks
+    const confirms = await findCommand(page, 'plugin:dialog|message');
+    expect(JSON.stringify(confirms[confirms.length - 1].args)).toContain('stop working');
+
+    await expect(page.locator('lv-toast-container .toast.success')).toContainText('regenerated');
+
+    // The new token is masked like the old one, and it is what gets copied
+    await expect(mcpTokenValue(page)).not.toContainText('token-new456');
+    await page.locator('lv-settings-dialog button.mcp-token-reveal').click();
+    await expect(mcpTokenValue(page)).toContainText('token-new456');
+  });
+
+  test('does not regenerate the token when the confirmation is declined', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+    // plugin-dialog resolves confirm() to false for anything but the OK label
+    await injectCommandMock(page, { 'plugin:dialog|message': 'Cancel' });
+
+    await page.locator('lv-settings-dialog button.mcp-token-regenerate').click();
+
+    await expect
+      .poll(async () => (await findCommand(page, 'plugin:dialog|message')).length)
+      .toBeGreaterThan(0);
+    expect(await findCommand(page, 'regenerate_mcp_token')).toHaveLength(0);
+
+    await page.locator('lv-settings-dialog button.mcp-token-reveal').click();
+    await expect(mcpTokenValue(page)).toContainText('token-abc123');
+  });
+
+  test('surfaces an error when the token cannot be regenerated', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+    await autoConfirmDialogs(page);
+    await injectCommandError(page, 'regenerate_mcp_token', 'Failed to write MCP config: disk full');
+
+    await page.locator('lv-settings-dialog button.mcp-token-regenerate').click();
+
+    await expect(page.locator('lv-settings-dialog .error-text')).toContainText(
+      'Failed to write MCP config: disk full'
+    );
+    await expect(page.locator('lv-toast-container .toast.error')).toBeVisible();
+    // The failed attempt must not pretend a new token exists
+    await page.locator('lv-settings-dialog button.mcp-token-reveal').click();
+    await expect(mcpTokenValue(page)).toContainText('token-abc123');
+  });
+
+  test('explains that a client without the Authorization header is refused', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, mcpMocks());
+    await openSettings(page);
+
+    await expect(
+      page.locator('lv-settings-dialog .setting-row', { hasText: 'MCP Client Configuration' })
+    ).toContainText('401');
   });
 });

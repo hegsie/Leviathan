@@ -4,7 +4,13 @@ version = "0.8.0"
 description = "A fully-featured, open-source, cross-platform Git GUI client"
 authors = ["Leviathan Contributors"]
 edition = "2021"
-rust-version = "1.70"
+# Derived from the dependency tree's own `rust_version` requirements, not chosen by hand.
+# Recompute with:
+#   cargo metadata --format-version 1 | python3 -c \
+#     "import json,sys; d=json.load(sys.stdin); \
+#      print(max((p['rust_version'], p['name'], p['version']) for p in d['packages'] if p.get('rust_version')))"
+# As of this writing the ceiling is set by sysinfo 0.39.x (rust-version = 1.95).
+rust-version = "1.95"
 
 [lib]
 name = "leviathan_lib"
@@ -77,6 +83,7 @@ rand = "0.8"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
+tauri-plugin-window-state = "2"
 
 # Keyring crate only used on non-macOS; macOS uses `security` CLI directly
 # to avoid keychain ACL prompts that the keyring crate triggers on dev builds

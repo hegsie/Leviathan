@@ -64,6 +64,34 @@ describe('app-shell global loading bar', () => {
     ).to.be.greaterThan(0);
   });
 
+  // The shared reduced-motion clamp stops every animation after a single
+  // 0.01ms iteration. For this bar that would park the ::after slider at its
+  // final keyframe — translateX(350%), i.e. entirely off-screen — so a user
+  // with "reduce motion" on would see an empty track during every long
+  // operation. app-shell therefore paints it as a static full-width fill.
+  it('keeps the bar visible when motion is reduced', async () => {
+    const el = await shellWithLoading(true);
+    const root = el.shadowRoot!;
+    const sheets = [...(root.adoptedStyleSheets ?? []), ...Array.from(root.styleSheets ?? [])];
+
+    const overrides = sheets
+      .flatMap((sheet) => Array.from(sheet.cssRules))
+      .filter(
+        (rule): rule is CSSMediaRule =>
+          rule instanceof CSSMediaRule && rule.conditionText.includes('prefers-reduced-motion'),
+      )
+      .flatMap((media) => Array.from(media.cssRules))
+      .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule)
+      .filter((rule) => rule.selectorText.includes('.global-loading-bar'));
+
+    expect(
+      overrides.length,
+      'no reduced-motion override for the loading bar — it would be parked off-screen',
+    ).to.be.greaterThan(0);
+    expect(overrides[0].style.getPropertyValue('width')).to.equal('100%');
+    expect(overrides[0].style.getPropertyValue('transform')).to.equal('none');
+  });
+
   it('styles the skip link, whose declarations sat after the keyframes', async () => {
     const el = await shellWithLoading(false);
     const skip = el.shadowRoot!.querySelector('.skip-link') as HTMLElement;
