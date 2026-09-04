@@ -281,7 +281,7 @@ This package is community-maintained and is not an official Leviathan release ch
 #### Prerequisites
 
 - [Node.js](https://nodejs.org/) 20+
-- [Rust](https://rustup.rs/) 1.70+
+- [Rust](https://rustup.rs/) 1.95+
 - Platform-specific dependencies (see below)
 
 #### macOS
