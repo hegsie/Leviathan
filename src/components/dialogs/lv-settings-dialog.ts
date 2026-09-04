@@ -495,7 +495,12 @@ export class LvSettingsDialog extends LitElement {
       this.providerTestStatus = { ...this.providerTestStatus, [providerType]: 'success' };
     } else {
       this.providerTestStatus = { ...this.providerTestStatus, [providerType]: 'failed' };
-      this.aiError = `${aiService.getProviderDisplayName(providerType)} is not available. Check your API key and try again.`;
+      // A security-gate refusal names the setting that refused and how to undo
+      // it. Overwriting that with "check your API key" sent the user to fix a
+      // key that was never the problem.
+      this.aiError = gitService.isNetworkGateRefusal(result.error)
+        ? (result.error?.message ?? 'Blocked by security settings')
+        : `${aiService.getProviderDisplayName(providerType)} is not available. Check your API key and try again.`;
     }
   }
 
@@ -874,6 +879,10 @@ export class LvSettingsDialog extends LitElement {
     this.remoteAllowlist = domains;
     settingsStore.getState().setRemoteAllowlist(domains);
     window.dispatchEvent(new CustomEvent('settings-changed'));
+    // The allowlist decides whether a cloud AI provider may be reached, so the
+    // surfaces that cache "is AI available" have to re-ask. They listen for
+    // `ai-settings-changed`; nothing listens to `settings-changed` for this.
+    window.dispatchEvent(new CustomEvent('ai-settings-changed'));
   }
 
   private handleToggle(setting: string, e: Event): void {
@@ -924,6 +933,12 @@ export class LvSettingsDialog extends LitElement {
         break;
     }
     window.dispatchEvent(new CustomEvent('settings-changed'));
+    // Offline mode decides whether a cloud AI provider may be reached, so the
+    // Generate / Vibe Check / AI-resolve surfaces have to re-ask rather than
+    // keep offering a button the gate is now guaranteed to refuse.
+    if (setting === 'offlineMode') {
+      window.dispatchEvent(new CustomEvent('ai-settings-changed'));
+    }
   }
 
   // =====================================================
@@ -1477,7 +1492,7 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Offline Mode</span>
-              <span class="setting-description">Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)</span>
+              <span class="setting-description">Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, provider APIs (pull requests, issues, releases, CI), and cloud AI providers (OpenAI, Anthropic, Google Gemini, GitHub Models). Local AI — Ollama, LM Studio and the embedded model — keeps working.</span>
             </div>
             ${this.renderToggle(this.offlineMode, 'offlineMode')}
           </div>
@@ -1493,7 +1508,7 @@ export class LvSettingsDialog extends LitElement {
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Remote Allowlist</span>
-              <span class="setting-description">Comma-separated domains. When set, remotes outside the list are blocked. Leave empty to allow all.</span>
+              <span class="setting-description">Comma-separated domains. When set, remotes, provider APIs and cloud AI providers outside the list are blocked. Leave empty to allow all.</span>
             </div>
             <input
               type="text"

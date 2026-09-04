@@ -261,6 +261,45 @@ function providerApiHost(command: string, args?: Record<string, unknown>): strin
 }
 
 /**
+ * True when a hard network policy is in force — offline mode, or an allowlist.
+ *
+ * Callers use this to skip the work of resolving a destination when nothing
+ * could refuse it anyway. It deliberately lives here, next to the gate whose
+ * settings it reports on: a copy of "which settings count as a policy" kept
+ * anywhere else goes stale the moment another one is added, and goes stale
+ * fail-OPEN, which is the failure mode this gate exists to avoid.
+ */
+export function isNetworkPolicyActive(): boolean {
+  const settings = settingsStore.getState();
+  return settings.offlineMode || settings.remoteAllowlist.length > 0;
+}
+
+/**
+ * The hard-block gate for an outbound request whose destination host the caller
+ * already knows — the AI providers, which reach `api.openai.com` and friends
+ * over reqwest exactly as the hosting-provider APIs above do.
+ *
+ * Exported so `ai.service` applies the same offline-mode and allowlist rules
+ * without restating them. A second copy of this logic is precisely how the gate
+ * came to cover less than it claimed, twice.
+ *
+ * `host` may be null when the caller could not determine the destination. Like
+ * every other path through the gate, that fails closed once an allowlist is
+ * configured — silently allowing is what made the setting decorative.
+ *
+ * `silent` defaults to true: AI callers render `result.error.message`
+ * themselves, and a toast here would double up on it with a vaguer wording.
+ *
+ * Returns null when allowed, or the reason it was refused.
+ */
+export async function checkOutboundHostAllowed(
+  host: string | null,
+  silent = true,
+): Promise<NetworkBlockReason | null> {
+  return checkNetworkAllowed(null, host ?? undefined, silent);
+}
+
+/**
  * True when a failed result is the security gate refusing, or the user
  * declining its confirm. Both are already accounted for — the gate toasts its
  * own reason, and a decline is the user's own choice — so callers must not

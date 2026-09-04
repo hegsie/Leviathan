@@ -4,6 +4,7 @@
  */
 
 import { invokeCommand } from './tauri-api.ts';
+import { checkOutboundHostAllowed, isNetworkPolicyActive } from './git.service.ts';
 import type { CommandResult } from '../types/api.types.ts';
 
 /**
@@ -46,8 +47,127 @@ export interface ConflictResolutionSuggestion {
   explanation: string;
 }
 
+// ========================================================================
+// Security gate
+// ========================================================================
+
+/**
+ * Providers whose requests leave this machine.
+ *
+ * Ollama and LM Studio listen on localhost and local inference runs
+ * in-process, so none of those three ever leaves the machine — offline mode
+ * has no business refusing them, and this list is what keeps them working.
+ */
+const CLOUD_PROVIDERS: ReadonlySet<AiProviderType> = new Set<AiProviderType>([
+  'open_ai',
+  'anthropic',
+  'github_copilot',
+  'google_gemini',
+]);
+
+/** True when a provider's requests leave this machine. */
+export function isCloudAiProvider(providerType: AiProviderType): boolean {
+  return CLOUD_PROVIDERS.has(providerType);
+}
+
+/**
+ * The API host each cloud provider talks to, so the remote allowlist has a
+ * domain to match. Mirrors `AiProviderType::default_endpoint` in
+ * `src-tauri/src/services/ai/mod.rs`.
+ *
+ * A provider whose endpoint has been overridden in the AI config is still
+ * matched against its default host: the endpoint is not exposed over IPC
+ * without a network probe (`get_ai_providers` calls `is_available` on every
+ * provider), and probing from inside the gate would be self-defeating. Offline
+ * mode — the setting this gate exists for — does not depend on the host at all.
+ */
+const CLOUD_PROVIDER_HOSTS: Readonly<Record<string, string>> = {
+  open_ai: 'https://api.openai.com',
+  anthropic: 'https://api.anthropic.com',
+  github_copilot: 'https://models.inference.ai.azure.com',
+  google_gemini: 'https://generativelanguage.googleapis.com',
+};
+
+/** The refusal an AI call returns, in the shape callers already render. */
+function aiBlockedResult<T>(
+  reason: 'offline' | 'allowlist',
+  provider: AiProviderType | null,
+): CommandResult<T> {
+  const name = provider ? getProviderDisplayName(provider) : null;
+  const host = provider ? CLOUD_PROVIDER_HOSTS[provider] : null;
+  const message =
+    reason === 'offline'
+      ? name
+        ? `Offline mode is enabled and ${name} is a cloud AI provider. ` +
+          'Turn offline mode off in Settings > Security, or select a local ' +
+          'provider (Ollama, LM Studio or Local AI).'
+        : 'Offline mode is enabled and no AI provider is selected, so this ' +
+          'request could reach a cloud provider. Select a local provider ' +
+          '(Ollama, LM Studio or Local AI) in Settings, or turn offline mode off.'
+      : name
+        ? `${name} (${host}) is not in your remote allowlist. Add it in ` +
+          'Settings > Security, or select a local provider.'
+        : 'A remote allowlist is configured and no AI provider is selected, ' +
+          'so the destination of this request is unknown. Select a provider in Settings.';
+
+  // `BLOCKED` is the code the git gate uses, so `isNetworkGateRefusal` and the
+  // suggestion service treat an AI refusal exactly like any other.
+  return { success: false, error: { code: 'BLOCKED', message } };
+}
+
+/**
+ * The security gate every provider-reaching AI call passes through.
+ *
+ * Offline mode promises to block "every operation that leaves this machine",
+ * and the AI providers were the one outbound path it never covered: with
+ * OpenAI / Anthropic / Gemini / GitHub Models selected, "Generate commit
+ * message" posted the staged diff, changelog generation posted the commit
+ * history, and conflict help posted both sides of the file — all while the
+ * setting said the app was offline.
+ *
+ * The active provider is resolved on every call rather than cached. It decides
+ * whether a diff leaves the machine, so it has to be the value in force at the
+ * moment of the call; a cache would need every writer of the AI config to
+ * remember to invalidate it, and the one that forgot would fail open.
+ * `get_active_ai_provider` reads in-memory config — it makes no request — and
+ * it is skipped entirely unless a policy is actually in force.
+ *
+ * @param providerType The provider this call will use, when the caller names
+ *   one — `testAiProvider` tests a provider that need not be the active one.
+ *   Omitted means "whichever provider is active".
+ * @returns null when the call may proceed, or the refusal to return as-is.
+ */
+async function checkAiNetworkAllowed<T>(
+  providerType?: AiProviderType,
+): Promise<CommandResult<T> | null> {
+  if (!isNetworkPolicyActive()) return null;
+
+  let provider = providerType ?? null;
+  if (!provider) {
+    const active = await getActiveAiProvider();
+    provider = active.success ? (active.data ?? null) : null;
+  }
+
+  // Local providers never leave the machine, so no policy applies to them.
+  if (provider && !isCloudAiProvider(provider)) return null;
+
+  // With nothing selected the backend falls back to whatever provider is
+  // reachable, cloud providers included (`resolve_provider` in
+  // src-tauri/src/services/ai/mod.rs), so the destination is genuinely unknown
+  // and the gate refuses rather than waving it through — the same fail-closed
+  // rule the allowlist already applies to a remote whose URL it cannot see.
+  const host = provider ? CLOUD_PROVIDER_HOSTS[provider] : null;
+  const reason = await checkOutboundHostAllowed(host);
+  if (!reason) return null;
+  return aiBlockedResult<T>(reason === 'allowlist' ? 'allowlist' : 'offline', provider);
+}
+
 /**
  * Get all AI providers with their status
+ *
+ * Deliberately ungated: this is how Settings lists the providers and how the
+ * user reaches the controls that turn a cloud provider off. Blocking it would
+ * make offline mode hide the way out of offline mode.
  */
 export async function getAiProviders(): Promise<CommandResult<AiProviderInfo[]>> {
   return invokeCommand<AiProviderInfo[]>('get_ai_providers');
@@ -91,15 +211,25 @@ export async function setAiModel(
 
 /**
  * Test if a provider is available
+ *
+ * Gated on the provider *named here*, not the active one: "Test" on the OpenAI
+ * row reaches OpenAI whatever is selected elsewhere in Settings.
  */
 export async function testAiProvider(
   providerType: AiProviderType
 ): Promise<CommandResult<boolean>> {
+  const blocked = await checkAiNetworkAllowed<boolean>(providerType);
+  if (blocked) return blocked;
   return invokeCommand<boolean>('test_ai_provider', { providerType });
 }
 
 /**
  * Auto-detect available local AI providers (Ollama, LM Studio)
+ *
+ * Deliberately ungated: `auto_detect_providers` probes only Ollama and LM
+ * Studio, both of which listen on localhost. Nothing here leaves the machine,
+ * and gating it would break the one path that finds the local providers a
+ * user is meant to fall back to while offline.
  */
 export async function autoDetectAiProviders(): Promise<CommandResult<AiProviderType[]>> {
   return invokeCommand<AiProviderType[]>('auto_detect_ai_providers');
@@ -111,6 +241,8 @@ export async function autoDetectAiProviders(): Promise<CommandResult<AiProviderT
 export async function generateCommitMessage(
   repoPath: string
 ): Promise<CommandResult<GeneratedCommitMessage>> {
+  const blocked = await checkAiNetworkAllowed<GeneratedCommitMessage>();
+  if (blocked) return blocked;
   return invokeCommand<GeneratedCommitMessage>('generate_commit_message', {
     repoPath,
   });
@@ -127,6 +259,8 @@ export async function suggestConflictResolution(
   contextBefore?: string,
   contextAfter?: string,
 ): Promise<CommandResult<ConflictResolutionSuggestion>> {
+  const blocked = await checkAiNetworkAllowed<ConflictResolutionSuggestion>();
+  if (blocked) return blocked;
   return invokeCommand<ConflictResolutionSuggestion>('suggest_conflict_resolution', {
     filePath,
     oursContent,
@@ -153,6 +287,8 @@ export async function generateChangelog(
   compareRef: string,
   maxCommits?: number,
 ): Promise<CommandResult<GeneratedChangelog>> {
+  const blocked = await checkAiNetworkAllowed<GeneratedChangelog>();
+  if (blocked) return blocked;
   return invokeCommand<GeneratedChangelog>('generate_changelog', {
     repoPath,
     baseRef,
@@ -209,6 +345,8 @@ export interface CommitSplitSuggestion {
 export async function analyzeStagedChanges(
   repoPath: string,
 ): Promise<CommandResult<StagedAnalysis>> {
+  const blocked = await checkAiNetworkAllowed<StagedAnalysis>();
+  if (blocked) return blocked;
   return invokeCommand<StagedAnalysis>('analyze_staged_changes', { repoPath });
 }
 
@@ -221,6 +359,8 @@ export async function generatePrDescription(
   headRef: string,
   title: string,
 ): Promise<CommandResult<GeneratedPrDescription>> {
+  const blocked = await checkAiNetworkAllowed<GeneratedPrDescription>();
+  if (blocked) return blocked;
   return invokeCommand<GeneratedPrDescription>('generate_pr_description', {
     repoPath,
     baseRef,
@@ -235,6 +375,8 @@ export async function generatePrDescription(
 export async function suggestCommitSplits(
   repoPath: string,
 ): Promise<CommandResult<CommitSplitSuggestion>> {
+  const blocked = await checkAiNetworkAllowed<CommitSplitSuggestion>();
+  if (blocked) return blocked;
   return invokeCommand<CommitSplitSuggestion>('suggest_commit_splits', { repoPath });
 }
 
@@ -264,6 +406,8 @@ export async function explainConflict(
   ourRef?: string,
   theirRef?: string,
 ): Promise<CommandResult<ConflictExplanation>> {
+  const blocked = await checkAiNetworkAllowed<ConflictExplanation>();
+  if (blocked) return blocked;
   return invokeCommand<ConflictExplanation>('explain_conflict', {
     filePath,
     oursContent,
@@ -281,13 +425,23 @@ export async function findReflogEntry(
   repoPath: string,
   query: string,
 ): Promise<CommandResult<ReflogMatch>> {
+  const blocked = await checkAiNetworkAllowed<ReflogMatch>();
+  if (blocked) return blocked;
   return invokeCommand<ReflogMatch>('find_reflog_entry', { repoPath, query });
 }
 
 /**
  * Check if AI is available (provider configured and working)
+ *
+ * Gated as well as the generation calls, for two reasons: `is_ai_available`
+ * asks the active provider whether it is reachable, and for an
+ * OpenAI-compatible cloud provider that is itself an outbound request; and a
+ * surface that offers "Generate" while the gate is guaranteed to refuse it is
+ * a button that exists only to fail. Blocked reads as unavailable, and
+ * `getAiUnavailableReason` says why.
  */
 export async function isAiAvailable(): Promise<boolean> {
+  if (await checkAiNetworkAllowed()) return false;
   const result = await invokeCommand<boolean>('is_ai_available');
   return result.success && result.data === true;
 }
@@ -313,6 +467,13 @@ export interface AiUnavailable {
  * substituted, the UI has to name it rather than claim nothing is configured.
  */
 export async function getAiUnavailableReason(): Promise<AiUnavailable | null> {
+  const blocked = await checkAiNetworkAllowed();
+  if (blocked) {
+    // `providerSelected: true` keeps the AI affordances visible-but-disabled
+    // rather than hidden: they worked a moment ago and the user needs to see
+    // which setting stopped them.
+    return { reason: blocked.error?.message ?? 'Blocked by security settings', providerSelected: true };
+  }
   const result = await invokeCommand<AiUnavailable | null>('ai_unavailable_reason');
   return result.success ? (result.data ?? null) : null;
 }
