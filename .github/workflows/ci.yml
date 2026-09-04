@@ -46,6 +46,10 @@ jobs:
       - name: Test workflow scripts
         run: node --test .github/scripts/*.test.mjs
 
+      # Fails when the frontend invokes a Tauri command lib.rs does not register.
+      - name: IPC contract test
+        run: npm run test:contract
+
   lint-backend:
     name: Lint Backend
     runs-on: ubuntu-22.04
