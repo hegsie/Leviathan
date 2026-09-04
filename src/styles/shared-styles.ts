@@ -1,6 +1,108 @@
 import { css } from 'lit';
 
 /**
+ * Reduced-motion fragment.
+ *
+ * Lit components render into shadow roots, so a `@media (prefers-reduced-motion)`
+ * block in the light-DOM stylesheet (src/styles/tokens.css) can NOT reach the
+ * animations declared inside a component's `static styles`. This fragment is
+ * therefore interpolated into `sharedStyles`, which every animating component
+ * already includes as the first entry of its styles array, so the rules are
+ * adopted into each shadow root.
+ *
+ * `!important` is deliberate: `sharedStyles` comes first in every styles array,
+ * so at equal specificity the component's own `animation:` / `transition:`
+ * declarations would otherwise win — and the spinner markup in
+ * lv-azure-devops-dialog sets `animation` in an inline `style` attribute, which
+ * only an important declaration can override.
+ *
+ * Indeterminate progress bars translate themselves off-screen and would be left
+ * parked at their final keyframe (invisible) by the blanket rule, so app-shell
+ * and lv-progress-indicator each carry a small reduced-motion override that
+ * paints them as a static filled bar instead.
+ */
+export const reducedMotionStyles = css`
+  @media (prefers-reduced-motion: reduce) {
+    :host,
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      animation-delay: 0ms !important;
+      transition-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+`;
+
+/**
+ * Keyboard focus ring fragment.
+ *
+ * Most components suppress the native ring with `outline: none` on `:focus`
+ * (usually paired with a border-colour change that only reads for mouse users),
+ * and those class-based rules out-specify a bare `:focus-visible` rule coming
+ * from `sharedStyles`. The ring is therefore declared `!important` on an
+ * explicit list of interactive selectors so keyboard users get an indicator
+ * everywhere, while mouse focus stays quiet.
+ *
+ * The ring is expressed through the `--lv-focus-ring-*` custom properties
+ * defined in src/styles/tokens.css (they inherit through shadow boundaries), so
+ * a component can still tune it — e.g. set `--lv-focus-ring-offset: -2px` on a
+ * full-bleed list row so the ring is not clipped by the scroll container —
+ * without fighting the `!important`.
+ *
+ * `[tabindex="-1"]` is excluded on purpose: those elements only ever receive
+ * programmatic focus (dialog containers, scroll panes) and should not flash a
+ * ring when a dialog opens.
+ */
+export const focusRingStyles = css`
+  a[href]:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  summary:focus-visible,
+  [tabindex]:not([tabindex='-1']):focus-visible,
+  [role='button']:focus-visible,
+  [role='tab']:focus-visible,
+  [role='option']:focus-visible,
+  [role='menuitem']:focus-visible,
+  [role='menuitemcheckbox']:focus-visible,
+  [role='menuitemradio']:focus-visible,
+  [role='checkbox']:focus-visible,
+  [role='switch']:focus-visible {
+    outline: var(--lv-focus-ring-width, 2px) solid
+      var(--lv-focus-ring-color, var(--color-primary, #1a73e8)) !important;
+    outline-offset: var(--lv-focus-ring-offset, 2px) !important;
+  }
+
+  /* Form fields sit flush against their own border, so the ring hugs the field
+     rather than floating 2px off it (this preserves the offset the previous
+     input focus rule used). Components can still override the property. */
+  input,
+  select,
+  textarea {
+    --lv-focus-ring-offset: 0px;
+  }
+
+  /* Hosts that put themselves in the tab order (lv-file-status, lv-diff-view)
+     cannot be reached by the [tabindex] rule above from inside their own
+     shadow root, so they get a matching inset ring here. */
+  :host([tabindex]:not([tabindex='-1']):focus-visible) {
+    outline: var(--lv-focus-ring-width, 2px) solid
+      var(--lv-focus-ring-color, var(--color-primary, #1a73e8)) !important;
+    outline-offset: calc(-1 * var(--lv-focus-ring-width, 2px)) !important;
+  }
+
+  /* Mouse/touch focus stays quiet — only :focus-visible paints a ring. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+`;
+
+/**
  * Shared styles for Lit components
  * Import into component static styles array
  */
@@ -16,24 +118,10 @@ export const sharedStyles = css`
   }
 
   /* Focus styles — keyboard-only focus indicators (WCAG 2.4.7) */
-  :focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 2px;
-  }
+  ${focusRingStyles}
 
-  /* Ensure inputs/textareas/selects show focus ring on keyboard navigation
-     even when components suppress outline on :focus for mouse users */
-  input:focus-visible,
-  textarea:focus-visible,
-  select:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 0;
-  }
-
-  /* Suppress focus ring for mouse clicks (non-keyboard) */
-  :focus:not(:focus-visible) {
-    outline: none;
-  }
+  /* Honour the OS "reduce motion" setting inside this shadow root */
+  ${reducedMotionStyles}
 
   /* Button reset */
   button {

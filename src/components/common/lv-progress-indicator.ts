@@ -108,6 +108,16 @@ export class LvProgressIndicator extends LitElement {
         100% { transform: translateX(400%); }
       }
 
+      /* Same reasoning as the global loading bar in app-shell: with motion
+         reduced the sliding fill would end up parked off-screen, so show a
+         static full-width fill instead of nothing. */
+      @media (prefers-reduced-motion: reduce) {
+        .progress-fill.indeterminate {
+          width: 100% !important;
+          transform: none;
+        }
+      }
+
       .cancel-btn {
         display: flex;
         align-items: center;

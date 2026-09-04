@@ -40,7 +40,10 @@ export class LvStashList extends LitElement {
         padding: 0;
       }
 
+      /* Full-bleed row inside a scrolling list: draw the shared keyboard
+         focus ring inside the row so the scroll container cannot clip it. */
       .stash-item {
+        --lv-focus-ring-offset: -2px;
         display: flex;
         align-items: center;
         gap: 6px;
