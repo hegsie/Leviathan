@@ -134,6 +134,11 @@ import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { runFetch, runPull, runPush } from './services/remote-operations.service.ts';
+import {
+  openRepositoryInTerminal,
+  openRepositoryInFileManager,
+  openRepositoryInEditor,
+} from './services/open-location.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import {
   confirmGarbageCollection,
@@ -225,6 +230,18 @@ export class AppShell extends LitElement {
         0% { transform: translateX(-100%); }
         50% { transform: translateX(150%); }
         100% { transform: translateX(350%); }
+      }
+
+      /* The shared reduced-motion rules clamp every animation to one 0.01ms
+         iteration, which would park this bar at its final keyframe — 350% to
+         the right, i.e. completely off-screen — and the app would look idle
+         during long operations. Paint a static full-width bar instead so the
+         "busy" state is still visible without motion. */
+      @media (prefers-reduced-motion: reduce) {
+        .global-loading-bar::after {
+          width: 100%;
+          transform: none;
+        }
       }
 
       .skip-link:focus {
@@ -3213,11 +3230,14 @@ export class AppShell extends LitElement {
     );
     if (!confirmed) return;
 
-    const opId = progressService.startOperation('push', 'Force pushing to remote...');
+    const opId = progressService.startOperation('push', 'Force pushing to remote...', {
+      cancellable: true,
+    });
     const result = await gitService.push({
       path: repoPath,
       forceWithLease: true,
       silent: true,
+      operationId: opId,
     });
     if (result.success) {
       progressService.completeOperation(opId);
@@ -3228,7 +3248,9 @@ export class AppShell extends LitElement {
       this.refreshConflictDialogRepo(repoPath);
     } else {
       progressService.failOperation(opId);
-      if (!gitService.isNetworkGateRefusal(result.error)) {
+      if (gitService.isOperationCancelled(result.error)) {
+        showToast('Force push cancelled', 'info');
+      } else if (!gitService.isNetworkGateRefusal(result.error)) {
         // NOT through showErrorWithSuggestion: a force push that is itself
         // rejected would match the same branch that produced this toast and
         // offer Force Push again, an unbounded loop over the one action that
@@ -4775,6 +4797,37 @@ export class AppShell extends LitElement {
         icon: 'file',
         action: this.requiresRepository(() => { this.showGitignoreDialog = true; }),
       },
+      // The palette acts on the ACTIVE repository; the same three actions are
+      // on the repository tab context menu for any open tab. Failures (no
+      // terminal emulator, a path that has gone away, an editor that cannot be
+      // spawned) are toasted by the shared service with the backend message.
+      {
+        id: 'open-in-terminal',
+        label: 'Open in Terminal',
+        category: 'action',
+        icon: 'terminal',
+        action: this.requiresRepository(() => {
+          void openRepositoryInTerminal(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'reveal-in-file-manager',
+        label: 'Reveal in File Manager',
+        category: 'action',
+        icon: 'folder',
+        action: this.requiresRepository(() => {
+          void openRepositoryInFileManager(this.activeRepository!.repository.path);
+        }),
+      },
+      {
+        id: 'open-in-editor',
+        label: 'Open in Editor',
+        category: 'action',
+        icon: 'file',
+        action: this.requiresRepository(() => {
+          void openRepositoryInEditor(this.activeRepository!.repository.path);
+        }),
+      },
     ];
 
     return commands;
@@ -5077,13 +5130,16 @@ export class AppShell extends LitElement {
     // the repo the fetch ran ON, not whichever tab is active when it returns.
     const repoPath = this.activeRepository?.repository.path;
     if (!repoPath) return Promise.resolve();
-    // The lock, the progress row, the failure reporting and the refresh all
-    // live in remote-operations.service, shared with the context dashboard's
-    // Fetch/Pull/Push buttons — the only mouse-reachable route to these three
-    // operations, which used to run its own divergent copy of all of it. The
-    // coalescing that matters here is still in force: keyboardService has no
-    // e.repeat guard, so HOLDING Ctrl+Shift+F fires many times a second, and
-    // every repeat used to launch a fully concurrent fetch.
+    // The lock, the cancellable progress row, the failure reporting and the
+    // refresh all live in remote-operations.service, shared with the context
+    // dashboard's Fetch/Pull/Push buttons — the only mouse-reachable route to
+    // these three operations, which used to run its own divergent copy of all
+    // of it. The runner starts the row with `{cancellable: true}` and hands its
+    // id to the backend, so the row's Cancel button really aborts the transfer
+    // whichever surface started it. The coalescing that matters here is still
+    // in force: keyboardService has no e.repeat guard, so HOLDING Ctrl+Shift+F
+    // fires many times a second, and every repeat used to launch a fully
+    // concurrent fetch.
     return runFetch(repoPath);
   }
 
@@ -5095,7 +5151,9 @@ export class AppShell extends LitElement {
     // Claims the SHARED working-tree lock inside the runner, not a private
     // key: a pull's fast-forward runs checkout_tree and its merge and rebase
     // paths rewrite the tree outright, so it must exclude every sidebar
-    // checkout, discard and reset — not just other pulls.
+    // checkout, discard and reset — not just other pulls. The runner also owns
+    // the cancellable progress row and the MERGE_CONFLICT/REBASE_CONFLICT
+    // routing into the resolution dialog.
     return runPull(repoPath);
   }
 
@@ -5507,7 +5565,6 @@ export class AppShell extends LitElement {
           }}
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
-        @repository-refresh=${() => this.handleRefresh()}
         @search-change=${this.handleSearchChange}
       ></lv-toolbar>
 

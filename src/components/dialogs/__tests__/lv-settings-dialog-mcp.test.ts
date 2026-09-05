@@ -25,7 +25,19 @@ let mcpStatus: Record<string, unknown> = {
   lastError: null,
 };
 let setMcpConfigError: string | null = null;
-let mcpConfig: Record<string, unknown> = { enabled: false, port: 3001, allowedOrigins: [] };
+let mcpConfig: Record<string, unknown> = {
+  enabled: false,
+  port: 3001,
+  allowedOrigins: [],
+  authToken: 'token-abc123',
+};
+/** Answer for showConfirm(): 'Ok' confirms, anything else cancels */
+let confirmAnswer = 'Ok';
+let regenerateError: string | null = null;
+let regeneratedToken = 'token-new456';
+/** Values handed to navigator.clipboard.writeText */
+const copied: string[] = [];
+let clipboardFails = false;
 
 const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
   if (command === 'plugin:notification|is_permission_granted') return false;
@@ -53,8 +65,19 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
       return mcpConfig;
     case 'set_mcp_config':
       if (setMcpConfigError) throw new Error(setMcpConfigError);
-      mcpConfig = { ...(args as { config: Record<string, unknown> }).config };
+      // The backend owns the token: a save never carries or replaces it
+      mcpConfig = {
+        ...(args as { config: Record<string, unknown> }).config,
+        authToken: mcpConfig.authToken,
+      };
       return null;
+    case 'regenerate_mcp_token':
+      if (regenerateError) throw new Error(regenerateError);
+      mcpConfig = { ...mcpConfig, authToken: regeneratedToken };
+      return regeneratedToken;
+    // showConfirm() resolves true when the dialog plugin answers 'Ok'
+    case 'plugin:dialog|message':
+      return confirmAnswer;
     case 'start_mcp_server':
       return null;
     default:
@@ -69,6 +92,7 @@ const mockInvoke: MockInvoke = async (command: string, args?: unknown) => {
 // Import AFTER setting up the mock
 import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+import { uiStore } from '../../../stores/ui.store.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -85,7 +109,24 @@ describe('lv-settings-dialog MCP settings', () => {
     invoked.length = 0;
     setMcpConfigError = null;
     mcpStatus = { running: false, port: 3001, url: null, lastError: null };
-    mcpConfig = { enabled: false, port: 3001, allowedOrigins: [] };
+    mcpConfig = { enabled: false, port: 3001, allowedOrigins: [], authToken: 'token-abc123' };
+    confirmAnswer = 'Ok';
+    regenerateError = null;
+    regeneratedToken = 'token-new456';
+    copied.length = 0;
+    clipboardFails = false;
+    uiStore.setState({ toasts: [] });
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (value: string) => {
+          if (clipboardFails) return Promise.reject(new Error('denied'));
+          copied.push(value);
+          return Promise.resolve();
+        },
+      },
+    });
   });
 
   it('persists the port when it changes', async () => {
@@ -224,5 +265,199 @@ describe('lv-settings-dialog MCP settings', () => {
     expect(el.shadowRoot?.querySelector('button.mcp-disable')).to.not.exist;
     const toggle = el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-toggle');
     expect(toggle?.textContent?.trim()).to.equal('Stop');
+  });
+
+  describe('access token', () => {
+    /** Load the dialog with the MCP config already applied */
+    async function openDialog(): Promise<LvSettingsDialog> {
+      const el = await fixture<LvSettingsDialog>(html`<lv-settings-dialog></lv-settings-dialog>`);
+      await (el as any).loadMcpStatus();
+      await el.updateComplete;
+      return el;
+    }
+
+    it('masks the token by default and reveals it on demand', async () => {
+      const el = await openDialog();
+
+      const value = el.shadowRoot?.querySelector('.mcp-token-value');
+      expect(value, 'the MCP section must show the access token').to.exist;
+      expect(value?.textContent).to.not.contain('token-abc123');
+      expect(value?.textContent?.trim()).to.match(/^•+$/);
+
+      const reveal = el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-reveal');
+      expect(reveal?.textContent?.trim()).to.equal('Reveal');
+      reveal?.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot?.querySelector('.mcp-token-value')?.textContent).to.contain(
+        'token-abc123'
+      );
+      expect(
+        el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-reveal')?.textContent?.trim()
+      ).to.equal('Hide');
+
+      // ...and it can be hidden again
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-reveal')?.click();
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.mcp-token-value')?.textContent).to.not.contain(
+        'token-abc123'
+      );
+    });
+
+    it('copies the real token even while it is masked', async () => {
+      const el = await openDialog();
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-copy')?.click();
+      await flush(el);
+
+      expect(copied).to.deep.equal(['token-abc123']);
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /copied/i.test(t.message))).to.be.true;
+    });
+
+    it('reports a failed copy instead of failing silently', async () => {
+      const el = await openDialog();
+      clipboardFails = true;
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-copy')?.click();
+      await flush(el);
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error' && /copy/i.test(t.message))).to.be.true;
+    });
+
+    it('offers a client configuration snippet with the Authorization header', async () => {
+      const el = await openDialog();
+
+      const snippet = el.shadowRoot?.querySelector('.mcp-client-config')?.textContent ?? '';
+      expect(snippet).to.contain('mcpServers');
+      expect(snippet).to.contain('http://127.0.0.1:3001');
+      expect(snippet).to.contain('Authorization');
+      expect(snippet).to.contain('Bearer');
+      // The token stays masked on screen until the user reveals it
+      expect(snippet).to.not.contain('token-abc123');
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-snippet-copy')?.click();
+      await flush(el);
+
+      expect(copied).to.have.lengthOf(1);
+      expect(copied[0]).to.contain('"Authorization": "Bearer token-abc123"');
+      expect(copied[0]).to.contain('http://127.0.0.1:3001');
+    });
+
+    it('shows the token in the snippet once it is revealed', async () => {
+      const el = await openDialog();
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-reveal')?.click();
+      await el.updateComplete;
+
+      expect(el.shadowRoot?.querySelector('.mcp-client-config')?.textContent).to.contain(
+        'Bearer token-abc123'
+      );
+    });
+
+    it('regenerates the token after a confirmation', async () => {
+      const el = await openDialog();
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-regenerate')?.click();
+      await flush(el);
+
+      const confirms = invoked.filter((c) => c.command === 'plugin:dialog|message');
+      expect(confirms.length, 'regenerating must be confirmed first').to.equal(1);
+      expect(JSON.stringify(confirms[0].args)).to.contain('stop working');
+
+      expect(invoked.some((c) => c.command === 'regenerate_mcp_token')).to.be.true;
+      expect((el as any).mcpToken).to.equal('token-new456');
+
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'success' && /regenerated/i.test(t.message))).to.be.true;
+
+      // The new token is masked like the old one, and copies as the new value
+      expect(el.shadowRoot?.querySelector('.mcp-token-value')?.textContent).to.not.contain(
+        'token-new456'
+      );
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-copy')?.click();
+      await flush(el);
+      expect(copied).to.deep.equal(['token-new456']);
+    });
+
+    it('does not regenerate the token when the confirmation is declined', async () => {
+      const el = await openDialog();
+      confirmAnswer = 'Cancel';
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-regenerate')?.click();
+      await flush(el);
+
+      expect(invoked.some((c) => c.command === 'regenerate_mcp_token')).to.be.false;
+      expect((el as any).mcpToken).to.equal('token-abc123');
+    });
+
+    it('shows an error when regenerating the token fails', async () => {
+      const el = await openDialog();
+      regenerateError = 'Failed to write MCP config: disk full';
+
+      el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-regenerate')?.click();
+      await flush(el);
+
+      expect(el.shadowRoot?.textContent ?? '').to.contain('Failed to write MCP config: disk full');
+      const toasts = uiStore.getState().toasts;
+      expect(toasts.some((t) => t.type === 'error')).to.be.true;
+      // The failed regeneration must not fake a new token
+      expect((el as any).mcpToken).to.equal('token-abc123');
+    });
+
+    it('explains that a client without the header is refused', async () => {
+      const el = await openDialog();
+      const rendered = el.shadowRoot?.textContent ?? '';
+      expect(rendered).to.contain('Authorization header');
+      expect(rendered).to.contain('401');
+    });
+
+    it('keeps the token out of the saved configuration', async () => {
+      const el = await openDialog();
+
+      await (el as any).handleMcpPortChange({ target: { value: '4321' } } as unknown as Event);
+      await el.updateComplete;
+
+      const saves = invoked.filter((c) => c.command === 'set_mcp_config');
+      const args = saves[saves.length - 1].args as { config: Record<string, unknown> };
+      expect(Object.keys(args.config).sort()).to.deep.equal([
+        'allowedOrigins',
+        'enabled',
+        'port',
+      ]);
+    });
+
+    it('preserves the configured allowed origins when saving the port', async () => {
+      mcpConfig = {
+        enabled: false,
+        port: 3001,
+        allowedOrigins: ['http://localhost:5173'],
+        authToken: 'token-abc123',
+      };
+      const el = await openDialog();
+
+      await (el as any).handleMcpPortChange({ target: { value: '4321' } } as unknown as Event);
+      await el.updateComplete;
+
+      const saves = invoked.filter((c) => c.command === 'set_mcp_config');
+      expect(saves[saves.length - 1].args).to.deep.equal({
+        config: { enabled: false, port: 4321, allowedOrigins: ['http://localhost:5173'] },
+      });
+    });
+
+    it('offers no token actions before a token exists', async () => {
+      mcpConfig = { enabled: false, port: 3001, allowedOrigins: [], authToken: '' };
+      const el = await openDialog();
+
+      expect(el.shadowRoot?.querySelector('.mcp-token-value')?.textContent).to.contain(
+        'Not generated yet'
+      );
+      expect(
+        el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-copy')?.disabled
+      ).to.be.true;
+      expect(
+        el.shadowRoot?.querySelector<HTMLButtonElement>('button.mcp-token-reveal')?.disabled
+      ).to.be.true;
+    });
   });
 });

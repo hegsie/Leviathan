@@ -323,6 +323,85 @@ describe('remote operations runner', () => {
     });
   });
 
+  /**
+   * The runner is the ONLY thing that starts these three rows, so it is the
+   * only thing that can make them cancellable. A row without
+   * `{cancellable: true}` renders no Cancel button, and a command without the
+   * row's `operationId` is not registered with the backend's cancellation
+   * registry — so `cancel_operation` has nothing to stop. Both surfaces get
+   * these because both go through here.
+   */
+  describe('cancellation', () => {
+    for (const [kind, run] of [
+      ['fetch', runFetch],
+      ['pull', runPull],
+      ['push', runPush],
+    ] as const) {
+      it(`${kind} runs under a cancellable row whose id reaches the backend`, async () => {
+        hang(kind);
+        const ids: string[] = [];
+        const unsubscribe = progressService.subscribe((ops) => {
+          for (const op of ops) if (!ids.includes(op.id)) ids.push(op.id);
+        });
+        try {
+          const running = run(REPO);
+          await sent(kind);
+
+          const row = progressService.getOperations()[0];
+          expect(row?.cancellable, `${kind}'s row must render the Cancel button`).to.equal(true);
+
+          const args = invoked.find((c) => c.command === kind)?.args as
+            | { operationId?: string }
+            | undefined;
+          expect(
+            args?.operationId,
+            `${kind} must hand the backend the very id the row was started with`,
+          ).to.equal(row.id);
+          expect(ids).to.contain(row.id);
+
+          release(kind);
+          await running;
+        } finally {
+          unsubscribe();
+        }
+      });
+
+      it(`a cancelled ${kind} says the cancel took effect instead of failing`, async () => {
+        failures.set(kind, { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' });
+        await run(REPO);
+
+        expect(errorToasts(), `a cancel the user asked for is not a red ${kind} failure`)
+          .to.deep.equal([]);
+        expect(
+          uiStore.getState().toasts.map((t) => t.message),
+          'the row vanishing needs an explanation',
+        ).to.deep.equal([`${kind[0].toUpperCase()}${kind.slice(1)} cancelled`]);
+        expect(progressMessages(), 'and no row is left behind').to.deep.equal([]);
+      });
+
+      it(`a cancelled ${kind} releases every lock it held`, async () => {
+        // Leaking a lock on cancellation wedges the repository until the app
+        // restarts — worse than not being able to cancel at all.
+        failures.set(kind, { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' });
+        await run(REPO);
+        expect(isRemoteOperationRunning(REPO), 'the shared slot').to.equal(false);
+        expect(isRefOpRunning(REPO), 'the working-tree lock').to.equal(false);
+        expect(isPushRunning(REPO), 'the push slot').to.equal(false);
+
+        failures.delete(kind);
+        invoked.length = 0;
+        await run(REPO);
+        expect(counts(kind), `a retry after a cancelled ${kind} is not refused`).to.equal(1);
+      });
+    }
+
+    it('a genuine failure is still a failure now that OPERATION_CANCELLED exists', async () => {
+      failures.set('fetch', { code: 'COMMAND_ERROR', message: 'host unreachable' });
+      await runFetch(REPO);
+      expect(errorToasts().join(' ')).to.contain('host unreachable');
+    });
+  });
+
   describe('reporting', () => {
     it('reports a failure with the recovery action the app implements', async () => {
       failures.set('push', {

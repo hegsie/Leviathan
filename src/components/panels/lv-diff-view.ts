@@ -675,6 +675,13 @@ export class LvDiffView extends CodeRenderMixin(LitElement) {
         outline: none;
       }
 
+      /* The editor fills its pane edge to edge, so the shared keyboard focus
+         ring is drawn inside the textarea instead of outside it, where the
+         surrounding overflow: hidden would clip it away. */
+      .editor-textarea {
+        --lv-focus-ring-offset: -2px;
+      }
+
       .edit-indicator {
         padding: var(--spacing-xs) var(--spacing-sm);
         background: var(--color-warning-bg);

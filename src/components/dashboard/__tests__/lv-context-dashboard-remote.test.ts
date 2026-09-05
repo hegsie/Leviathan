@@ -320,4 +320,78 @@ describe('dashboard remote operations', () => {
     }
     expect(seen).to.deep.equal(['/repo/a']);
   });
+
+  // ── cancellation ─────────────────────────────────────────────────────────
+  //
+  // These are the most visible fetch/pull/push buttons in the app and they
+  // showed no progress row at all, so the whole cancellation flow was
+  // unreachable from them even once the backend supported it.
+
+  describe('cancellation', () => {
+    for (const op of ['fetch', 'pull', 'push'] as const) {
+      const handler = `handle${op[0].toUpperCase()}${op.slice(1)}`;
+
+      it(`${op} shows a cancellable row and passes its id to the backend`, async () => {
+        const service = progressService;
+        const rows: Array<{ id: string; cancellable?: boolean }> = [];
+        const unsubscribe = service.subscribe((ops) => {
+          for (const o of ops) if (!rows.some((r) => r.id === o.id)) rows.push({ ...o });
+        });
+        try {
+          const el = await dashboard();
+          await (el as any)[handler]();
+
+          const call = invoked.find((c) => c.command === op);
+          expect(call, `${op} invoked`).to.not.be.undefined;
+          const operationId = (call!.args as { operationId?: string }).operationId;
+          expect(
+            rows.some((r) => r.id === operationId && r.cancellable === true),
+            `${op} must run under a cancellable row the backend can find`,
+          ).to.equal(true);
+        } finally {
+          unsubscribe();
+        }
+      });
+
+      it(`${op} removes its row when it finishes`, async () => {
+        const service = progressService;
+        const el = await dashboard();
+
+        await (el as any)[handler]();
+
+        expect(
+          service.getOperations().length,
+          `${op} must not leave a spinner behind`,
+        ).to.equal(0);
+      });
+
+      it(`a cancelled ${op} says so instead of showing a failure`, async () => {
+        failures.set(op, { code: 'OPERATION_CANCELLED', message: 'Operation cancelled' });
+        const el = await dashboard();
+        uiStore.setState({ toasts: [] });
+
+        await (el as any)[handler]();
+
+        expect(
+          uiStore.getState().toasts.some((t) => t.type === 'error'),
+          `a cancelled ${op} is not a red failure`,
+        ).to.equal(false);
+        expect(toastText()).to.match(/cancelled/i);
+      });
+
+      it(`a genuine ${op} failure is still reported as one`, async () => {
+        failures.set(op, { code: 'COMMAND_ERROR', message: 'remote hung up' });
+        const el = await dashboard();
+        uiStore.setState({ toasts: [] });
+
+        await (el as any)[handler]();
+
+        expect(toastText()).to.contain('remote hung up');
+        expect(
+          progressService.getOperations().length,
+          'the row is cleared on failure too',
+        ).to.equal(0);
+      });
+    }
+  });
 });

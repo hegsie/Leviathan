@@ -8,10 +8,10 @@
  * - Badge updates after operations
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupOpenRepository, defaultMockData, withConflicts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
-import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandHang, waitForCommand } from '../fixtures/test-helpers';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandHang, emitBackendEvent, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
 // Helper function to create branches with ahead/behind status
@@ -832,13 +832,25 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
 // "A fetch is already running for this repository".
 // ============================================================================
 
+/**
+ * The dashboard's own Fetch / Pull / Push control.
+ *
+ * Scoped to `.remote-btn` rather than matched by accessible name: once an
+ * operation is running its progress row adds a "Cancel fetch" button, which a
+ * bare `name: /Fetch/i` matches too — and a strict-mode violation is not the
+ * failure these tests are looking for.
+ */
+function remoteButton(page: Page, label: 'Fetch' | 'Pull' | 'Push') {
+  return page.locator(`.remote-btn[title^="${label}"]`);
+}
+
 test.describe('Shared remote-operation runner', () => {
   test('a dashboard fetch shows a progress row while it runs', async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCapture(page);
     await injectCommandHang(page, 'fetch');
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = remoteButton(page, 'Fetch');
     await fetchButton.click();
     await waitForCommand(page, 'fetch');
 
@@ -847,15 +859,15 @@ test.describe('Shared remote-operation runner', () => {
     // And every remote control is refused for the duration, rather than left
     // lit and doing nothing but raising a refusal toast.
     await expect(fetchButton).toBeDisabled();
-    await expect(page.getByRole('button', { name: /Pull/i })).toBeDisabled();
-    await expect(page.getByRole('button', { name: /^Push/i })).toBeDisabled();
+    await expect(remoteButton(page, 'Pull')).toBeDisabled();
+    await expect(remoteButton(page, 'Push')).toBeDisabled();
   });
 
   test('the progress row is torn down when the fetch lands', async ({ page }) => {
     await setupOpenRepository(page);
     await startCommandCaptureWithMocks(page, { fetch: null });
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = remoteButton(page, 'Fetch');
     await fetchButton.click();
     await waitForCommand(page, 'fetch');
 
@@ -868,7 +880,7 @@ test.describe('Shared remote-operation runner', () => {
     await startCommandCapture(page);
     await injectCommandHang(page, 'fetch');
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = remoteButton(page, 'Fetch');
     await fetchButton.click();
     await waitForCommand(page, 'fetch');
     await expect(fetchButton).toBeDisabled();
@@ -886,5 +898,105 @@ test.describe('Shared remote-operation runner', () => {
 
     expect((await findCommand(page, 'fetch')).length, 'one fetch, not two').toBe(1);
     expect((await findCommand(page, 'pull')).length, 'and no pull behind it').toBe(0);
+  });
+});
+
+// ============================================================================
+// Cancelling a remote operation
+//
+// Fetch/pull/push used to advertise cancellation that did not exist: the
+// progress row was never marked cancellable, so the indicator's Cancel button
+// was unreachable dead code, and no operation id reached the backend, so
+// `cancel_operation` had nothing to cancel. No backend code emitted
+// `operation-progress` either, so the row showed an indeterminate stripe with
+// no counts for as long as the transfer ran.
+// ============================================================================
+
+test.describe('Cancelling a remote operation', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  /** The operation id the app handed the given command. */
+  async function operationIdOf(page: Page, command: string): Promise<string | undefined> {
+    const [call] = await findCommand(page, command);
+    return (call.args as { operationId?: string }).operationId;
+  }
+
+  test('a running fetch shows a cancellable progress row', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await page.getByRole('button', { name: /Fetch/i }).click();
+    await waitForCommand(page, 'fetch');
+
+    const row = page.locator('lv-progress-indicator .progress-item');
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(/fetch/i);
+    await expect(page.locator('lv-progress-indicator .cancel-btn')).toBeVisible();
+
+    // And the backend was told which row it belongs to, so a cancel can find it.
+    expect(await operationIdOf(page, 'fetch')).toBeTruthy();
+  });
+
+  test('clicking Cancel invokes cancel_operation for that row and dismisses it', async ({
+    page,
+  }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await page.getByRole('button', { name: /Fetch/i }).click();
+    await waitForCommand(page, 'fetch');
+
+    const operationId = await operationIdOf(page, 'fetch');
+    await page.locator('lv-progress-indicator .cancel-btn').click();
+
+    await waitForCommand(page, 'cancel_operation');
+    const [cancel] = await findCommand(page, 'cancel_operation');
+    expect((cancel.args as { operationId?: string }).operationId).toBe(operationId);
+
+    // The row goes away immediately — the user's click has visibly taken effect.
+    await expect(page.locator('lv-progress-indicator .progress-item')).toHaveCount(0);
+  });
+
+  test('a running push is cancellable too', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'push');
+
+    await page.getByRole('button', { name: /Push/i }).click();
+    await waitForCommand(page, 'push');
+
+    await expect(page.locator('lv-progress-indicator .cancel-btn')).toBeVisible();
+
+    const operationId = await operationIdOf(page, 'push');
+    await page.locator('lv-progress-indicator .cancel-btn').click();
+    await waitForCommand(page, 'cancel_operation');
+
+    const [cancel] = await findCommand(page, 'cancel_operation');
+    expect((cancel.args as { operationId?: string }).operationId).toBe(operationId);
+  });
+
+  test('the progress row shows the transfer counts the backend reports', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await page.getByRole('button', { name: /Fetch/i }).click();
+    await waitForCommand(page, 'fetch');
+
+    const operationId = await operationIdOf(page, 'fetch');
+    await emitBackendEvent(page, 'operation-progress', {
+      operationId,
+      message: 'Fetching from origin',
+      progress: 40,
+      receivedObjects: 400,
+      totalObjects: 1000,
+      receivedBytes: 1024 * 1024,
+    });
+
+    const row = page.locator('lv-progress-indicator .progress-item');
+    await expect(row).toContainText('Fetching from origin');
+    await expect(row).toContainText('40%');
+    await expect(row).toContainText('400 / 1,000 objects');
+    await expect(row).toContainText('1.00 MiB');
   });
 });

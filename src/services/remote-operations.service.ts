@@ -31,6 +31,7 @@ import {
   pull as gitPull,
   push as gitPush,
   isNetworkGateRefusal,
+  isOperationCancelled,
 } from './git.service.ts';
 import { progressService } from './progress.service.ts';
 import { showErrorWithSuggestion } from './error-suggestion.service.ts';
@@ -71,6 +72,20 @@ const FAILURE_FALLBACK: Record<RemoteOperationKind, string> = {
   fetch: 'Fetch failed',
   pull: 'Pull failed',
   push: 'Push failed',
+};
+
+/**
+ * What a cancel that really took effect says, per operation.
+ *
+ * A cancelled pull is worth spelling out: the backend only aborts during the
+ * fetch phase and refuses to begin a merge it cannot stop halfway, so nothing
+ * was merged and the repository is exactly where a plain Fetch would have left
+ * it. See commands/remote.rs::pull_branch.
+ */
+const CANCELLED_MESSAGE: Record<RemoteOperationKind, string> = {
+  fetch: 'Fetch cancelled',
+  pull: 'Pull cancelled',
+  push: 'Push cancelled',
 };
 
 /**
@@ -236,17 +251,29 @@ function openConflictResolution(repoPath: string, operationType: 'merge' | 'reba
   notifyRepositoryRefreshed(repoPath);
 }
 
+/**
+ * Hand the operation to `git.service`, carrying the progress row's id.
+ *
+ * `operationId` is what makes cancellation real: the backend registers it with
+ * `CancellationRegistry`, checks the token inside git2's transfer callbacks,
+ * and addresses its `operation-progress` events (received/total objects and
+ * bytes) back to this exact row. A call without it is uncancellable and shows
+ * an indeterminate stripe, which is what every one of these three surfaces did
+ * before — so the runner always passes it.
+ *
+ * `silent: true` on all three: this runner owns the messaging, and the backend
+ * emits `remote-operation-completed` on success — which
+ * setupRemoteOperationListeners toasts, naming the remote. Without it every
+ * click stacked two toasts, and every failure two errors.
+ */
 function invokeOperation(
   kind: RemoteOperationKind,
   repoPath: string,
+  operationId: string,
 ): Promise<CommandResult<void>> {
-  // `silent: true` on all three: this runner owns the messaging, and the
-  // backend emits `remote-operation-completed` on success — which
-  // setupRemoteOperationListeners toasts, naming the remote. Without it every
-  // click stacked two toasts, and every failure two errors.
-  if (kind === 'fetch') return gitFetch({ path: repoPath, silent: true });
-  if (kind === 'pull') return gitPull({ path: repoPath, silent: true });
-  return gitPush({ path: repoPath, silent: true });
+  if (kind === 'fetch') return gitFetch({ path: repoPath, silent: true, operationId });
+  if (kind === 'pull') return gitPull({ path: repoPath, silent: true, operationId });
+  return gitPush({ path: repoPath, silent: true, operationId });
 }
 
 /**
@@ -270,9 +297,15 @@ async function runRemoteOperation(
   // the same choice the backend registry documents.
   if (!claim) return;
 
-  const opId = progressService.startOperation(kind, PROGRESS_MESSAGE[kind]);
+  // `cancellable: true` is what puts the Cancel button on the row; without it
+  // the button is unreachable dead code and the operation cannot be stopped.
+  // Every surface gets it, so a fetch a keyboard shortcut started is as
+  // cancellable as one a dashboard button started.
+  const opId = progressService.startOperation(kind, PROGRESS_MESSAGE[kind], {
+    cancellable: true,
+  });
   try {
-    const result = await invokeOperation(kind, repoPath);
+    const result = await invokeOperation(kind, repoPath, opId);
     if (result.success) {
       progressService.completeOperation(opId);
       notifyRepositoryRefreshed(repoPath);
@@ -284,6 +317,16 @@ async function runRemoteOperation(
     const code = result.error?.code;
     if (kind === 'pull' && (code === 'MERGE_CONFLICT' || code === 'REBASE_CONFLICT')) {
       openConflictResolution(repoPath, code === 'REBASE_CONFLICT' ? 'rebase' : 'merge');
+      return;
+    }
+
+    // A cancel the user asked for is not a failure — say it took effect rather
+    // than showing them a red error for their own click. Kept separate from
+    // isNetworkGateRefusal, which means the operation never started and has
+    // already announced itself: this one has to be acknowledged, or the row
+    // simply vanishes with no explanation.
+    if (isOperationCancelled(result.error)) {
+      showToast(CANCELLED_MESSAGE[kind], 'info');
       return;
     }
 
@@ -301,6 +344,11 @@ async function runRemoteOperation(
       repoPath,
     });
   } finally {
+    // Belt and braces, and idempotent (both complete and fail just remove the
+    // row): a throw between startOperation and the branches above would
+    // otherwise leave the row spinning forever with a Cancel button attached to
+    // an operation that is no longer running.
+    progressService.completeOperation(opId);
     claim.release();
   }
 }
