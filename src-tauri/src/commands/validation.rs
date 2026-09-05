@@ -9,7 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 
 /// Rules for validating commit messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,11 +100,11 @@ fn load_rules(repo_path: &Path) -> Result<Option<CommitMessageRules>> {
     }
 
     let content = fs::read_to_string(&rules_path).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to read commit rules file: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to read commit rules file: {}", e))
     })?;
 
     let rules: CommitMessageRules = serde_json::from_str(&content).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse commit rules file: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to parse commit rules file: {}", e))
     })?;
 
     Ok(Some(rules))
@@ -117,7 +117,7 @@ fn save_rules(repo_path: &Path, rules: &CommitMessageRules) -> Result<()> {
     // Ensure the gitnado directory exists
     if let Some(parent) = rules_path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            LeviathanError::OperationFailed(format!(
+            GitnadoError::OperationFailed(format!(
                 "Failed to create gitnado config directory: {}",
                 e
             ))
@@ -125,11 +125,11 @@ fn save_rules(repo_path: &Path, rules: &CommitMessageRules) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(rules).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to serialize commit rules: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to serialize commit rules: {}", e))
     })?;
 
     fs::write(&rules_path, content).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to write commit rules file: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to write commit rules file: {}", e))
     })?;
 
     Ok(())

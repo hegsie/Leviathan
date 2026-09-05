@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::error::LeviathanError;
+use crate::error::GitnadoError;
 
 /// The result of a successful OAuth callback: the authorization code together
 /// with the `state` parameter echoed back by the provider. The caller is
@@ -95,7 +95,7 @@ const PREFERRED_PORTS: &[u16] = &[8080, 8081];
 
 impl LoopbackServer {
     /// Create a new loopback server, preferring specific ports for OAuth compatibility
-    pub fn new() -> Result<Self, LeviathanError> {
+    pub fn new() -> Result<Self, GitnadoError> {
         // Try preferred ports first (these should match redirect URIs in OAuth apps)
         let listener = Self::bind_preferred_or_random()?;
         Self::from_listener(listener)
@@ -103,9 +103,9 @@ impl LoopbackServer {
 
     /// Create a loopback server on a specific required port
     /// Returns an error if the port is not available
-    pub fn new_with_port(port: u16) -> Result<Self, LeviathanError> {
+    pub fn new_with_port(port: u16) -> Result<Self, GitnadoError> {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .map_err(|e| LeviathanError::OAuth(format!(
+            .map_err(|e| GitnadoError::OAuth(format!(
                 "Port {} is not available for OAuth callback. Please close any application using this port and try again. Error: {}",
                 port, e
             )))?;
@@ -138,10 +138,10 @@ impl LoopbackServer {
 
     /// Create a loopback server from an existing IPv4 listener, also listening on
     /// the IPv6 loopback (same port) when available.
-    fn from_listener(listener: TcpListener) -> Result<Self, LeviathanError> {
+    fn from_listener(listener: TcpListener) -> Result<Self, GitnadoError> {
         let port = listener
             .local_addr()
-            .map_err(|e| LeviathanError::OAuth(format!("Failed to get local address: {}", e)))?
+            .map_err(|e| GitnadoError::OAuth(format!("Failed to get local address: {}", e)))?
             .port();
 
         let listener_v6 = Self::try_bind_ipv6_loopback(port);
@@ -154,10 +154,10 @@ impl LoopbackServer {
         // Set non-blocking mode so the accept loop can poll both listeners.
         listener
             .set_nonblocking(true)
-            .map_err(|e| LeviathanError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
+            .map_err(|e| GitnadoError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
         if let Some(ref v6) = listener_v6 {
             v6.set_nonblocking(true)
-                .map_err(|e| LeviathanError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
+                .map_err(|e| GitnadoError::OAuth(format!("Failed to set non-blocking: {}", e)))?;
         }
 
         // Spawn server thread
@@ -174,7 +174,7 @@ impl LoopbackServer {
     }
 
     /// Try to bind to preferred ports first, fall back to random port
-    fn bind_preferred_or_random() -> Result<TcpListener, LeviathanError> {
+    fn bind_preferred_or_random() -> Result<TcpListener, GitnadoError> {
         // Try preferred ports first
         for &port in PREFERRED_PORTS {
             if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)) {
@@ -186,7 +186,7 @@ impl LoopbackServer {
         // Fall back to random port
         tracing::info!("Preferred ports unavailable, using random port");
         TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| LeviathanError::OAuth(format!("Failed to bind loopback server: {}", e)))
+            .map_err(|e| GitnadoError::OAuth(format!("Failed to bind loopback server: {}", e)))
     }
 
     /// Get the port the server is listening on
@@ -205,14 +205,11 @@ impl LoopbackServer {
     /// on success, or an error message on failure. The caller MUST validate the
     /// returned `state` against the value it issued.
     /// Times out after 5 minutes.
-    pub fn wait_for_callback(
-        mut self,
-        timeout: Duration,
-    ) -> Result<CallbackResult, LeviathanError> {
+    pub fn wait_for_callback(mut self, timeout: Duration) -> Result<CallbackResult, GitnadoError> {
         let code_rx = self
             .code_rx
             .take()
-            .ok_or_else(|| LeviathanError::OAuth("Server already consumed".to_string()))?;
+            .ok_or_else(|| GitnadoError::OAuth("Server already consumed".to_string()))?;
 
         // Wait for the code with timeout
         match code_rx.recv_timeout(timeout) {
@@ -227,17 +224,15 @@ impl LoopbackServer {
                 if let Some(tx) = self.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
-                Err(LeviathanError::OAuth(error))
+                Err(GitnadoError::OAuth(error))
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(tx) = self.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
-                Err(LeviathanError::OAuth(
-                    "OAuth callback timed out".to_string(),
-                ))
+                Err(GitnadoError::OAuth("OAuth callback timed out".to_string()))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(LeviathanError::OAuth(
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(GitnadoError::OAuth(
                 "Server thread disconnected".to_string(),
             )),
         }

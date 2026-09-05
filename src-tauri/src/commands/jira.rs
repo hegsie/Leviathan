@@ -3,7 +3,7 @@
 //! Provides integration with Atlassian JIRA for issue tracking, transitions,
 //! and branch creation from issues.
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -76,17 +76,16 @@ fn load_jira_config(repo_path: &str) -> Result<JiraConfig> {
     let config_path = gitnado_config_dir(repo_path)?.join("jira.json");
 
     if !config_path.exists() {
-        return Err(LeviathanError::OperationFailed(
+        return Err(GitnadoError::OperationFailed(
             "JIRA not configured. Save a JIRA configuration first.".to_string(),
         ));
     }
 
-    let content = std::fs::read_to_string(&config_path).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to read JIRA config: {}", e))
-    })?;
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to read JIRA config: {}", e)))?;
 
     serde_json::from_str(&content)
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to parse JIRA config: {}", e)))
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to parse JIRA config: {}", e)))
 }
 
 /// Generate a branch-safe name from an issue key and summary
@@ -174,7 +173,7 @@ pub async fn save_jira_config(path: String, config: JiraConfig) -> Result<()> {
     // Create the gitnado directory if it doesn't exist
     if !gitnado_dir.exists() {
         std::fs::create_dir_all(&gitnado_dir).map_err(|e| {
-            LeviathanError::OperationFailed(format!(
+            GitnadoError::OperationFailed(format!(
                 "Failed to create gitnado config directory: {}",
                 e
             ))
@@ -183,11 +182,11 @@ pub async fn save_jira_config(path: String, config: JiraConfig) -> Result<()> {
 
     let config_path = gitnado_dir.join("jira.json");
     let content = serde_json::to_string_pretty(&config).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to serialize JIRA config: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to serialize JIRA config: {}", e))
     })?;
 
     std::fs::write(&config_path, content).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to write JIRA config: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to write JIRA config: {}", e))
     })?;
 
     info!("JIRA config saved to {:?}", config_path);
@@ -254,13 +253,13 @@ pub async fn get_jira_issues(
         .await
         .map_err(|e| {
             error!("JIRA API request failed: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to fetch JIRA issues: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to fetch JIRA issues: {}", e))
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "JIRA API error {}: {}",
             status, body
         )));
@@ -308,7 +307,7 @@ pub async fn get_jira_issues(
     }
 
     let data: SearchResponse = response.json().await.map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse JIRA response: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to parse JIRA response: {}", e))
     })?;
 
     let base_url = config.base_url.trim_end_matches('/');
@@ -355,13 +354,13 @@ pub async fn get_jira_issue(path: String, issue_key: String) -> Result<JiraIssue
         .await
         .map_err(|e| {
             error!("JIRA API request failed: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to fetch JIRA issue: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to fetch JIRA issue: {}", e))
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "JIRA API error {}: {}",
             status, body
         )));
@@ -403,9 +402,10 @@ pub async fn get_jira_issue(path: String, issue_key: String) -> Result<JiraIssue
         name: String,
     }
 
-    let issue: ApiIssue = response.json().await.map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse JIRA issue: {}", e))
-    })?;
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to parse JIRA issue: {}", e)))?;
 
     let base_url = config.base_url.trim_end_matches('/');
 
@@ -444,13 +444,13 @@ pub async fn get_jira_transitions(path: String, issue_key: String) -> Result<Vec
         .await
         .map_err(|e| {
             error!("JIRA API request failed: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to fetch JIRA transitions: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to fetch JIRA transitions: {}", e))
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "JIRA API error {}: {}",
             status, body
         )));
@@ -468,7 +468,7 @@ pub async fn get_jira_transitions(path: String, issue_key: String) -> Result<Vec
     }
 
     let data: TransitionsResponse = response.json().await.map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse JIRA transitions: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to parse JIRA transitions: {}", e))
     })?;
 
     Ok(data
@@ -529,14 +529,14 @@ pub async fn transition_jira_issue(
         .await
         .map_err(|e| {
             error!("JIRA API request failed: {}", e);
-            LeviathanError::OperationFailed(format!("Failed to transition JIRA issue: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to transition JIRA issue: {}", e))
         })?;
 
     // JIRA returns 204 No Content on successful transition
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "JIRA API error {}: {}",
             status, body
         )));
@@ -576,14 +576,12 @@ pub async fn create_branch_from_jira(
         .header("Content-Type", "application/json")
         .send()
         .await
-        .map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to fetch JIRA issue: {}", e))
-        })?;
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to fetch JIRA issue: {}", e)))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "JIRA API error {}: {}",
             status, body
         )));
@@ -600,28 +598,28 @@ pub async fn create_branch_from_jira(
         summary: String,
     }
 
-    let issue: ApiIssue = response.json().await.map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse JIRA issue: {}", e))
-    })?;
+    let issue: ApiIssue = response
+        .json()
+        .await
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to parse JIRA issue: {}", e)))?;
 
     let branch_name =
         generate_branch_name(&issue.key, &issue.fields.summary, branch_type.as_deref());
 
     // Create the branch using git2
-    let repo = git2::Repository::open(&path).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to open repository: {}", e))
-    })?;
+    let repo = git2::Repository::open(&path)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to open repository: {}", e)))?;
 
     let head = repo
         .head()
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get HEAD: {}", e)))?;
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to get HEAD: {}", e)))?;
 
-    let commit = head.peel_to_commit().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to get HEAD commit: {}", e))
-    })?;
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to get HEAD commit: {}", e)))?;
 
     repo.branch(&branch_name, &commit, false).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create branch '{}': {}", branch_name, e))
+        GitnadoError::OperationFailed(format!("Failed to create branch '{}': {}", branch_name, e))
     })?;
 
     info!(

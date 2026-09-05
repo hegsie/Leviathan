@@ -4,7 +4,7 @@
 use std::path::Path;
 use tauri::command;
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 use crate::utils::{apply_token_credential_helper, create_command};
 
 /// LFS file tracking pattern
@@ -111,7 +111,7 @@ fn run_lfs_command_with_token(
 ) -> Result<String> {
     let output = build_lfs_command(repo_path, args, token)
         .output()
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git-lfs: {}", e)))?;
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to run git-lfs: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -119,7 +119,7 @@ fn run_lfs_command_with_token(
     if output.status.success() {
         Ok(stdout.trim().to_string())
     } else {
-        Err(LeviathanError::OperationFailed(
+        Err(GitnadoError::OperationFailed(
             if stderr.is_empty() { stdout } else { stderr }
                 .trim()
                 .to_string(),
@@ -391,7 +391,7 @@ pub async fn init_lfs(path: String) -> Result<()> {
     let repo_path = Path::new(&path);
 
     if !is_lfs_installed() {
-        return Err(LeviathanError::OperationFailed(
+        return Err(GitnadoError::OperationFailed(
             "Git LFS is not installed. Please install it first.".to_string(),
         ));
     }
@@ -436,7 +436,7 @@ pub async fn lfs_untrack(path: String, pattern: String) -> Result<()> {
     // "No longer tracking ..." over a pattern that is still there.
     if let Ok(output) = run_lfs_command(repo_path, &["track"]) {
         if lists_pattern(&output, &pattern) {
-            return Err(LeviathanError::OperationFailed(format!(
+            return Err(GitnadoError::OperationFailed(format!(
                 "{} is still tracked. Remove it from the .gitattributes that defines it.",
                 pattern
             )));

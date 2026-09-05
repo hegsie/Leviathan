@@ -5,7 +5,7 @@ use std::path::Path;
 use tauri::command;
 
 use crate::commands::config::{run_git_config_raw, run_git_config_unset};
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 use crate::utils::create_command;
 
 // ========================================================================
@@ -136,7 +136,7 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
 
     let output = cmd
         .output()
-        .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run git config: {}", e)))?;
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to run git config: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -146,7 +146,7 @@ fn run_git_config(repo_path: Option<&Path>, args: &[&str]) -> Result<String> {
     } else if output.status.code() == Some(1) && stderr.is_empty() && stdout.is_empty() {
         Ok(String::new())
     } else {
-        Err(LeviathanError::OperationFailed(if stderr.is_empty() {
+        Err(GitnadoError::OperationFailed(if stderr.is_empty() {
             stdout
         } else {
             stderr
@@ -269,13 +269,13 @@ fn extract_helper_name(cmd: &str) -> String {
 /// Both reject control characters and quotes outright.
 fn validate_url_pattern(pat: &str) -> Result<()> {
     if pat.is_empty() {
-        return Err(LeviathanError::OperationFailed(
+        return Err(GitnadoError::OperationFailed(
             "url_pattern must not be empty".to_string(),
         ));
     }
     for ch in pat.chars() {
         if ch.is_control() {
-            return Err(LeviathanError::OperationFailed(format!(
+            return Err(GitnadoError::OperationFailed(format!(
                 "url_pattern contains invalid control character U+{:04X}",
                 ch as u32
             )));
@@ -286,7 +286,7 @@ fn validate_url_pattern(pat: &str) -> Result<()> {
             'a'..='z' | 'A'..='Z' | '0'..='9'
             | '.' | ':' | '/' | '-' | '_' | '*' | '+' | '%' | '@'
         ) {
-            return Err(LeviathanError::OperationFailed(format!(
+            return Err(GitnadoError::OperationFailed(format!(
                 "url_pattern contains disallowed character {:?} — only letters, digits, and .:-/_*+%@ are permitted",
                 ch
             )));
@@ -297,7 +297,7 @@ fn validate_url_pattern(pat: &str) -> Result<()> {
 
 fn validate_helper(helper: &str) -> Result<()> {
     if helper.is_empty() {
-        return Err(LeviathanError::OperationFailed(
+        return Err(GitnadoError::OperationFailed(
             "helper must not be empty".to_string(),
         ));
     }
@@ -310,7 +310,7 @@ fn validate_helper(helper: &str) -> Result<()> {
     // file or inject additional lines.
     for ch in helper.chars() {
         if ch.is_control() {
-            return Err(LeviathanError::OperationFailed(format!(
+            return Err(GitnadoError::OperationFailed(format!(
                 "helper contains invalid control character U+{:04X}",
                 ch as u32
             )));
@@ -371,7 +371,7 @@ pub async fn unset_credential_helper(
     // with no path, is whatever directory the app process happens to be in,
     // not the repository on screen. Refuse instead of guessing.
     if !global && repo_path.is_none() {
-        return Err(LeviathanError::OperationFailed(
+        return Err(GitnadoError::OperationFailed(
             "A repository path is required to remove a repository-scoped credential helper"
                 .to_string(),
         ));
@@ -393,7 +393,7 @@ pub async fn unset_credential_helper(
     // genuine no-op — so the removal has to be confirmed, not assumed.
     let scope_name = if global { "global" } else { "local" };
     if let Some(origin) = key_origin_in_scope(repo_path, scope_name, &key) {
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "\"{}\" is still set by {}, a file included from the {} git config. \
              Edit that file to remove it.",
             key, origin, scope_name
@@ -542,7 +542,7 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
             ])
             .output()
             .map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to test SSH connection: {}", e))
+                GitnadoError::OperationFailed(format!("Failed to test SSH connection: {}", e))
             })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -576,7 +576,7 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
         cmd.stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to run git credential: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to run git credential: {}", e))
         })?;
 
         // Send credential request
@@ -587,7 +587,7 @@ pub async fn test_credentials(path: String, remote_url: String) -> Result<Creden
         }
 
         let output = child.wait_with_output().map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to get credential output: {}", e))
+            GitnadoError::OperationFailed(format!("Failed to get credential output: {}", e))
         })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -689,7 +689,7 @@ pub async fn store_git_credentials(url: String, username: String, password: Stri
     tracing::info!("Storing git credentials for URL: {}", safe_url);
     credentials_service::store_credentials(&url, &username, &password).map_err(|e| {
         tracing::error!("Failed to store credentials for {}: {}", safe_url, e);
-        LeviathanError::OperationFailed(format!("Failed to store credentials: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to store credentials: {}", e))
     })?;
     tracing::info!("Successfully stored git credentials for URL: {}", safe_url);
     Ok(())
@@ -700,9 +700,8 @@ pub async fn store_git_credentials(url: String, username: String, password: Stri
 pub async fn delete_git_credentials(url: String) -> Result<()> {
     use crate::services::credentials_service;
 
-    credentials_service::delete_credentials(&url).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to delete credentials: {}", e))
-    })
+    credentials_service::delete_credentials(&url)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to delete credentials: {}", e)))
 }
 
 /// Erase stored credentials for a host
@@ -716,7 +715,7 @@ pub async fn erase_credentials(path: String, host: String, protocol: String) -> 
     cmd.stdin(std::process::Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to run git credential: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to run git credential: {}", e))
     })?;
 
     // Send credential info to reject
@@ -791,19 +790,19 @@ fn write_keyring_token(service: &str, key: &str, value: &str) -> Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to run security: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(value.as_bytes()).map_err(|e| {
-                LeviathanError::OperationFailed(format!("Failed to write token: {e}"))
+                GitnadoError::OperationFailed(format!("Failed to write token: {e}"))
             })?;
         }
         let output = child
             .wait_with_output()
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to run security: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(LeviathanError::OperationFailed(format!(
+            return Err(GitnadoError::OperationFailed(format!(
                 "Failed to store token: {stderr}"
             )));
         }
@@ -814,7 +813,7 @@ fn write_keyring_token(service: &str, key: &str, value: &str) -> Result<()> {
         // Chunk transparently: Windows Credential Manager caps a secret at 2560
         // bytes, which large Entra tokens exceed.
         crate::services::keyring_util::set(service, key, value)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to store token: {e}")))?;
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to store token: {e}")))?;
     }
 
     Ok(())
@@ -827,7 +826,7 @@ fn read_keyring_token(service: &str, key: &str) -> Result<Option<String>> {
         let output = std::process::Command::new("security")
             .args(["find-generic-password", "-s", service, "-a", key, "-w"])
             .output()
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to run security: {e}")))?;
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to run security: {e}")))?;
 
         if output.status.success() {
             let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -845,7 +844,7 @@ fn read_keyring_token(service: &str, key: &str) -> Result<Option<String>> {
     #[cfg(not(target_os = "macos"))]
     {
         crate::services::keyring_util::get(service, key)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to get token: {e}")))
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to get token: {e}")))
     }
 }
 
@@ -863,7 +862,7 @@ fn remove_keyring_token(service: &str, key: &str) -> Result<()> {
     {
         // Removes the primary entry and any chunk entries a large token created.
         crate::services::keyring_util::delete(service, key)
-            .map_err(|e| LeviathanError::OperationFailed(format!("Failed to delete token: {e}")))
+            .map_err(|e| GitnadoError::OperationFailed(format!("Failed to delete token: {e}")))
     }
 }
 
@@ -1650,7 +1649,7 @@ mod tests {
             move |s, k| Ok(r.borrow().get(&(s.to_string(), k.to_string())).cloned()),
             move |s, k, v| {
                 if write_fails {
-                    return Err(LeviathanError::OperationFailed("write failed".into()));
+                    return Err(GitnadoError::OperationFailed("write failed".into()));
                 }
                 w.borrow_mut()
                     .insert((s.to_string(), k.to_string()), v.to_string());

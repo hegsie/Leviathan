@@ -32,6 +32,7 @@
     "active": true,
     "targets": "all",
     "publisher": "Gitnado Contributors",
+    "homepage": "https://gitnado.dev",
     "copyright": "Copyright © 2024 Gitnado Contributors",
     "icon": [
       "icons/32x32.png",

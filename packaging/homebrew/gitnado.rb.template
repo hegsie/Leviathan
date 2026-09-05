@@ -7,7 +7,7 @@ cask "gitnado" do
   url "https://github.com/hegsie/gitnado/releases/download/v#{version}/Gitnado_#{version}_aarch64.dmg"
   name "Gitnado"
   desc "Fast, privacy-first Git GUI client"
-  homepage "https://github.com/hegsie/gitnado"
+  homepage "https://gitnado.dev"
 
   livecheck do
     url :url

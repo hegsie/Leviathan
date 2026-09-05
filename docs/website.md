@@ -51,7 +51,7 @@ Download links are matched by asset-name suffix (`_aarch64.dmg`,
 `.x86_64.rpm`); if the bundle naming changes, update the `groups` table in the
 page's script alongside `publish-packages.yml`.
 
-Once the site is live, point the `homepage` fields at it as well: `bundle` in
-`src-tauri/tauri.conf.json`, `packaging/scoop/gitnado.json`,
-`packaging/homebrew/gitnado.rb.template`, and the winget manifest's
-`PublisherUrl` / `PackageUrl`.
+The `homepage` fields in `src-tauri/tauri.conf.json` (`bundle.homepage`),
+`packaging/scoop/gitnado.json` and `packaging/homebrew/gitnado.rb.template`
+already point at `https://gitnado.dev`; use the same URL for the winget
+manifest's `PublisherUrl` / `PackageUrl` when submitting `hegsie.Gitnado`.

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::command;
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 
 /// Resolve the hooks directory exactly as git does:
 /// - `core.hooksPath` if set. A leading `~` is expanded to `$HOME`; a relative
@@ -156,7 +156,7 @@ pub fn run_hook(
     // exactly what git relies on.
 
     let mut child = cmd.spawn().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
+        GitnadoError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
     })?;
 
     if let Some(data) = stdin_data {
@@ -168,7 +168,7 @@ pub fn run_hook(
     }
 
     let output = child.wait_with_output().map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
+        GitnadoError::OperationFailed(format!("Failed to run {} hook: {}", name, e))
     })?;
 
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
@@ -199,7 +199,7 @@ pub fn run_hook_blocking(
     let outcome = run_hook(repo, name, args, stdin_data)?;
     if outcome.ran && !outcome.success {
         let detail = outcome.output.trim();
-        return Err(LeviathanError::OperationFailed(if detail.is_empty() {
+        return Err(GitnadoError::OperationFailed(if detail.is_empty() {
             format!("{} hook failed", name)
         } else {
             format!("{} hook failed:\n{}", name, detail)

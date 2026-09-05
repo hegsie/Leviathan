@@ -71,7 +71,7 @@ describe('error-suggestion.service', () => {
     });
 
     // A repository that already has a remote operation in flight. The backend
-    // refuses with LeviathanError::RemoteOperationInFlight; its message is
+    // refuses with GitnadoError::RemoteOperationInFlight; its message is
     // already user-facing and explains that a timed-out operation can still be
     // running, so the suggestion service must pass it through UNCHANGED rather
     // than let a later rule rewrite it.

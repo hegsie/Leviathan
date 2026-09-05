@@ -12,7 +12,7 @@ use tauri::command;
 use uuid::Uuid;
 
 use crate::commands::search::{find_match_position, read_grep_records};
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 use crate::models::{Workspace, WorkspaceRepoStatus, WorkspaceRepository, WorkspacesConfig};
 
 /// A single search match across workspace repositories
@@ -251,13 +251,11 @@ fn load_workspaces_config() -> Result<WorkspacesConfig> {
         return Ok(WorkspacesConfig::default());
     }
 
-    let content = fs::read_to_string(&path).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to read workspaces: {}", e))
-    })?;
+    let content = fs::read_to_string(&path)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to read workspaces: {}", e)))?;
 
-    let config: WorkspacesConfig = serde_json::from_str(&content).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse workspaces: {}", e))
-    })?;
+    let config: WorkspacesConfig = serde_json::from_str(&content)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to parse workspaces: {}", e)))?;
 
     Ok(config)
 }
@@ -267,12 +265,11 @@ fn save_workspaces_config(config: &WorkspacesConfig) -> Result<()> {
     let path = get_workspaces_path()?;
 
     let content = serde_json::to_string_pretty(config).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to serialize workspaces: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to serialize workspaces: {}", e))
     })?;
 
-    fs::write(&path, content).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to write workspaces: {}", e))
-    })?;
+    fs::write(&path, content)
+        .map_err(|e| GitnadoError::OperationFailed(format!("Failed to write workspaces: {}", e)))?;
 
     Ok(())
 }
@@ -292,7 +289,7 @@ pub async fn get_workspace(workspace_id: String) -> Result<Workspace> {
         .workspaces
         .into_iter()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))
 }
 
 /// Save a workspace (create or update)
@@ -337,7 +334,7 @@ pub async fn add_repository_to_workspace(
         .workspaces
         .iter_mut()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))?;
 
     // Don't add duplicates
     if !workspace.repositories.iter().any(|r| r.path == path) {
@@ -363,7 +360,7 @@ pub async fn remove_repository_from_workspace(
         .workspaces
         .iter_mut()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))?;
 
     workspace.repositories.retain(|r| r.path != path);
 
@@ -396,7 +393,7 @@ pub async fn validate_workspace_repositories(
         .workspaces
         .iter()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))?;
 
     let mut statuses = Vec::new();
 
@@ -481,7 +478,7 @@ pub async fn search_workspace(
         .workspaces
         .iter()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))?;
 
     Ok(search_repositories(
         &workspace.repositories,
@@ -501,10 +498,10 @@ pub async fn export_workspace(workspace_id: String) -> Result<String> {
         .workspaces
         .iter()
         .find(|w| w.id == workspace_id)
-        .ok_or_else(|| LeviathanError::OperationFailed("Workspace not found".to_string()))?;
+        .ok_or_else(|| GitnadoError::OperationFailed("Workspace not found".to_string()))?;
 
     let json = serde_json::to_string_pretty(workspace).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to serialize workspace: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to serialize workspace: {}", e))
     })?;
 
     Ok(json)
@@ -514,7 +511,7 @@ pub async fn export_workspace(workspace_id: String) -> Result<String> {
 #[command]
 pub async fn import_workspace(json_data: String) -> Result<Workspace> {
     let mut workspace: Workspace = serde_json::from_str(&json_data).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to parse workspace JSON: {}", e))
+        GitnadoError::OperationFailed(format!("Failed to parse workspace JSON: {}", e))
     })?;
 
     // Generate a new ID and creation timestamp

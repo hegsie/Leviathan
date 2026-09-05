@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use tauri::command;
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 
 /// A user-defined custom action
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -109,7 +109,7 @@ fn shell_quote_windows(value: &str) -> Result<String> {
         } else {
             format!("metacharacter '{}'", c)
         };
-        return Err(LeviathanError::OperationFailed(format!(
+        return Err(GitnadoError::OperationFailed(format!(
             "Refusing to substitute value containing shell {} on Windows",
             label
         )));
@@ -150,7 +150,7 @@ fn substitute_variables(
 pub async fn get_custom_actions(path: String) -> Result<Vec<CustomAction>> {
     let repo_path = Path::new(&path);
     if !repo_path.join(".git").exists() {
-        return Err(LeviathanError::RepositoryNotFound(path));
+        return Err(GitnadoError::RepositoryNotFound(path));
     }
     read_actions(repo_path)
 }
@@ -160,7 +160,7 @@ pub async fn get_custom_actions(path: String) -> Result<Vec<CustomAction>> {
 pub async fn save_custom_action(path: String, action: CustomAction) -> Result<Vec<CustomAction>> {
     let repo_path = Path::new(&path);
     if !repo_path.join(".git").exists() {
-        return Err(LeviathanError::RepositoryNotFound(path));
+        return Err(GitnadoError::RepositoryNotFound(path));
     }
 
     let mut actions = read_actions(repo_path)?;
@@ -181,7 +181,7 @@ pub async fn save_custom_action(path: String, action: CustomAction) -> Result<Ve
 pub async fn delete_custom_action(path: String, action_id: String) -> Result<Vec<CustomAction>> {
     let repo_path = Path::new(&path);
     if !repo_path.join(".git").exists() {
-        return Err(LeviathanError::RepositoryNotFound(path));
+        return Err(GitnadoError::RepositoryNotFound(path));
     }
 
     let mut actions = read_actions(repo_path)?;
@@ -212,14 +212,14 @@ pub async fn delete_custom_action(path: String, action_id: String) -> Result<Vec
 pub async fn run_custom_action(path: String, action_id: String) -> Result<ActionResult> {
     let repo_path = Path::new(&path);
     if !repo_path.join(".git").exists() {
-        return Err(LeviathanError::RepositoryNotFound(path));
+        return Err(GitnadoError::RepositoryNotFound(path));
     }
 
     let actions = read_actions(repo_path)?;
     let action = actions
         .iter()
         .find(|a| a.id == action_id)
-        .ok_or_else(|| LeviathanError::OperationFailed(format!("Action not found: {}", action_id)))?
+        .ok_or_else(|| GitnadoError::OperationFailed(format!("Action not found: {}", action_id)))?
         .clone();
 
     let branch = get_current_branch(repo_path);
@@ -283,7 +283,7 @@ pub async fn run_custom_action(path: String, action_id: String) -> Result<Action
                 success: output.status.success(),
             })
         }
-        Err(e) => Err(LeviathanError::OperationFailed(format!(
+        Err(e) => Err(GitnadoError::OperationFailed(format!(
             "Failed to execute command: {}",
             e
         ))),

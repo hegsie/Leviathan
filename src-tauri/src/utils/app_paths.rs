@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{LeviathanError, Result};
+use crate::error::{GitnadoError, Result};
 
 /// Directory name under the platform config/data roots and inside a git dir.
 pub const APP_DIR_NAME: &str = "gitnado";
@@ -76,7 +76,7 @@ pub fn adopt_legacy_identifier_dir(current: &Path) -> PathBuf {
 /// The user-level config directory (`<config root>/gitnado`), created if missing.
 pub fn config_dir() -> Result<PathBuf> {
     let root = dirs::config_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find config directory".to_string())
+        GitnadoError::OperationFailed("Could not find config directory".to_string())
     })?;
     ensure_app_subdir(&root, "config")
 }
@@ -84,7 +84,7 @@ pub fn config_dir() -> Result<PathBuf> {
 /// The user-level data directory (`<data root>/gitnado`), created if missing.
 pub fn data_dir() -> Result<PathBuf> {
     let root = dirs::data_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find data directory".to_string())
+        GitnadoError::OperationFailed("Could not find data directory".to_string())
     })?;
     ensure_app_subdir(&root, "app")
 }
@@ -92,7 +92,7 @@ pub fn data_dir() -> Result<PathBuf> {
 fn ensure_app_subdir(root: &Path, what: &str) -> Result<PathBuf> {
     let dir = app_subdir(root);
     std::fs::create_dir_all(&dir).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create {} directory: {}", what, e))
+        GitnadoError::OperationFailed(format!("Failed to create {} directory: {}", what, e))
     })?;
     Ok(dir)
 }
