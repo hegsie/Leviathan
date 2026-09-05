@@ -491,6 +491,62 @@ test.describe('Output Panel - In-app integration', () => {
     await expect(appPanel.locator('.legend')).toHaveCount(0);
   });
 
+  test('app plumbing never shows up as a command in the panel', async ({ page }) => {
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    await app.executeCommand('Toggle Output Panel');
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toBeVisible();
+    await clearEntries(page);
+
+    // Fire the plumbing through the REAL IPC wrapper, exactly as the app does:
+    // `sync_app_menu` at startup and on every tab open/close and shortcut
+    // rebind, the browse/scan commands from "Add repository", and the search
+    // index maintenance that follows a refresh. None is a git operation the
+    // user ran, and none has a git line, so each used to leave a bare IPC-name
+    // row in every repository's panel on every launch.
+    const plumbing = [
+      'sync_app_menu',
+      'classify_repository_path',
+      'scan_for_repositories',
+      'cancel_repository_scan',
+      'refresh_search_index',
+      'build_search_index',
+      'drop_search_index',
+    ];
+    await page.evaluate(async (commands: string[]) => {
+      // @ts-expect-error - dynamic import resolved by Vite at runtime
+      const mod = await import('/src/services/tauri-api.ts');
+      const invokeCommand = mod.invokeCommand as (
+        command: string,
+        args?: unknown
+      ) => Promise<unknown>;
+      for (const command of commands) {
+        await invokeCommand(command, { path: '/tmp/test-repo' });
+      }
+    }, plumbing);
+
+    // A real operation still logs, so the assertions below are not vacuous.
+    await app.executeCommand('Create stash');
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('plumbing probe');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    await expect(
+      appPanel.locator('.entry-command', { hasText: 'git stash push' })
+    ).toHaveCount(1);
+
+    // ...and none of the plumbing left a row of its own.
+    for (const command of plumbing) {
+      await expect(
+        appPanel.locator('.entry-command', { hasText: command }),
+        command
+      ).toHaveCount(0);
+    }
+  });
+
   test('a failing operation shows its git line and its error output', async ({ page }) => {
     const { injectCommandError } = await import('../fixtures/test-helpers');
     const { AppPage } = await import('../pages/app.page');

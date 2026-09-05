@@ -139,6 +139,36 @@ describe('output-log.service', () => {
       expect(shouldLogToOutput('store_keyring_token')).to.be.false;
       expect(shouldLogToOutput('plugin:event|listen')).to.be.false;
     });
+
+    it('skips app plumbing and index maintenance the user never ran', () => {
+      // `sync_app_menu` fires at startup and on every tab open/close and
+      // shortcut rebind; the scan commands are the "Add repository" browse
+      // flow; the index builders are background bookkeeping. None is a git
+      // operation, and none has a git line — so besides being noise in every
+      // repository's panel, each was a stray claimant for the REAL invocation
+      // of an operation the user actually ran.
+      for (const command of [
+        'sync_app_menu',
+        'classify_repository_path',
+        'scan_for_repositories',
+        'cancel_repository_scan',
+        'refresh_search_index',
+        'build_search_index',
+        'drop_search_index',
+        'build_embedding_index',
+        'cancel_embedding_build',
+      ]) {
+        expect(shouldLogToOutput(command), command).to.be.false;
+      }
+    });
+
+    it('still logs the repository operations that look like plumbing', () => {
+      // The skip list is by exact name, so neighbouring real operations that
+      // the user did run must keep their rows.
+      expect(shouldLogToOutput('run_gc')).to.be.true;
+      expect(shouldLogToOutput('push_to_multiple_remotes')).to.be.true;
+      expect(shouldLogToOutput('clone_repository')).to.be.true;
+    });
   });
 
   describe('invokeCommand integration', () => {
@@ -507,6 +537,135 @@ describe('output-log.service', () => {
         .true;
     });
 
+    it('a real push is claimed by the push, not by an older unrelated operation', async () => {
+      // `run_gc` has no builder, so its subcommand is unknown and it stays
+      // claimable — but it must never take the claim ahead of the operation
+      // whose subcommand IS this run's, or the push would write a second,
+      // contradictory row.
+      const resolvers = new Map<string, () => void>();
+      mockInvoke = (command: string) =>
+        new Promise((resolve) => {
+          resolvers.set(command, () => resolve(null));
+        });
+
+      const gc = invokeCommand('run_gc', { path: '/repo' });
+      const push = invokeCommand('push', {
+        path: '/repo',
+        remote: 'origin',
+        branch: 'main',
+        forceWithLease: true,
+      });
+
+      recordGitCommandEvent({
+        command: 'git -C /repo push --force-with-lease origin main',
+        output: 'forced update',
+        success: true,
+        durationMs: 40,
+        repoPath: '/repo',
+      });
+
+      resolvers.get('push')?.();
+      await push;
+
+      // ONE row for the push, and it is the real invocation.
+      const afterPush = getLogEntries();
+      expect(afterPush.length).to.equal(1);
+      expect(afterPush[0].synthesized).to.be.false;
+      expect(afterPush[0].gitCommand).to.equal(
+        'git -C /repo push --force-with-lease origin main',
+      );
+
+      // The gc never shelled out, so it still gets its own row.
+      resolvers.get('run_gc')?.();
+      await gc;
+      expect(getLogEntries().length).to.equal(2);
+    });
+
+    it('a repository path containing a space does not double the push row', async () => {
+      // The backend quotes any argument with whitespace, so the real line is
+      // `git -C "…/My Repos/lev" push …`. Reading that line as whitespace
+      // tokens makes the two-slot `-C` skip land inside the path, the
+      // subcommands then disagree, the claim is refused and the panel shows
+      // the real push AND a synthesised twin.
+      const repoPath = '/Users/me/My Repos/lev';
+      shellsOut('push', {
+        command: `git -C "${repoPath}" push --force-with-lease origin main`,
+        output: 'forced update',
+        repoPath,
+      });
+
+      await invokeCommand('push', {
+        path: repoPath,
+        remote: 'origin',
+        branch: 'main',
+        forceWithLease: true,
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].synthesized).to.be.false;
+      expect(entries[0].gitCommand).to.equal(
+        `git -C "${repoPath}" push --force-with-lease origin main`,
+      );
+    });
+
+    it("a permissively claimed operation's failure never marks a real run failed", async () => {
+      // `run_gc` is claimable by any run in the repository because its
+      // subcommand is unknown. If it then fails, its error must land on a row
+      // of its own — stamping it onto the successful `git push` that really
+      // ran would tell the user a push that worked had failed.
+      let rejectGc: (error: unknown) => void = () => {};
+      mockInvoke = () =>
+        new Promise((_resolve, reject) => {
+          rejectGc = reject;
+        });
+
+      const gc = invokeCommand('run_gc', { path: '/repo' });
+
+      recordGitCommandEvent({
+        command: 'git -C /repo push --force-with-lease origin main',
+        output: 'forced update',
+        success: true,
+        durationMs: 40,
+        repoPath: '/repo',
+      });
+
+      rejectGc({ code: 'GC_FAILED', message: 'failed to open the commit index' });
+      await gc;
+
+      const entries = getLogEntries();
+      const real = entries.find((e) => e.gitCommand?.includes('push'));
+      expect(real?.success, 'the push really succeeded').to.be.true;
+      expect(real?.output).to.not.contain('commit index');
+
+      // The failure is still shown, as its own row.
+      const failure = entries.find((e) => !e.success);
+      expect(failure?.command).to.equal('run_gc');
+      expect(failure?.output).to.contain('failed to open the commit index');
+    });
+
+    it('a confirmed claim still carries the operation failure onto its row', async () => {
+      // The guard above must not cost the documented behaviour: when the
+      // subcommand CONFIRMS the claim, a later failure belongs on that row.
+      shellsOut(
+        'push',
+        { command: 'git -C /repo push --force-with-lease origin main', repoPath: '/repo' },
+        () => Promise.reject({ code: 'PUSH_FAILED', message: 'hook rejected the push' }),
+      );
+
+      await invokeCommand('push', {
+        path: '/repo',
+        remote: 'origin',
+        branch: 'main',
+        forceWithLease: true,
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].success).to.be.false;
+      expect(entries[0].output).to.contain('hook rejected the push');
+    });
+
     it('a real run reported AFTER the operation settles replaces its row', async () => {
       // Event delivery and IPC resolution are separate channels, so the real
       // line can arrive either side of the command returning.
@@ -525,6 +684,36 @@ describe('output-log.service', () => {
       expect(entries.length).to.equal(1);
       expect(entries[0].synthesized).to.be.false;
       expect(entries[0].gitCommand).to.equal('git commit -m late -S');
+    });
+
+    it("a late real run does not inherit an unconfirmed operation's failure", async () => {
+      // Same hazard as the in-flight case, on the late-claim path: `run_gc`
+      // settles FAILED, then the real push event arrives inside the late-claim
+      // window. Dropping the gc row and stamping its error onto the push would
+      // report a push that succeeded as failed.
+      mockInvoke = () =>
+        Promise.reject({
+          code: 'GC_FAILED',
+          message: 'failed to open the commit index',
+        });
+      await invokeCommand('run_gc', { path: '/repo' });
+      expect(getLogEntries().length).to.equal(1);
+
+      recordGitCommandEvent({
+        command: 'git -C /repo push --force-with-lease origin main',
+        output: 'forced update',
+        success: true,
+        durationMs: 40,
+        repoPath: '/repo',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(2);
+      const real = entries.find((e) => e.gitCommand?.includes('push'));
+      expect(real?.success, 'the push really succeeded').to.be.true;
+      expect(real?.output).to.not.contain('commit index');
+      const failure = entries.find((e) => e.command === 'run_gc');
+      expect(failure?.success).to.be.false;
     });
 
     it('a late run of a different subcommand keeps both rows', async () => {

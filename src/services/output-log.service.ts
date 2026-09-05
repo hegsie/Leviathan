@@ -164,10 +164,24 @@ export function clearLogEntries(repoPath?: string): void {
 // The real line is the truthful one — it is the actual argv — so it wins. An
 // IPC call registers itself here for the duration of the operation; a real
 // invocation reported while it is registered CLAIMS it, and the synthesised row
-// is then never written. Nothing is suppressed on a guess: a claim requires the
-// repository AND the git subcommand to be compatible, so a background fetch in
-// the same repository cannot swallow a commit's row, and repository A's real
-// line cannot swallow repository B's synthesised one.
+// is then never written.
+//
+// A claim requires the repository and the git subcommand to be COMPATIBLE: two
+// KNOWN values that differ block it, so a background fetch in the same
+// repository cannot swallow a commit's row and repository A's real line cannot
+// swallow repository B's synthesised one. But many operations have no
+// synthesised line and therefore no known subcommand at all (`clone_repository`,
+// `run_gc`, `bundle_create`, the index builders), and those must still be
+// claimable or they would double every time they shell out. So an unknown
+// subcommand stays compatible — as a FALLBACK only: an operation whose
+// subcommand IS this run's is always preferred, and an unknown one can never
+// take the claim ahead of it.
+//
+// A claim taken on that fallback is a compatibility guess rather than a
+// confirmed identity, so a failure arriving afterwards is carried onto the real
+// row only when the subcommand CONFIRMED the claim; otherwise it gets a row of
+// its own, because marking a real, successful invocation as failed with an
+// unrelated error is worse than one extra row.
 //
 // Event delivery and IPC resolution are separate channels, so the real line can
 // also arrive just AFTER the operation settles. A briefly-remembered settled
@@ -184,6 +198,12 @@ interface GitOperation {
   subcommand?: string;
   /** Log entry id of the real invocation that claimed this operation. */
   claimedEntryId?: number;
+  /**
+   * True when the claim was confirmed by a matching git subcommand rather than
+   * merely tolerated because one side's subcommand was unknown. Only a
+   * confirmed claim may have this operation's failure stamped onto its row.
+   */
+  claimConfirmed?: boolean;
   /** Log entry id of the synthesised row written when it settled unclaimed. */
   settledEntryId?: number;
   /** Error text of a settled failure, so a late claim can carry it over. */
@@ -247,11 +267,21 @@ function findClaimable(
     operationMatches(op, repoPath, subcommand),
   );
   if (matches.length === 0) return undefined;
+  // Prefer the operation whose subcommand IS this run's. `operationMatches` is
+  // permissive about an unknown subcommand so the operations with no
+  // synthesised line (`clone_repository`, `run_gc`, `bundle_create`, the index
+  // builders) can still be claimed — but those are pending far more often, and
+  // `matches` is oldest-first, so without this a background index refresh would
+  // take a push's claim and the push would write a second, contradictory row.
+  const confirmed = matches.filter(
+    (op) => op.subcommand !== undefined && op.subcommand === subcommand,
+  );
+  const preferred = confirmed.length > 0 ? confirmed : matches;
   // A run whose repository could not be determined (`git clone` has no working
   // directory yet) is only attributed when there is exactly one candidate —
   // otherwise it could be attributed to the wrong repository's operation.
-  if (repoPath === undefined && matches.length > 1) return undefined;
-  return matches[0];
+  if (repoPath === undefined && preferred.length > 1) return undefined;
+  return preferred[0];
 }
 
 function entryIndex(id: number): number {
@@ -345,10 +375,20 @@ export function settleGitOperation(
   }
 
   if (operation.claimedEntryId !== undefined) {
-    if (!success && applyFailureToEntry(operation.claimedEntryId, output)) return;
     if (success) return;
-    // The claimed entry is gone (cleared or trimmed) and the operation failed —
-    // fall through and record the failure rather than losing it.
+    // Only a claim CONFIRMED by a matching subcommand may recolour the real
+    // invocation's row: an operation claimed on the permissive fallback is not
+    // provably the same action, and stamping its error onto that row would
+    // report a git command that actually succeeded as having failed.
+    if (
+      operation.claimConfirmed === true &&
+      applyFailureToEntry(operation.claimedEntryId, output)
+    ) {
+      return;
+    }
+    // Either the claim was unconfirmed, or the claimed entry is gone (cleared
+    // or trimmed) — fall through and record the failure rather than losing it
+    // or attaching it to a row that may not be this operation's.
   }
 
   operation.settledAt = Date.now();
@@ -376,6 +416,8 @@ export function claimGitOperationForEntry(
   const inFlight = findClaimable(pendingOperations, repoPath, subcommand);
   if (inFlight) {
     inFlight.claimedEntryId = entryId;
+    inFlight.claimConfirmed =
+      inFlight.subcommand !== undefined && inFlight.subcommand === subcommand;
     return;
   }
 
@@ -394,9 +436,19 @@ export function claimGitOperationForEntry(
   );
   if (!settled || settled.settledEntryId === undefined) return;
 
+  // Same rule as `settleGitOperation`: a failure may only be carried onto the
+  // real row when the subcommand CONFIRMS the claim. An unconfirmed operation
+  // that failed keeps the row it already wrote — two rows are the honest
+  // outcome, and recolouring a real invocation that succeeded with an
+  // unrelated error is not.
+  const confirmed =
+    settled.subcommand !== undefined && settled.subcommand === subcommand;
+  if (settled.settledFailure !== undefined && !confirmed) return;
+
   const index = entryIndex(settled.settledEntryId);
   if (index < 0) return;
   settled.claimedEntryId = entryId;
+  settled.claimConfirmed = confirmed;
   logEntries.splice(index, 1);
   if (settled.settledFailure !== undefined) {
     // applyFailureToEntry notifies; when it cannot (entry gone) notify anyway
@@ -435,6 +487,21 @@ const SKIP_COMMANDS = new Set([
   // App plumbing, not git operations the user ran
   'open_repository',
   'close_repository',
+  // Native menu sync: fired at startup and on every tab open/close and
+  // shortcut rebind, with no repository and nothing a user asked for.
+  'sync_app_menu',
+  // Repository discovery: the "Add repository" browse/scan plumbing.
+  'classify_repository_path',
+  'scan_for_repositories',
+  'cancel_repository_scan',
+  // Search/embedding index maintenance: background bookkeeping the user never
+  // ran, and — because none of them has a git line — a stray claimant for the
+  // real invocations of the operations the user DID run.
+  'refresh_search_index',
+  'build_search_index',
+  'drop_search_index',
+  'build_embedding_index',
+  'cancel_embedding_build',
 ]);
 
 /**

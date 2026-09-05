@@ -395,6 +395,58 @@ const GLOBAL_OPTS_WITH_VALUE = new Set([
 ]);
 
 /**
+ * Split a rendered command line back into the arguments it was rendered from.
+ *
+ * The line is NOT free-form text: `format_command_line` in
+ * `src-tauri/src/utils/command.rs` joins arguments with single spaces after
+ * passing each through `quote_arg`, and `quoteArg` above renders the
+ * synthesised lines the same way. Both wrap an argument that contains
+ * whitespace, a quote or a backslash in `"…"`, escaping `\` as `\\` and `"`
+ * as `\"`. Splitting on whitespace would therefore tear a quoted repository
+ * path — `git -C "/Users/me/My Repos/lev" push …` — into three pieces, and the
+ * two-slot `-C` skip would land in the middle of the path instead of on the
+ * subcommand. Undoing the quoting keeps one argument one token.
+ *
+ * Best-effort, like its caller: an unterminated quote simply ends the last
+ * token, and a backslash outside quotes (which neither renderer emits) is
+ * taken literally.
+ */
+function tokenizeCommandLine(line: string): string[] {
+  const tokens: string[] = [];
+  let current = '';
+  let started = false;
+  let quoted = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (quoted) {
+      if (char === '\\' && i + 1 < line.length) {
+        current += line[++i];
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      started = true;
+    } else if (/\s/.test(char)) {
+      if (started) tokens.push(current);
+      current = '';
+      started = false;
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+  if (started) tokens.push(current);
+
+  return tokens;
+}
+
+/**
  * The git subcommand a rendered command line runs (`commit`, `push`, …), or
  * `undefined` when the line is absent or names none.
  *
@@ -406,7 +458,9 @@ const GLOBAL_OPTS_WITH_VALUE = new Set([
  */
 export function gitSubcommand(line: string | undefined): string | undefined {
   if (!line) return undefined;
-  const tokens = line.trim().split(/\s+/).filter((t) => t.length > 0);
+  // Quote-aware: a repository path with a space is ONE argument, so `-C` skips
+  // the whole path rather than the first whitespace-separated piece of it.
+  const tokens = tokenizeCommandLine(line).filter((t) => t.length > 0);
   let i = 0;
   // Drop the program itself (`git`, or a fully qualified path to it).
   if (i < tokens.length && /(^|[/\\])git(\.exe)?$/i.test(tokens[i])) i++;

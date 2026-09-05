@@ -379,6 +379,53 @@ describe('git-command-format', () => {
       expect(gitSubcommand('/usr/bin/git rebase --continue')).to.equal('rebase');
     });
 
+    it('keeps a quoted repository path with spaces as ONE argument', () => {
+      // `quote_arg` in src-tauri/src/utils/command.rs quotes any argument
+      // containing whitespace, so the CLI push renders `-C "…"`. Splitting the
+      // line on whitespace would make the two-slot `-C` skip land inside the
+      // path and the panel would show two rows for one push.
+      expect(
+        gitSubcommand(
+          'git -C "/Users/me/My Repos/lev" push --force-with-lease origin main',
+        ),
+      ).to.equal('push');
+      expect(
+        gitSubcommand('git -C "/Users/me/My Repos/lev" push --tags origin'),
+      ).to.equal('push');
+      expect(
+        gitSubcommand('git --git-dir "/My Repos/lev/.git" --no-pager log'),
+      ).to.equal('log');
+    });
+
+    it('unescapes the quoting the renderers emit', () => {
+      // Inside the quotes it adds, `quote_arg` escapes a backslash as `\\` and
+      // a quote as `\"`, so these are the lines the backend really emits for a
+      // Windows path and for a path containing a quote. String.raw keeps those
+      // escapes literal here — neither may end the argument early.
+      expect(
+        gitSubcommand(String.raw`git -C "C:\\My Repos\\lev" push origin main`),
+      ).to.equal('push');
+      expect(
+        gitSubcommand(
+          String.raw`git -C "/tmp/od\"d \\ repo" push --force-with-lease origin`,
+        ),
+      ).to.equal('push');
+      // A fully qualified program path that had to be quoted is still `git`:
+      // the escapes must resolve back to real separators, or the path stops
+      // looking like git and gets read as the subcommand instead.
+      expect(
+        gitSubcommand(
+          String.raw`"C:\\Program Files\\Git\\bin\\git.exe" rebase --continue`,
+        ),
+      ).to.equal('rebase');
+    });
+
+    it('does not mistake a quoted commit message for a subcommand', () => {
+      // The message is an option VALUE, so the scan never reaches it — but if
+      // quoting were ignored, `push` inside it could be read as the subcommand.
+      expect(gitSubcommand('git commit -m "push the button" -S')).to.equal('commit');
+    });
+
     it('is undefined when there is no line or no subcommand', () => {
       expect(gitSubcommand(undefined)).to.equal(undefined);
       expect(gitSubcommand('')).to.equal(undefined);
