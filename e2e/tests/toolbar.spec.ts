@@ -6,6 +6,34 @@ import { startCommandCapture, startCommandCaptureWithMocks, findCommand, waitFor
  * E2E tests for Toolbar
  * Tests toolbar buttons, repository tabs, and actions
  */
+
+/**
+ * Fetch/Pull/Push exist on two surfaces — the toolbar and the context
+ * dashboard — so every locator for them must say which one it means. The
+ * dashboard's copies are covered in remote-operations.spec.ts.
+ */
+function toolbarButton(page: import('@playwright/test').Page, name: RegExp) {
+  return page.locator('lv-toolbar').getByRole('button', { name });
+}
+
+/** Ahead/behind values for the current branch, as the store holds them. */
+function withAheadBehind(ahead: number, behind: number, upstream: string | null = 'origin/main') {
+  return {
+    branches: [
+      {
+        name: 'main',
+        shorthand: 'main',
+        isHead: true,
+        isRemote: false,
+        upstream,
+        targetOid: 'abc123def456',
+        aheadBehind: upstream ? { ahead, behind } : undefined,
+        lastCommitTimestamp: Date.now() / 1000,
+        isStale: false,
+      },
+    ],
+  };
+}
 test.describe('Toolbar Buttons', () => {
   test.beforeEach(async ({ page }) => {
     await setupOpenRepository(page);
@@ -410,7 +438,7 @@ test.describe('Toolbar Error Scenarios', () => {
     // Inject error for the fetch command
     await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = toolbarButton(page, /Fetch/i);
     await fetchButton.click();
 
     // Error toast should appear with informative message
@@ -426,7 +454,7 @@ test.describe('Toolbar Error Scenarios', () => {
     // Inject error for the push command
     await injectCommandError(page, 'push', 'Push rejected: non-fast-forward update');
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = toolbarButton(page, /Push/i);
     await pushButton.click();
 
     // Error toast should appear with informative message. A non-fast-forward
@@ -452,7 +480,7 @@ test.describe('Toolbar - Extended Tests', () => {
     await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
 
     // Click the Fetch button
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = toolbarButton(page, /Fetch/i);
     await fetchButton.click();
 
     // Error toast should appear within a reasonable time and contain the error message
@@ -563,5 +591,130 @@ test.describe('Toolbar - Extended Tests', () => {
     // After successful init, the toolbar should show the new repo name
     const newRepoTab = page.locator('lv-toolbar .tab', { hasText: 'new-init-repo' });
     await expect(newRepoTab).toBeVisible({ timeout: 5000 });
+  });
+});
+
+
+// ============================================================================
+// Toolbar remote operations (Fetch / Pull / Push)
+//
+// The three most frequent remote operations used to have no toolbar presence
+// at all: their only mouse route was the context dashboard, which collapses
+// and remembers that it is collapsed — so a user who collapsed it had no way
+// to push without the keyboard or the command palette.
+// ============================================================================
+
+test.describe('Toolbar Remote Operations', () => {
+  test('shows Fetch, Pull and Push in the toolbar', async ({ page }) => {
+    await setupOpenRepository(page);
+
+    for (const name of [/Fetch/i, /Pull/i, /Push/i]) {
+      await expect(toolbarButton(page, name)).toBeVisible();
+    }
+  });
+
+  test('shows the behind count on Pull and the ahead count on Push', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(2, 5));
+
+    const pull = toolbarButton(page, /Pull/i);
+    const push = toolbarButton(page, /Push/i);
+    await expect(pull.locator('.remote-count')).toHaveText('5');
+    await expect(push.locator('.remote-count')).toHaveText('2');
+    await expect(pull).toHaveAttribute('title', /5 incoming commits/);
+    await expect(push).toHaveAttribute('title', /2 local commits/);
+  });
+
+  test('dims Pull and Push, without disabling them, when there is nothing to do', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(0, 0));
+
+    const pull = toolbarButton(page, /Pull/i);
+    const push = toolbarButton(page, /Push/i);
+    await expect(pull).toHaveClass(/idle/);
+    await expect(push).toHaveClass(/idle/);
+    await expect(pull).toBeEnabled();
+    await expect(push).toBeEnabled();
+    await expect(pull.locator('.remote-count')).toHaveCount(0);
+    await expect(push.locator('.remote-count')).toHaveCount(0);
+  });
+
+  test('disables all three when the repository has no remote', async ({ page }) => {
+    await setupOpenRepository(page, { remotes: [] });
+
+    for (const name of [/Fetch/i, /Pull/i, /Push/i]) {
+      const btn = toolbarButton(page, name);
+      await expect(btn).toBeDisabled();
+      await expect(btn).toHaveAttribute('title', /no remote configured/);
+    }
+  });
+
+  test('disables all three on the welcome screen, explaining why', async ({ page }) => {
+    // No repository opened at all — mocks only.
+    await setupTauriMocks(page);
+    await page.goto('/');
+
+    for (const name of [/Fetch/i, /Pull/i, /Push/i]) {
+      const btn = toolbarButton(page, name);
+      await expect(btn).toBeDisabled();
+      await expect(btn).toHaveAttribute('title', /open a repository first/);
+    }
+  });
+
+  test('clicking Fetch runs a fetch and refreshes the counts', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(0, 3));
+    await expect(toolbarButton(page, /Pull/i).locator('.remote-count')).toHaveText('3');
+
+    // After the fetch the branch is up to date, so the refresh that follows
+    // must clear the toolbar's badge.
+    await startCommandCaptureWithMocks(page, {
+      fetch: null,
+      get_branches: [
+        {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'origin/main',
+          targetOid: 'abc123def456',
+          aheadBehind: { ahead: 0, behind: 0 },
+          isStale: false,
+        },
+      ],
+    });
+
+    await toolbarButton(page, /Fetch/i).click();
+    await waitForCommand(page, 'fetch');
+
+    expect(findCommand(page, 'fetch')).toBeTruthy();
+    await expect(toolbarButton(page, /Pull/i).locator('.remote-count')).toHaveCount(0);
+    await expect(toolbarButton(page, /Pull/i)).toHaveClass(/idle/);
+  });
+
+  test('clicking Pull runs a pull', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(0, 2));
+    await startCommandCapture(page);
+
+    await toolbarButton(page, /Pull/i).click();
+    await waitForCommand(page, 'pull');
+  });
+
+  test('clicking Push runs a push', async ({ page }) => {
+    await setupOpenRepository(page, withAheadBehind(2, 0));
+    await startCommandCapture(page);
+
+    await toolbarButton(page, /Push/i).click();
+    await waitForCommand(page, 'push');
+  });
+
+  test('a failed toolbar fetch is reported and the button comes back', async ({ page }) => {
+    await setupOpenRepository(page);
+    await injectCommandError(page, 'fetch', 'Network error: could not resolve host');
+
+    const fetchButton = toolbarButton(page, /Fetch/i);
+    await fetchButton.click();
+
+    const toast = page.locator('.toast').first();
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText(/error|network|resolve/i);
+    await expect(fetchButton).toBeEnabled();
   });
 });

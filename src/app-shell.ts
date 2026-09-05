@@ -5671,6 +5671,16 @@ export class AppShell extends LitElement {
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
         @search-change=${this.handleSearchChange}
+        @remote-fetch=${this.requiresRepository(() => {
+            // The toolbar's Fetch/Pull/Push buttons run the SAME handlers the
+            // keyboard shortcuts and the command palette do: the shared locks,
+            // the progress rows, the suggestion-toast recovery and the closing
+            // handleRefresh() all live there and must not be reimplemented per
+            // surface.
+            void this.handleFetch();
+          })}
+        @remote-pull=${this.requiresRepository(() => void this.handlePull())}
+        @remote-push=${this.requiresRepository(() => void this.handlePush())}
       ></lv-toolbar>
 
       ${this.activeRepository

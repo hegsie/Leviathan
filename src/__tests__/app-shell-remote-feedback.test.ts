@@ -1098,4 +1098,102 @@ describe('app-shell remote-operation feedback', () => {
       }
     });
   });
+  describe('the toolbar Fetch/Pull/Push buttons run the shared handlers', () => {
+    /** Mount a shell on a repo that has a remote, so the buttons are live. */
+    async function mountWithRemote(): Promise<AppShell> {
+      for (const cmd of ['get_stashes', 'get_tags', 'get_status', 'get_branches']) {
+        if (!mockResponses[cmd]) mockResponses[cmd] = () => [];
+      }
+      mockResponses['get_remotes'] = () => [
+        { name: 'origin', url: 'https://example.com/test/repo.git', pushUrl: null },
+      ];
+      mockResponses['open_repository'] = () => mockRepo('/repo/one', 'one');
+      const el = createAppShell();
+      document.body.appendChild(el);
+      await (el as any).updateComplete;
+      repositoryStore.getState().addRepository(mockRepo('/repo/one', 'one'));
+      repositoryStore.getState().updateRepoData('/repo/one', {
+        remotes: [{ name: 'origin', url: 'https://example.com/test/repo.git', pushUrl: null }],
+        currentBranch: {
+          name: 'main',
+          shorthand: 'main',
+          isHead: true,
+          isRemote: false,
+          upstream: 'origin/main',
+          targetOid: 'abc123',
+          aheadBehind: { ahead: 2, behind: 3 },
+          isStale: false,
+        } as any,
+      });
+      await (el as any).updateComplete;
+      return el;
+    }
+
+    function toolbarButton(el: AppShell, op: string): HTMLButtonElement {
+      const toolbar = el.shadowRoot!.querySelector('lv-toolbar');
+      expect(toolbar, 'the toolbar is rendered').to.not.be.null;
+      const btn = toolbar!.shadowRoot!.querySelector(`.remote-btn.${op}`);
+      expect(btn, `the toolbar ${op} button`).to.not.be.null;
+      return btn as HTMLButtonElement;
+    }
+
+    for (const op of ['fetch', 'pull', 'push'] as const) {
+      it(`the toolbar ${op} button invokes ${op} through app-shell`, async () => {
+        const el = await mountWithRemote();
+        try {
+          await (el.shadowRoot!.querySelector('lv-toolbar') as any).updateComplete;
+          const btn = toolbarButton(el, op);
+          expect(btn.disabled, `${op} is enabled on a repo with a remote`).to.be.false;
+          btn.click();
+
+          await waitUntil(
+            () => invokeCallArgs.some((c) => c.command === op),
+            `the toolbar ${op} button reaches the ${op} command`,
+          );
+          // Through the shared handler, which passes silent so the service
+          // does not toast on top of it.
+          const call = invokeCallArgs.find((c) => c.command === op)!;
+          expect(call.args.silent).to.equal(true);
+        } finally {
+          el.remove();
+        }
+      });
+
+      it(`a failed ${op} from the toolbar is reported, not swallowed`, async () => {
+        failures[op] = { code: 'COMMAND_ERROR', message: 'remote hung up' };
+        const el = await mountWithRemote();
+        try {
+          toolbarButton(el, op).click();
+
+          await waitUntil(
+            () => uiStore.getState().toasts.some((t) => t.type === 'error'),
+            `a failed ${op} from the toolbar surfaces an error`,
+          );
+        } finally {
+          el.remove();
+        }
+      });
+    }
+
+    it('explains itself when the event arrives with no repository open', async () => {
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        await (el as any).updateComplete;
+        uiStore.setState({ toasts: [] });
+        el.shadowRoot!
+          .querySelector('lv-toolbar')!
+          .dispatchEvent(new CustomEvent('remote-fetch', { bubbles: true, composed: true }));
+
+        await waitUntil(
+          () => uiStore.getState().toasts.length > 0,
+          'the no-repository case is explained',
+        );
+        expect(uiStore.getState().toasts[0].message).to.contain('open a repository');
+        expect(invokeCallArgs.some((c) => c.command === 'fetch')).to.be.false;
+      } finally {
+        el.remove();
+      }
+    });
+  });
 });
