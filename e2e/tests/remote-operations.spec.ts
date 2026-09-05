@@ -14,6 +14,20 @@ import { AppPage } from '../pages/app.page';
 import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandHang, emitBackendEvent, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Fetch/Pull/Push now exist on TWO surfaces — the context dashboard and the
+ * toolbar — so a bare `getByRole('button', { name: /Push/i })` matches both.
+ * These tests are about the dashboard's copy; the toolbar's live in
+ * toolbar.spec.ts.
+ */
+function dashboardButton(page: import('@playwright/test').Page, name: RegExp) {
+  return page.locator('lv-context-dashboard').getByRole('button', { name });
+}
+
+// ============================================================================
 // Helper function to create branches with ahead/behind status
 // ============================================================================
 
@@ -57,32 +71,32 @@ test.describe('Remote Operation Buttons', () => {
   });
 
   test('should display Fetch button in context dashboard', async ({ page }) => {
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await expect(fetchButton).toBeVisible();
   });
 
   test('should display Pull button in context dashboard', async ({ page }) => {
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await expect(pullButton).toBeVisible();
   });
 
   test('should display Push button in context dashboard', async ({ page }) => {
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await expect(pushButton).toBeVisible();
   });
 
   test('Fetch button should be clickable', async ({ page }) => {
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await expect(fetchButton).toBeEnabled();
   });
 
   test('Pull button should be clickable', async ({ page }) => {
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await expect(pullButton).toBeEnabled();
   });
 
   test('Push button should be clickable', async ({ page }) => {
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await expect(pushButton).toBeEnabled();
   });
 });
@@ -190,7 +204,7 @@ test.describe('Status-bar ahead/behind badge', () => {
     await expect(aheadBadge(page)).toHaveText('↑3');
 
     await startCommandCapture(page);
-    await page.getByRole('button', { name: /Push/i }).click();
+    await dashboardButton(page, /Push/i).click();
     await waitForCommand(page, 'push');
 
     await expect(aheadBadge(page)).toHaveCount(0);
@@ -204,7 +218,7 @@ test.describe('Status-bar ahead/behind badge', () => {
     await expect(behindBadge(page)).toHaveText('↓2');
 
     await startCommandCapture(page);
-    await page.getByRole('button', { name: /Pull/i }).click();
+    await dashboardButton(page, /Pull/i).click();
     await waitForCommand(page, 'pull');
 
     await expect(behindBadge(page)).toHaveCount(0);
@@ -215,7 +229,7 @@ test.describe('Status-bar ahead/behind badge', () => {
     await expect(aheadBadge(page)).toHaveText('↑3');
 
     await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
-    await page.getByRole('button', { name: /Push/i }).click();
+    await dashboardButton(page, /Push/i).click();
 
     await expect(page.locator('.toast')).toBeVisible({ timeout: 5000 });
     await expect(aheadBadge(page)).toHaveText('↑3');
@@ -289,7 +303,7 @@ test.describe('Remote Button Tooltips', () => {
     app = new AppPage(page);
     await setupOpenRepository(page, withAheadBehind(5, 0));
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     const title = await pushButton.getAttribute('title');
     expect(title).toContain('Push');
   });
@@ -298,7 +312,7 @@ test.describe('Remote Button Tooltips', () => {
     app = new AppPage(page);
     await setupOpenRepository(page, withAheadBehind(0, 3));
 
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     const title = await pullButton.getAttribute('title');
     expect(title).toContain('Pull');
   });
@@ -307,7 +321,7 @@ test.describe('Remote Button Tooltips', () => {
     app = new AppPage(page);
     await setupOpenRepository(page);
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     const title = await fetchButton.getAttribute('title');
     expect(title).toContain('Fetch');
   });
@@ -359,9 +373,9 @@ test.describe('Context Dashboard', () => {
     await setupOpenRepository(page);
 
     // Remote buttons should be in a group
-    const fetchBtn = page.getByRole('button', { name: /Fetch/i });
-    const pullBtn = page.getByRole('button', { name: /Pull/i });
-    const pushBtn = page.getByRole('button', { name: /Push/i });
+    const fetchBtn = dashboardButton(page, /Fetch/i);
+    const pullBtn = dashboardButton(page, /Pull/i);
+    const pushBtn = dashboardButton(page, /Push/i);
 
     await expect(fetchBtn).toBeVisible();
     await expect(pullBtn).toBeVisible();
@@ -384,7 +398,7 @@ test.describe('Fetch Operation', () => {
   test('clicking Fetch button should invoke fetch and re-check remote status', async ({ page }) => {
     await startCommandCapture(page);
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
 
     await waitForCommand(page, 'fetch');
@@ -406,7 +420,7 @@ test.describe('Fetch Operation', () => {
   test('fetch failure should show error toast and keep button enabled', async ({ page }) => {
     await injectCommandError(page, 'fetch', 'Network error: unable to reach remote');
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
 
     // Error toast should appear with the specific error message
@@ -438,7 +452,7 @@ test.describe('Remote selection for fetch/pull/push', () => {
     await setupOpenRepository(page, forkRemotes);
     await startCommandCaptureWithMocks(page, { get_fetch_remote: 'upstream', fetch: null });
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
     await waitForCommand(page, 'fetch');
 
@@ -455,7 +469,7 @@ test.describe('Remote selection for fetch/pull/push', () => {
     await setupOpenRepository(page, forkRemotes);
     await startCommandCaptureWithMocks(page, { get_pull_remote: 'upstream', pull: null });
 
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await pullButton.click();
     await waitForCommand(page, 'pull');
 
@@ -468,7 +482,7 @@ test.describe('Remote selection for fetch/pull/push', () => {
     await setupOpenRepository(page, forkRemotes);
     await startCommandCaptureWithMocks(page, { get_push_remote: 'upstream', push: null });
 
-    const pushButton = page.getByRole('button', { name: /^Push/i });
+    const pushButton = dashboardButton(page, /^Push/i);
     await pushButton.click();
     await waitForCommand(page, 'push');
 
@@ -485,7 +499,7 @@ test.describe('Remote selection for fetch/pull/push', () => {
     await startCommandCapture(page);
     await injectCommandError(page, 'get_fetch_remote', 'Remote not found: origin');
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
     await waitForCommand(page, 'fetch');
 
@@ -513,7 +527,7 @@ test.describe('Push Operation', () => {
 
     await startCommandCapture(page);
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await pushButton.click();
 
     await waitForCommand(page, 'push');
@@ -539,7 +553,7 @@ test.describe('Push Operation', () => {
 
     await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await pushButton.click();
 
     const toast = page.locator('.toast');
@@ -574,7 +588,7 @@ test.describe('Push Operation', () => {
       'A push is already running for this repository. Wait for it to finish and try again — an operation that timed out can still be finishing in the background.'
     );
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await pushButton.click();
 
     const toast = page.locator('.toast');
@@ -612,7 +626,7 @@ test.describe('Pull Operation', () => {
 
     await startCommandCapture(page);
 
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await pullButton.click();
 
     await waitForCommand(page, 'pull');
@@ -638,7 +652,7 @@ test.describe('Pull Operation', () => {
 
     await injectCommandError(page, 'pull', 'Pull failed: merge conflict');
 
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await pullButton.click();
 
     const toast = page.locator('.toast');
@@ -685,7 +699,7 @@ test.describe('Remote Operation Sequences', () => {
 
     await startCommandCapture(page);
 
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
 
     await waitForCommand(page, 'get_remote_status');
@@ -712,7 +726,7 @@ test.describe('Remote Operation Sequences', () => {
     await startCommandCapture(page);
 
     // Click fetch
-    const fetchButton = page.getByRole('button', { name: /Fetch/i });
+    const fetchButton = dashboardButton(page, /Fetch/i);
     await fetchButton.click();
 
     await waitForCommand(page, 'fetch');
@@ -742,7 +756,7 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     await startCommandCapture(page);
 
     // Click push -- the mock sets ahead to 0 on push
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await pushButton.click();
 
     await waitForCommand(page, 'push');
@@ -763,7 +777,7 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     await startCommandCapture(page);
 
     // Click pull -- the mock sets behind to 0 on pull
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await pullButton.click();
 
     await waitForCommand(page, 'pull');
@@ -784,7 +798,7 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     // Inject a push error
     await injectCommandError(page, 'push', 'Push rejected: non-fast-forward');
 
-    const pushButton = page.getByRole('button', { name: /Push/i });
+    const pushButton = dashboardButton(page, /Push/i);
     await pushButton.click();
 
     // Error toast should appear
@@ -808,7 +822,7 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     // Inject a pull error
     await injectCommandError(page, 'pull', 'Pull failed: merge conflict');
 
-    const pullButton = page.getByRole('button', { name: /Pull/i });
+    const pullButton = dashboardButton(page, /Pull/i);
     await pullButton.click();
 
     // Error toast should appear
@@ -927,7 +941,7 @@ test.describe('Cancelling a remote operation', () => {
     await startCommandCapture(page);
     await injectCommandHang(page, 'fetch');
 
-    await page.getByRole('button', { name: /Fetch/i }).click();
+    await dashboardButton(page, /Fetch/i).click();
     await waitForCommand(page, 'fetch');
 
     const row = page.locator('lv-progress-indicator .progress-item');
@@ -945,7 +959,7 @@ test.describe('Cancelling a remote operation', () => {
     await startCommandCapture(page);
     await injectCommandHang(page, 'fetch');
 
-    await page.getByRole('button', { name: /Fetch/i }).click();
+    await dashboardButton(page, /Fetch/i).click();
     await waitForCommand(page, 'fetch');
 
     const operationId = await operationIdOf(page, 'fetch');
@@ -963,7 +977,7 @@ test.describe('Cancelling a remote operation', () => {
     await startCommandCapture(page);
     await injectCommandHang(page, 'push');
 
-    await page.getByRole('button', { name: /Push/i }).click();
+    await dashboardButton(page, /Push/i).click();
     await waitForCommand(page, 'push');
 
     await expect(page.locator('lv-progress-indicator .cancel-btn')).toBeVisible();
@@ -980,7 +994,7 @@ test.describe('Cancelling a remote operation', () => {
     await startCommandCapture(page);
     await injectCommandHang(page, 'fetch');
 
-    await page.getByRole('button', { name: /Fetch/i }).click();
+    await dashboardButton(page, /Fetch/i).click();
     await waitForCommand(page, 'fetch');
 
     const operationId = await operationIdOf(page, 'fetch');
