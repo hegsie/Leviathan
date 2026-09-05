@@ -372,6 +372,7 @@ export class LvSettingsDialog extends LitElement {
   @state() private diffIgnoreWhitespace: DiffWhitespaceMode = 'none';
   @state() private diffContextLines = 3;
   @state() private confirmBeforeDiscard = true;
+  @state() private openLastRepository = true;
   @state() private offlineMode = false;
   @state() private confirmNetworkOps = false;
   @state() private remoteAllowlist: string[] = [];
@@ -599,6 +600,7 @@ export class LvSettingsDialog extends LitElement {
     this.diffIgnoreWhitespace = settings.diffIgnoreWhitespace;
     this.diffContextLines = settings.diffContextLines;
     this.confirmBeforeDiscard = settings.confirmBeforeDiscard;
+    this.openLastRepository = settings.openLastRepository;
     this.offlineMode = settings.offlineMode;
     this.confirmNetworkOps = settings.confirmNetworkOps;
     this.remoteAllowlist = settings.remoteAllowlist;
@@ -995,6 +997,10 @@ export class LvSettingsDialog extends LitElement {
       case 'confirmBeforeDiscard':
         this.confirmBeforeDiscard = value;
         store.setConfirmBeforeDiscard(value);
+        break;
+      case 'openLastRepository':
+        this.openLastRepository = value;
+        store.setOpenLastRepository(value);
         break;
       case 'offlineMode':
         this.offlineMode = value;
@@ -1782,6 +1788,13 @@ export class LvSettingsDialog extends LitElement {
 
         <div class="settings-section">
           <div class="section-title">Behavior</div>
+
+          ${this.renderToggleRow(
+            'Reopen Last Repositories',
+            'Reopen the repository tabs from your last session when Leviathan starts. Turn this off to start on the welcome screen — the tabs are remembered, so turning it back on restores them.',
+            this.openLastRepository,
+            'openLastRepository'
+          )}
 
           ${this.renderToggleRow(
             'Confirm Before Discard',

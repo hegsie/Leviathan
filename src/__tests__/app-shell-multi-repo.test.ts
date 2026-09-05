@@ -927,6 +927,10 @@ describe('app-shell multi-repo behavior', () => {
   });
 
   describe('startup restore', () => {
+    afterEach(() => {
+      settingsStore.setState({ openLastRepository: true });
+    });
+
     it('opens every persisted repo but builds indexes only for the active one', async () => {
       mockResponses['open_repository'] = (args) => mockRepo(args.path as string, 'restored');
       repositoryStore.setState({
@@ -1024,6 +1028,73 @@ describe('app-shell multi-repo behavior', () => {
         expect(persisted).to.deep.equal(['/repo/one']);
       } finally {
         el.remove();
+      }
+    });
+
+    it('opens nothing when "Reopen Last Repositories" is off, and keeps the list', async () => {
+      mockResponses['open_repository'] = (args) => mockRepo(args.path as string, 'restored');
+      settingsStore.setState({ openLastRepository: false });
+      repositoryStore.setState({
+        persistedOpenRepos: [
+          { path: '/repo/one', name: 'one' },
+          { path: '/repo/two', name: 'two' },
+        ],
+        persistedActivePath: '/repo/two',
+      });
+
+      const el = createAppShell();
+      document.body.appendChild(el);
+      try {
+        // Give the restore pass every chance to run before asserting it didn't.
+        await new Promise((r) => setTimeout(r, 50));
+
+        expect(
+          invokeCallArgs.filter((c) => c.command === 'open_repository'),
+          'no repository is opened — the app starts on the welcome screen'
+        ).to.have.length(0);
+        expect(repositoryStore.getState().openRepositories).to.have.length(0);
+        expect(uiStore.getState().toasts, 'nothing is reported as a failed restore').to.have.length(
+          0
+        );
+
+        // The remembered tabs must SURVIVE: the toggle is reversible, not a
+        // one-way wipe of the session.
+        expect(repositoryStore.getState().persistedOpenRepos.map((r) => r.path)).to.deep.equal([
+          '/repo/one',
+          '/repo/two',
+        ]);
+        expect(repositoryStore.getState().persistedActivePath).to.equal('/repo/two');
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('restores again once the setting is turned back on', async () => {
+      mockResponses['open_repository'] = (args) => mockRepo(args.path as string, 'restored');
+      settingsStore.setState({ openLastRepository: false });
+      repositoryStore.setState({
+        persistedOpenRepos: [{ path: '/repo/one', name: 'one' }],
+      });
+
+      const off = createAppShell();
+      document.body.appendChild(off);
+      await new Promise((r) => setTimeout(r, 20));
+      off.remove();
+      expect(repositoryStore.getState().openRepositories).to.have.length(0);
+
+      settingsStore.setState({ openLastRepository: true });
+      const on = createAppShell();
+      document.body.appendChild(on);
+      try {
+        await waitUntil(
+          () => repositoryStore.getState().openRepositories.length === 1,
+          'expected the still-persisted repo to be restored once the setting is on'
+        );
+        expect(
+          repositoryStore.getState().openRepositories[0].repository.path
+        ).to.equal('/repo/one');
+      } finally {
+        on.remove();
       }
     });
 

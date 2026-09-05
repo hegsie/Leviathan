@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupTauriMocks, emptyRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
@@ -724,5 +724,99 @@ test.describe('Welcome Screen - recent repository rows', () => {
     await expect(app.recentItems).toHaveCount(1);
     await expect(app.recentItems.first()).toContainText('repo2');
     expect(await findCommand(page, 'open_repository')).toHaveLength(0);
+  });
+});
+
+/**
+ * "Reopen Last Repositories" (Settings → Behavior).
+ *
+ * The startup restore used to run unconditionally, so this setting — persisted,
+ * with a setter, and read by nothing — could not be obeyed. A restart is
+ * simulated by seeding the persisted zustand blobs before the page loads; the
+ * seed only fills in values that are not already stored, so a reload keeps
+ * whatever the running app wrote.
+ */
+test.describe('Session restore', () => {
+  const RESTORED_PATH = '/tmp/test-repo';
+
+  async function seedSession(page: Page, openLastRepository: boolean): Promise<void> {
+    await page.addInitScript(
+      ({ openLastRepository, path }) => {
+        if (!localStorage.getItem('leviathan-repositories')) {
+          localStorage.setItem(
+            'leviathan-repositories',
+            JSON.stringify({
+              state: {
+                recentRepositories: [],
+                persistedOpenRepos: [{ path, name: 'test-repo' }],
+                activeIndex: 0,
+                persistedActivePath: path,
+              },
+              version: 0,
+            })
+          );
+        }
+        if (!localStorage.getItem('leviathan-settings')) {
+          localStorage.setItem(
+            'leviathan-settings',
+            JSON.stringify({ state: { openLastRepository }, version: 7 })
+          );
+        }
+      },
+      { openLastRepository, path: RESTORED_PATH }
+    );
+  }
+
+  async function persistedPaths(page: Page): Promise<string[]> {
+    return page.evaluate(() => {
+      const raw = localStorage.getItem('leviathan-repositories');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as { state?: { persistedOpenRepos?: { path: string }[] } };
+      return (parsed.state?.persistedOpenRepos ?? []).map((r) => r.path);
+    });
+  }
+
+  test('reopens the last session when the setting is on', async ({ page }) => {
+    await setupTauriMocks(page);
+    await seedSession(page, true);
+    const app = new AppPage(page);
+    await app.goto();
+
+    await expect(page.locator('lv-toolbar .tab')).toHaveCount(1);
+    await expect(app.welcomeScreen).not.toBeVisible();
+  });
+
+  test('starts on the welcome screen when the setting is off, keeping the tabs', async ({
+    page,
+  }) => {
+    await setupTauriMocks(page);
+    await seedSession(page, false);
+    const app = new AppPage(page);
+    await app.goto();
+
+    await expect(app.welcomeScreen).toBeVisible();
+    await expect(page.locator('lv-toolbar .tab')).toHaveCount(0);
+    // Nothing failed to restore, so nothing is reported as an error either.
+    await expect(page.locator('.toast')).toHaveCount(0);
+    // The remembered tabs survive: the toggle is reversible, not a wipe.
+    expect(await persistedPaths(page)).toEqual([RESTORED_PATH]);
+  });
+
+  test('restores again once the setting is turned back on', async ({ page }) => {
+    await setupTauriMocks(page);
+    await seedSession(page, false);
+    const app = new AppPage(page);
+    await app.goto();
+    await expect(app.welcomeScreen).toBeVisible();
+
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        settingsStore: { getState: () => { setOpenLastRepository: (v: boolean) => void } };
+      };
+      stores.settingsStore.getState().setOpenLastRepository(true);
+    });
+    await page.reload();
+
+    await expect(page.locator('lv-toolbar .tab')).toHaveCount(1);
   });
 });
