@@ -64,12 +64,6 @@ function select(el: LvSettingsDialog): HTMLSelectElement {
   return node as HTMLSelectElement;
 }
 
-function settingNames(el: LvSettingsDialog): string[] {
-  return Array.from(el.shadowRoot?.querySelectorAll('.setting-name') ?? []).map(
-    (node) => node.textContent?.trim() ?? ''
-  );
-}
-
 function sectionTitles(el: LvSettingsDialog): string[] {
   return Array.from(el.shadowRoot?.querySelectorAll('.section-title') ?? []).map(
     (node) => node.textContent?.trim() ?? ''
@@ -158,22 +152,57 @@ describe('lv-settings-dialog language setting', () => {
     expect(settingsStore.getState().language).to.equal('en');
   });
 
-  it('translates the rows this dialog gained along with the older ones', async () => {
-    // A half-translated screen is worse than an untranslated one: the rows
-    // added most recently must follow the locale like every other row.
+  /**
+   * A half-translated screen is worse than an untranslated one, and the way it
+   * happens is that one branch re-words a string another branch already
+   * translated: the `@lit/localize` id is a hash of the source text, so the
+   * merge is clean and the translation silently detaches.
+   *
+   * This used to name a handful of expected French labels, so a row it did not
+   * happen to list could go back to English unnoticed. It now renders the whole
+   * dialog twice and compares the two sets: any text that survives the switch to
+   * French unchanged is English that leaked into the French UI.
+   */
+  it('leaves no English text behind when the dialog switches to French', async () => {
+    const LOCALISED = '.section-title, .setting-name, .setting-description';
+    const visibleText = (): Set<string> =>
+      new Set(
+        Array.from(el.shadowRoot?.querySelectorAll(LOCALISED) ?? []).map(
+          (node) => node.textContent?.trim() ?? ''
+        )
+      );
+
+    /**
+     * Text that is legitimately identical in both languages. Every entry has to
+     * be a word French borrows unchanged — if a row lands here because nobody
+     * translated it, that is the bug this test exists to catch.
+     */
+    const SAME_IN_FRENCH = new Set(['Port']);
+
+    const english = visibleText();
+    expect(english.size, 'the dialog rendered its rows in English').to.be.greaterThan(50);
+
     await choose(el, 'fr');
     await waitUntil(() => sectionTitles(el)[0] === 'Apparence');
 
-    const names = settingNames(el);
-    expect(names, 'Show Avatars').to.include('Afficher les avatars');
-    expect(names, 'Whitespace').to.include('Espaces');
-    expect(names, 'Context Lines').to.include('Lignes de contexte');
-    expect(names, 'Always Sign Off Commits').to.include(
-      'Toujours ajouter un Signed-off-by aux commits'
+    const leftInEnglish = [...visibleText()].filter(
+      (text) => text !== '' && english.has(text) && !SAME_IN_FRENCH.has(text)
     );
+    expect(
+      leftInEnglish,
+      `${leftInEnglish.length} label(s) render the same text under "fr" as under "en" — ` +
+        `their translation is missing or detached from the source string:\n` +
+        leftInEnglish.map((text) => `  ${JSON.stringify(text)}`).join('\n')
+    ).to.deep.equal([]);
+  });
 
-    // The whitespace menu's labels live in the settings store, so they have to
-    // be localised there rather than baked into a module-level constant.
+  it('localises the menu labels that live in the settings store', async () => {
+    // The whitespace menu's labels are built in the settings store, not in this
+    // component, so they have to be localised there rather than baked into a
+    // module-level constant that freezes at the startup locale.
+    await choose(el, 'fr');
+    await waitUntil(() => sectionTitles(el)[0] === 'Apparence');
+
     const options = Array.from(
       el.shadowRoot?.querySelectorAll('#diff-whitespace-select option') ?? []
     ).map((option) => option.textContent?.trim());

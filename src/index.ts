@@ -7,8 +7,13 @@
 import './styles/tokens.css';
 
 // Localization runtime. Importing this configures @lit/localize in runtime
-// mode; applying the persisted language here means the first paint is already
-// in the user's language, and later changes re-render without a restart.
+// mode. The persisted language is applied at the bottom of this file, but a
+// locale's templates arrive through a dynamic import(), so the first paint is
+// in the source locale and the @localized() surfaces re-render a frame or two
+// later, once the module resolves. Blocking the app shell on that import to
+// avoid the swap would trade a brief re-render for an empty window on every
+// launch. Language changes made later take exactly the same path, so they
+// apply without a restart.
 import './i18n/index.ts';
 import { applyPersistedLocale } from './stores/settings.store.ts';
 
