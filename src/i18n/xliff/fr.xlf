@@ -623,6 +623,9 @@
 <trans-unit id="s3605f04ef070fcd3">
   <source>Unavailable: your remote allowlist does not include <x id="0" equiv-text="${GRAVATAR_HOST}"/>.</source>
   <target>Indisponible : votre liste des distants autorisés ne contient pas <x id="0" equiv-text="${GRAVATAR_HOST}"/>.</target></trans-unit>
+<trans-unit id="sdfd045b4e3898993">
+  <source>Could not check for updates. Try again later.</source>
+  <target>Impossible de vérifier les mises à jour. Réessayez plus tard.</target></trans-unit>
 </body>
 </file>
 </xliff>

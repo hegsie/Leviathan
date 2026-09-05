@@ -190,6 +190,7 @@
 'sd9ad53251f2330a5': `Arrêter`,
 'sdbd27b6f6f6bfce6': str`Afficher les avatars des auteurs dans les nœuds de commit. Les avatars sont récupérés auprès de Gravatar (${0}), un service tiers : chaque requête envoie une empreinte MD5 de l'adresse e-mail de l'auteur du commit ainsi que votre adresse IP. Désactivé par défaut ; le mode hors ligne le désactive.`,
 'sdc673e73b5c13aea': `Supprimer`,
+'sdfd045b4e3898993': `Impossible de vérifier les mises à jour. Réessayez plus tard.`,
 'se0863d4c871d274c': `Saisir la clé d'API...`,
 'se19df7d58cd5fff7': `Version :`,
 'se2f45cb096d63365': `Nom de branche par défaut`,
