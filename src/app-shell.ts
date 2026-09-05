@@ -139,6 +139,10 @@ import { settingsStore } from './stores/settings.store.ts';
 import { workspaceStore } from './stores/workspace.store.ts';
 import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
+import {
+  startGitCommandLogging,
+  stopGitCommandLogging,
+} from './services/git-output.service.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
 import { runFetch, runPull, runPush } from './services/remote-operations.service.ts';
@@ -1936,6 +1940,10 @@ export class AppShell extends LitElement {
     // Set up remote operation event listeners (for auto-fetch notifications)
     gitService.setupRemoteOperationListeners();
 
+    // Record the backend's real `git` invocations (interactive rebase, force
+    // push, difftool, LFS, …) into the Output panel's log.
+    void startGitCommandLogging();
+
     // Load profiles
     gitService.loadProfiles();
 
@@ -2049,6 +2057,7 @@ export class AppShell extends LitElement {
   // Verified: every addEventListener has a corresponding removeEventListener below.
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    stopGitCommandLogging();
     this.unsubscribeRefOps?.();
     this.unsubscribeRefOps = undefined;
     this.unsubscribe?.();

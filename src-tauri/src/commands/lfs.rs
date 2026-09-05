@@ -85,7 +85,7 @@ fn build_lfs_command(
     repo_path: &Path,
     args: &[&str],
     token: Option<&str>,
-) -> std::process::Command {
+) -> crate::utils::GitCommand {
     let mut cmd = create_command("git");
     cmd.current_dir(repo_path).arg("lfs").args(args);
 

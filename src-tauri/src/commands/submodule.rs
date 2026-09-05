@@ -2,12 +2,11 @@
 //! Manage git submodules
 
 use std::path::Path;
-use std::process::Command;
 use tauri::command;
 
 use crate::error::{LeviathanError, Result};
 use crate::utils::cli_safety::reject_flag_like;
-use crate::utils::{apply_token_credential_helper, create_command};
+use crate::utils::{apply_token_credential_helper, create_command, GitCommand};
 
 /// Information about a submodule
 #[derive(Debug, Clone, serde::Serialize)]
@@ -75,7 +74,7 @@ fn submodule_command(
     args: &[&str],
     token: Option<&str>,
     token_remote: Option<&str>,
-) -> Command {
+) -> GitCommand {
     let mut cmd = create_command("git");
     cmd.current_dir(repo_path).args(args);
     if let (Some(token_value), Some(remote_name)) = (token, token_remote) {
