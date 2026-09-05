@@ -167,6 +167,18 @@
   --transition-normal: 200ms ease;
   --transition-slow: 300ms ease;
 
+  /* Keyboard focus ring (WCAG 2.4.7 / 1.4.11).
+     Custom properties inherit through shadow boundaries, so these reach every
+     Lit component; the rules that consume them live in the focusRingStyles
+     fragment in src/styles/shared-styles.ts. Components may override
+     --lv-focus-ring-offset locally (e.g. -2px on a full-bleed list row that a
+     scroll container would otherwise clip). The colour tracks --color-primary,
+     which is themed per light/dark, so the ring stays visible in both. */
+  --lv-focus-ring-color: var(--color-primary);
+  --lv-focus-ring-width: 2px;
+  --lv-focus-ring-offset: 2px;
+  --lv-focus-ring: var(--lv-focus-ring-width) solid var(--lv-focus-ring-color);
+
   /* Z-Index */
   --z-dropdown: 100;
   --z-modal: 200;
@@ -411,4 +423,38 @@ body {
 * {
   scrollbar-width: thin;
   scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+/* Keyboard focus ring for light-DOM chrome (anything rendered outside a Lit
+   shadow root). Component-internal focus styling comes from the focusRingStyles
+   fragment in src/styles/shared-styles.ts, which this rule mirrors. */
+a[href]:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: var(--lv-focus-ring);
+  outline-offset: var(--lv-focus-ring-offset);
+}
+
+/* Honour the OS "reduce motion" setting for light-DOM chrome. This block does
+   NOT cross shadow boundaries — the equivalent rules for component internals
+   are in the reducedMotionStyles fragment in src/styles/shared-styles.ts. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
 }

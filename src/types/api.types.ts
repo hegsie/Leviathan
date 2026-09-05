@@ -187,6 +187,12 @@ export interface FetchCommand {
   /** Suppress the success event a user-initiated fetch emits. Set by the
    *  window-focus background fetch, which must not toast. */
   quiet?: boolean;
+  /** The progress row's id, from `progressService.startOperation`. Registers
+   *  the fetch with the backend cancellation registry so the row's Cancel
+   *  button can stop it, and addresses the `operation-progress` events it
+   *  emits back to that row. Omitted by unattended callers, which have no row
+   *  and must not be cancellable. */
+  operationId?: string;
 }
 
 export interface PullCommand {
@@ -196,6 +202,9 @@ export interface PullCommand {
   rebase?: boolean;
   token?: string;
   timeoutSecs?: number;
+  /** See `FetchCommand.operationId`. A pull can only be cancelled during its
+   *  fetch phase — once the merge or rebase starts it runs to completion. */
+  operationId?: string;
 }
 
 export interface PushCommand {
@@ -208,6 +217,8 @@ export interface PushCommand {
   setUpstream?: boolean;
   token?: string;
   timeoutSecs?: number;
+  /** See `FetchCommand.operationId`. */
+  operationId?: string;
 }
 
 export interface PushToMultipleRemotesCommand {

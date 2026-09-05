@@ -16,6 +16,13 @@ export interface ProgressOperation {
   message: string;
   progress?: number; // 0-100, undefined = indeterminate
   cancellable?: boolean;
+  /** Objects transferred so far, from the backend's `operation-progress`
+   *  event. Undefined until the first event arrives. */
+  receivedObjects?: number;
+  /** Objects the remote said there are in total. */
+  totalObjects?: number;
+  /** Bytes transferred so far. */
+  receivedBytes?: number;
 }
 
 export type OperationType = ProgressOperation['type'];
@@ -26,6 +33,9 @@ interface ProgressEvent {
   progress?: number;
   completed?: boolean;
   error?: string;
+  receivedObjects?: number;
+  totalObjects?: number;
+  receivedBytes?: number;
 }
 
 type ProgressListener = (operations: ProgressOperation[]) => void;
@@ -56,7 +66,16 @@ class ProgressService {
   private async setupListeners(): Promise<void> {
     // Listen for progress events from Rust backend
     const unlistenProgress = await listen<ProgressEvent>('operation-progress', (event) => {
-      const { operationId, message, progress, completed, error } = event.payload;
+      const {
+        operationId,
+        message,
+        progress,
+        completed,
+        error,
+        receivedObjects,
+        totalObjects,
+        receivedBytes,
+      } = event.payload;
 
       if (completed || error) {
         this.removeOperation(operationId);
@@ -65,6 +84,12 @@ class ProgressService {
         if (existing) {
           existing.message = message ?? existing.message;
           existing.progress = progress;
+          // Kept on the row rather than folded into the message so the
+          // indicator can format them (and so a later event that carries no
+          // counts — there is none today — would not wipe the last ones).
+          existing.receivedObjects = receivedObjects ?? existing.receivedObjects;
+          existing.totalObjects = totalObjects ?? existing.totalObjects;
+          existing.receivedBytes = receivedBytes ?? existing.receivedBytes;
           this.notifyListeners();
         }
       }

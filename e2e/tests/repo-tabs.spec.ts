@@ -1,5 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 import { setupOpenRepository } from '../fixtures/tauri-mock';
+import {
+  startCommandCaptureWithMocks,
+  findCommand,
+  waitForCommand,
+  injectCommandError,
+  injectCommandMock,
+} from '../fixtures/test-helpers';
 
 /**
  * E2E tests for the multi-repository tab bar:
@@ -177,5 +184,93 @@ test.describe('Repository Tabs - single repo', () => {
     await expect(
       page.locator('lv-toolbar .context-menu-item', { hasText: 'Close Tabs to the Right' })
     ).toBeDisabled();
+  });
+});
+
+test.describe('Repository Tabs - open this repository elsewhere', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    await addRepo(page, '/work/client-a/api', 'api');
+    await addRepo(page, '/work/client-b/api', 'api');
+    // The editor command resolves with an OpenResult payload; the unmocked
+    // default (null) would legitimately be treated as a failure.
+    await startCommandCaptureWithMocks(page, {
+      open_terminal: null,
+      open_file_manager: null,
+      open_in_configured_editor: { success: true, message: 'Opened in code' },
+    });
+  });
+
+  test('Open in Terminal acts on the clicked tab, not the active one', async ({ page }) => {
+    // client-b (the last added) is active; the menu is opened on client-a.
+    await expect(page.locator('lv-toolbar .tab.active')).toHaveAttribute(
+      'title',
+      '/work/client-b/api'
+    );
+
+    await page.locator('lv-toolbar .tab').nth(1).click({ button: 'right' });
+    await page.locator('lv-toolbar .context-menu-item', { hasText: 'Open in Terminal' }).click();
+
+    await waitForCommand(page, 'open_terminal');
+    const calls = await findCommand(page, 'open_terminal');
+    expect(calls[0].args).toMatchObject({ path: '/work/client-a/api' });
+
+    // The menu closes and nothing is reported on success.
+    await expect(page.locator('lv-toolbar .tab-context-menu')).toHaveCount(0);
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
+  });
+
+  test('Reveal in File Manager opens the clicked tab directory', async ({ page }) => {
+    await page.locator('lv-toolbar .tab').first().click({ button: 'right' });
+    await page
+      .locator('lv-toolbar .context-menu-item', { hasText: 'Reveal in File Manager' })
+      .click();
+
+    await waitForCommand(page, 'open_file_manager');
+    const calls = await findCommand(page, 'open_file_manager');
+    expect(calls[0].args).toMatchObject({ path: '/tmp/test-repo' });
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
+  });
+
+  test('Open in Editor targets the repository root of the clicked tab', async ({ page }) => {
+    await page.locator('lv-toolbar .tab').nth(2).click({ button: 'right' });
+    await page.locator('lv-toolbar .context-menu-item', { hasText: 'Open in Editor' }).click();
+
+    await waitForCommand(page, 'open_in_configured_editor');
+    const calls = await findCommand(page, 'open_in_configured_editor');
+    expect(calls[0].args).toMatchObject({
+      path: '/work/client-b/api',
+      filePath: '/work/client-b/api',
+    });
+    await expect(page.locator('lv-toast-container .toast.error')).toHaveCount(0);
+  });
+
+  test('a terminal that cannot be launched is reported to the user', async ({ page }) => {
+    await injectCommandError(
+      page,
+      'open_terminal',
+      'Operation failed: No terminal emulator found',
+      'OPERATION_FAILED'
+    );
+
+    await page.locator('lv-toolbar .tab').first().click({ button: 'right' });
+    await page.locator('lv-toolbar .context-menu-item', { hasText: 'Open in Terminal' }).click();
+
+    await expect(page.locator('lv-toast-container .toast.error')).toContainText(
+      'No terminal emulator found'
+    );
+  });
+
+  test('an editor that reports failure is not silently swallowed', async ({ page }) => {
+    await injectCommandMock(page, {
+      open_in_configured_editor: { success: false, message: 'No editor configured' },
+    });
+
+    await page.locator('lv-toolbar .tab').first().click({ button: 'right' });
+    await page.locator('lv-toolbar .context-menu-item', { hasText: 'Open in Editor' }).click();
+
+    await expect(page.locator('lv-toast-container .toast.error')).toContainText(
+      'No editor configured'
+    );
   });
 });
