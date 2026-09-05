@@ -909,6 +909,47 @@ mod tests {
         assert!(guard_embedding_model_download().is_ok());
     }
 
+    // ---- the auto-updater ----
+    //
+    // The last unguarded outbound path in the tree, and the one that mattered
+    // most: it runs 30 seconds after every launch, unattended, and installs a
+    // binary. Nothing about `updater.check()` is visible to the frontend gate,
+    // so the backstop is the only thing standing between offline mode and a
+    // request to the release host.
+
+    #[test]
+    fn offline_mode_refuses_the_updater() {
+        use crate::services::update_service::{guard_update_endpoints, shipped_update_endpoints};
+
+        let endpoints = shipped_update_endpoints();
+        let _guard = test_support::offline();
+
+        // Exactly the guard `check_and_install_update` (the periodic loop and
+        // `download_and_install_update`) and `check_for_update_manual` (the
+        // Settings button) run before they build the updater.
+        expect_blocked(guard_update_endpoints(&endpoints), "check_for_update");
+    }
+
+    #[test]
+    fn an_allowlist_without_the_update_host_refuses_the_updater() {
+        use crate::services::security::url_host;
+        use crate::services::update_service::{guard_update_endpoints, shipped_update_endpoints};
+
+        let endpoints = shipped_update_endpoints();
+        let host = url_host(&endpoints[0]).expect("the configured endpoint has a host");
+
+        {
+            let _guard = test_support::allowlist(&["example.test"]);
+            expect_blocked(guard_update_endpoints(&endpoints), "check_for_update");
+        }
+
+        // Naming the release host is what makes updates possible again — a
+        // guard that refused either way would just be offline mode by another
+        // name.
+        let _guard = test_support::allowlist(&[host.as_str()]);
+        assert!(guard_update_endpoints(&endpoints).is_ok());
+    }
+
     #[tokio::test]
     async fn offline_mode_refuses_the_github_app_endpoints() {
         let pem = test_private_key_pem();
