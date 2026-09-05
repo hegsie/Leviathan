@@ -39,11 +39,23 @@ pub async fn get_mcp_config(state: State<'_, McpState>) -> Result<McpConfig> {
 }
 
 /// Set the MCP server configuration
+///
+/// The access token is not part of what a caller may set: the backend keeps
+/// the stored one and `regenerate_mcp_token` is the only way to change it.
 #[command]
 pub async fn set_mcp_config(state: State<'_, McpState>, config: McpConfig) -> Result<()> {
     let mut server = state.write().await;
     server
         .set_config(config)
+        .map_err(LeviathanError::OperationFailed)
+}
+
+/// Generate a new MCP access token, invalidating the previous one
+#[command]
+pub async fn regenerate_mcp_token(state: State<'_, McpState>) -> Result<String> {
+    let mut server = state.write().await;
+    server
+        .regenerate_auth_token()
         .map_err(LeviathanError::OperationFailed)
 }
 
@@ -67,6 +79,7 @@ mod tests {
             enabled: true,
             port: 3001,
             allowed_origins: Vec::new(),
+            auth_token: String::new(),
         };
         let json = serde_json::to_string(&config).expect("Failed to serialize");
         // Verify camelCase serialization

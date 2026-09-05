@@ -15,6 +15,7 @@ import type { AiProviderInfo, AiProviderType } from '../../services/ai.service.t
 import type { SystemCapabilities, ModelEntry, DownloadedModel, DownloadProgress, LocalModelStatus } from '../../services/local-ai.service.ts';
 import type { McpStatus } from '../../services/mcp.service.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import '../common/lv-toggle.ts';
 
 @customElement('lv-settings-dialog')
 export class LvSettingsDialog extends LitElement {
@@ -88,50 +89,6 @@ export class LvSettingsDialog extends LitElement {
         width: 16px;
         height: 16px;
         accent-color: var(--accent-color);
-      }
-
-      .toggle-switch {
-        position: relative;
-        width: 40px;
-        height: 22px;
-      }
-
-      .toggle-switch input {
-        opacity: 0;
-        width: 0;
-        height: 0;
-      }
-
-      .toggle-slider {
-        position: absolute;
-        cursor: pointer;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background-color: var(--border-color);
-        transition: 0.2s;
-        border-radius: 22px;
-      }
-
-      .toggle-slider:before {
-        position: absolute;
-        content: "";
-        height: 16px;
-        width: 16px;
-        left: 3px;
-        bottom: 3px;
-        background-color: var(--toggle-knob-color, #ffffff);
-        transition: 0.2s;
-        border-radius: 50%;
-      }
-
-      input:checked + .toggle-slider {
-        background-color: var(--accent-color);
-      }
-
-      input:checked + .toggle-slider:before {
-        transform: translateX(18px);
       }
 
       .footer {
@@ -240,6 +197,39 @@ export class LvSettingsDialog extends LitElement {
         margin-top: 4px;
       }
 
+      .mcp-token-controls {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .mcp-token-value {
+        font-family: monospace;
+        font-size: 12px;
+        color: var(--text-primary);
+        background: var(--input-background);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        padding: 4px 8px;
+        max-width: 280px;
+        overflow-wrap: anywhere;
+      }
+
+      .mcp-client-config {
+        margin: 0;
+        padding: 8px 10px;
+        background: var(--input-background);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 11px;
+        color: var(--text-secondary);
+        overflow-x: auto;
+        white-space: pre;
+      }
+
       .status-indicator {
         display: inline-flex;
         align-items: center;
@@ -289,6 +279,32 @@ export class LvSettingsDialog extends LitElement {
         border-radius: 2px;
       }
 
+      .auto-scheme-note {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm, 4px);
+        font-size: 11px;
+        color: var(--color-text-secondary);
+        white-space: nowrap;
+      }
+
+      /* Forced colors would flatten every swatch to the same system color,
+         turning the palette preview into a row of identical squares. These
+         squares ARE the information, so opt them out and outline them. */
+      @media (forced-colors: active) {
+        .color-swatch {
+          forced-color-adjust: none;
+          border: 1px solid CanvasText;
+        }
+
+        .auto-scheme-note {
+          border-color: CanvasText;
+        }
+      }
+
       .scheme-option {
         display: flex;
         align-items: center;
@@ -322,6 +338,8 @@ export class LvSettingsDialog extends LitElement {
   @state() private fontSize: FontSize = 'medium';
   @state() private density: Density = 'comfortable';
   @state() private graphColorScheme: GraphColorScheme = 'default';
+  @state() private graphColorSchemeAuto = true;
+  @state() private systemHighContrast = false;
   @state() private defaultBranchName = 'main';
   @state() private defaultClonePath = '';
   @state() private showAvatars = true;
@@ -373,6 +391,15 @@ export class LvSettingsDialog extends LitElement {
   @state() private mcpEnabled = false;
   @state() private mcpToggling = false;
   @state() private mcpError: string | null = null;
+  /** Bearer token required by every MCP request. Treated as a secret: masked unless revealed. */
+  @state() private mcpToken = '';
+  @state() private mcpTokenRevealed = false;
+  @state() private mcpRegenerating = false;
+  /**
+   * Origins the backend enforces on the MCP request path. Carried through every
+   * save so persisting the port or the enabled flag cannot wipe the list.
+   */
+  @state() private mcpAllowedOrigins: string[] = [];
 
   // Event listener cleanup
   private downloadProgressUnlisten: UnlistenFn | null = null;
@@ -394,9 +421,18 @@ export class LvSettingsDialog extends LitElement {
   private mergeToolWriteToken = 0;
   private diffToolWriteToken = 0;
 
+  private settingsUnsubscribe: (() => void) | null = null;
+
   connectedCallback(): void {
     super.connectedCallback();
     this.loadSettings();
+    // The graph colour scheme can change underneath an open dialog when the OS
+    // high-contrast setting flips, so mirror it from the store.
+    this.settingsUnsubscribe = settingsStore.subscribe((state) => {
+      this.graphColorScheme = state.graphColorScheme;
+      this.graphColorSchemeAuto = state.graphColorSchemeAuto;
+      this.systemHighContrast = state.systemHighContrast;
+    });
     this.loadVersion();
     this.loadAiProviders();
     this.loadExternalToolsConfig();
@@ -407,6 +443,8 @@ export class LvSettingsDialog extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.settingsUnsubscribe?.();
+    this.settingsUnsubscribe = null;
     this.downloadProgressUnlisten?.();
     this.downloadCompleteUnlisten?.();
     this.downloadErrorUnlisten?.();
@@ -419,6 +457,10 @@ export class LvSettingsDialog extends LitElement {
     // selects once their options exist.
     this.syncSelectValue('#merge-tool-select', this.mergeToolName);
     this.syncSelectValue('#diff-tool-select', this.diffToolName);
+    // Same hazard: the graph scheme select and its options render in one
+    // update, and the automatic high-contrast scheme is a value that is only
+    // ever set before the options exist.
+    this.syncSelectValue('#graph-scheme-select', this.graphColorScheme);
   }
 
   private syncSelectValue(selector: string, value: string | null): void {
@@ -521,6 +563,8 @@ export class LvSettingsDialog extends LitElement {
     this.fontSize = settings.fontSize;
     this.density = settings.density;
     this.graphColorScheme = settings.graphColorScheme;
+    this.graphColorSchemeAuto = settings.graphColorSchemeAuto;
+    this.systemHighContrast = settings.systemHighContrast;
     this.defaultBranchName = settings.defaultBranchName;
     this.defaultClonePath = settings.defaultClonePath;
     this.showAvatars = settings.showAvatars;
@@ -564,7 +608,10 @@ export class LvSettingsDialog extends LitElement {
   private handleGraphColorSchemeChange(e: Event): void {
     const select = e.target as HTMLSelectElement;
     this.graphColorScheme = select.value as GraphColorScheme;
+    // Picking a scheme by hand pins it — the OS high-contrast watcher stops
+    // overriding it from here on.
     settingsStore.getState().setGraphColorScheme(this.graphColorScheme);
+    this.graphColorSchemeAuto = settingsStore.getState().graphColorSchemeAuto;
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
@@ -878,9 +925,7 @@ export class LvSettingsDialog extends LitElement {
     window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
-  private handleToggle(setting: string, e: Event): void {
-    const input = e.target as HTMLInputElement;
-    const value = input.checked;
+  private handleToggle(setting: string, value: boolean): void {
     const store = settingsStore.getState();
 
     switch (setting) {
@@ -1084,6 +1129,8 @@ export class LvSettingsDialog extends LitElement {
     if (configResult.success && configResult.data) {
       this.mcpPort = configResult.data.port;
       this.mcpEnabled = configResult.data.enabled;
+      this.mcpToken = configResult.data.authToken ?? '';
+      this.mcpAllowedOrigins = configResult.data.allowedOrigins ?? [];
     }
   }
 
@@ -1101,7 +1148,7 @@ export class LvSettingsDialog extends LitElement {
       const saved = await mcpService.setMcpConfig({
         enabled: true,
         port: this.mcpPort,
-        allowedOrigins: [],
+        allowedOrigins: this.mcpAllowedOrigins,
       });
       if (!saved.success) {
         this.mcpError = saved.error?.message ?? 'Failed to save MCP settings';
@@ -1131,7 +1178,7 @@ export class LvSettingsDialog extends LitElement {
     const result = await mcpService.setMcpConfig({
       enabled: false,
       port: this.mcpPort,
-      allowedOrigins: [],
+      allowedOrigins: this.mcpAllowedOrigins,
     });
     if (!result.success) {
       this.mcpError = result.error?.message ?? 'Failed to disable the MCP server';
@@ -1151,11 +1198,89 @@ export class LvSettingsDialog extends LitElement {
     const result = await mcpService.setMcpConfig({
       enabled: this.mcpEnabled,
       port: this.mcpPort,
-      allowedOrigins: [],
+      allowedOrigins: this.mcpAllowedOrigins,
     });
     this.mcpError = result.success
       ? null
       : (result.error?.message ?? 'Failed to save MCP port');
+  }
+
+  /**
+   * The MCP client configuration block a user pastes into Cursor, VS Code or any
+   * other MCP client. The token is masked in the rendered snippet; Copy always
+   * puts the real one on the clipboard.
+   */
+  private mcpClientConfigSnippet(reveal: boolean): string {
+    const token = reveal ? this.mcpToken : this.maskedMcpToken();
+    return JSON.stringify(
+      {
+        mcpServers: {
+          leviathan: {
+            url: `http://127.0.0.1:${this.mcpPort}`,
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        },
+      },
+      null,
+      2
+    );
+  }
+
+  /** The token as shown while it is hidden — never a partial of the real value */
+  private maskedMcpToken(): string {
+    return this.mcpToken ? '•'.repeat(this.mcpToken.length) : '';
+  }
+
+  private handleMcpTokenReveal(): void {
+    this.mcpTokenRevealed = !this.mcpTokenRevealed;
+  }
+
+  /** Copy a secret to the clipboard, always telling the user what happened */
+  private async copyMcpValue(value: string, label: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(`${label} copied to clipboard`, 'success');
+    } catch {
+      showToast(`Failed to copy ${label.toLowerCase()} to clipboard`, 'error');
+    }
+  }
+
+  private async handleMcpTokenCopy(): Promise<void> {
+    await this.copyMcpValue(this.mcpToken, 'MCP access token');
+  }
+
+  private async handleMcpSnippetCopy(): Promise<void> {
+    await this.copyMcpValue(this.mcpClientConfigSnippet(true), 'MCP client configuration');
+  }
+
+  /**
+   * Replace the access token. Every client still using the old one starts
+   * failing immediately, so the confirmation says so before anything changes.
+   */
+  private async handleMcpRegenerateToken(): Promise<void> {
+    if (this.mcpRegenerating) return;
+    this.mcpRegenerating = true;
+
+    try {
+      const confirmed = await showConfirm(
+        'Regenerate MCP Token',
+        'Generate a new MCP access token? Every MCP client configured with the current token will stop working until you paste the new token into its configuration.',
+        'warning'
+      );
+      if (!confirmed) return;
+
+      const result = await mcpService.regenerateMcpToken();
+      if (result.success && result.data) {
+        this.mcpToken = result.data;
+        this.mcpError = null;
+        showToast('MCP access token regenerated — update your MCP clients', 'success');
+      } else {
+        this.mcpError = result.error?.message ?? 'Failed to regenerate the MCP access token';
+        showToast(this.mcpError, 'error');
+      }
+    } finally {
+      this.mcpRegenerating = false;
+    }
   }
 
   private async handleReset(): Promise<void> {
@@ -1202,16 +1327,31 @@ export class LvSettingsDialog extends LitElement {
     this.handleClose();
   }
 
-  private renderToggle(checked: boolean, setting: string): unknown {
+  /**
+   * A labelled boolean setting row. The visible name/description and the
+   * switch's accessible name come from the same strings, so the switch can
+   * never go unnamed the way the previous bare checkbox did.
+   */
+  private renderToggleRow(
+    name: string,
+    description: string,
+    checked: boolean,
+    setting: string
+  ): unknown {
     return html`
-      <label class="toggle-switch">
-        <input
-          type="checkbox"
+      <div class="setting-row">
+        <div class="setting-label">
+          <span class="setting-name">${name}</span>
+          <span class="setting-description">${description}</span>
+        </div>
+        <lv-toggle
+          .label=${name}
+          .description=${description}
           .checked=${checked}
-          @change=${(e: Event) => this.handleToggle(setting, e)}
-        />
-        <span class="toggle-slider"></span>
-      </label>
+          @change=${(e: CustomEvent<{ checked: boolean }>) =>
+            this.handleToggle(setting, e.detail.checked)}
+        ></lv-toggle>
+      </div>
     `;
   }
 
@@ -1261,29 +1401,39 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Graph</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Show Avatars</span>
-              <span class="setting-description">Display author avatars in commit nodes</span>
-            </div>
-            ${this.renderToggle(this.showAvatars, 'showAvatars')}
-          </div>
+          ${this.renderToggleRow(
+            'Show Avatars',
+            'Display author avatars in commit nodes',
+            this.showAvatars,
+            'showAvatars'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Show Commit Size</span>
-              <span class="setting-description">Scale node size based on changes</span>
-            </div>
-            ${this.renderToggle(this.showCommitSize, 'showCommitSize')}
-          </div>
+          ${this.renderToggleRow(
+            'Show Commit Size',
+            'Scale node size based on changes',
+            this.showCommitSize,
+            'showCommitSize'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
               <span class="setting-name">Graph Color Scheme</span>
-              <span class="setting-description">Color palette for branch lanes</span>
+              <span class="setting-description">
+                ${this.graphColorSchemeAuto && this.systemHighContrast
+                  ? 'Following your system high contrast setting — the graph is drawn on a canvas, so it cannot be recolored by the OS. Choose a scheme to override.'
+                  : 'Color palette for branch lanes'}
+              </span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <select .value=${this.graphColorScheme} @change=${this.handleGraphColorSchemeChange}>
+              ${this.graphColorSchemeAuto && this.systemHighContrast
+                ? html`<span class="auto-scheme-note" data-testid="graph-scheme-auto-note">Auto (high contrast)</span>`
+                : ''}
+              <select
+                id="graph-scheme-select"
+                aria-label="Graph color scheme"
+                .value=${this.graphColorScheme}
+                @change=${this.handleGraphColorSchemeChange}
+              >
                 ${getGraphColorSchemes().map(scheme => html`
                   <option value=${scheme.id}>${scheme.name}</option>
                 `)}
@@ -1357,13 +1507,12 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Editor</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Word Wrap</span>
-              <span class="setting-description">Wrap long lines in diff view</span>
-            </div>
-            ${this.renderToggle(this.wordWrap, 'wordWrap')}
-          </div>
+          ${this.renderToggleRow(
+            'Word Wrap',
+            'Wrap long lines in diff view',
+            this.wordWrap,
+            'wordWrap'
+          )}
         </div>
 
         <div class="settings-section">
@@ -1468,33 +1617,30 @@ export class LvSettingsDialog extends LitElement {
             />
           </div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Fetch on Window Focus</span>
-              <span class="setting-description">Automatically fetch when the app window regains focus</span>
-            </div>
-            ${this.renderToggle(this.fetchOnFocus, 'fetchOnFocus')}
-          </div>
+          ${this.renderToggleRow(
+            'Fetch on Window Focus',
+            'Automatically fetch when the app window regains focus',
+            this.fetchOnFocus,
+            'fetchOnFocus'
+          )}
         </div>
 
         <div class="settings-section">
           <div class="section-title">Security</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Offline Mode</span>
-              <span class="setting-description">Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)</span>
-            </div>
-            ${this.renderToggle(this.offlineMode, 'offlineMode')}
-          </div>
+          ${this.renderToggleRow(
+            'Offline Mode',
+            'Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)',
+            this.offlineMode,
+            'offlineMode'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Confirm Network Operations</span>
-              <span class="setting-description">Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.</span>
-            </div>
-            ${this.renderToggle(this.confirmNetworkOps, 'confirmNetworkOps')}
-          </div>
+          ${this.renderToggleRow(
+            'Confirm Network Operations',
+            'Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.',
+            this.confirmNetworkOps,
+            'confirmNetworkOps'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1514,29 +1660,26 @@ export class LvSettingsDialog extends LitElement {
         <div class="settings-section">
           <div class="section-title">Behavior</div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Reopen Last Repositories</span>
-              <span class="setting-description">Reopen the repository tabs from your last session when Leviathan starts. Turn this off to start on the welcome screen — the tabs are remembered, so turning it back on restores them.</span>
-            </div>
-            ${this.renderToggle(this.openLastRepository, 'openLastRepository')}
-          </div>
+          ${this.renderToggleRow(
+            'Reopen Last Repositories',
+            'Reopen the repository tabs from your last session when Leviathan starts. Turn this off to start on the welcome screen — the tabs are remembered, so turning it back on restores them.',
+            this.openLastRepository,
+            'openLastRepository'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Confirm Before Discard</span>
-              <span class="setting-description">Ask for confirmation when discarding changes. Deleting untracked files always asks.</span>
-            </div>
-            ${this.renderToggle(this.confirmBeforeDiscard, 'confirmBeforeDiscard')}
-          </div>
+          ${this.renderToggleRow(
+            'Confirm Before Discard',
+            'Ask for confirmation when discarding changes. Deleting untracked files always asks.',
+            this.confirmBeforeDiscard,
+            'confirmBeforeDiscard'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Auto-Stash on Checkout</span>
-              <span class="setting-description">Automatically stash and re-apply changes when switching branches</span>
-            </div>
-            ${this.renderToggle(this.autoStashOnCheckout, 'autoStashOnCheckout')}
-          </div>
+          ${this.renderToggleRow(
+            'Auto-Stash on Checkout',
+            'Automatically stash and re-apply changes when switching branches',
+            this.autoStashOnCheckout,
+            'autoStashOnCheckout'
+          )}
 
           <div class="setting-row">
             <div class="setting-label">
@@ -1566,21 +1709,19 @@ export class LvSettingsDialog extends LitElement {
             />
           </div>
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Minimize to Tray</span>
-              <span class="setting-description">Minimize to system tray instead of closing</span>
-            </div>
-            ${this.renderToggle(this.minimizeToTray, 'minimizeToTray')}
-          </div>
+          ${this.renderToggleRow(
+            'Minimize to Tray',
+            'Minimize to system tray instead of closing',
+            this.minimizeToTray,
+            'minimizeToTray'
+          )}
 
-          <div class="setting-row">
-            <div class="setting-label">
-              <span class="setting-name">Native Notifications</span>
-              <span class="setting-description">Show system notifications for background events</span>
-            </div>
-            ${this.renderToggle(this.showNativeNotifications, 'showNativeNotifications')}
-          </div>
+          ${this.renderToggleRow(
+            'Native Notifications',
+            'Show system notifications for background events',
+            this.showNativeNotifications,
+            'showNativeNotifications'
+          )}
         </div>
 
         <div class="settings-section">
@@ -1887,6 +2028,66 @@ export class LvSettingsDialog extends LitElement {
               </div>
             </div>
           ` : nothing}
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">Access Token</span>
+              <span class="setting-description">
+                Every MCP request must send this token. Keep it secret: anyone who has it can
+                read the history and contents of your open repositories.
+              </span>
+            </div>
+            <div class="mcp-token-controls">
+              <code class="mcp-token-value">
+                ${this.mcpToken
+                  ? this.mcpTokenRevealed
+                    ? this.mcpToken
+                    : this.maskedMcpToken()
+                  : 'Not generated yet'}
+              </code>
+              <button
+                class="mcp-token-reveal"
+                @click=${this.handleMcpTokenReveal}
+                ?disabled=${!this.mcpToken}
+              >
+                ${this.mcpTokenRevealed ? 'Hide' : 'Reveal'}
+              </button>
+              <button
+                class="mcp-token-copy"
+                @click=${this.handleMcpTokenCopy}
+                ?disabled=${!this.mcpToken}
+              >
+                Copy
+              </button>
+              <button
+                class="mcp-token-regenerate"
+                @click=${this.handleMcpRegenerateToken}
+                ?disabled=${this.mcpRegenerating}
+              >
+                ${this.mcpRegenerating ? '...' : 'Regenerate'}
+              </button>
+            </div>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">MCP Client Configuration</span>
+              <span class="setting-description">
+                Paste this into your MCP client. A client set up before Leviathan required a token
+                must add the Authorization header, or its requests are refused with 401.
+              </span>
+            </div>
+            <button
+              class="mcp-snippet-copy"
+              @click=${this.handleMcpSnippetCopy}
+              ?disabled=${!this.mcpToken}
+            >
+              Copy
+            </button>
+          </div>
+          <pre class="mcp-client-config"><code>${this.mcpClientConfigSnippet(
+            this.mcpTokenRevealed
+          )}</code></pre>
         </div>
 
         <div class="settings-section">

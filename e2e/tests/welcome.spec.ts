@@ -759,7 +759,7 @@ test.describe('Session restore', () => {
         if (!localStorage.getItem('leviathan-settings')) {
           localStorage.setItem(
             'leviathan-settings',
-            JSON.stringify({ state: { openLastRepository }, version: 4 })
+            JSON.stringify({ state: { openLastRepository }, version: 5 })
           );
         }
       },

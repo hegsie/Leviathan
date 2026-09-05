@@ -49,6 +49,7 @@ const mockInvoke: MockInvoke = async (command: string) => {
 import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+import type { LvToggle } from '../../common/lv-toggle.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -63,8 +64,14 @@ function settingRow(el: LvSettingsDialog, name: string): HTMLElement | null {
     ) as HTMLElement | undefined) ?? null;
 }
 
-function rowToggle(el: LvSettingsDialog, name: string): HTMLInputElement | null {
-  return settingRow(el, name)?.querySelector('input[type="checkbox"]') ?? null;
+/** The `<lv-toggle>` switch in that row. */
+function rowToggle(el: LvSettingsDialog, name: string): LvToggle | null {
+  return settingRow(el, name)?.querySelector<LvToggle>('lv-toggle') ?? null;
+}
+
+/** Activate a switch the way a user does — through its inner `role="switch"`. */
+function clickToggle(toggle: LvToggle): void {
+  toggle.shadowRoot!.querySelector<HTMLButtonElement>('button[role="switch"]')!.click();
 }
 
 describe('lv-settings-dialog startup section', () => {
@@ -100,17 +107,24 @@ describe('lv-settings-dialog startup section', () => {
     expect(rowToggle(reopened, ROW_NAME)!.checked).to.equal(false);
   });
 
-  it('clicking the toggle writes both directions to the store', async () => {
+  it('names the switch and describes it for assistive technology', () => {
     const toggle = rowToggle(el, ROW_NAME)!;
-    expect(toggle.checked, 'starts on — restoring is the default').to.equal(true);
+    expect(toggle.label, 'the switch carries the visible name').to.equal(ROW_NAME);
+    expect(toggle.description).to.contain('welcome screen');
+  });
 
-    toggle.click();
+  it('clicking the toggle writes both directions to the store', async () => {
+    expect(rowToggle(el, ROW_NAME)!.checked, 'starts on — restoring is the default').to.equal(true);
+
+    clickToggle(rowToggle(el, ROW_NAME)!);
     await el.updateComplete;
     expect(settingsStore.getState().openLastRepository).to.equal(false);
+    expect(rowToggle(el, ROW_NAME)!.checked, 'the switch follows the store').to.equal(false);
 
-    toggle.click();
+    clickToggle(rowToggle(el, ROW_NAME)!);
     await el.updateComplete;
     expect(settingsStore.getState().openLastRepository).to.equal(true);
+    expect(rowToggle(el, ROW_NAME)!.checked).to.equal(true);
   });
 
   it('dispatches settings-changed so the rest of the app can react', () => {
@@ -120,7 +134,7 @@ describe('lv-settings-dialog startup section', () => {
     };
     window.addEventListener('settings-changed', onChange);
     try {
-      rowToggle(el, ROW_NAME)!.click();
+      clickToggle(rowToggle(el, ROW_NAME)!);
     } finally {
       window.removeEventListener('settings-changed', onChange);
     }

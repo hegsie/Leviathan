@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupOpenRepository, withModifiedFiles } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { RightPanelPage, GraphPanelPage } from '../pages/panels.page';
@@ -1099,8 +1099,8 @@ test.describe('Word Wrap setting', () => {
   // The diff view has its own `.diff-content` inside the app-shell wrapper of the
   // same name, so scope the assertion to the component.
   const DIFF_CONTENT = 'lv-diff-view .diff-content';
-  const WORD_WRAP_TOGGLE =
-    'lv-settings-dialog .setting-row:has(.setting-name:text-is("Word Wrap")) .toggle-switch';
+  const wordWrapToggle = (page: Page) =>
+    page.locator('lv-settings-dialog').getByRole('switch', { name: 'Word Wrap' });
 
   test.beforeEach(async ({ page }) => {
     rightPanel = new RightPanelPage(page);
@@ -1120,7 +1120,7 @@ test.describe('Word Wrap setting', () => {
 
     await page.keyboard.press('Meta+,');
     await expect(page.locator('lv-settings-dialog')).toBeVisible();
-    await page.locator(`${WORD_WRAP_TOGGLE} .toggle-slider`).click();
+    await wordWrapToggle(page).click();
     await page.locator('lv-settings-dialog button:has-text("Done")').click();
 
     await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
@@ -1131,14 +1131,14 @@ test.describe('Word Wrap setting', () => {
     await expect(graph.diffOverlay).toBeVisible({ timeout: 5000 });
 
     await page.keyboard.press('Meta+,');
-    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).not.toBeChecked();
+    await expect(wordWrapToggle(page)).not.toBeChecked();
     await page.locator('lv-settings-dialog button:has-text("Done")').click();
 
     await page.locator('lv-diff-view [title="Toggle word wrap"]').click();
     await expect(page.locator(DIFF_CONTENT)).toHaveClass(/word-wrap/);
 
     await page.keyboard.press('Meta+,');
-    await expect(page.locator(`${WORD_WRAP_TOGGLE} input`)).toBeChecked();
+    await expect(wordWrapToggle(page)).toBeChecked();
   });
 
   test('wrapping survives closing and reopening the diff', async ({ page }) => {
