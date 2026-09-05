@@ -2,6 +2,11 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
+import {
+  dialogStore,
+  dialogs,
+  type ConflictDialogContext,
+} from './stores/dialog.store.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
 import { loggers } from './utils/logger.ts';
 import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
@@ -124,6 +129,7 @@ import type { IntegrationOpenContext, IntegrationType } from './types/integratio
 import type { Commit, RefInfo, StatusEntry, Tag, Branch, RepositoryState } from './types/git.types.ts';
 import type { SearchFilter } from './components/toolbar/lv-search-bar.ts';
 import type { PaletteCommand } from './components/dialogs/lv-command-palette.ts';
+import { buildPaletteCommands, type PaletteCommandHost } from './palette-commands.ts';
 import * as gitService from './services/git.service.ts';
 import * as updateService from './services/update.service.ts';
 import * as unifiedProfileService from './services/unified-profile.service.ts';
@@ -133,11 +139,6 @@ import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
-import {
-  openRepositoryInTerminal,
-  openRepositoryInFileManager,
-  openRepositoryInEditor,
-} from './services/open-location.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
 import {
   confirmGarbageCollection,
@@ -599,18 +600,18 @@ export class AppShell extends LitElement {
     `,
   ];
 
-  @state() private activeRepository: OpenRepository | null = null;
-  @state() private selectedCommit: Commit | null = null;
+  @state() activeRepository: OpenRepository | null = null;
+  @state() selectedCommit: Commit | null = null;
   @state() private selectedCommitRefs: RefInfo[] = [];
 
-  // Diff view state
-  @state() private showDiff = false;
+  // Diff view state. Whether the pane is up lives in the dialog store
+  // (`dialogs.isOpen('diff')`); these payload fields stay here because they are
+  // re-derived from every status refresh, not fixed at open time.
   @state() private diffFile: StatusEntry | null = null;
   @state() private diffCommitFile: { commitOid: string; filePath: string } | null = null;
   @state() private diffFilePartiallyStaged = false;
 
-  // Blame view state
-  @state() private showBlame = false;
+  // Blame view state. Open-ness lives in the dialog store, as for the diff.
   @state() private blameFile: string | null = null;
   @state() private blameCommitOid: string | null = null;
 
@@ -618,8 +619,6 @@ export class AppShell extends LitElement {
   @state() private progressOperations: ProgressOperation[] = [];
   private progressUnsubscribe?: () => void;
 
-  // Settings dialog
-  @state() private showSettings = false;
   /** True while an abort is in flight — blocks a double-click firing two. */
   @state() private abortInProgress = false;
   @state() private skipInProgress = false;
@@ -655,28 +654,10 @@ export class AppShell extends LitElement {
     isHead: false,
   };
 
-  // Conflict resolution dialog
-  @state() private showConflictDialog = false;
-  /**
-   * The open dialog's inputs, SNAPSHOTTED at open time. The dialog must
-   * keep operating on the repository and operation it was opened for even
-   * if the user switches repo tabs (Ctrl+Tab still works behind the
-   * full-screen dialog) or another conflicting operation fires while it is
-   * up — live-binding the loose fields below would let a second conflict
-   * source retarget an in-flight resolution's repo/operation, aiming its
-   * abort/resolve/stage commands at the wrong repository.
-   */
-  @state() private conflictDialogConfig: {
-    repoPath: string;
-    operationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash';
-    initialFilePath: string | null;
-    stashSourceCertain: boolean;
-    stashIndex: number;
-    stashOid: string | null;
-    dropStashOnComplete: boolean;
-    squashMerge: boolean;
-    gitflowFinish: GitflowFinishContext | null;
-  } | null = null;
+  // Conflict resolution dialog. Its open flag AND its snapshotted inputs live
+  // in the dialog store as the `conflict` dialog's context — see
+  // ConflictDialogContext there for why they are snapshotted rather than
+  // live-bound to the loose staging fields below.
   @state() private conflictOperationType: 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash' = 'merge';
   // Stash-completion semantics for the conflict dialog (which entry to drop and
   // whether to drop it at all — pop drops, plain apply keeps).
@@ -697,104 +678,24 @@ export class AppShell extends LitElement {
   @state() private conflictStashSourceCertain = true;
 
   // Command palette
-  @state() private showCommandPalette = false;
-  @state() private showOutputPanel = false;
   @state() private paletteBranches: Branch[] = [];
   @state() private paletteTrackedFiles: string[] = [];
   private commandPaletteRepositoryPath: string | null = null;
   private commandPaletteRequestId = 0;
 
-  // File history
-  @state() private showFileHistory = false;
-  @state() private fileHistoryPath: string | null = null;
-
-  // Reflog dialog
-  @state() private showReflog = false;
-
-  // Content/diff/pickaxe search dialog. The `show[A-Z]` name is load-bearing:
-  // closeRepoScopedDialogs() enumerates Lit's reactive properties for it.
-  @state() private showSearchDialog = false;
-  @state() private searchDialogMode: SearchDialogMode = 'files';
-
-  // Keyboard shortcuts dialog
-  @state() private showShortcuts = false;
   @state() private vimMode = false;
-
-  // Remote management dialog
-  @state() private showRemotes = false;
-
-  // Clean dialog
-  @state() private showClean = false;
-
-  // Repository health dialog
-  @state() private showRepositoryHealth = false;
-
-  // Bisect dialog
-  @state() private showBisect = false;
-
-  // Submodule dialog
-  @state() private showSubmodules = false;
-
-  // Worktree dialog
-  @state() private showWorktrees = false;
-
-  // LFS dialog
-  @state() private showLfs = false;
-
-  // Changelog dialog
-
-  // GPG dialog
-  @state() private showGpg = false;
-
-  // SSH dialog
-  @state() private showSsh = false;
-
-  // Config dialog
-  @state() private showConfig = false;
-
-  // Credentials dialog
-  @state() private showCredentials = false;
-
-  // GitHub dialog
-  @state() private showGitHub = false;
-
-  // GitLab dialog
-  @state() private showGitLab = false;
-
-  // Bitbucket dialog
-  @state() private showBitbucket = false;
-
-  // Azure DevOps dialog
-  @state() private showAzureDevOps = false;
-
-  // OIDC / Enterprise SSO dialog
-  @state() private showOidc = false;
-
-  // Profile Manager dialog
-  @state() private showProfileManager = false;
-  // Which view the Profile Manager should open to. 'accounts' is set when the
-  // user picks "Manage Accounts" from an integration dialog; reset on close.
-  @state() private profileManagerView: '' | 'accounts' = '';
 
   // EXPLICIT navigation context for a provider/OIDC dialog opened FROM the
   // profile manager's "Connect a new account" flow. Non-null ONLY while such a
   // dialog is open: it drives the Back arrow, the "Adding to <name>" breadcrumb,
   // and the deterministic return + attach-after-connect. Cleared on every
   // standalone open (command palette/dashboard/toolbar) so those never show a
-  // back arrow or auto-attach. Replaces the old `showProfileManager` inference.
+  // back arrow or auto-attach. Replaces the old open-profile-manager inference.
   @state() private integrationContext: IntegrationOpenContext | null = null;
   // When "Manage Accounts" is opened from a provider dialog, remember which
   // provider so closing the Accounts view can return there — making that
   // navigation reversible rather than a one-way teleport.
   private manageAccountsReturnProvider: IntegrationType | null = null;
-
-  // Migration dialog
-  @state() private showMigrationDialog = false;
-
-  // Workspace Manager dialog
-  @state() private showWorkspaceManager = false;
-  @state() private showHooksDialog = false;
-  @state() private showGitignoreDialog = false;
 
   // Right panel tab tracking
   @state() private activeRightPanelTab: string | undefined;
@@ -813,17 +714,17 @@ export class AppShell extends LitElement {
   private resizeStartPos = 0;
   private resizeStartValue = 0;
 
-  @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
+  @query('lv-graph-canvas') graphCanvas?: LvGraphCanvas;
   @query('lv-diff-view') private diffView?: LvDiffView;
-  @query('lv-create-tag-dialog') private createTagDialog?: LvCreateTagDialog;
-  @query('lv-create-branch-dialog') private createBranchDialog?: LvCreateBranchDialog;
+  @query('lv-create-tag-dialog') createTagDialog?: LvCreateTagDialog;
+  @query('lv-create-branch-dialog') createBranchDialog?: LvCreateBranchDialog;
   @query('lv-cherry-pick-dialog') private cherryPickDialog?: LvCherryPickDialog;
-  @query('lv-export-import-dialog') private exportImportDialog?: LvExportImportDialog;
+  @query('lv-export-import-dialog') exportImportDialog?: LvExportImportDialog;
   @query('#app-rebase-dialog') private interactiveRebaseDialog?: LvInteractiveRebaseDialog;
   @query('lv-profile-manager-dialog') private profileManagerDialog?: LvProfileManagerDialog;
   @query('lv-reflog-dialog') private reflogDialog?: LvReflogDialog;
-  @query('lv-describe-dialog') private describeDialog?: LvDescribeDialog;
-  @query('lv-compare-branches-dialog') private compareBranchesDialog?: LvCompareBranchesDialog;
+  @query('lv-describe-dialog') describeDialog?: LvDescribeDialog;
+  @query('lv-compare-branches-dialog') compareBranchesDialog?: LvCompareBranchesDialog;
   @query('lv-clean-dialog') private cleanDialog?: LvCleanDialog;
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
   @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
@@ -854,6 +755,17 @@ export class AppShell extends LitElement {
    * rather than mutated so Lit sees the change and re-renders the menus. */
   @state() private refOpsVersion = 0;
   private unsubscribeRefOps?: () => void;
+  /**
+   * Re-render trigger for the dialog store.
+   *
+   * Which dialogs are open is module state now (see stores/dialog.store.ts), so
+   * Lit has nothing of its own to observe. Bumping this from the store
+   * subscription is the same trick `refOpsVersion` above uses for the ref lock,
+   * and it keeps `await el.updateComplete` after a `dialogs.open(...)` working
+   * exactly as it did when each dialog had its own `@state()` flag.
+   */
+  @state() private dialogVersion = 0;
+  private unsubscribeDialogs?: () => void;
   /**
    * Keys for destructive actions already running.
    *
@@ -895,7 +807,7 @@ export class AppShell extends LitElement {
   }
 
   /** The one refusal message every busy-repo path shows. */
-  private warnRepositoryBusy(): void {
+  warnRepositoryBusy(): void {
     warnRepositoryBusy();
   }
 
@@ -924,11 +836,11 @@ export class AppShell extends LitElement {
   }
 
   /** Claim the lock for `repoPath`; false when it is already held. */
-  private claimRefOperation(repoPath: string): boolean {
+  claimRefOperation(repoPath: string): boolean {
     return tryAcquireRefOp(repoPath);
   }
 
-  private releaseRefOperation(repoPath: string): void {
+  releaseRefOperation(repoPath: string): void {
     releaseRefOp(repoPath);
   }
 
@@ -1044,7 +956,7 @@ export class AppShell extends LitElement {
    * its branch list to render — `lv-branch-list` registers the window listener
    * in connectedCallback, so dispatching before it exists is the same dead end.
    */
-  private async openBranchCleanup(): Promise<void> {
+  async openBranchCleanup(): Promise<void> {
     if (!this.leftPanelVisible) {
       uiStore.getState().togglePanel('left');
       await this.updateComplete;
@@ -1392,14 +1304,14 @@ export class AppShell extends LitElement {
       );
       return;
     }
-    if (this.showConflictDialog) {
+    if (dialogs.isOpen('conflict')) {
       showToast(
         'A conflict resolution is already in progress — finish or close it first',
         'warning',
       );
       return;
     }
-    this.conflictDialogConfig = {
+    dialogs.open('conflict', {
       repoPath,
       operationType: this.conflictOperationType,
       initialFilePath: this.conflictInitialFilePath,
@@ -1409,67 +1321,38 @@ export class AppShell extends LitElement {
       dropStashOnComplete: this.conflictDropStashOnComplete,
       squashMerge: this.conflictSquashMerge,
       gitflowFinish: this.conflictGitflowFinish,
-    };
-    this.showConflictDialog = true;
+    });
   }
 
   /**
-   * Dialog flags that are NOT tied to an open repository.
+   * The conflict dialog's snapshotted inputs, or null while it is shut.
    *
-   * The criterion is where the dialog RENDERS. The sweep exists because a
-   * dialog inside the `${this.activeRepository ? ...}` block has its ELEMENT
-   * destroyed while its flag stays true, so it springs back open over the next
-   * repository. A dialog rendered outside that block is never destroyed and has
-   * no such problem: clearing its flag just kills a session the user started,
-   * and skips the `@close` binding that unwinds its navigation state
-   * (`integrationContext`, `manageAccountsReturnProvider`).
-   *
-   * Every flag below is reachable with zero repositories open — the welcome
-   * screen offers the profile manager, and the palette's SSH, profiles and
-   * provider entries are deliberately not wrapped in `requiresRepository`.
+   * Read through the store rather than a field of its own: the snapshot IS the
+   * dialog's open-time context, so it is created and dropped by the same
+   * `dialogs.open('conflict', …)` / `dialogs.close('conflict')` calls and
+   * cannot drift out of step with the flag the way two fields could.
    */
-  private static readonly REPO_INDEPENDENT_DIALOGS = new Set([
-    'showSettings',
-    'showShortcuts',
-    'showOutputPanel',
-    'showCommandPalette',
-    'showWorkspaceManager',
-    'showSsh',
-    'showProfileManager',
-    // Fires from checkUnifiedProfilesMigration on startup, before any repo.
-    'showMigrationDialog',
-    // Account connection is repo-independent; only the PR/issue/pipeline tabs
-    // inside these dialogs guard themselves on a repository.
-    'showGitHub',
-    'showGitLab',
-    'showBitbucket',
-    'showAzureDevOps',
-    'showOidc',
-  ]);
-
-  /**
-   * Clear every repo-scoped `show*` flag. See the call site for why this is an
-   * exclusion list: an inclusion list has gone stale here more than once.
-   */
-  private closeRepoScopedDialogs(): void {
-    // Enumerated from Lit's own reactive-property map, NOT Object.keys: an
-    // @state() field is an accessor on the prototype backed by a private slot,
-    // so it never appears as an own enumerable key.
-    const self = this as unknown as Record<string, unknown>;
-    const declared = (this.constructor as unknown as {
-      elementProperties: Map<PropertyKey, unknown>;
-    }).elementProperties;
-    for (const key of declared.keys()) {
-      if (typeof key !== 'string') continue;
-      if (!/^show[A-Z]/.test(key)) continue;
-      if (AppShell.REPO_INDEPENDENT_DIALOGS.has(key)) continue;
-      if (self[key] === true) self[key] = false;
-    }
+  private get conflictDialogConfig(): ConflictDialogContext | null {
+    return dialogs.context('conflict');
   }
 
   private closeConflictDialog(): void {
-    this.showConflictDialog = false;
-    this.conflictDialogConfig = null;
+    dialogs.close('conflict');
+  }
+
+  /** The file the history pane is showing, or null while it is shut. */
+  private get fileHistoryPath(): string | null {
+    return dialogs.context('fileHistory')?.filePath ?? null;
+  }
+
+  /** Which mode the search dialog opened in. */
+  private get searchDialogMode(): SearchDialogMode {
+    return dialogs.context('search')?.mode ?? 'files';
+  }
+
+  /** Which view the Profile Manager should open to. */
+  private get profileManagerView(): '' | 'accounts' {
+    return dialogs.context('profileManager')?.initialView ?? '';
   }
 
   // Reset the conflict-dialog completion semantics to defaults so a value set by a
@@ -1515,28 +1398,40 @@ export class AppShell extends LitElement {
       this.refOpsVersion++;
     });
 
+    // A freshly mounted shell shows nothing, exactly as it did when every
+    // dialog was a `@state()` flag initialised to false on the instance. The
+    // store is module state and outlives an instance, so it is cleared here
+    // rather than inherited from whatever the previous shell left open.
+    dialogs.reset();
+    this.unsubscribeDialogs = dialogStore.subscribe(() => {
+      this.dialogVersion++;
+    });
+
     this.unsubscribe = repositoryStore.subscribe((state) => {
       const newActiveRepo = state.getActiveRepository();
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
-      // Every repo-scoped dialog flag must die with the last repository.
+      // Every repo-scoped dialog must die with the last repository.
       //
       // These dialogs render inside the `${this.activeRepository ? ...}` block,
-      // so closing the last tab destroys the ELEMENT while its `show*` flag
-      // stays true. Open the next repository and the element is reconstructed
-      // with ?open=true — a full-screen overlay springing up unbidden over a
-      // repo the user just opened, freshly constructed with every button
+      // so closing the last tab destroys the ELEMENT while its open flag stays
+      // set. Open the next repository and the element is reconstructed with
+      // ?open=true — a full-screen overlay springing up unbidden over a repo
+      // the user just opened, freshly constructed with every button
       // re-enabled. lv-repository-health-dialog carries that exact story, and
       // lv-bisect-dialog then reproduced it because it has no pinned path and
       // so was in neither hand-written sweep.
       //
-      // Written as an EXCLUSION list, not an inclusion one. A list of dialogs
-      // to close goes stale every time one is added — which is how this keeps
-      // recurring — whereas the handful that are genuinely not repo-scoped is
-      // stable, and a new dialog defaults to the safe behaviour.
+      // This used to reflect over Lit's reactive-property map and match field
+      // names against /^show[A-Z]/, minus a hand-kept exclusion list, because
+      // nothing enumerated the dialogs. DIALOG_REGISTRY does, so it is now a
+      // plain loop over the dialogs declared `repoScoped` — and repo-scoping is
+      // a property of the dialog rather than of how its field was named. The
+      // default is still the safe one: a newly declared dialog is repo-scoped
+      // unless it says otherwise.
       if (state.openRepositories.length === 0) {
-        this.closeRepoScopedDialogs();
+        dialogs.closeRepoScoped();
       }
 
       // Closing the pinned repo's TAB while its conflict dialog is up
@@ -1546,7 +1441,7 @@ export class AppShell extends LitElement {
       // explanation — the operation itself persists on disk and resurfaces
       // when the repo is reopened.
       if (
-        this.showConflictDialog &&
+        dialogs.isOpen('conflict') &&
         this.conflictDialogConfig &&
         !state.openRepositories.some(
           (r) => r.repository.path === this.conflictDialogConfig!.repoPath,
@@ -1602,7 +1497,7 @@ export class AppShell extends LitElement {
           'lv-clean-dialog': {
             dismissed: 'clean cancelled',
             running: 'clean',
-            clearFlag: () => { this.showClean = false; },
+            clearFlag: () => { dialogs.close('clean'); },
           },
           // No clearFlag: this dialog owns its own open state via open()/close(),
           // like lv-create-branch-dialog.
@@ -1613,7 +1508,7 @@ export class AppShell extends LitElement {
           'lv-reflog-dialog': {
             dismissed: 'undo history closed',
             running: 'reset',
-            clearFlag: () => { this.showReflog = false; },
+            clearFlag: () => { dialogs.close('reflog'); },
           },
           // Read-only: it never reports work in flight, so the sweep always
           // takes the dismissal branch here.
@@ -1628,60 +1523,60 @@ export class AppShell extends LitElement {
           'lv-search-dialog': {
             dismissed: 'search closed',
             running: 'search',
-            clearFlag: () => { this.showSearchDialog = false; },
+            clearFlag: () => { dialogs.close('search'); },
           },
           'lv-remote-dialog': {
             dismissed: 'remote management closed',
             running: 'remote update',
-            clearFlag: () => { this.showRemotes = false; },
+            clearFlag: () => { dialogs.close('remotes'); },
           },
           // Closing this one DESTROYS the element (its render block is gated on
-          // showRepositoryHealth), so it implements closeWhenIdle() and the
+          // the repositoryHealth dialog), so it implements closeWhenIdle() and the
           // sweep hands the close over rather than orphaning a running gc.
           'lv-repository-health-dialog': {
             dismissed: 'repository health closed',
             running: 'maintenance operation',
-            clearFlag: () => { this.showRepositoryHealth = false; },
+            clearFlag: () => { dialogs.close('repositoryHealth'); },
           },
           'lv-worktree-dialog': {
             dismissed: 'worktrees closed',
             running: 'worktree removal',
-            clearFlag: () => { this.showWorktrees = false; },
+            clearFlag: () => { dialogs.close('worktrees'); },
           },
           'lv-submodule-dialog': {
             dismissed: 'submodules closed',
             running: 'submodule removal',
-            clearFlag: () => { this.showSubmodules = false; },
+            clearFlag: () => { dialogs.close('submodules'); },
           },
           'lv-lfs-dialog': {
             dismissed: 'Git LFS closed',
             running: 'LFS prune',
-            clearFlag: () => { this.showLfs = false; },
+            clearFlag: () => { dialogs.close('lfs'); },
           },
           'lv-gpg-dialog': {
             dismissed: 'signing settings closed',
             running: 'signing update',
-            clearFlag: () => { this.showGpg = false; },
+            clearFlag: () => { dialogs.close('gpg'); },
           },
           'lv-config-dialog': {
             dismissed: 'configuration closed',
             running: 'configuration save',
-            clearFlag: () => { this.showConfig = false; },
+            clearFlag: () => { dialogs.close('config'); },
           },
           'lv-credentials-dialog': {
             dismissed: 'credentials closed',
             running: 'credential test',
-            clearFlag: () => { this.showCredentials = false; },
+            clearFlag: () => { dialogs.close('credentials'); },
           },
           'lv-hooks-dialog': {
             dismissed: 'hooks closed',
             running: 'hook save',
-            clearFlag: () => { this.showHooksDialog = false; },
+            clearFlag: () => { dialogs.close('hooks'); },
           },
           'lv-gitignore-dialog': {
             dismissed: 'ignore rules closed',
             running: 'ignore rule update',
-            clearFlag: () => { this.showGitignoreDialog = false; },
+            clearFlag: () => { dialogs.close('gitignore'); },
           },
           'lv-changelog-dialog': {
             dismissed: 'changelog closed',
@@ -1716,7 +1611,7 @@ export class AppShell extends LitElement {
           // that file the typed text goes with the pane, so say so.
           this.warnIfDiscardingEdits();
           this.diffFile = null;
-          this.showDiff = false;
+          dialogs.close('diff');
         }
       }
 
@@ -1749,7 +1644,7 @@ export class AppShell extends LitElement {
       // Clear view state when switching repositories
       if (repoChanged) {
         this.commandPaletteRequestId++;
-        this.showCommandPalette = false;
+        dialogs.close('commandPalette');
         this.commandPaletteRepositoryPath = null;
         this.paletteBranches = [];
         this.paletteTrackedFiles = [];
@@ -1762,14 +1657,13 @@ export class AppShell extends LitElement {
         this.warnIfDiscardingEdits();
 
         // Close any open overlays
-        this.showDiff = false;
+        dialogs.close('diff');
         this.diffFile = null;
         this.diffCommitFile = null;
-        this.showBlame = false;
+        dialogs.close('blame');
         this.blameFile = null;
         this.blameCommitOid = null;
-        this.showFileHistory = false;
-        this.fileHistoryPath = null;
+        dialogs.close('fileHistory');
 
         // Graph context-menu entries are scoped to the repository that
         // produced their commit/ref. Leaving either menu open across a tab
@@ -1916,12 +1810,12 @@ export class AppShell extends LitElement {
       commit: () => {/* handled by commit panel */},
       refresh: () => this.handleRefresh(),
       search: () => this.handleToggleSearch(),
-      openSettings: () => { this.showSettings = true; },
-      openShortcuts: () => { this.showShortcuts = true; },
+      openSettings: () => { dialogs.open('settings'); },
+      openShortcuts: () => { dialogs.open('shortcuts'); },
       toggleLeftPanel: () => this.toggleLeftPanel(),
       toggleRightPanel: () => uiStore.getState().togglePanel('right'),
       openCommandPalette: () => this.openCommandPalette(),
-      openReflog: this.requiresRepository(() => { this.showReflog = true; }),
+      openReflog: this.requiresRepository(() => { dialogs.open('reflog'); }),
       // Wrapped like the palette entries: pressing Ctrl+Shift+F on the welcome
       // screen used to do nothing at all while the same command from the
       // palette explained that a repository is needed.
@@ -1948,6 +1842,8 @@ export class AppShell extends LitElement {
     super.disconnectedCallback();
     this.unsubscribeRefOps?.();
     this.unsubscribeRefOps = undefined;
+    this.unsubscribeDialogs?.();
+    this.unsubscribeDialogs = undefined;
     this.unsubscribe?.();
     this.unsubscribeUi?.();
     this.unsubscribeWatcher?.();
@@ -2011,7 +1907,7 @@ export class AppShell extends LitElement {
       if (needsMigration) {
         // Show migration dialog after a short delay to let the UI settle
         setTimeout(() => {
-          this.showMigrationDialog = true;
+          dialogs.open('migration');
         }, 500);
       }
     } catch (error) {
@@ -2179,7 +2075,7 @@ export class AppShell extends LitElement {
    * Hiding the left panel is refused while it hosts an open dialog — see
    * hasSidebarDialogOpen. Revealing it is always allowed.
    */
-  private toggleLeftPanel(): void {
+  toggleLeftPanel(): void {
     if (this.leftPanelVisible && this.hasSidebarDialogOpen()) {
       showToast('Close the open dialog before hiding the sidebar', 'info');
       return;
@@ -2200,7 +2096,7 @@ export class AppShell extends LitElement {
       if (modal) (modal as HTMLElement & { open: boolean }).open = true;
       return;
     }
-    this.showRepositoryHealth = false;
+    dialogs.close('repositoryHealth');
   };
 
   private handleCloseOverlay(): void {
@@ -2209,7 +2105,7 @@ export class AppShell extends LitElement {
       // A modal owns this Escape and dismisses itself, through lv-modal's
       // handler or its own — each now gated on being the TOPMOST overlay.
       //
-      // This arm is FIRST. The showShortcuts and showCommandPalette arms used
+      // This arm is FIRST. The shortcuts and command-palette arms used
       // to precede it and closed unconditionally, without consulting the
       // stack: opening the undo-history dialog over the shortcuts dialog and
       // pressing Escape once closed BOTH. Both dialogs clear their own flag
@@ -2219,20 +2115,20 @@ export class AppShell extends LitElement {
       // so a dialog that deliberately blocks dismissal mid-operation does not
       // leak the key either.
       //
-      // This subsumes the old showReflog arm, which assumed reflog was always
+      // This subsumes the old reflog arm, which assumed reflog was always
       // topmost: a dialog opened over it (via the palette) made Escape discard
       // the reflog session underneath. The dialog's own handler applies the
-      // isResetting guard and its `close` event clears showReflog.
+      // isResetting guard and its `close` event closes the reflog dialog.
       return;
     } else if (this.contextMenu.visible) {
       this.contextMenu = { ...this.contextMenu, visible: false };
     } else if (this.refContextMenu.visible) {
       this.refContextMenu = { ...this.refContextMenu, visible: false };
-    } else if (this.showDiff) {
+    } else if (dialogs.isOpen('diff')) {
       this.handleCloseDiff();
-    } else if (this.showBlame) {
+    } else if (dialogs.isOpen('blame')) {
       this.handleCloseBlame();
-    } else if (this.showFileHistory) {
+    } else if (dialogs.isOpen('fileHistory')) {
       this.handleCloseFileHistory();
     }
   }
@@ -3076,12 +2972,12 @@ export class AppShell extends LitElement {
   };
 
   private handleOpenSettings = (): void => {
-    this.showSettings = true;
+    dialogs.open('settings');
   };
 
   // True while any integration dialog is open.
   private get integrationDialogOpen(): boolean {
-    return this.showGitHub || this.showGitLab || this.showBitbucket || this.showAzureDevOps || this.showOidc;
+    return dialogs.isOpen('gitHub') || dialogs.isOpen('gitLab') || dialogs.isOpen('bitbucket') || dialogs.isOpen('azureDevOps') || dialogs.isOpen('oidc');
   }
 
   // True only while a provider/OIDC dialog is open ON TOP of the profile manager
@@ -3120,7 +3016,7 @@ export class AppShell extends LitElement {
    * Clears any return context so the dialog shows no Back arrow and never
    * auto-attaches to a profile.
    */
-  private openIntegrationStandalone(type: IntegrationType): void {
+  openIntegrationStandalone(type: IntegrationType): void {
     this.integrationContext = null;
     this.setIntegrationDialogOpen(type, true);
   }
@@ -3138,11 +3034,11 @@ export class AppShell extends LitElement {
 
   private setIntegrationDialogOpen(type: IntegrationType, open: boolean): void {
     switch (type) {
-      case 'github': this.showGitHub = open; break;
-      case 'gitlab': this.showGitLab = open; break;
-      case 'bitbucket': this.showBitbucket = open; break;
-      case 'azure-devops': this.showAzureDevOps = open; break;
-      case 'oidc': this.showOidc = open; break;
+      case 'github': dialogs.setOpen('gitHub', open); break;
+      case 'gitlab': dialogs.setOpen('gitLab', open); break;
+      case 'bitbucket': dialogs.setOpen('bitbucket', open); break;
+      case 'azure-devops': dialogs.setOpen('azureDevOps', open); break;
+      case 'oidc': dialogs.setOpen('oidc', open); break;
     }
   }
 
@@ -3712,7 +3608,7 @@ export class AppShell extends LitElement {
    * (plus a badge hydration so its tab updates promptly) when it is
    * backgrounded.
    */
-  private refreshConflictDialogRepo(pinnedPath: string | null): void {
+  refreshConflictDialogRepo(pinnedPath: string | null): void {
     if (!pinnedPath || pinnedPath === this.activeRepository?.repository.path) {
       this.handleRefresh();
       return;
@@ -3849,7 +3745,7 @@ export class AppShell extends LitElement {
       return;
     }
     // Close blame if open
-    this.showBlame = false;
+    dialogs.close('blame');
     this.blameFile = null;
     this.blameCommitOid = null;
     // Close file history if open. It sits last in the center pane's
@@ -3858,31 +3754,29 @@ export class AppShell extends LitElement {
     // the diff is closed. Unlike the diff a file-history pane opens
     // (`handleFileHistoryViewDiff`), this selection comes from the right
     // panel, not from history, so there is no drill-down to return to.
-    this.showFileHistory = false;
-    this.fileHistoryPath = null;
+    dialogs.close('fileHistory');
     // Working directory file selected - show diff
     this.diffFile = file;
     this.diffFilePartiallyStaged = isPartiallyStaged;
     this.diffCommitFile = null;
-    this.showDiff = true;
+    dialogs.open('diff');
   }
 
   private handleCommitFileSelected(e: CustomEvent<{ commitOid: string; filePath: string }>): void {
     // Close blame if open
-    this.showBlame = false;
+    dialogs.close('blame');
     this.blameFile = null;
     this.blameCommitOid = null;
     // Close file history if open — same reason as handleFileSelected: it
     // would otherwise reappear under the user when this diff is closed.
-    this.showFileHistory = false;
-    this.fileHistoryPath = null;
+    dialogs.close('fileHistory');
     // Commit file selected - show diff
     this.diffCommitFile = {
       commitOid: e.detail.commitOid,
       filePath: e.detail.filePath,
     };
     this.diffFile = null;
-    this.showDiff = true;
+    dialogs.open('diff');
   }
 
   /**
@@ -3890,7 +3784,7 @@ export class AppShell extends LitElement {
    *
    * The editor guards every teardown it can see — Cancel confirms, a file
    * change warns — but the × button, Escape and a repository tab switch are all
-   * owned by app-shell and simply set `showDiff = false`, dropping typed text
+   * owned by app-shell and simply close the diff, dropping typed text
    * with no confirm and no message. Escape is the sharpest case: the editor's
    * own indicator says "Esc to cancel" while the header says "Close diff (Esc)",
    * and which one won depended purely on whether the caret was in the textarea.
@@ -3907,7 +3801,7 @@ export class AppShell extends LitElement {
 
   private handleCloseDiff(): void {
     this.warnIfDiscardingEdits();
-    this.showDiff = false;
+    dialogs.close('diff');
     this.diffFile = null;
     this.diffCommitFile = null;
   }
@@ -3946,11 +3840,11 @@ export class AppShell extends LitElement {
     return '';
   }
 
-  private handleStageAll(): void {
+  handleStageAll(): void {
     void this.dispatchToFileStatus('stage-all');
   }
 
-  private handleUnstageAll(): void {
+  handleUnstageAll(): void {
     void this.dispatchToFileStatus('unstage-all');
   }
 
@@ -4027,7 +3921,7 @@ export class AppShell extends LitElement {
   private refreshInFlight = false;
   private refreshQueued = false;
 
-  private async handleRefresh(): Promise<void> {
+  async handleRefresh(): Promise<void> {
     if (this.refreshInFlight) {
       this.refreshQueued = true;
       return;
@@ -4085,27 +3979,27 @@ export class AppShell extends LitElement {
   // there (see handleProfileManagerClose), instead of a one-way teleport.
   private handleManageAccounts(e: CustomEvent<{ integrationType?: IntegrationType }>): void {
     const from = e.detail?.integrationType ?? null;
-    this.showGitHub = false;
-    this.showGitLab = false;
-    this.showBitbucket = false;
-    this.showAzureDevOps = false;
-    this.showOidc = false;
+    dialogs.close('gitHub');
+    dialogs.close('gitLab');
+    dialogs.close('bitbucket');
+    dialogs.close('azureDevOps');
+    dialogs.close('oidc');
     // If we're pivoting from a provider dialog that was stacked on top of the manager,
     // preserve the integrationContext so we can restore the stacked state later.
-    if (!this.showProfileManager) {
+    if (!dialogs.isOpen('profileManager')) {
       this.integrationContext = null;
     }
     this.manageAccountsReturnProvider = from;
-    this.profileManagerView = 'accounts';
+    dialogs.setContext('profileManager', { initialView: 'accounts' });
     // If the manager is ALREADY open (the provider dialog was launched FROM it,
     // so it's open & demoted), the `open` property won't transition false→true and
     // the manager's willUpdate/open-transition logic that applies `initialView`
     // never runs — it would reveal on its prior view (select-account/edit). Drive
     // the Accounts view explicitly instead so the click isn't a no-op.
-    if (this.showProfileManager) {
+    if (dialogs.isOpen('profileManager')) {
       this.profileManagerDialog?.showAccountsView(true);
     } else {
-      this.showProfileManager = true;
+      dialogs.open('profileManager');
     }
   }
 
@@ -4117,8 +4011,7 @@ export class AppShell extends LitElement {
   private handleProfileManagerClose(e: CustomEvent<{ fromView?: string }>): void {
     const returnProvider = this.manageAccountsReturnProvider;
     const closedFromAccounts = e.detail?.fromView === 'accounts';
-    this.showProfileManager = false;
-    this.profileManagerView = '';
+    dialogs.close('profileManager');
     this.manageAccountsReturnProvider = null;
     if (returnProvider && closedFromAccounts) {
       this.openIntegrationStandalone(returnProvider);
@@ -4150,7 +4043,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handleToggleSearch(): void {
+  handleToggleSearch(): void {
     const toolbar = this.shadowRoot?.querySelector('lv-toolbar');
     if (toolbar) {
       (toolbar as HTMLElement).dispatchEvent(new CustomEvent('focus-search'));
@@ -4158,16 +4051,16 @@ export class AppShell extends LitElement {
   }
 
   private handleCloseSettings(): void {
-    this.showSettings = false;
+    dialogs.close('settings');
   }
 
   private handleBlameCommitClick(e: CustomEvent<{ oid: string }>): void {
-    this.showBlame = false;
+    dialogs.close('blame');
     this.revealCommitInGraph(e.detail.oid);
   }
 
   private handleCloseBlame(): void {
-    this.showBlame = false;
+    dialogs.close('blame');
     this.blameFile = null;
     this.blameCommitOid = null;
   }
@@ -4177,18 +4070,17 @@ export class AppShell extends LitElement {
     // inline editor with it — same teardown as the × and a tab switch.
     this.warnIfDiscardingEdits();
     // Close diff if open
-    this.showDiff = false;
+    dialogs.close('diff');
     this.diffFile = null;
     this.diffCommitFile = null;
     // Open blame
     this.blameFile = e.detail.filePath;
     this.blameCommitOid = e.detail.commitOid ?? null;
-    this.showBlame = true;
+    dialogs.open('blame');
   }
 
-  private openSearchDialog(mode: SearchDialogMode): void {
-    this.searchDialogMode = mode;
-    this.showSearchDialog = true;
+  openSearchDialog(mode: SearchDialogMode): void {
+    dialogs.open('search', { mode });
   }
 
   /**
@@ -4265,7 +4157,7 @@ export class AppShell extends LitElement {
       this.commandPaletteRepositoryPath = null;
     }
     if (requestId !== this.commandPaletteRequestId) return;
-    this.showCommandPalette = true;
+    dialogs.open('commandPalette');
   }
 
   /**
@@ -4278,10 +4170,10 @@ export class AppShell extends LitElement {
    */
   private handleCommandPaletteClose(): void {
     this.commandPaletteRequestId++;
-    this.showCommandPalette = false;
+    dialogs.close('commandPalette');
   }
 
-  private requiresRepository(action: () => void): () => void {
+  requiresRepository(action: () => void): () => void {
     return () => {
       if (!this.activeRepository) {
         uiStore.getState().addToast({
@@ -4295,520 +4187,15 @@ export class AppShell extends LitElement {
     };
   }
 
+  /**
+   * The palette command table lives in palette-commands.ts — it is a long,
+   * flat list rather than behaviour, and the native menu bar resolves its own
+   * item ids against these entries' `action`s, so the ids and shapes here are
+   * a contract. The members it reaches for are declared by PaletteCommandHost,
+   * which is why they are not private on this class.
+   */
   private getPaletteCommands(): PaletteCommand[] {
-    const isMac = navigator.platform.includes('Mac');
-    const mod = isMac ? '⌘' : 'Ctrl';
-
-    const commands: PaletteCommand[] = [
-      {
-        id: 'fetch',
-        label: 'Fetch from remote',
-        category: 'action',
-        icon: 'fetch',
-        action: this.requiresRepository(() => this.handleFetch()),
-      },
-      {
-        id: 'pull',
-        label: 'Pull from remote',
-        category: 'action',
-        icon: 'pull',
-        action: this.requiresRepository(() => this.handlePull()),
-      },
-      {
-        id: 'push',
-        label: 'Push to remote',
-        category: 'action',
-        icon: 'push',
-        action: this.requiresRepository(() => this.handlePush()),
-      },
-      {
-        id: 'refresh',
-        label: 'Refresh repository',
-        category: 'action',
-        icon: 'refresh',
-        shortcut: `${mod}R`,
-        action: () => this.handleRefresh(),
-      },
-      {
-        id: 'graph-jump-head',
-        label: 'Graph: Jump to HEAD',
-        category: 'navigation',
-        icon: 'commit',
-        action: this.requiresRepository(() => {
-          if (this.graphCanvas?.jumpToHead()) {
-            return;
-          }
-          // Route the miss through the shared reveal helper so the toast
-          // distinguishes loaded-but-filtered from not-loaded
-          const headOid = this.graphCanvas?.getHeadOid();
-          if (headOid !== undefined) {
-            this.revealCommitInGraph(headOid);
-          } else {
-            showToast('HEAD commit is not loaded in the graph', 'info', 4000);
-          }
-        }),
-      },
-      {
-        id: 'toggle-output-panel',
-        label: 'Toggle Output Panel',
-        category: 'action',
-        icon: 'terminal',
-        action: () => { this.showOutputPanel = !this.showOutputPanel; },
-      },
-      {
-        id: 'stash',
-        label: 'Create stash',
-        category: 'action',
-        icon: 'stash',
-        action: this.requiresRepository(() => this.handleCreateStash()),
-      },
-      {
-        id: 'create-branch',
-        label: 'Create branch',
-        category: 'action',
-        icon: 'branch',
-        shortcut: `${mod}⇧N`,
-        action: this.requiresRepository(() => this.createBranchDialog?.open()),
-      },
-      {
-        id: 'create-tag',
-        label: 'Create tag',
-        category: 'action',
-        icon: 'tag',
-        action: this.requiresRepository(() => this.createTagDialog?.open()),
-      },
-      {
-        id: 'export-archive',
-        label: 'Export archive…',
-        category: 'action',
-        icon: 'file',
-        action: this.requiresRepository(() => this.exportImportDialog?.open({ tab: 'archive' })),
-      },
-      {
-        id: 'create-patch',
-        label: 'Create patch from commits…',
-        category: 'action',
-        icon: 'commit',
-        action: this.requiresRepository(() =>
-          this.exportImportDialog?.open({
-            tab: 'patch',
-            patchMode: 'create',
-            commitOid: this.selectedCommit?.oid,
-          }),
-        ),
-      },
-      {
-        id: 'apply-patch',
-        label: 'Apply patch file…',
-        category: 'action',
-        icon: 'commit',
-        action: this.requiresRepository(() =>
-          this.exportImportDialog?.open({ tab: 'patch', patchMode: 'apply' }),
-        ),
-      },
-      {
-        id: 'create-bundle',
-        label: 'Create bundle…',
-        category: 'action',
-        icon: 'file',
-        action: this.requiresRepository(() =>
-          this.exportImportDialog?.open({ tab: 'bundle', bundleMode: 'create' }),
-        ),
-      },
-      {
-        id: 'import-bundle',
-        label: 'Import bundle…',
-        category: 'action',
-        icon: 'file',
-        action: this.requiresRepository(() =>
-          this.exportImportDialog?.open({ tab: 'bundle', bundleMode: 'import' }),
-        ),
-      },
-      {
-        id: 'settings',
-        label: 'Open settings',
-        category: 'action',
-        icon: 'settings',
-        shortcut: `${mod},`,
-        action: () => { this.showSettings = true; },
-      },
-      {
-        id: 'remotes',
-        label: 'Manage remotes',
-        category: 'action',
-        icon: 'globe',
-        action: this.requiresRepository(() => { this.showRemotes = true; }),
-      },
-      {
-        id: 'changelog',
-        label: 'Generate Changelog',
-        category: 'action',
-        icon: 'tag',
-        action: this.requiresRepository(() => {
-          const dialog = this.shadowRoot?.querySelector('lv-changelog-dialog');
-          if (dialog) (dialog as import('./components/dialogs/lv-changelog-dialog.ts').LvChangelogDialog).open();
-        }),
-      },
-      {
-        id: 'smart-undo',
-        label: 'Smart Undo (AI)',
-        category: 'action',
-        icon: 'undo',
-        action: this.requiresRepository(async () => {
-          // Captured BEFORE the prompt/AI/confirm awaits (all yield): the
-          // reflog reset must run on the repo it was invoked on, even if the
-          // user switches tabs while any of those dialogs/calls are pending.
-          const repoPath = this.activeRepository!.repository.path;
-          const query = await showPrompt('Smart Undo (AI)', 'Describe what you want to undo (e.g., "before the rebase", "undo last 3 commits"):');
-          if (!query) return;
-
-          const result = await import('./services/ai.service.ts').then(m =>
-            m.findReflogEntry(repoPath, query)
-          );
-
-          if (result.success && result.data) {
-            const match = result.data;
-
-            // Resolve the index to a commit BEFORE the confirm. An AI round
-            // trip plus a prompt plus a confirm all elapse between the reflog
-            // being read and the reset firing, and any commit or checkout in
-            // that window renumbers every entry. Pinning the oid means the
-            // reset either lands on the commit named here or is refused.
-            const git = await import('./services/git.service.ts');
-            const reflog = await git.getReflog(repoPath);
-            const target = reflog.success ? reflog.data?.[match.index] : undefined;
-
-            if (!target) {
-              showToast('Could not resolve that reflog entry — try again', 'error');
-              return;
-            }
-
-            const confirmed = await showConfirm(
-              'Smart Undo',
-              `${match.description}\n\nReset to ${target.shortId} (HEAD@{${match.index}})?\n\n` +
-                `This branch will point at ${target.shortId}. Any commit no longer ` +
-                `reachable from it is recoverable only through the reflog. Your ` +
-                `changes remain staged.`,
-              'warning'
-            );
-            if (confirmed) {
-              // The other caller of reset_to_reflog — lv-reflog-dialog — claims
-              // the shared working-tree lock; this palette route to the same
-              // command was missed by that sweep. The expected_oid pin guards
-              // against a STALE index, not against a checkout moving the branch
-              // underneath the reset.
-              // runRefExclusive returns silently when the lock is held, which
-              // suits context-menu items whose buttons carry a ?disabled
-              // binding. This one sits behind a prompt, an AI call and a
-              // confirm, so a silent return reads as "the reset happened".
-              if (!this.claimRefOperation(repoPath)) {
-                this.warnRepositoryBusy();
-                return;
-              }
-              try {
-                const resetResult = await git.resetToReflog(
-                  repoPath,
-                  match.index,
-                  'soft',
-                  target.oid
-                );
-                if (resetResult.success) {
-                  showToast('Undo successful', 'success');
-                  this.refreshConflictDialogRepo(repoPath);
-                } else {
-                  showToast(resetResult.error?.message ?? 'Undo failed', 'error');
-                }
-              } finally {
-                this.releaseRefOperation(repoPath);
-              }
-            }
-          } else {
-            showToast(result.error?.message ?? 'Could not find matching reflog entry', 'error');
-          }
-        }),
-      },
-      {
-        id: 'clean',
-        label: 'Clean working directory',
-        category: 'action',
-        icon: 'trash',
-        action: this.requiresRepository(() => { this.showClean = true; }),
-      },
-      {
-        id: 'branch-cleanup',
-        label: 'Clean up branches',
-        category: 'action',
-        icon: 'git-branch',
-        action: this.requiresRepository(() => { void this.openBranchCleanup(); }),
-      },
-      {
-        id: 'bisect',
-        label: 'Start bisect (find bug)',
-        category: 'action',
-        icon: 'search',
-        action: this.requiresRepository(() => { this.showBisect = true; }),
-      },
-      {
-        id: 'submodules',
-        label: 'Manage submodules',
-        category: 'action',
-        icon: 'folder',
-        action: this.requiresRepository(() => { this.showSubmodules = true; }),
-      },
-      {
-        id: 'worktrees',
-        label: 'Manage worktrees',
-        category: 'action',
-        icon: 'folder',
-        action: this.requiresRepository(() => { this.showWorktrees = true; }),
-      },
-      {
-        id: 'lfs',
-        label: 'Manage Git LFS',
-        category: 'action',
-        icon: 'folder',
-        action: this.requiresRepository(() => { this.showLfs = true; }),
-      },
-      {
-        id: 'gpg',
-        label: 'GPG Signing Settings',
-        category: 'action',
-        icon: 'key',
-        action: this.requiresRepository(() => { this.showGpg = true; }),
-      },
-      {
-        id: 'ssh',
-        label: 'SSH Key Management',
-        category: 'action',
-        icon: 'key',
-        action: () => { this.showSsh = true; },
-      },
-      {
-        id: 'config',
-        label: 'Git Configuration',
-        category: 'action',
-        icon: 'settings',
-        action: this.requiresRepository(() => { this.showConfig = true; }),
-      },
-      {
-        id: 'credentials',
-        label: 'Credential Management',
-        category: 'action',
-        icon: 'key',
-        action: this.requiresRepository(() => { this.showCredentials = true; }),
-      },
-      {
-        id: 'gc',
-        label: 'Run Garbage Collection',
-        category: 'action',
-        icon: 'trash',
-        action: this.requiresRepository(() => this.handleRunGc()),
-      },
-      {
-        id: 'gc-aggressive',
-        label: 'Run Garbage Collection (Aggressive)',
-        category: 'action',
-        icon: 'trash',
-        action: this.requiresRepository(() => this.handleRunGc(true)),
-      },
-      {
-        id: 'fsck',
-        label: 'Check Repository Integrity',
-        category: 'action',
-        icon: 'search',
-        action: this.requiresRepository(() => this.handleRunFsck()),
-      },
-      {
-        id: 'prune',
-        label: 'Prune Unreachable Objects',
-        category: 'action',
-        icon: 'trash',
-        action: this.requiresRepository(() => this.handleRunPrune()),
-      },
-      {
-        id: 'repository-health',
-        label: 'Repository Health & Maintenance',
-        category: 'action',
-        icon: 'activity',
-        action: this.requiresRepository(() => { this.showRepositoryHealth = true; }),
-      },
-      {
-        id: 'github',
-        label: 'GitHub Integration',
-        category: 'action',
-        icon: 'github',
-        // Account connection is repo-independent; only PR/issue/pipeline tabs guard themselves.
-        action: () => this.openIntegrationStandalone('github'),
-      },
-      {
-        id: 'gitlab',
-        label: 'GitLab Integration',
-        category: 'action',
-        icon: 'gitlab',
-        action: () => this.openIntegrationStandalone('gitlab'),
-      },
-      {
-        id: 'bitbucket',
-        label: 'Bitbucket Integration',
-        category: 'action',
-        icon: 'bitbucket',
-        action: () => this.openIntegrationStandalone('bitbucket'),
-      },
-      {
-        id: 'azure-devops',
-        label: 'Azure DevOps Integration',
-        category: 'action',
-        icon: 'azure',
-        action: () => this.openIntegrationStandalone('azure-devops'),
-      },
-      {
-        id: 'oidc',
-        label: 'Enterprise SSO (OIDC) Integration',
-        category: 'action',
-        icon: 'key',
-        action: () => this.openIntegrationStandalone('oidc'),
-      },
-      {
-        id: 'profiles',
-        label: 'Profiles & Accounts',
-        category: 'action',
-        icon: 'user',
-        action: () => { this.showProfileManager = true; },
-      },
-      {
-        id: 'search',
-        label: 'Search commits',
-        category: 'action',
-        icon: 'search',
-        shortcut: `${mod}F`,
-        action: () => this.handleToggleSearch(),
-      },
-      {
-        id: 'search-in-files',
-        label: 'Search in files',
-        category: 'action',
-        icon: 'search',
-        action: this.requiresRepository(() => this.openSearchDialog('files')),
-      },
-      {
-        id: 'search-in-diff',
-        label: 'Search in current diff',
-        category: 'action',
-        icon: 'search',
-        action: this.requiresRepository(() => this.openSearchDialog('diff')),
-      },
-      {
-        id: 'search-commit-content',
-        label: 'Find commits that changed text',
-        category: 'action',
-        icon: 'search',
-        action: this.requiresRepository(() => this.openSearchDialog('commits')),
-      },
-      {
-        id: 'stage-all',
-        label: 'Stage all changes',
-        category: 'action',
-        icon: 'commit',
-        action: this.requiresRepository(() => this.handleStageAll()),
-      },
-      {
-        id: 'unstage-all',
-        label: 'Unstage all changes',
-        category: 'action',
-        icon: 'commit',
-        action: this.requiresRepository(() => this.handleUnstageAll()),
-      },
-      {
-        id: 'toggle-left-panel',
-        label: 'Toggle left panel',
-        category: 'navigation',
-        shortcut: `${mod}B`,
-        action: () => this.toggleLeftPanel(),
-      },
-      {
-        id: 'toggle-right-panel',
-        label: 'Toggle right panel',
-        category: 'navigation',
-        shortcut: `${mod}J`,
-        action: () => uiStore.getState().togglePanel('right'),
-      },
-      {
-        id: 'undo',
-        label: 'Undo (open reflog)',
-        category: 'action',
-        icon: 'refresh',
-        shortcut: `${mod}Z`,
-        action: this.requiresRepository(() => { this.showReflog = true; }),
-      },
-      {
-        id: 'describe',
-        label: 'Describe commit (git describe)',
-        category: 'action',
-        icon: 'tag',
-        action: this.requiresRepository(() => { this.describeDialog?.open(); }),
-      },
-      {
-        id: 'compare-branches',
-        label: 'Compare branches',
-        category: 'action',
-        icon: 'branch',
-        action: this.requiresRepository(() => { this.compareBranchesDialog?.open(); }),
-      },
-      {
-        id: 'workspaces',
-        label: 'Manage workspaces',
-        category: 'action',
-        icon: 'folder',
-        action: () => { this.showWorkspaceManager = true; },
-      },
-      {
-        id: 'hooks',
-        label: 'Manage git hooks',
-        category: 'action',
-        icon: 'terminal',
-        action: this.requiresRepository(() => { this.showHooksDialog = true; }),
-      },
-      {
-        id: 'gitignore',
-        label: 'Edit .gitignore & .gitattributes',
-        category: 'action',
-        icon: 'file',
-        action: this.requiresRepository(() => { this.showGitignoreDialog = true; }),
-      },
-      // The palette acts on the ACTIVE repository; the same three actions are
-      // on the repository tab context menu for any open tab. Failures (no
-      // terminal emulator, a path that has gone away, an editor that cannot be
-      // spawned) are toasted by the shared service with the backend message.
-      {
-        id: 'open-in-terminal',
-        label: 'Open in Terminal',
-        category: 'action',
-        icon: 'terminal',
-        action: this.requiresRepository(() => {
-          void openRepositoryInTerminal(this.activeRepository!.repository.path);
-        }),
-      },
-      {
-        id: 'reveal-in-file-manager',
-        label: 'Reveal in File Manager',
-        category: 'action',
-        icon: 'folder',
-        action: this.requiresRepository(() => {
-          void openRepositoryInFileManager(this.activeRepository!.repository.path);
-        }),
-      },
-      {
-        id: 'open-in-editor',
-        label: 'Open in Editor',
-        category: 'action',
-        icon: 'file',
-        action: this.requiresRepository(() => {
-          void openRepositoryInEditor(this.activeRepository!.repository.path);
-        }),
-      },
-    ];
-
-    return commands;
+    return buildPaletteCommands(this satisfies PaletteCommandHost);
   }
 
   private async restorePersistedRepositories(): Promise<void> {
@@ -5102,7 +4489,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleFetch(): Promise<void> {
+  async handleFetch(): Promise<void> {
     if (!this.activeRepository) return;
     // Coalesced like its pull and push siblings. keyboardService has no
     // e.repeat guard, so HOLDING Ctrl+Shift+F fires many times a second and
@@ -5154,7 +4541,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handlePull(pinnedRepoPath?: string): Promise<void> {
+  handlePull(pinnedRepoPath?: string): Promise<void> {
     // pinnedRepoPath comes from a suggestion toast's Pull Now, which must pull
     // the repo whose push failed even if the user has since switched tabs.
     const repoPath = pinnedRepoPath ?? this.activeRepository?.repository.path;
@@ -5224,7 +4611,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private handlePush(): Promise<void> {
+  handlePush(): Promise<void> {
     const repoPath = this.activeRepository?.repository.path;
     if (!repoPath) return Promise.resolve();
     // Keyed like the force-push sibling, which was hardened against exactly
@@ -5275,7 +4662,7 @@ export class AppShell extends LitElement {
     progressService.cancelOperation(e.detail.id);
   }
 
-  private handleCreateStash(): Promise<void> {
+  handleCreateStash(): Promise<void> {
     if (!this.activeRepository) return Promise.resolve();
     // Pinned: if the user switches tabs while the stash is being created, the
     // refresh must target the repo that was stashed, not the active tab.
@@ -5329,7 +4716,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleRunGc(aggressive = false): Promise<void> {
+  async handleRunGc(aggressive = false): Promise<void> {
     if (!this.activeRepository) return;
 
     // Pinned before the confirm await, like every other destructive handler —
@@ -5387,7 +4774,7 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleRunFsck(): Promise<void> {
+  async handleRunFsck(): Promise<void> {
     if (!this.activeRepository) return;
 
     const repoPath = this.activeRepository.repository.path;
@@ -5416,7 +4803,7 @@ export class AppShell extends LitElement {
     );
   }
 
-  private async handleRunPrune(): Promise<void> {
+  async handleRunPrune(): Promise<void> {
     if (!this.activeRepository) return;
 
     const repoPath = this.activeRepository.repository.path;
@@ -5511,7 +4898,7 @@ export class AppShell extends LitElement {
     const { repoPath, filePath, lineNumber } = e.detail;
 
     // Close the workspace manager
-    this.showWorkspaceManager = false;
+    dialogs.close('workspaceManager');
 
     try {
       const currentRepoPath = this.activeRepository?.repository.path;
@@ -5530,7 +4917,7 @@ export class AppShell extends LitElement {
       // Show blame view for the file
       this.blameFile = filePath;
       this.blameCommitOid = null;
-      this.showBlame = true;
+      dialogs.open('blame');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Failed to open repository', 'error');
     }
@@ -5541,7 +4928,7 @@ export class AppShell extends LitElement {
    * (below the paginated window or hidden by a branch filter) instead of
    * silently doing nothing. ALL reveal-in-graph flows must go through this.
    */
-  private revealCommitInGraph(oid: string): void {
+  revealCommitInGraph(oid: string): void {
     if (this.graphCanvas?.selectCommit(oid)) {
       return;
     }
@@ -5571,21 +4958,19 @@ export class AppShell extends LitElement {
     // unmounts the inline editor with it, same teardown as the x button.
     this.warnIfDiscardingEdits();
     // Close diff if open
-    this.showDiff = false;
+    dialogs.close('diff');
     this.diffFile = null;
     this.diffCommitFile = null;
     // Close blame if open
-    this.showBlame = false;
+    dialogs.close('blame');
     this.blameFile = null;
     this.blameCommitOid = null;
     // Open file history
-    this.fileHistoryPath = e.detail.filePath;
-    this.showFileHistory = true;
+    dialogs.open('fileHistory', { filePath: e.detail.filePath });
   }
 
   private handleCloseFileHistory(): void {
-    this.showFileHistory = false;
-    this.fileHistoryPath = null;
+    dialogs.close('fileHistory');
   }
 
   private handleFileHistoryCommitSelected(e: CustomEvent<{ commit: Commit }>): void {
@@ -5600,7 +4985,7 @@ export class AppShell extends LitElement {
       commitOid: e.detail.commitOid,
       filePath: e.detail.filePath,
     };
-    this.showDiff = true;
+    dialogs.open('diff');
   }
 
   private handleVimModeChange(e: CustomEvent<{ enabled: boolean }>): void {
@@ -5656,8 +5041,8 @@ export class AppShell extends LitElement {
       ${this.globalLoading ? html`<div class="global-loading-bar"></div>` : ''}
 
       <lv-toolbar
-        @open-settings=${() => { this.showSettings = true; }}
-        @open-shortcuts=${() => { this.showShortcuts = true; }}
+        @open-settings=${() => { dialogs.open('settings'); }}
+        @open-shortcuts=${() => { dialogs.open('shortcuts'); }}
         @open-command-palette=${() => {
             // Through openCommandPalette, like Ctrl+P. Setting the flag alone
             // skipped the loader, so the toolbar button opened a palette with
@@ -5668,15 +5053,15 @@ export class AppShell extends LitElement {
             // branch>" — the no-op the palette excludes on purpose.
             void this.openCommandPalette();
           }}
-        @open-profile-manager=${() => { this.showProfileManager = true; }}
-        @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
+        @open-profile-manager=${() => { dialogs.open('profileManager'); }}
+        @open-workspace-manager=${() => { dialogs.open('workspaceManager'); }}
         @search-change=${this.handleSearchChange}
       ></lv-toolbar>
 
       ${this.activeRepository
         ? html`
             <lv-context-dashboard
-              @open-profile-manager=${() => { this.showProfileManager = true; }}
+              @open-profile-manager=${() => { dialogs.open('profileManager'); }}
               @open-github=${() => this.openIntegrationStandalone('github')}
               @open-gitlab=${() => this.openIntegrationStandalone('gitlab')}
               @open-bitbucket=${() => this.openIntegrationStandalone('bitbucket')}
@@ -5774,7 +5159,7 @@ export class AppShell extends LitElement {
                             ? html`
                                 <button
                                   class="operation-btn operation-btn-primary"
-                                  @click=${() => { this.showBisect = true; }}
+                                  @click=${() => { dialogs.open('bisect'); }}
                                 >
                                   Manage Bisect
                                 </button>
@@ -5797,7 +5182,7 @@ export class AppShell extends LitElement {
                   ></lv-graph-canvas>
                 </div>
 
-                ${this.showDiff
+                ${dialogs.isOpen('diff')
                   ? html`
                       <div class="diff-area">
                         <div class="diff-header">
@@ -5829,7 +5214,7 @@ export class AppShell extends LitElement {
                         </div>
                       </div>
                     `
-                  : this.showBlame && this.blameFile
+                  : dialogs.isOpen('blame') && this.blameFile
                     ? html`
                         <div class="diff-area">
                           <lv-blame-view
@@ -5841,7 +5226,7 @@ export class AppShell extends LitElement {
                           ></lv-blame-view>
                         </div>
                       `
-                    : this.showFileHistory && this.fileHistoryPath
+                    : dialogs.isOpen('fileHistory') && this.fileHistoryPath
                       ? html`
                           <div class="diff-area">
                             <lv-file-history
@@ -5855,13 +5240,13 @@ export class AppShell extends LitElement {
                           </div>
                         `
                       : ''}
-                ${this.showOutputPanel
+                ${dialogs.isOpen('outputPanel')
                   ? html`
                       <div class="output-panel-container">
                         <lv-output-panel
                           closable
                           .repositoryPath=${this.activeRepository.repository.path}
-                          @close=${() => { this.showOutputPanel = false; }}
+                          @close=${() => { dialogs.close('outputPanel'); }}
                         ></lv-output-panel>
                       </div>
                     `
@@ -5889,7 +5274,7 @@ export class AppShell extends LitElement {
                   <lv-right-panel
                     .commit=${this.selectedCommit}
                     .refs=${this.selectedCommitRefs}
-                    @open-settings=${() => { this.showSettings = true; }}
+                    @open-settings=${() => { dialogs.open('settings'); }}
                     @tab-changed=${(e: CustomEvent) => { this.activeRightPanelTab = e.detail?.tab; }}
                   ></lv-right-panel>
                 </aside>
@@ -5902,11 +5287,11 @@ export class AppShell extends LitElement {
             </footer>
           `
         : html`<lv-welcome
-            @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
-            @open-profile-manager=${() => { this.showProfileManager = true; }}
+            @open-workspace-manager=${() => { dialogs.open('workspaceManager'); }}
+            @open-profile-manager=${() => { dialogs.open('profileManager'); }}
           ></lv-welcome>`}
 
-      ${this.showSettings
+      ${dialogs.isOpen('settings')
         ? html`
             <lv-modal
               open
@@ -5915,13 +5300,13 @@ export class AppShell extends LitElement {
             >
               <lv-settings-dialog
                 @close=${this.handleCloseSettings}
-                @open-profile-manager=${() => { this.showProfileManager = true; }}
+                @open-profile-manager=${() => { dialogs.open('profileManager'); }}
               ></lv-settings-dialog>
             </lv-modal>
           `
         : ''}
 
-      ${this.showConflictDialog && this.conflictDialogConfig
+      ${dialogs.isOpen('conflict') && this.conflictDialogConfig
         ? html`
             <lv-conflict-resolution-dialog
               open
@@ -6197,7 +5582,7 @@ export class AppShell extends LitElement {
         : ''}
 
       <lv-command-palette
-        ?open=${this.showCommandPalette}
+        ?open=${dialogs.isOpen('commandPalette')}
         .repositoryPath=${this.commandPaletteRepositoryPath ?? ''}
         .commands=${this.getPaletteCommands()}
         .branches=${this.paletteBranches}
@@ -6212,48 +5597,48 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-reflog-dialog
-          ?open=${this.showReflog}
+          ?open=${dialogs.isOpen('reflog')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showReflog = false; }}
+          @close=${() => { dialogs.close('reflog'); }}
           @undo-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
-            this.showReflog = false;
+            dialogs.close('reflog');
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
           }}
-          @show-commit=${(e: CustomEvent<{ oid: string }>) => { this.showReflog = false; this.revealCommitInGraph(e.detail.oid); }}
+          @show-commit=${(e: CustomEvent<{ oid: string }>) => { dialogs.close('reflog'); this.revealCommitInGraph(e.detail.oid); }}
         ></lv-reflog-dialog>
 
         <lv-search-dialog
-          ?open=${this.showSearchDialog}
+          ?open=${dialogs.isOpen('search')}
           .mode=${this.searchDialogMode}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showSearchDialog = false; }}
-          @mode-changed=${(e: CustomEvent<{ mode: SearchDialogMode }>) => { this.searchDialogMode = e.detail.mode; }}
+          @close=${() => { dialogs.close('search'); }}
+          @mode-changed=${(e: CustomEvent<{ mode: SearchDialogMode }>) => { dialogs.setContext('search', { mode: e.detail.mode }); }}
           @show-blame=${this.handleShowBlame}
           @show-working-diff=${this.handleShowWorkingDiff}
         ></lv-search-dialog>
       ` : ''}
 
       <lv-keyboard-shortcuts-dialog
-        ?open=${this.showShortcuts}
+        ?open=${dialogs.isOpen('shortcuts')}
         ?vimMode=${this.vimMode}
-        @close=${() => { this.showShortcuts = false; }}
+        @close=${() => { dialogs.close('shortcuts'); }}
         @vim-mode-change=${this.handleVimModeChange}
       ></lv-keyboard-shortcuts-dialog>
 
       ${this.activeRepository ? html`
         <lv-remote-dialog
-          ?open=${this.showRemotes}
+          ?open=${dialogs.isOpen('remotes')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showRemotes = false; }}
+          @close=${() => { dialogs.close('remotes'); }}
           @remotes-changed=${() => this.handleRefresh()}
         ></lv-remote-dialog>
       ` : ''}
 
       ${this.activeRepository ? html`
         <lv-clean-dialog
-          ?open=${this.showClean}
+          ?open=${dialogs.isOpen('clean')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showClean = false; }}
+          @close=${() => { dialogs.close('clean'); }}
           @files-cleaned=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-clean-dialog>
@@ -6265,10 +5650,10 @@ export class AppShell extends LitElement {
         ></lv-changelog-dialog>
       ` : ''}
 
-      ${this.activeRepository && this.showRepositoryHealth ? html`
+      ${this.activeRepository && dialogs.isOpen('repositoryHealth') ? html`
         <lv-modal
           modalTitle="Repository Health"
-          ?open=${this.showRepositoryHealth}
+          ?open=${dialogs.isOpen('repositoryHealth')}
           @close=${this.handleRepositoryHealthClose}
         >
           <lv-repository-health-dialog
@@ -6280,13 +5665,13 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-bisect-dialog
-          ?open=${this.showBisect}
+          ?open=${dialogs.isOpen('bisect')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showBisect = false; }}
+          @close=${() => { dialogs.close('bisect'); }}
           @bisect-step=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
           @bisect-complete=${(e: CustomEvent<{ repositoryPath?: string }>) => {
-            this.showBisect = false;
+            dialogs.close('bisect');
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null);
           }}
         ></lv-bisect-dialog>
@@ -6294,9 +5679,9 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-submodule-dialog
-          ?open=${this.showSubmodules}
+          ?open=${dialogs.isOpen('submodules')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showSubmodules = false; }}
+          @close=${() => { dialogs.close('submodules'); }}
           @submodules-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             // Routed to the repo the operation RAN ON. handleRefresh resolves
             // activeRepository at call time, so a Ctrl+Tab during a slow
@@ -6308,9 +5693,9 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-worktree-dialog
-          ?open=${this.showWorktrees}
+          ?open=${dialogs.isOpen('worktrees')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showWorktrees = false; }}
+          @close=${() => { dialogs.close('worktrees'); }}
           @worktrees-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             // Routed to the repo the operation RAN ON. handleRefresh resolves
             // activeRepository at call time, so a Ctrl+Tab during a slow
@@ -6322,9 +5707,9 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-lfs-dialog
-          ?open=${this.showLfs}
+          ?open=${dialogs.isOpen('lfs')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showLfs = false; }}
+          @close=${() => { dialogs.close('lfs'); }}
           @lfs-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             // Routed to the repo the operation RAN ON. handleRefresh resolves
             // activeRepository at call time, so a Ctrl+Tab during a slow
@@ -6336,37 +5721,37 @@ export class AppShell extends LitElement {
 
       ${this.activeRepository ? html`
         <lv-gpg-dialog
-          ?open=${this.showGpg}
+          ?open=${dialogs.isOpen('gpg')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showGpg = false; }}
+          @close=${() => { dialogs.close('gpg'); }}
           @gpg-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
         ></lv-gpg-dialog>
       ` : ''}
 
       <lv-ssh-dialog
-        ?open=${this.showSsh}
-        @close=${() => { this.showSsh = false; }}
+        ?open=${dialogs.isOpen('ssh')}
+        @close=${() => { dialogs.close('ssh'); }}
       ></lv-ssh-dialog>
 
       ${this.activeRepository ? html`
         <lv-config-dialog
-          ?open=${this.showConfig}
+          ?open=${dialogs.isOpen('config')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showConfig = false; }}
+          @close=${() => { dialogs.close('config'); }}
         ></lv-config-dialog>
       ` : ''}
 
       ${this.activeRepository ? html`
         <lv-credentials-dialog
-          ?open=${this.showCredentials}
+          ?open=${dialogs.isOpen('credentials')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showCredentials = false; }}
+          @close=${() => { dialogs.close('credentials'); }}
         ></lv-credentials-dialog>
       ` : ''}
 
       <lv-github-dialog
-        ?open=${this.showGitHub}
+        ?open=${dialogs.isOpen('gitHub')}
         ?backButton=${this.integrationBackButton}
         .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
@@ -6375,7 +5760,7 @@ export class AppShell extends LitElement {
       ></lv-github-dialog>
 
       <lv-gitlab-dialog
-        ?open=${this.showGitLab}
+        ?open=${dialogs.isOpen('gitLab')}
         ?backButton=${this.integrationBackButton}
         .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
@@ -6384,7 +5769,7 @@ export class AppShell extends LitElement {
       ></lv-gitlab-dialog>
 
       <lv-bitbucket-dialog
-        ?open=${this.showBitbucket}
+        ?open=${dialogs.isOpen('bitbucket')}
         ?backButton=${this.integrationBackButton}
         .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
@@ -6393,7 +5778,7 @@ export class AppShell extends LitElement {
       ></lv-bitbucket-dialog>
 
       <lv-azure-devops-dialog
-        ?open=${this.showAzureDevOps}
+        ?open=${dialogs.isOpen('azureDevOps')}
         ?backButton=${this.integrationBackButton}
         .attachToProfileName=${this.integrationAttachName}
         .repositoryPath=${this.activeRepository?.repository.path ?? ''}
@@ -6402,7 +5787,7 @@ export class AppShell extends LitElement {
       ></lv-azure-devops-dialog>
 
       <lv-oidc-dialog
-        ?open=${this.showOidc}
+        ?open=${dialogs.isOpen('oidc')}
         ?backButton=${this.integrationBackButton}
         .attachToProfileName=${this.integrationAttachName}
         @close=${() => this.handleIntegrationDialogClose('oidc')}
@@ -6410,7 +5795,7 @@ export class AppShell extends LitElement {
       ></lv-oidc-dialog>
 
       <lv-profile-manager-dialog
-        ?open=${this.showProfileManager}
+        ?open=${dialogs.isOpen('profileManager')}
         ?demoted=${this.profileManagerDemoted}
         .repoPath=${this.activeRepository?.repository.path ?? ''}
         .initialView=${this.profileManagerView}
@@ -6420,35 +5805,35 @@ export class AppShell extends LitElement {
         @open-bitbucket=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('bitbucket', e)}
         @open-azure-devops=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('azure-devops', e)}
         @open-oidc=${(e: CustomEvent<IntegrationOpenContext>) => this.handleOpenIntegrationFromManager('oidc', e)}
-        @migration-needed=${() => { this.showMigrationDialog = true; }}
+        @migration-needed=${() => { dialogs.open('migration'); }}
         @request-restore-provider=${this.handleRestoreProvider}
       ></lv-profile-manager-dialog>
 
       <lv-migration-dialog
-        ?open=${this.showMigrationDialog}
-        @close=${() => { this.showMigrationDialog = false; }}
-        @open-profile-manager=${() => { this.showProfileManager = true; }}
+        ?open=${dialogs.isOpen('migration')}
+        @close=${() => { dialogs.close('migration'); }}
+        @open-profile-manager=${() => { dialogs.open('profileManager'); }}
       ></lv-migration-dialog>
 
       <lv-workspace-manager-dialog
-        ?open=${this.showWorkspaceManager}
-        @close=${() => { this.showWorkspaceManager = false; }}
+        ?open=${dialogs.isOpen('workspaceManager')}
+        @close=${() => { dialogs.close('workspaceManager'); }}
         @open-repo-file=${this.handleWorkspaceOpenRepoFile}
       ></lv-workspace-manager-dialog>
 
       ${this.activeRepository ? html`
         <lv-hooks-dialog
-          ?open=${this.showHooksDialog}
+          ?open=${dialogs.isOpen('hooks')}
           .repoPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showHooksDialog = false; }}
+          @close=${() => { dialogs.close('hooks'); }}
         ></lv-hooks-dialog>
       ` : ''}
 
       ${this.activeRepository ? html`
         <lv-gitignore-dialog
-          ?open=${this.showGitignoreDialog}
+          ?open=${dialogs.isOpen('gitignore')}
           .repositoryPath=${this.activeRepository.repository.path}
-          @close=${() => { this.showGitignoreDialog = false; }}
+          @close=${() => { dialogs.close('gitignore'); }}
           @ignore-rules-changed=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             // Writing .gitignore/.gitattributes changes the working tree, so the
             // file list must be reloaded. Routed to the repo the write RAN ON:

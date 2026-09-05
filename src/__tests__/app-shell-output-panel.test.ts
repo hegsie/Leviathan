@@ -19,6 +19,7 @@ const mockInvoke: MockInvoke = () => Promise.resolve(null);
 import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
+import { dialogs } from '../stores/dialog.store.ts';
 
 interface PaletteCommandLike {
   id: string;
@@ -35,6 +36,14 @@ function getPaletteCommands(el: AppShell): PaletteCommandLike[] {
   return (el as any).getPaletteCommands();
 }
 
+// Which dialogs are open is module state, and several tests here drive a shell
+// that is never connected to the document (so its connectedCallback reset never
+// runs). Clear it per test to keep the isolation each instance used to get for
+// free from its own `@state()` flags.
+beforeEach(() => {
+  dialogs.reset();
+});
+
 describe('app-shell output panel wiring', () => {
   it('exposes a Toggle Output Panel palette command', () => {
     const el = createAppShell();
@@ -47,13 +56,10 @@ describe('app-shell output panel wiring', () => {
     const el = createAppShell();
     const cmd = getPaletteCommands(el).find((c) => c.id === 'toggle-output-panel')!;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((el as any).showOutputPanel).to.be.false;
+    expect(dialogs.isOpen('outputPanel')).to.be.false;
     cmd.action();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((el as any).showOutputPanel).to.be.true;
+    expect(dialogs.isOpen('outputPanel')).to.be.true;
     cmd.action();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((el as any).showOutputPanel).to.be.false;
+    expect(dialogs.isOpen('outputPanel')).to.be.false;
   });
 });
