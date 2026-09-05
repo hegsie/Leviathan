@@ -1,0 +1,290 @@
+/**
+ * Exhaustive guard on the AI security gate's coverage.
+ *
+ * Offline mode says it blocks "every operation that leaves this machine", and
+ * every git and hosting-provider call honours that (see
+ * network-gate-coverage.test.ts). The AI service did not: with OpenAI,
+ * Anthropic, Gemini or GitHub Models selected, generating a commit message
+ * posted the staged diff, the changelog posted the commit history and conflict
+ * help posted both sides of the file — while the toggle said the app was
+ * offline.
+ *
+ * Like its git counterpart this sweeps EVERY exported function rather than a
+ * hand-written list, so a new provider-reaching call fails the test without
+ * anyone having to remember to register it.
+ */
+
+type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
+const invoked: string[] = [];
+let activeProvider: string | null = null;
+
+(globalThis as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+  invoke: ((command: string) => {
+    invoked.push(command);
+    if (command === 'get_active_ai_provider') return Promise.resolve(activeProvider);
+    if (command === 'get_ai_providers') return Promise.resolve([]);
+    if (command === 'auto_detect_ai_providers') return Promise.resolve([]);
+    if (command === 'is_ai_available') return Promise.resolve(true);
+    return Promise.resolve(null);
+  }) as MockInvoke,
+  transformCallback: () => 0,
+};
+
+import { expect } from '@open-wc/testing';
+import * as aiService from '../ai.service.ts';
+import type { AiProviderType } from '../ai.service.ts';
+import { settingsStore } from '../../stores/settings.store.ts';
+
+/**
+ * Tauri commands that reach whichever AI provider is configured. Each either
+ * ships repository content to it (diffs, commit history, conflict text) or
+ * asks it whether it is reachable — for an OpenAI-compatible cloud provider
+ * that probe is itself an outbound request carrying the API key.
+ */
+const PROVIDER_COMMANDS = new Set([
+  'generate_commit_message',
+  'suggest_conflict_resolution',
+  'generate_changelog',
+  'analyze_staged_changes',
+  'generate_pr_description',
+  'suggest_commit_splits',
+  'explain_conflict',
+  'find_reflog_entry',
+  'test_ai_provider',
+  'is_ai_available',
+  'ai_unavailable_reason',
+]);
+
+/**
+ * Commands that must NEVER be gated. `get_ai_providers` is how Settings lists
+ * the providers — blocking it would make offline mode hide the way out of
+ * offline mode — and `auto_detect_ai_providers` probes only Ollama and LM
+ * Studio, both on localhost. The setters and the active-provider read touch a
+ * local config file.
+ */
+const LOCAL_COMMANDS = new Set([
+  'get_ai_providers',
+  'get_active_ai_provider',
+  'set_ai_provider',
+  'set_ai_api_key',
+  'set_ai_model',
+  'auto_detect_ai_providers',
+]);
+
+const CLOUD_PROVIDERS: AiProviderType[] = [
+  'open_ai',
+  'anthropic',
+  'github_copilot',
+  'google_gemini',
+];
+const LOCAL_PROVIDERS: AiProviderType[] = ['ollama', 'lm_studio', 'local_inference'];
+
+/**
+ * Arguments wide enough to get every exported function to its invoke. The
+ * first is the provider under test so `testAiProvider` — the one function
+ * gated on a provider it is *given* rather than the active one — is exercised
+ * for the same provider as the rest of the sweep.
+ */
+function argsFor(provider: AiProviderType | null): unknown[] {
+  return [provider ?? 'ollama', 'main', 'feature', 'title', 'base', 'head'];
+}
+
+/** Call every exported ai.service function; return the commands they reached. */
+async function sweep(provider: AiProviderType | null): Promise<Set<string>> {
+  const reached = new Set<string>();
+  for (const [, value] of Object.entries(aiService)) {
+    if (typeof value !== 'function') continue;
+    invoked.length = 0;
+    try {
+      await (value as (...a: unknown[]) => unknown)(...argsFor(provider));
+    } catch {
+      // A rejected call is fine — it certainly didn't reach a provider.
+    }
+    for (const c of invoked) reached.add(c);
+  }
+  return reached;
+}
+
+describe('AI provider network gate', () => {
+  beforeEach(() => {
+    activeProvider = null;
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+  });
+
+  afterEach(() => {
+    activeProvider = null;
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+  });
+
+  for (const provider of CLOUD_PROVIDERS) {
+    it(`offline mode stops every exported function reaching ${provider}`, async () => {
+      activeProvider = provider;
+      settingsStore.setState({ offlineMode: true });
+
+      const reached = await sweep(provider);
+      const leaked = [...reached].filter((c) => PROVIDER_COMMANDS.has(c));
+
+      expect(leaked, `these reached ${provider} with offline mode on`).to.deep.equal([]);
+    });
+  }
+
+  for (const provider of LOCAL_PROVIDERS) {
+    it(`offline mode leaves ${provider} working`, async () => {
+      // Ollama and LM Studio listen on localhost and local inference runs
+      // in-process. Refusing them would break the very providers a user is
+      // meant to fall back to while offline.
+      activeProvider = provider;
+      settingsStore.setState({ offlineMode: true });
+
+      const reached = await sweep(provider);
+      const missing = [...PROVIDER_COMMANDS].filter((c) => !reached.has(c));
+
+      expect(missing, `${provider} is local and must not be gated`).to.deep.equal([]);
+    });
+  }
+
+  it('a cloud provider still works when offline mode is off', async () => {
+    // Guards the test itself: if the sweep stopped exercising anything, the
+    // assertions above would pass vacuously.
+    activeProvider = 'open_ai';
+
+    const reached = await sweep('open_ai');
+    const missing = [...PROVIDER_COMMANDS].filter((c) => !reached.has(c));
+
+    expect(missing, 'nothing is blocked when no policy is in force').to.deep.equal([]);
+  });
+
+  it('never gates the commands that stay on this machine', async () => {
+    settingsStore.setState({ offlineMode: true, remoteAllowlist: ['example.test'] });
+    activeProvider = 'open_ai';
+
+    const reached = await sweep('open_ai');
+    const missing = [...LOCAL_COMMANDS].filter((c) => !reached.has(c));
+
+    expect(missing, 'these never leave the machine and must not be gated').to.deep.equal([]);
+  });
+
+  it('a command cannot be both local and provider-reaching', () => {
+    const both = [...LOCAL_COMMANDS].filter((c) => PROVIDER_COMMANDS.has(c));
+    expect(both).to.deep.equal([]);
+  });
+
+  it('an allowlist that omits the provider host refuses it', async () => {
+    settingsStore.setState({ remoteAllowlist: ['github.com'] });
+    activeProvider = 'open_ai';
+
+    invoked.length = 0;
+    const result = await aiService.generateCommitMessage('/repo');
+
+    expect(result.success).to.equal(false);
+    expect(result.error?.code).to.equal('BLOCKED');
+    expect(result.error?.message).to.contain('allowlist');
+    expect(invoked.includes('generate_commit_message')).to.equal(false);
+  });
+
+  it('an allowlist that names the provider host permits it', async () => {
+    settingsStore.setState({ remoteAllowlist: ['api.openai.com'] });
+    activeProvider = 'open_ai';
+
+    invoked.length = 0;
+    const result = await aiService.generateCommitMessage('/repo');
+
+    expect(result.success).to.not.equal(false);
+    expect(invoked.includes('generate_commit_message')).to.equal(true);
+  });
+
+  it('an allowlist does not touch a local provider', async () => {
+    settingsStore.setState({ remoteAllowlist: ['github.com'] });
+    activeProvider = 'ollama';
+
+    invoked.length = 0;
+    const result = await aiService.generateCommitMessage('/repo');
+
+    expect(result.success).to.not.equal(false);
+    expect(invoked.includes('generate_commit_message')).to.equal(true);
+  });
+
+  it('refuses when offline and no provider is selected', async () => {
+    // With nothing chosen the backend falls back to whatever provider is
+    // reachable, cloud ones included, so the destination is unknown and the
+    // gate has to fail closed.
+    settingsStore.setState({ offlineMode: true });
+    activeProvider = null;
+
+    invoked.length = 0;
+    const result = await aiService.generateCommitMessage('/repo');
+
+    expect(result.success).to.equal(false);
+    expect(result.error?.code).to.equal('BLOCKED');
+    expect(result.error?.message).to.contain('no AI provider is selected');
+    expect(invoked.includes('generate_commit_message')).to.equal(false);
+  });
+
+  it('allows an unselected provider when no policy is in force', async () => {
+    activeProvider = null;
+
+    invoked.length = 0;
+    const result = await aiService.generateCommitMessage('/repo');
+
+    expect(result.success).to.not.equal(false);
+    expect(invoked.includes('generate_commit_message')).to.equal(true);
+  });
+
+  it('does not ask for the active provider when no policy is in force', async () => {
+    // The gate costs one local IPC read per AI call; it must not spend it when
+    // nothing could refuse the call anyway.
+    activeProvider = 'open_ai';
+
+    invoked.length = 0;
+    await aiService.generateCommitMessage('/repo');
+
+    expect(invoked.includes('get_active_ai_provider')).to.equal(false);
+  });
+
+  it('gates testAiProvider on the provider it is given, not the active one', async () => {
+    // "Test" on the OpenAI row reaches OpenAI whatever is selected elsewhere.
+    settingsStore.setState({ offlineMode: true });
+    activeProvider = 'ollama';
+
+    invoked.length = 0;
+    const blocked = await aiService.testAiProvider('open_ai');
+    expect(blocked.success).to.equal(false);
+    expect(blocked.error?.code).to.equal('BLOCKED');
+    expect(invoked.includes('test_ai_provider')).to.equal(false);
+
+    invoked.length = 0;
+    const allowed = await aiService.testAiProvider('ollama');
+    expect(allowed.success).to.not.equal(false);
+    expect(invoked.includes('test_ai_provider')).to.equal(true);
+  });
+
+  it('names the provider and the way out in the refusal', async () => {
+    settingsStore.setState({ offlineMode: true });
+    activeProvider = 'anthropic';
+
+    const result = await aiService.generateChangelog('/repo', 'v1', 'HEAD');
+
+    expect(result.error?.message).to.contain('Anthropic Claude');
+    expect(result.error?.message).to.contain('Offline mode');
+    expect(result.error?.message).to.contain('Settings');
+  });
+
+  it('reports AI as unavailable, with a reason, while blocked', async () => {
+    settingsStore.setState({ offlineMode: true });
+    activeProvider = 'open_ai';
+
+    expect(await aiService.isAiAvailable()).to.equal(false);
+
+    const reason = await aiService.getAiUnavailableReason();
+    expect(reason?.reason).to.contain('Offline mode');
+    // Selected-but-unreachable keeps the AI buttons visible and disabled with
+    // an explanation, instead of hiding them as "never configured".
+    expect(reason?.providerSelected).to.equal(true);
+  });
+
+  it('classifies every provider as cloud or local exactly once', () => {
+    const all: AiProviderType[] = [...CLOUD_PROVIDERS, ...LOCAL_PROVIDERS];
+    expect(all.filter((p) => aiService.isCloudAiProvider(p))).to.deep.equal(CLOUD_PROVIDERS);
+    expect(all.filter((p) => !aiService.isCloudAiProvider(p))).to.deep.equal(LOCAL_PROVIDERS);
+  });
+});
