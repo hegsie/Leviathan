@@ -24,6 +24,7 @@ export class AppPage {
   readonly openButton: Locator;
   readonly cloneButton: Locator;
   readonly initButton: Locator;
+  readonly scanButton: Locator;
 
   // Recent repositories
   readonly recentSection: Locator;
@@ -59,6 +60,7 @@ export class AppPage {
     this.openButton = this.welcomeScreen.locator('.action-btn', { hasText: 'Open' });
     this.cloneButton = this.welcomeScreen.locator('.action-btn', { hasText: 'Clone' });
     this.initButton = this.welcomeScreen.locator('.action-btn', { hasText: 'Init' });
+    this.scanButton = this.welcomeScreen.locator('.action-btn', { hasText: 'Scan' });
 
     // Recent repos
     this.recentSection = this.welcomeScreen.locator('.recent-section');

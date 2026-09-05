@@ -100,6 +100,8 @@ import './components/dialogs/lv-azure-devops-dialog.ts';
 import './components/dialogs/lv-profile-manager-dialog.ts';
 import './components/dialogs/lv-migration-dialog.ts';
 import './components/dialogs/lv-workspace-manager-dialog.ts';
+import './components/dialogs/lv-scan-repositories-dialog.ts';
+import './components/dialogs/lv-init-dialog.ts';
 import './components/dialogs/lv-hooks-dialog.ts';
 import './components/dialogs/lv-create-tag-dialog.ts';
 import './components/dialogs/lv-create-branch-dialog.ts';
@@ -184,6 +186,10 @@ import { embeddingIndexService } from './services/embedding-index.service.ts';
 import { initOAuthListener } from './services/oauth.service.ts';
 import * as localAiService from './services/local-ai.service.ts';
 import { emit, type UnlistenFn } from '@tauri-apps/api/event';
+import {
+  startRepositoryDropListener,
+  REPOSITORY_SCAN_OFFER_EVENT,
+} from './services/window-drop.service.ts';
 
 /**
  * Main application shell component
@@ -850,6 +856,15 @@ export class AppShell extends LitElement {
 
   // Migration dialog
   @state() private showMigrationDialog = false;
+
+  // Scan-for-repositories dialog, opened from the welcome screen's Scan
+  // action and from a dropped folder that is not a repository.
+  @state() private showRepositoryScan = false;
+  @state() private repositoryScanPath = '';
+  @state() private repositoryScanMode: 'scan' | 'offer' = 'scan';
+  /** True while an OS drag is over the window, so the welcome screen can
+   *  show its drop affordance. */
+  @state() private fileDragActive = false;
 
   // Workspace Manager dialog
   @state() private showWorkspaceManager = false;
@@ -1933,6 +1948,10 @@ export class AppShell extends LitElement {
     this.addEventListener('rebase-complete', this.handleRebaseComplete);
     this.addEventListener('show-commit', this.handleShowCommitEvent);
     window.addEventListener('settings-changed', this.handleSettingsChanged);
+    window.addEventListener(REPOSITORY_SCAN_OFFER_EVENT, this.handleRepositoryScanOffer);
+    // OS folder drops open repositories from anywhere in the app, not just
+    // the welcome screen.
+    void this.setupWindowDropListener();
 
     // Load vim mode from keyboard service
     this.vimMode = keyboardService.isVimMode();
@@ -2101,6 +2120,9 @@ export class AppShell extends LitElement {
     this.removeEventListener('rebase-complete', this.handleRebaseComplete);
     this.removeEventListener('show-commit', this.handleShowCommitEvent);
     window.removeEventListener('settings-changed', this.handleSettingsChanged);
+    window.removeEventListener(REPOSITORY_SCAN_OFFER_EVENT, this.handleRepositoryScanOffer);
+    this.dropUnlisten?.();
+    this.dropUnlisten = undefined;
     gitService.cleanupRemoteOperationListeners();
     // Clean up auto-fetch
     this.autoFetchUnsubscribe?.();
@@ -3394,6 +3416,60 @@ export class AppShell extends LitElement {
   private handleOpenSettings = (): void => {
     this.showSettings = true;
   };
+
+  /** Unlisten for the webview's OS drag/drop events. */
+  private dropUnlisten?: UnlistenFn;
+
+  /** Open the scan dialog on a folder the user picked (welcome screen). */
+  private handleOpenRepositoryScan = (e: Event): void => {
+    const detail = (e as CustomEvent<{ path?: string; mode?: 'scan' | 'offer' }>).detail;
+    if (!detail?.path) return;
+    this.repositoryScanPath = detail.path;
+    this.repositoryScanMode = detail.mode ?? 'scan';
+    this.showRepositoryScan = true;
+  };
+
+  /**
+   * A folder dropped on the window is not a repository: offer to scan it or to
+   * initialize one there. Fired on `window` by the drop service, which has no
+   * component of its own.
+   */
+  private handleRepositoryScanOffer = (e: Event): void => {
+    const detail = (e as CustomEvent<{ path?: string }>).detail;
+    if (!detail?.path) return;
+    this.repositoryScanPath = detail.path;
+    this.repositoryScanMode = 'offer';
+    this.showRepositoryScan = true;
+  };
+
+  /**
+   * Hand a folder to the init dialog. Only one init dialog is mounted at a
+   * time: the welcome screen owns it while no repository is open, the shell
+   * owns it once one is.
+   */
+  private handleInitializeRepositoryRequest = async (e: Event): Promise<void> => {
+    const path = (e as CustomEvent<{ path?: string }>).detail?.path;
+    this.showRepositoryScan = false;
+    await this.updateComplete;
+    const welcome = this.renderRoot.querySelector('lv-welcome');
+    if (welcome) {
+      welcome.openInitDialog(path);
+      return;
+    }
+    const initDialog = this.renderRoot.querySelector('lv-init-dialog');
+    if (initDialog) {
+      initDialog.open(path);
+      return;
+    }
+    showToast('Could not open the Initialize Repository dialog', 'error');
+  };
+
+  /** Start listening for folders dropped onto the window. */
+  private async setupWindowDropListener(): Promise<void> {
+    this.dropUnlisten = await startRepositoryDropListener((active) => {
+      this.fileDragActive = active;
+    });
+  }
 
   // True while any integration dialog is open.
   private get integrationDialogOpen(): boolean {
@@ -6337,8 +6413,10 @@ export class AppShell extends LitElement {
             </footer>
           `
         : html`<lv-welcome
+            .dragActive=${this.fileDragActive}
             @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
             @open-profile-manager=${() => { this.showProfileManager = true; }}
+            @open-repository-scan=${this.handleOpenRepositoryScan}
           ></lv-welcome>`}
 
       ${this.showSettings
@@ -6871,6 +6949,20 @@ export class AppShell extends LitElement {
         @close=${() => { this.showWorkspaceManager = false; }}
         @open-repo-file=${this.handleWorkspaceOpenRepoFile}
       ></lv-workspace-manager-dialog>
+
+      <lv-scan-repositories-dialog
+        ?open=${this.showRepositoryScan}
+        .scanPath=${this.repositoryScanPath}
+        .mode=${this.repositoryScanMode}
+        @close=${() => { this.showRepositoryScan = false; }}
+        @initialize-repository=${this.handleInitializeRepositoryRequest}
+      ></lv-scan-repositories-dialog>
+
+      ${this.activeRepository
+        // The welcome screen mounts its own init dialog, so this one exists
+        // only while a repository is open — never two at once.
+        ? html`<lv-init-dialog></lv-init-dialog>`
+        : ''}
 
       ${this.activeRepository ? html`
         <lv-hooks-dialog

@@ -2,7 +2,14 @@ import { test, expect, type Page } from '@playwright/test';
 import { setupTauriMocks, emptyRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
-import { startCommandCapture, findCommand, waitForCommand, injectCommandError } from '../fixtures/test-helpers';
+import {
+  startCommandCapture,
+  startCommandCaptureWithMocks,
+  findCommand,
+  waitForCommand,
+  injectCommandError,
+  injectCommandMock,
+} from '../fixtures/test-helpers';
 
 test.describe('Welcome Screen', () => {
   let app: AppPage;
@@ -818,5 +825,259 @@ test.describe('Session restore', () => {
     await page.reload();
 
     await expect(page.locator('lv-toolbar .tab')).toHaveCount(1);
+  });
+});
+
+/** Repository payload shaped like the backend's `Repository`. */
+function repositoryPayload(path: string) {
+  return {
+    path,
+    name: path.split('/').pop(),
+    isValid: true,
+    isBare: false,
+    headRef: 'main',
+    state: 'clean',
+    isShallow: false,
+    isPartialClone: false,
+    cloneFilter: null,
+  };
+}
+
+function scanResultPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    root: '/code',
+    repositories: [
+      { path: '/code/alpha', name: 'alpha', isBare: false },
+      { path: '/code/beta', name: 'beta', isBare: false },
+    ],
+    scannedDirectories: 12,
+    truncated: false,
+    cancelled: false,
+    ...overrides,
+  };
+}
+
+/** Fire one of the webview's OS drag/drop events through the Tauri mock. */
+async function emitDragEvent(
+  page: import('@playwright/test').Page,
+  event: 'tauri://drag-enter' | 'tauri://drag-over' | 'tauri://drag-leave' | 'tauri://drag-drop',
+  paths: string[] = []
+): Promise<void> {
+  await page.evaluate(
+    ({ name, dropped }) => {
+      const emit = (window as unknown as {
+        __EMIT_TAURI_EVENT__: (event: string, payload: unknown) => void;
+      }).__EMIT_TAURI_EVENT__;
+      emit(name, { paths: dropped, position: { x: 20, y: 20 } });
+    },
+    { name: event, dropped: paths }
+  );
+}
+
+test.describe('Welcome Screen - scan for repositories', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    app = new AppPage(page);
+    await app.goto();
+    await expect(app.welcomeScreen).toBeVisible();
+  });
+
+  test('scans the chosen folder and opens the selected repository', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|open': '/code',
+      scan_for_repositories: scanResultPayload(),
+      open_repository: repositoryPayload('/code/alpha'),
+      get_repository_info: repositoryPayload('/code/alpha'),
+    });
+
+    await app.scanButton.click();
+
+    const dialog = page.locator('lv-scan-repositories-dialog');
+    await expect(dialog.locator('.result-item')).toHaveCount(2);
+    await expect(dialog.locator('.results-toolbar')).toContainText('2 repositories');
+
+    const scanCalls = await findCommand(page, 'scan_for_repositories');
+    expect((scanCalls[0].args as { path: string }).path).toBe('/code');
+
+    // Nothing is opened until the user picks something.
+    const openSelected = dialog.getByRole('button', { name: /Open selected/ });
+    await expect(openSelected).toBeDisabled();
+
+    await dialog.locator('.result-item').first().locator('input[type="checkbox"]').check();
+    await expect(openSelected).toBeEnabled();
+    await openSelected.click();
+
+    // The repository really opens: the welcome screen gives way to the repo view.
+    await expect(app.welcomeScreen).not.toBeVisible({ timeout: 10000 });
+    const openCalls = await findCommand(page, 'open_repository');
+    expect((openCalls[0].args as { path: string }).path).toBe('/code/alpha');
+  });
+
+  test('reports a folder with no repositories in it', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      'plugin:dialog|open': '/code',
+      scan_for_repositories: scanResultPayload({ repositories: [], scannedDirectories: 40 }),
+    });
+
+    await app.scanButton.click();
+
+    const dialog = page.locator('lv-scan-repositories-dialog');
+    await expect(dialog.locator('.explanation')).toContainText('No Git repositories were found');
+    await expect(dialog.locator('.notice')).toContainText('40');
+    await expect(dialog.locator('.result-item')).toHaveCount(0);
+  });
+
+  test('surfaces a scan failure', async ({ page }) => {
+    await injectCommandMock(page, { 'plugin:dialog|open': '/code' });
+    await injectCommandError(page, 'scan_for_repositories', '/code no longer exists');
+
+    await app.scanButton.click();
+
+    const dialog = page.locator('lv-scan-repositories-dialog');
+    await expect(dialog.locator('.error-message')).toContainText('no longer exists');
+  });
+
+  test('does not open the scan dialog when the folder picker is cancelled', async ({ page }) => {
+    await injectCommandMock(page, { 'plugin:dialog|open': null });
+
+    await app.scanButton.click();
+
+    // The element is always mounted in the shell; a cancelled picker must
+    // leave it closed (and so invisible), not open it on an empty folder.
+    await expect(page.locator('lv-scan-repositories-dialog .body')).not.toBeVisible();
+  });
+});
+
+test.describe('Welcome Screen - dropping a folder on the window', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    app = new AppPage(page);
+    await app.goto();
+    await expect(app.welcomeScreen).toBeVisible();
+  });
+
+  test('shows a drop affordance while a folder is dragged over the window', async ({ page }) => {
+    await emitDragEvent(page, 'tauri://drag-enter', ['/code/alpha']);
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toBeVisible();
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toContainText('Drop a folder');
+
+    await emitDragEvent(page, 'tauri://drag-leave');
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toHaveCount(0);
+  });
+
+  test('opens a dropped repository', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      classify_repository_path: {
+        path: '/code/alpha',
+        name: 'alpha',
+        exists: true,
+        isDirectory: true,
+        isRepository: true,
+        isBare: false,
+      },
+      open_repository: repositoryPayload('/code/alpha'),
+      get_repository_info: repositoryPayload('/code/alpha'),
+    });
+
+    await emitDragEvent(page, 'tauri://drag-enter', ['/code/alpha']);
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toBeVisible();
+    await emitDragEvent(page, 'tauri://drag-drop', ['/code/alpha']);
+
+    await expect(app.welcomeScreen).not.toBeVisible({ timeout: 10000 });
+    const openCalls = await findCommand(page, 'open_repository');
+    expect((openCalls[0].args as { path: string }).path).toBe('/code/alpha');
+  });
+
+  test('offers a scan or an init for a dropped folder that is not a repository', async ({
+    page,
+  }) => {
+    await startCommandCaptureWithMocks(page, {
+      classify_repository_path: {
+        path: '/projects',
+        name: 'projects',
+        exists: true,
+        isDirectory: true,
+        isRepository: false,
+        isBare: false,
+      },
+      scan_for_repositories: scanResultPayload({ root: '/projects' }),
+    });
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/projects']);
+
+    const dialog = page.locator('lv-scan-repositories-dialog');
+    await expect(dialog.locator('.explanation')).toContainText('not a Git repository');
+    // The drop affordance goes away as soon as the drop lands.
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toHaveCount(0);
+
+    await dialog.getByRole('button', { name: 'Scan it for repositories' }).click();
+    await expect(dialog.locator('.result-item')).toHaveCount(2);
+    const scanCalls = await findCommand(page, 'scan_for_repositories');
+    expect((scanCalls[0].args as { path: string }).path).toBe('/projects');
+  });
+
+  test('offers to initialize a dropped folder that is not a repository', async ({ page }) => {
+    await injectCommandMock(page, {
+      classify_repository_path: {
+        path: '/projects/new-thing',
+        name: 'new-thing',
+        exists: true,
+        isDirectory: true,
+        isRepository: false,
+        isBare: false,
+      },
+    });
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/projects/new-thing']);
+
+    const dialog = page.locator('lv-scan-repositories-dialog');
+    await dialog.getByRole('button', { name: 'Initialize a repository here' }).click();
+
+    // The init dialog takes over, pre-filled with the dropped folder.
+    await expect(page.getByRole('dialog', { name: 'Initialize Repository' })).toBeVisible();
+    await expect(page.getByRole('textbox', { name: /Repository Location/i })).toHaveValue(
+      '/projects/new-thing'
+    );
+  });
+
+  test('reports a dropped path that is gone', async ({ page }) => {
+    await injectCommandMock(page, {
+      classify_repository_path: {
+        path: '/code/gone',
+        name: 'gone',
+        exists: false,
+        isDirectory: false,
+        isRepository: false,
+        isBare: false,
+      },
+    });
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/code/gone']);
+
+    await expect(page.locator('.toast')).toContainText('no longer exists');
+    await expect(app.welcomeScreen).toBeVisible();
+  });
+
+  test('reports a dropped repository that cannot be opened', async ({ page }) => {
+    await injectCommandMock(page, {
+      classify_repository_path: {
+        path: '/code/locked',
+        name: 'locked',
+        exists: true,
+        isDirectory: true,
+        isRepository: true,
+        isBare: false,
+      },
+    });
+    await injectCommandError(page, 'open_repository', 'permission denied');
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/code/locked']);
+
+    await expect(page.locator('.toast')).toContainText('permission denied');
+    await expect(app.welcomeScreen).toBeVisible();
   });
 });
