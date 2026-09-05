@@ -10,9 +10,12 @@ import {
   isNetworkGateRefusal,
   cloneRepository,
   cancelClone,
+  getSubmodules,
+  updateSubmodules,
   type ProviderRepository,
 } from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
+import { showToast } from '../../services/notification.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -149,6 +152,11 @@ export class LvCloneDialog extends LitElement {
         font-size: var(--font-size-sm);
       }
 
+      .field-hint {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-muted);
+      }
+
       .btn {
         padding: var(--spacing-sm) var(--spacing-lg);
         border-radius: var(--radius-md);
@@ -235,6 +243,9 @@ export class LvCloneDialog extends LitElement {
   @state() private depth: number | null = null;
   @state() private filter: string | null = null;
   @state() private singleBranch = false;
+  /** Empty means "whatever the remote's HEAD points at" -- the default branch. */
+  @state() private branch = '';
+  @state() private cloneSubmodules = false;
   @state() private isCloning = false;
   /**
    * The clone SUCCEEDED and the dialog is in its brief close delay.
@@ -249,6 +260,14 @@ export class LvCloneDialog extends LitElement {
   @state() private isComplete = false;
   /** Set while a cancellation request is in flight, so Cancel cannot be spammed. */
   @state() private isCancelling = false;
+  /**
+   * The clone itself is done and the submodules are being fetched.
+   *
+   * The phase runs against the repository that is ALREADY in the store and
+   * open, so nothing here may report a failure as a failed clone, and
+   * dismissing the dialog must leave that repository alone.
+   */
+  @state() private submodulePhase = false;
   @state() private progress = 0;
   @state() private progressText = '';
   @state() private error = '';
@@ -256,6 +275,18 @@ export class LvCloneDialog extends LitElement {
   @query('lv-modal') private modal!: LvModal;
 
   private unlistenProgress?: UnlistenFn;
+
+  /**
+   * Identifies the submodule phase currently owned by this dialog session.
+   *
+   * The submodule update has no cancellation handle, so a dismissed dialog
+   * leaves the phase running. Bumping this on every reset makes that orphaned
+   * run report through a toast instead of writing progress into -- or closing
+   * -- the session that replaced it.
+   */
+  private submoduleRunId = 0;
+  /** The dialog was dismissed while the submodule phase was still running. */
+  private submoduleDetached = false;
 
   public open(): void {
     // A clone already in flight owns this component; reset() would
@@ -277,6 +308,7 @@ export class LvCloneDialog extends LitElement {
     this.isCloning = false;
     this.isCancelling = false;
     this.isComplete = false;
+    this.submodulePhase = false;
     this.cleanupListener();
   }
 
@@ -294,12 +326,18 @@ export class LvCloneDialog extends LitElement {
     this.destination = '';
     this.repoName = '';
     this.depth = null;
+    this.branch = '';
+    this.cloneSubmodules = false;
     this.isCloning = false;
     this.isCancelling = false;
     this.isComplete = false;
+    this.submodulePhase = false;
     this.progress = 0;
     this.progressText = '';
     this.error = '';
+    // Any submodule phase still running belongs to the session being thrown
+    // away: it must report through a toast rather than into this one.
+    this.submoduleRunId += 1;
     this.cleanupListener();
   }
 
@@ -366,6 +404,12 @@ export class LvCloneDialog extends LitElement {
     this.error = '';
   }
 
+  private handleBranchChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    this.branch = input.value;
+    this.error = '';
+  }
+
   private extractRepoName(url: string): string {
     if (!url) return '';
 
@@ -415,6 +459,15 @@ export class LvCloneDialog extends LitElement {
       return;
     }
 
+    // Mirrors the backend's own check (commands/repository.rs clone_repository)
+    // so the user is told before a round trip; the backend keeps rejecting
+    // these regardless of what the dialog sends.
+    const branch = this.branch.trim();
+    if (branch && (branch.startsWith('-') || /[\r\n]/.test(branch))) {
+      this.error = "Branch name must not start with '-' or contain line breaks";
+      return;
+    }
+
     this.isCloning = true;
     this.progress = 0;
     this.progressText = 'Starting clone...';
@@ -443,6 +496,7 @@ export class LvCloneDialog extends LitElement {
       const result = await cloneRepository({
         url: this.url.trim(),
         path: fullPath,
+        ...(branch ? { branch } : {}),
         ...(this.depth !== null ? { depth: this.depth } : {}),
         ...(this.filter ? { filter: this.filter } : {}),
         ...(this.singleBranch ? { singleBranch: true } : {}),
@@ -453,9 +507,17 @@ export class LvCloneDialog extends LitElement {
         this.progressText = 'Clone complete!';
         this.isComplete = true;
 
-        // Add the repository to the store
+        // Add the repository to the store FIRST: the submodule phase below runs
+        // against a repository that is already open, so however that phase
+        // ends the user keeps the clone they asked for.
         const store = repositoryStore.getState();
         store.addRepository(result.data);
+
+        if (this.cloneSubmodules) {
+          // 'detached' means the dialog was dismissed during the phase, or
+          // reset into a new session: closing it here would yank that one shut.
+          if ((await this.runSubmodulePhase(result.data.path)) !== 'close') return;
+        }
 
         // Close dialog after a brief delay
         setTimeout(() => {
@@ -482,6 +544,131 @@ export class LvCloneDialog extends LitElement {
     }
   }
 
+  /**
+   * Fetch the freshly cloned repository's submodules.
+   *
+   * There is no recursive clone on the backend, so this reuses the ordinary
+   * submodule commands against the new repository. The clone has already
+   * succeeded by the time this runs: every failure here is a PARTIAL success
+   * and is reported as such.
+   *
+   * Returns what the caller should do with the dialog: `close` it as usual, or
+   * leave it alone because it is no longer this run's to close.
+   */
+  private async runSubmodulePhase(repoPath: string): Promise<'close' | 'detached'> {
+    const runId = ++this.submoduleRunId;
+    this.submoduleDetached = false;
+    this.submodulePhase = true;
+    this.progress = 100;
+    this.progressText = 'Checking for submodules...';
+
+    const name = this.repoName || repoPath;
+
+    // Listed first so a repository without submodules never reaches the
+    // network gate: prompting to confirm a network operation that has nothing
+    // to fetch would be a confirm for no reason.
+    const listed = await getSubmodules(repoPath);
+    if (!listed.success) {
+      return this.reportSubmoduleFailure(
+        runId,
+        listed.error?.message ?? 'the submodule list could not be read',
+      );
+    }
+
+    const count = listed.data?.length ?? 0;
+    if (count === 0) {
+      if (!this.isDetached(runId)) {
+        this.progressText = 'No submodules to clone.';
+        this.submodulePhase = false;
+        return 'close';
+      }
+      return 'detached';
+    }
+
+    const label = count === 1 ? '1 submodule' : `${count} submodules`;
+    if (!this.isDetached(runId)) {
+      this.progressText = `Cloning ${label}...`;
+    }
+
+    const updated = await updateSubmodules(repoPath, { init: true, recursive: true });
+
+    if (updated.success) {
+      if (this.isDetached(runId)) {
+        // The dialog is gone, so the only place left to say this is a toast.
+        showToast(`Cloned ${label} into ${name}.`, 'success');
+        return 'detached';
+      }
+      this.progressText = `Cloned ${label}.`;
+      this.submodulePhase = false;
+      return 'close';
+    }
+
+    if (isNetworkGateRefusal(updated.error)) {
+      // The gate already explained a block, and a declined confirm is the
+      // user's own decision, so neither is reported again. The clone itself
+      // stands either way.
+      if (this.isDetached(runId)) return 'detached';
+      this.progressText = 'Submodules were not cloned.';
+      this.submodulePhase = false;
+      return 'close';
+    }
+
+    return this.reportSubmoduleFailure(
+      runId,
+      updated.error?.message ?? 'the submodules could not be cloned',
+    );
+  }
+
+  /**
+   * True once `runId`'s phase has lost the dialog: either the user dismissed
+   * it, or the dialog was reset into a new session while the phase ran. Such a
+   * phase must not write progress into — or close — the dialog it no longer
+   * owns; it reports through a toast instead.
+   */
+  private isDetached(runId: number): boolean {
+    return this.submoduleDetached || runId !== this.submoduleRunId;
+  }
+
+  /**
+   * Report a submodule failure WITHOUT claiming the clone failed: the
+   * repository is on disk, in the store, and open.
+   *
+   * A toast rather than an inline banner, because opening the cloned
+   * repository can tear this dialog down with the welcome screen that hosts
+   * it — an inline message would then be shown to nobody, which is exactly the
+   * silent error path this must not become.
+   */
+  private reportSubmoduleFailure(runId: number, message: string): 'close' | 'detached' {
+    showToast(
+      `The repository was cloned, but its submodules were not: ${message}. Use Submodules to retry.`,
+      'warning',
+      10000,
+    );
+
+    if (this.isDetached(runId)) return 'detached';
+
+    this.submodulePhase = false;
+    this.progressText = '';
+    return 'close';
+  }
+
+  /**
+   * Dismiss the dialog while submodules are still being fetched.
+   *
+   * The clone has already succeeded and the repository is open, so this closes
+   * the dialog and lets the phase finish in the background rather than leaving
+   * a half-cloned working tree behind. The phase reports its outcome in a
+   * toast once it lands.
+   */
+  private handleDetachSubmodules(): void {
+    this.submoduleDetached = true;
+    showToast(
+      'Repository opened. Its submodules are still being cloned in the background.',
+      'info',
+    );
+    this.close();
+  }
+
   private handleModalClose(): void {
     // A clone in flight must not be abandoned behind a hidden dialog: lv-modal
     // sets open=false BEFORE dispatching, so re-assert it and route Escape, the
@@ -492,6 +679,14 @@ export class LvCloneDialog extends LitElement {
     if (this.isCloning && !this.isComplete) {
       this.modal.open = true;
       void this.handleCancelClone();
+      return;
+    }
+
+    // The clone is done and only submodules are outstanding. Cancelling the
+    // clone here would be wrong (there is nothing left to cancel) and reset()
+    // alone would leave the phase writing into a discarded session.
+    if (this.submodulePhase) {
+      this.handleDetachSubmodules();
       return;
     }
 
@@ -529,7 +724,13 @@ export class LvCloneDialog extends LitElement {
   }
 
   private get canClone(): boolean {
-    return Boolean(this.url.trim() && this.destination.trim() && !this.isCloning);
+    // `isComplete` is checked as well as `isCloning`: the submodule phase and
+    // the partial-success warning both release `isCloning` while the clone
+    // that already landed in this destination is finished, and a second clone
+    // into the same path could only fail.
+    return Boolean(
+      this.url.trim() && this.destination.trim() && !this.isCloning && !this.isComplete,
+    );
   }
 
   render() {
@@ -617,6 +818,21 @@ export class LvCloneDialog extends LitElement {
           </div>
 
           <div class="field">
+            <label for="branch">Branch (optional)</label>
+            <input
+              id="branch"
+              type="text"
+              placeholder="Leave empty for the default branch"
+              .value=${this.branch}
+              @input=${this.handleBranchChange}
+              ?disabled=${this.isCloning}
+            />
+            <div class="field-hint">
+              Clones and checks out this branch instead of the one the remote points at.
+            </div>
+          </div>
+
+          <div class="field">
             <label for="depth">Shallow clone depth (optional)</label>
             <input
               id="depth"
@@ -654,11 +870,26 @@ export class LvCloneDialog extends LitElement {
             <label for="single-branch" style="margin:0">Single branch only</label>
           </div>
 
+          <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+            <input
+              type="checkbox"
+              id="clone-submodules"
+              .checked=${this.cloneSubmodules}
+              @change=${(e: Event) => {
+                this.cloneSubmodules = (e.target as HTMLInputElement).checked;
+              }}
+              ?disabled=${this.isCloning}
+            />
+            <label for="clone-submodules" style="margin:0">
+              Clone submodules (fetched after the clone finishes)
+            </label>
+          </div>
+
           ${this.fullPath
             ? html`<div class="repo-name-preview">Full path: ${this.fullPath}</div>`
             : ''}
 
-          ${this.isCloning
+          ${this.isCloning || this.submodulePhase
             ? html`
                 <div class="progress-section">
                   <div class="progress-text">${this.progressText}</div>
@@ -677,19 +908,31 @@ export class LvCloneDialog extends LitElement {
         <div slot="footer">
           <button
             class="btn btn-secondary"
-            @click=${this.isCloning && !this.isComplete ? this.handleCancelClone : this.close}
+            @click=${this.submodulePhase
+              ? this.handleDetachSubmodules
+              : this.isCloning && !this.isComplete
+                ? this.handleCancelClone
+                : this.close}
             ?disabled=${this.isCancelling}
           >
-            ${this.isCloning && !this.isComplete
-              ? (this.isCancelling ? 'Cancelling…' : 'Cancel Clone')
-              : 'Cancel'}
+            ${this.submodulePhase
+              ? 'Close'
+              : this.isCloning && !this.isComplete
+                ? (this.isCancelling ? 'Cancelling…' : 'Cancel Clone')
+                : 'Cancel'}
           </button>
           <button
             class="btn btn-primary"
             @click=${this.handleClone}
             ?disabled=${!this.canClone}
           >
-            ${this.isCloning ? 'Cloning...' : 'Clone'}
+            ${this.submodulePhase
+              ? 'Cloning submodules...'
+              : this.isComplete
+                ? 'Done'
+                : this.isCloning
+                  ? 'Cloning...'
+                  : 'Clone'}
           </button>
         </div>
       </lv-modal>
