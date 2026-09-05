@@ -8,10 +8,10 @@
  * - Badge updates after operations
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupOpenRepository, defaultMockData, withConflicts } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
-import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, waitForCommand } from '../fixtures/test-helpers';
+import { startCommandCapture, startCommandCaptureWithMocks, findCommand, injectCommandError, injectCommandHang, emitBackendEvent, waitForCommand } from '../fixtures/test-helpers';
 
 // ============================================================================
 // Helpers
@@ -832,5 +832,105 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
     // The pull badge should still show 7 (unchanged because pull failed)
     await expect(pullBadge).toBeVisible();
     await expect(pullBadge).toHaveText('7');
+  });
+});
+
+// ============================================================================
+// Cancelling a remote operation
+//
+// Fetch/pull/push used to advertise cancellation that did not exist: the
+// progress row was never marked cancellable, so the indicator's Cancel button
+// was unreachable dead code, and no operation id reached the backend, so
+// `cancel_operation` had nothing to cancel. No backend code emitted
+// `operation-progress` either, so the row showed an indeterminate stripe with
+// no counts for as long as the transfer ran.
+// ============================================================================
+
+test.describe('Cancelling a remote operation', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+  });
+
+  /** The operation id the app handed the given command. */
+  async function operationIdOf(page: Page, command: string): Promise<string | undefined> {
+    const [call] = await findCommand(page, command);
+    return (call.args as { operationId?: string }).operationId;
+  }
+
+  test('a running fetch shows a cancellable progress row', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await dashboardButton(page, /Fetch/i).click();
+    await waitForCommand(page, 'fetch');
+
+    const row = page.locator('lv-progress-indicator .progress-item');
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(/fetch/i);
+    await expect(page.locator('lv-progress-indicator .cancel-btn')).toBeVisible();
+
+    // And the backend was told which row it belongs to, so a cancel can find it.
+    expect(await operationIdOf(page, 'fetch')).toBeTruthy();
+  });
+
+  test('clicking Cancel invokes cancel_operation for that row and dismisses it', async ({
+    page,
+  }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await dashboardButton(page, /Fetch/i).click();
+    await waitForCommand(page, 'fetch');
+
+    const operationId = await operationIdOf(page, 'fetch');
+    await page.locator('lv-progress-indicator .cancel-btn').click();
+
+    await waitForCommand(page, 'cancel_operation');
+    const [cancel] = await findCommand(page, 'cancel_operation');
+    expect((cancel.args as { operationId?: string }).operationId).toBe(operationId);
+
+    // The row goes away immediately — the user's click has visibly taken effect.
+    await expect(page.locator('lv-progress-indicator .progress-item')).toHaveCount(0);
+  });
+
+  test('a running push is cancellable too', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'push');
+
+    await dashboardButton(page, /Push/i).click();
+    await waitForCommand(page, 'push');
+
+    await expect(page.locator('lv-progress-indicator .cancel-btn')).toBeVisible();
+
+    const operationId = await operationIdOf(page, 'push');
+    await page.locator('lv-progress-indicator .cancel-btn').click();
+    await waitForCommand(page, 'cancel_operation');
+
+    const [cancel] = await findCommand(page, 'cancel_operation');
+    expect((cancel.args as { operationId?: string }).operationId).toBe(operationId);
+  });
+
+  test('the progress row shows the transfer counts the backend reports', async ({ page }) => {
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    await dashboardButton(page, /Fetch/i).click();
+    await waitForCommand(page, 'fetch');
+
+    const operationId = await operationIdOf(page, 'fetch');
+    await emitBackendEvent(page, 'operation-progress', {
+      operationId,
+      message: 'Fetching from origin',
+      progress: 40,
+      receivedObjects: 400,
+      totalObjects: 1000,
+      receivedBytes: 1024 * 1024,
+    });
+
+    const row = page.locator('lv-progress-indicator .progress-item');
+    await expect(row).toContainText('Fetching from origin');
+    await expect(row).toContainText('40%');
+    await expect(row).toContainText('400 / 1,000 objects');
+    await expect(row).toContainText('1.00 MiB');
   });
 });

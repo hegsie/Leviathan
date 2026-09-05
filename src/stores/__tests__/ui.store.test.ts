@@ -10,9 +10,6 @@ describe('ui.store', () => {
         right: { isVisible: true, width: 350, isCollapsed: false },
         bottom: { isVisible: false, width: 200, isCollapsed: false },
       },
-      viewMode: 'graph',
-      splitDiffMode: true,
-      showLineNumbers: true,
       globalLoading: false,
       toasts: [],
     });
@@ -29,18 +26,6 @@ describe('ui.store', () => {
 
     it('should have bottom panel hidden by default', () => {
       expect(uiStore.getState().panels.bottom.isVisible).to.be.false;
-    });
-
-    it('should have graph view mode by default', () => {
-      expect(uiStore.getState().viewMode).to.equal('graph');
-    });
-
-    it('should have split diff mode enabled by default', () => {
-      expect(uiStore.getState().splitDiffMode).to.be.true;
-    });
-
-    it('should have line numbers shown by default', () => {
-      expect(uiStore.getState().showLineNumbers).to.be.true;
     });
 
     it('should start with no toasts', () => {
@@ -101,44 +86,6 @@ describe('ui.store', () => {
       uiStore.getState().setPanelCollapsed('left', true);
       uiStore.getState().setPanelCollapsed('left', false);
       expect(uiStore.getState().panels.left.isCollapsed).to.be.false;
-    });
-  });
-
-  describe('setViewMode', () => {
-    it('should set view mode to list', () => {
-      uiStore.getState().setViewMode('list');
-      expect(uiStore.getState().viewMode).to.equal('list');
-    });
-
-    it('should set view mode to tree', () => {
-      uiStore.getState().setViewMode('tree');
-      expect(uiStore.getState().viewMode).to.equal('tree');
-    });
-
-    it('should set view mode back to graph', () => {
-      uiStore.getState().setViewMode('list');
-      uiStore.getState().setViewMode('graph');
-      expect(uiStore.getState().viewMode).to.equal('graph');
-    });
-  });
-
-  describe('setSplitDiffMode', () => {
-    it('should disable split diff mode', () => {
-      uiStore.getState().setSplitDiffMode(false);
-      expect(uiStore.getState().splitDiffMode).to.be.false;
-    });
-
-    it('should enable split diff mode', () => {
-      uiStore.getState().setSplitDiffMode(false);
-      uiStore.getState().setSplitDiffMode(true);
-      expect(uiStore.getState().splitDiffMode).to.be.true;
-    });
-  });
-
-  describe('setShowLineNumbers', () => {
-    it('should disable line numbers', () => {
-      uiStore.getState().setShowLineNumbers(false);
-      expect(uiStore.getState().showLineNumbers).to.be.false;
     });
   });
 

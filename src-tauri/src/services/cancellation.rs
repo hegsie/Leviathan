@@ -39,10 +39,15 @@ impl Default for CancellationToken {
     }
 }
 
-/// Registry for tracking active operations and their cancellation tokens
-#[derive(Default)]
+/// Registry for tracking active operations and their cancellation tokens.
+///
+/// Cloning shares one map: the registry is Tauri managed state, but the
+/// blocking task that actually runs a fetch/pull/push outlives the command
+/// future that borrowed the `State`, so it needs an owned handle onto the same
+/// table to deregister itself when it really finishes.
+#[derive(Default, Clone)]
 pub struct CancellationRegistry {
-    tokens: Mutex<HashMap<String, CancellationToken>>,
+    tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl CancellationRegistry {
@@ -70,6 +75,81 @@ impl CancellationRegistry {
     pub fn remove(&self, operation_id: &str) {
         if let Ok(mut tokens) = self.tokens.lock() {
             tokens.remove(operation_id);
+        }
+    }
+
+    /// How many operations are currently registered. Test/diagnostic only.
+    pub fn len(&self) -> usize {
+        self.tokens.lock().map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Whether no operation is currently registered.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Register `operation_id` and hand back a guard that deregisters it again
+    /// when dropped.
+    ///
+    /// A guard rather than a matching `remove` call at the end of the command:
+    /// fetch/pull/push are full of `?` early returns and can fail anywhere
+    /// between the network and the merge, and a leaked registration is not
+    /// harmless — the id would stay cancellable forever, and the frontend
+    /// reuses nothing but still, a stale entry keeps a token alive for the
+    /// life of the process.
+    ///
+    /// `operation_id` is `None` for callers that did not ask for
+    /// cancellation (the background window-focus fetch, an internal fetch).
+    /// The guard is then inert: it registers nothing and its token is never
+    /// cancelled.
+    pub fn guard(&self, operation_id: Option<String>) -> OperationGuard {
+        match operation_id {
+            Some(id) => {
+                let token = self.register(id.clone());
+                OperationGuard {
+                    registry: Some(self.clone()),
+                    operation_id: id,
+                    token,
+                }
+            }
+            None => OperationGuard {
+                registry: None,
+                operation_id: String::new(),
+                token: CancellationToken::new(),
+            },
+        }
+    }
+}
+
+/// Deregisters its operation when dropped — on success, on an early `?`
+/// return, and on a panic unwinding out of the task.
+pub struct OperationGuard {
+    registry: Option<CancellationRegistry>,
+    operation_id: String,
+    token: CancellationToken,
+}
+
+impl OperationGuard {
+    /// The token to hand to the git2 callbacks.
+    pub fn token(&self) -> CancellationToken {
+        self.token.clone()
+    }
+
+    /// The operation id, when this guard actually registered one.
+    pub fn operation_id(&self) -> Option<&str> {
+        self.registry.as_ref().map(|_| self.operation_id.as_str())
+    }
+
+    /// Whether cancellation has been requested for this operation.
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        if let Some(registry) = &self.registry {
+            registry.remove(&self.operation_id);
         }
     }
 }
@@ -132,5 +212,69 @@ mod tests {
         registry.remove("op-1");
         let cancelled = registry.cancel("op-1");
         assert!(!cancelled);
+    }
+
+    #[test]
+    fn clones_share_one_table() {
+        let registry = CancellationRegistry::default();
+        let handle = registry.clone();
+        let token = handle.register("op-1".to_string());
+
+        // The clone the blocking task carries must cancel the very operation
+        // the command registered, not a private copy of the map.
+        assert!(registry.cancel("op-1"));
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn guard_registers_and_deregisters_on_drop() {
+        let registry = CancellationRegistry::default();
+        {
+            let guard = registry.guard(Some("op-1".to_string()));
+            assert_eq!(guard.operation_id(), Some("op-1"));
+            assert!(registry.cancel("op-1"), "the id must be cancellable");
+            assert!(guard.is_cancelled());
+        }
+        assert!(registry.is_empty(), "the guard must deregister on drop");
+        assert!(!registry.cancel("op-1"));
+    }
+
+    #[test]
+    fn guard_deregisters_when_the_operation_fails() {
+        let registry = CancellationRegistry::default();
+        fn run(registry: &CancellationRegistry) -> std::result::Result<(), &'static str> {
+            let _guard = registry.guard(Some("op-1".to_string()));
+            Err("network blew up")
+        }
+        let failed = run(&registry);
+        assert!(failed.is_err());
+        assert!(
+            registry.is_empty(),
+            "an early return must not leak a registration"
+        );
+    }
+
+    #[test]
+    fn guard_deregisters_when_the_operation_panics() {
+        let registry = CancellationRegistry::default();
+        let handle = registry.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = handle.guard(Some("op-1".to_string()));
+            panic!("boom");
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            registry.is_empty(),
+            "a panic must not leak a registration either"
+        );
+    }
+
+    #[test]
+    fn guard_without_an_id_registers_nothing() {
+        let registry = CancellationRegistry::default();
+        let guard = registry.guard(None);
+        assert_eq!(guard.operation_id(), None);
+        assert!(!guard.is_cancelled());
+        assert!(registry.is_empty());
     }
 }
