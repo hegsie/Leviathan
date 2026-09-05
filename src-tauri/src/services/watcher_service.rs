@@ -609,6 +609,32 @@ fn strip_to_last_git(path: &Path) -> Option<PathBuf> {
     Some(path.components().skip(split? + 1).collect::<PathBuf>())
 }
 
+/// Drop the `worktrees/<name>` or `modules/<name>` pair this scope owns from a
+/// path that was only resolved by its last `.git` component.
+///
+/// A linked worktree's git dir is `<repo>/.git/worktrees/<name>` and a
+/// submodule opened as its own repository has `<super>/.git/modules/<name>`, so
+/// the text after the last `.git` still carries that pair —
+/// `worktrees/wt/index` rather than `index` — and `classify_git_relative`
+/// matches on the FIRST component, which would drop the event.
+///
+/// Only the pair belonging to THIS scope's git dir is removed, so the main
+/// repository (whose git dir has no such suffix) keeps ignoring
+/// `modules/sub/index`, and a linked worktree's events in the shared common dir
+/// (`refs/heads/main`) are left untouched.
+fn strip_scope_git_dir_suffix(scope: &RepoScope, relative: PathBuf) -> PathBuf {
+    let Some(suffix) = strip_to_last_git(&scope.git_dir) else {
+        return relative;
+    };
+    if suffix.as_os_str().is_empty() {
+        return relative;
+    }
+    match relative.strip_prefix(&suffix) {
+        Ok(stripped) => stripped.to_path_buf(),
+        Err(_) => relative,
+    }
+}
+
 /// The path of an event relative to the repository's git directory, if it is
 /// inside it.
 fn git_relative<'a>(scope: &RepoScope, path: &'a Path) -> Option<Cow<'a, Path>> {
@@ -619,8 +645,10 @@ fn git_relative<'a>(scope: &RepoScope, path: &'a Path) -> Option<Cow<'a, Path>> 
     } else {
         // Some back ends report a differently normalised prefix than libgit2
         // hands us (`/private/var` vs `/var` on macOS, for one), so fall back
-        // to the last `.git` component in the path.
-        Cow::Owned(strip_to_last_git(path)?)
+        // to the last `.git` component in the path. That leaves a linked
+        // worktree or a submodule's own git dir prefixed with the pair it
+        // lives under, which has to go before the path can be classified.
+        Cow::Owned(strip_scope_git_dir_suffix(scope, strip_to_last_git(path)?))
     };
 
     // A submodule or nested repository below the git directory carries a
@@ -810,6 +838,27 @@ mod tests {
 
     fn classify_in(root: &str, paths: &[&str]) -> Option<WatcherEvent> {
         classify_paths(Path::new(root), paths.iter().map(PathBuf::from).collect())
+    }
+
+    /// A scope whose git dir is not the plain `<root>/.git` — a linked
+    /// worktree (`<main>/.git/worktrees/<name>`) or a submodule opened as its
+    /// own repository (`<super>/.git/modules/<name>`).
+    fn linked_scope(key: &str, git_dir: &str, common_dir: &str) -> Arc<RepoScope> {
+        Arc::new(RepoScope {
+            key: key.to_string(),
+            git_dir: PathBuf::from(git_dir),
+            common_dir: PathBuf::from(common_dir),
+        })
+    }
+
+    fn classify_with(scope: Arc<RepoScope>, paths: &[&str]) -> Option<WatcherEvent> {
+        coalesce(vec![(
+            scope,
+            Ok(vec![debounced(paths.iter().map(PathBuf::from).collect())]),
+        )])
+        .into_iter()
+        .map(|(_, event)| event)
+        .next()
     }
 
     fn workdir_paths(event: Option<WatcherEvent>) -> Vec<PathBuf> {
@@ -1207,6 +1256,105 @@ mod tests {
             classify_in("/repo", &["/repo/.git/modules/sub/.git/refs/heads/main"]),
             Some(WatcherEvent::RefsChanged)
         ));
+    }
+
+    // --- linked worktrees and submodules opened as their own repository ---
+
+    fn worktree_scope() -> Arc<RepoScope> {
+        linked_scope("/wt", "/main/.git/worktrees/wt", "/main/.git")
+    }
+
+    fn submodule_scope() -> Arc<RepoScope> {
+        linked_scope(
+            "/super/sub",
+            "/super/.git/modules/sub",
+            "/super/.git/modules/sub",
+        )
+    }
+
+    #[test]
+    fn test_linked_worktree_classifies_on_the_prefix_path() {
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/main/.git/worktrees/wt/index"]),
+            Some(WatcherEvent::IndexChanged)
+        ));
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/main/.git/worktrees/wt/HEAD"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+        // Refs are shared with the main repository, so they arrive under the
+        // common dir instead
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/main/.git/refs/heads/main"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_linked_worktree_classifies_on_the_fallback_path() {
+        // Neither prefix matches (a differently normalised path), so the last
+        // `.git` fallback runs and has to drop `worktrees/wt` itself.
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/private/main/.git/worktrees/wt/index"]),
+            Some(WatcherEvent::IndexChanged)
+        ));
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/private/main/.git/worktrees/wt/HEAD"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+        assert!(matches!(
+            classify_with(worktree_scope(), &["/private/main/.git/refs/heads/main"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_submodule_as_its_own_repository_classifies_on_the_fallback_path() {
+        assert!(matches!(
+            classify_with(
+                submodule_scope(),
+                &["/private/super/.git/modules/sub/index"]
+            ),
+            Some(WatcherEvent::IndexChanged)
+        ));
+        assert!(matches!(
+            classify_with(submodule_scope(), &["/private/super/.git/modules/sub/HEAD"]),
+            Some(WatcherEvent::RefsChanged)
+        ));
+        assert!(matches!(
+            classify_with(
+                submodule_scope(),
+                &["/private/super/.git/modules/sub/refs/heads/main"]
+            ),
+            Some(WatcherEvent::RefsChanged)
+        ));
+    }
+
+    #[test]
+    fn test_submodule_as_its_own_repository_classifies_on_the_prefix_path() {
+        assert!(matches!(
+            classify_with(submodule_scope(), &["/super/.git/modules/sub/index"]),
+            Some(WatcherEvent::IndexChanged)
+        ));
+    }
+
+    #[test]
+    fn test_fallback_only_strips_the_pair_this_scope_owns() {
+        // The main repository still ignores a submodule's git dir, whichever
+        // branch resolved the path
+        assert!(classify_in("/repo", &["/private/repo/.git/modules/sub/index"]).is_none());
+        // ... and a worktree scope does not claim a sibling worktree's index
+        assert!(classify_with(
+            worktree_scope(),
+            &["/private/main/.git/worktrees/other/index"]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_linked_worktree_working_files_are_still_workdir_changes() {
+        let paths = workdir_paths(classify_with(worktree_scope(), &["/wt/src/main.rs"]));
+        assert_eq!(paths, vec![PathBuf::from("/wt/src/main.rs")]);
     }
 
     // --- working directory files that look like git files ---
