@@ -7585,30 +7585,117 @@ export type CommitInfoFormat =
 export type FilePathFormat = "relative" | "absolute" | "filename";
 
 /**
+ * How long to wait for `navigator.clipboard.writeText` before giving up on it.
+ *
+ * The async clipboard API does not always reject when it cannot write: without
+ * clipboard-write permission, outside a secure context, or outside a user
+ * gesture it can leave its promise pending forever. An unbounded `await` there
+ * means the caller never returns, so the user clicks "Copy" and gets neither a
+ * clipboard entry nor an error — the operation just disappears. Bound the wait
+ * and fall through to the synchronous fallback below instead.
+ */
+const CLIPBOARD_WRITE_TIMEOUT_MS = 2000;
+
+/**
+ * Last-resort clipboard write using the legacy synchronous API.
+ *
+ * `document.execCommand("copy")` is deprecated but still implemented
+ * everywhere, works without the clipboard-write permission, and — being
+ * synchronous — cannot hang. It only copies the current selection, so the text
+ * is staged in an off-screen textarea first.
+ *
+ * @returns true when the copy was accepted
+ */
+function copyToClipboardFallback(text: string): boolean {
+  if (typeof document === "undefined" || !document.body) {
+    return false;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  // Keep it out of view and out of the layout, but still focusable/selectable —
+  // `display: none` and `visibility: hidden` elements cannot hold a selection.
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  textarea.setAttribute("aria-hidden", "true");
+
+  const previouslyFocused = document.activeElement as HTMLElement | null;
+  document.body.appendChild(textarea);
+
+  try {
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+    // Restore focus so the fallback is invisible to the user.
+    previouslyFocused?.focus?.();
+  }
+}
+
+/**
  * Copy text to the system clipboard
- * Uses the browser's clipboard API for better reliability
+ *
+ * Prefers the async clipboard API and falls back to the legacy synchronous
+ * copy when it is missing, rejects, or never settles. Always resolves — a
+ * clipboard write must never leave a caller (or a test) awaiting forever.
+ *
+ * Note: this deliberately does not route through the `copy_to_clipboard` Tauri
+ * command. That command does not touch the system clipboard; it echoes the
+ * text back, so using it would report success while copying nothing.
+ *
  * @param text Text to copy
  * @returns Result with the copied text
  */
 export async function copyToClipboard(
   text: string,
 ): Promise<CommandResult<CopyResult>> {
-  try {
-    await navigator.clipboard.writeText(text);
+  let asyncError: unknown;
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const wrote = await Promise.race([
+        navigator.clipboard.writeText(text).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), CLIPBOARD_WRITE_TIMEOUT_MS);
+        }),
+      ]);
+      if (wrote) {
+        return {
+          success: true,
+          data: { success: true, text },
+        };
+      }
+    } catch (error) {
+      asyncError = error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  if (copyToClipboardFallback(text)) {
     return {
       success: true,
       data: { success: true, text },
     };
-  } catch (error) {
-    return {
-      success: false,
-      error: {
-        code: "CLIPBOARD_ERROR",
-        message:
-          error instanceof Error ? error.message : "Failed to copy to clipboard",
-      },
-    };
   }
+
+  return {
+    success: false,
+    error: {
+      code: "CLIPBOARD_ERROR",
+      message:
+        asyncError instanceof Error
+          ? asyncError.message
+          : "Failed to copy to clipboard",
+    },
+  };
 }
 
 /**

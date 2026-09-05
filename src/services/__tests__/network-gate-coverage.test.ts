@@ -28,6 +28,24 @@ const invoked: string[] = [];
   transformCallback: () => 0,
 };
 
+/**
+ * The sweep calls `copyToClipboard` like every other export. The real async
+ * clipboard API leaves its promise pending in a headless browser — no
+ * permission, no user gesture — which used to hang both sweeps until the
+ * 10 s mocha timeout, and got written off as load flakiness for months.
+ *
+ * `copyToClipboard` now bounds that wait itself, so the sweep no longer hangs
+ * either way; this stub keeps it instant and deterministic instead of paying
+ * the timeout, exactly as `__TAURI_INTERNALS__` above stubs the IPC layer.
+ * The sweep still calls the function and still checks what it invoked, so
+ * nothing the test guards is weakened.
+ */
+Object.defineProperty(navigator, 'clipboard', {
+  value: { writeText: () => Promise.resolve(), readText: () => Promise.resolve('') },
+  configurable: true,
+  writable: true,
+});
+
 import { expect } from '@open-wc/testing';
 import * as gitService from '../git.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
