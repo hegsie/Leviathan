@@ -90,33 +90,36 @@ pub async fn get_diff(
     commit: Option<String>,
     compare_with: Option<String>,
 ) -> Result<Vec<DiffFile>> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let mut diff = if let Some(ref commit_oid) = commit {
-        // Diff between two commits or commit and parent
-        let commit = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
+        let mut diff = if let Some(ref commit_oid) = commit {
+            // Diff between two commits or commit and parent
+            let commit = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
 
-        if let Some(ref compare_oid) = compare_with {
-            let compare_commit = repo.find_commit(git2::Oid::from_str(compare_oid)?)?;
-            repo.diff_tree_to_tree(Some(&compare_commit.tree()?), Some(&commit.tree()?), None)?
+            if let Some(ref compare_oid) = compare_with {
+                let compare_commit = repo.find_commit(git2::Oid::from_str(compare_oid)?)?;
+                repo.diff_tree_to_tree(Some(&compare_commit.tree()?), Some(&commit.tree()?), None)?
+            } else {
+                let parent = commit.parent(0).ok();
+                let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
+                repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit.tree()?), None)?
+            }
+        } else if staged.unwrap_or(false) {
+            // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
+            let head_tree = head_tree_opt(&repo)?;
+            repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
         } else {
-            let parent = commit.parent(0).ok();
-            let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
-            repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit.tree()?), None)?
-        }
-    } else if staged.unwrap_or(false) {
-        // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
-        let head_tree = head_tree_opt(&repo)?;
-        repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
-    } else {
-        // Unstaged changes (working directory vs index)
-        repo.diff_index_to_workdir(None, None)?
-    };
+            // Unstaged changes (working directory vs index)
+            repo.diff_index_to_workdir(None, None)?
+        };
 
-    // Detect renames/copies (git's default) so a move is one entry, not add+del.
-    detect_renames(&mut diff)?;
+        // Detect renames/copies (git's default) so a move is one entry, not add+del.
+        detect_renames(&mut diff)?;
 
-    parse_diff(&diff)
+        parse_diff(&diff)
+    })
+    .await
 }
 
 /// Get diff with advanced options (whitespace handling, context lines, algorithm)
@@ -141,68 +144,71 @@ pub async fn get_diff_with_options(
     histogram: Option<bool>,
     max_lines: Option<u32>,
 ) -> Result<Vec<DiffFile>> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let mut opts = git2::DiffOptions::new();
+        let mut opts = git2::DiffOptions::new();
 
-    // Apply file path filter if specified
-    if let Some(ref fp) = file_path {
-        let normalized = fp.replace('\\', "/");
-        opts.pathspec(&normalized);
-    }
-
-    // Apply whitespace, context, and algorithm options
-    apply_diff_options(
-        &mut opts,
-        &ignore_whitespace,
-        context_lines,
-        patience,
-        histogram,
-    );
-
-    // Include untracked files for working directory diffs
-    if commit.is_none() {
-        opts.include_untracked(true);
-        opts.recurse_untracked_dirs(true);
-        opts.show_untracked_content(true);
-    }
-
-    let mut diff = if let Some(ref commit_oid) = commit {
-        // Diff between two commits or commit and parent
-        let commit_obj = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
-
-        if let Some(ref compare_oid) = compare_with {
-            let compare_commit = repo.find_commit(git2::Oid::from_str(compare_oid)?)?;
-            repo.diff_tree_to_tree(
-                Some(&compare_commit.tree()?),
-                Some(&commit_obj.tree()?),
-                Some(&mut opts),
-            )?
-        } else {
-            let parent = commit_obj.parent(0).ok();
-            let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
-            repo.diff_tree_to_tree(
-                parent_tree.as_ref(),
-                Some(&commit_obj.tree()?),
-                Some(&mut opts),
-            )?
+        // Apply file path filter if specified
+        if let Some(ref fp) = file_path {
+            let normalized = fp.replace('\\', "/");
+            opts.pathspec(&normalized);
         }
-    } else if staged.unwrap_or(false) {
-        // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
-        let head_tree = head_tree_opt(&repo)?;
-        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
-    } else {
-        // Unstaged changes (working directory vs index)
-        repo.diff_index_to_workdir(None, Some(&mut opts))?
-    };
 
-    detect_renames(&mut diff)?;
+        // Apply whitespace, context, and algorithm options
+        apply_diff_options(
+            &mut opts,
+            &ignore_whitespace,
+            context_lines,
+            patience,
+            histogram,
+        );
 
-    let files = parse_diff(&diff)?;
-    Ok(files
-        .into_iter()
-        .map(|f| maybe_truncate_diff(f, max_lines))
-        .collect())
+        // Include untracked files for working directory diffs
+        if commit.is_none() {
+            opts.include_untracked(true);
+            opts.recurse_untracked_dirs(true);
+            opts.show_untracked_content(true);
+        }
+
+        let mut diff = if let Some(ref commit_oid) = commit {
+            // Diff between two commits or commit and parent
+            let commit_obj = repo.find_commit(git2::Oid::from_str(commit_oid)?)?;
+
+            if let Some(ref compare_oid) = compare_with {
+                let compare_commit = repo.find_commit(git2::Oid::from_str(compare_oid)?)?;
+                repo.diff_tree_to_tree(
+                    Some(&compare_commit.tree()?),
+                    Some(&commit_obj.tree()?),
+                    Some(&mut opts),
+                )?
+            } else {
+                let parent = commit_obj.parent(0).ok();
+                let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
+                repo.diff_tree_to_tree(
+                    parent_tree.as_ref(),
+                    Some(&commit_obj.tree()?),
+                    Some(&mut opts),
+                )?
+            }
+        } else if staged.unwrap_or(false) {
+            // Staged changes (index vs HEAD, or the empty tree on an unborn HEAD)
+            let head_tree = head_tree_opt(&repo)?;
+            repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
+        } else {
+            // Unstaged changes (working directory vs index)
+            repo.diff_index_to_workdir(None, Some(&mut opts))?
+        };
+
+        detect_renames(&mut diff)?;
+
+        let files = parse_diff(&diff)?;
+        Ok(files
+            .into_iter()
+            .map(|f| maybe_truncate_diff(f, max_lines))
+            .collect())
+    })
+    .await
 }
 
 /// Get diff for a specific file
@@ -213,141 +219,145 @@ pub async fn get_file_diff(
     staged: Option<bool>,
     max_lines: Option<u32>,
 ) -> Result<DiffFile> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    // Normalize path separators for git (always use forward slashes)
-    let normalized_file_path = file_path.replace('\\', "/");
+        // Normalize path separators for git (always use forward slashes)
+        let normalized_file_path = file_path.replace('\\', "/");
 
-    let mut opts = git2::DiffOptions::new();
-    opts.pathspec(&normalized_file_path);
-    // Include untracked files so we can show diff for new files
-    opts.include_untracked(true);
-    opts.recurse_untracked_dirs(true);
-    opts.show_untracked_content(true);
+        let mut opts = git2::DiffOptions::new();
+        opts.pathspec(&normalized_file_path);
+        // Include untracked files so we can show diff for new files
+        opts.include_untracked(true);
+        opts.recurse_untracked_dirs(true);
+        opts.show_untracked_content(true);
 
-    let is_staged = staged.unwrap_or(false);
+        let is_staged = staged.unwrap_or(false);
 
-    let mut diff = if is_staged {
-        // Staged changes: compare HEAD to index (empty tree on an unborn HEAD)
-        let head_tree = head_tree_opt(&repo)?;
-        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
-    } else {
-        // Unstaged changes: compare index to workdir
-        repo.diff_index_to_workdir(None, Some(&mut opts))?
-    };
+        let mut diff = if is_staged {
+            // Staged changes: compare HEAD to index (empty tree on an unborn HEAD)
+            let head_tree = head_tree_opt(&repo)?;
+            repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
+        } else {
+            // Unstaged changes: compare index to workdir
+            repo.diff_index_to_workdir(None, Some(&mut opts))?
+        };
 
-    detect_renames(&mut diff)?;
+        detect_renames(&mut diff)?;
 
-    let files = parse_diff(&diff)?;
+        let files = parse_diff(&diff)?;
 
-    // If we found the file, return it
-    // pathspec should have filtered to just our file, but it may be empty
-    // if case-sensitivity caused a mismatch
-    if let Some(file) = files.into_iter().next() {
-        return Ok(maybe_truncate_diff(file, max_lines));
-    }
+        // If we found the file, return it
+        // pathspec should have filtered to just our file, but it may be empty
+        // if case-sensitivity caused a mismatch
+        if let Some(file) = files.into_iter().next() {
+            return Ok(maybe_truncate_diff(file, max_lines));
+        }
 
-    // Fallback: pathspec may have failed due to case sensitivity on Windows
-    // Try getting full diff and finding the file with case-insensitive match
-    let mut fallback_opts = git2::DiffOptions::new();
-    fallback_opts.include_untracked(true);
-    fallback_opts.recurse_untracked_dirs(true);
-    fallback_opts.show_untracked_content(true);
+        // Fallback: pathspec may have failed due to case sensitivity on Windows
+        // Try getting full diff and finding the file with case-insensitive match
+        let mut fallback_opts = git2::DiffOptions::new();
+        fallback_opts.include_untracked(true);
+        fallback_opts.recurse_untracked_dirs(true);
+        fallback_opts.show_untracked_content(true);
 
-    let mut fallback_diff = if is_staged {
-        let head_tree = head_tree_opt(&repo)?;
-        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut fallback_opts))?
-    } else {
-        repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
-    };
+        let mut fallback_diff = if is_staged {
+            let head_tree = head_tree_opt(&repo)?;
+            repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut fallback_opts))?
+        } else {
+            repo.diff_index_to_workdir(None, Some(&mut fallback_opts))?
+        };
 
-    detect_renames(&mut fallback_diff)?;
+        detect_renames(&mut fallback_diff)?;
 
-    let all_files = parse_diff(&fallback_diff)?;
+        let all_files = parse_diff(&fallback_diff)?;
 
-    // Try exact match first
-    if let Some(file) = all_files.iter().find(|f| f.path == normalized_file_path) {
-        return Ok(maybe_truncate_diff(file.clone(), max_lines));
-    }
+        // Try exact match first
+        if let Some(file) = all_files.iter().find(|f| f.path == normalized_file_path) {
+            return Ok(maybe_truncate_diff(file.clone(), max_lines));
+        }
 
-    // Try case-insensitive match (handles case-sensitivity mismatches on
-    // Windows). We deliberately do NOT fall back to a filename-suffix match or
-    // to the opposite staging area: `git diff [--cached] -- <path>` is strict
-    // about the path and never substitutes a different file's diff. Doing so
-    // here previously returned an unrelated file (e.g. vendor/foo.c for a
-    // request of src/foo.c) or presented staged hunks as unstaged.
-    if let Some(file) = all_files
-        .iter()
-        .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
-    {
-        return Ok(maybe_truncate_diff(file.clone(), max_lines));
-    }
+        // Try case-insensitive match (handles case-sensitivity mismatches on
+        // Windows). We deliberately do NOT fall back to a filename-suffix match or
+        // to the opposite staging area: `git diff [--cached] -- <path>` is strict
+        // about the path and never substitutes a different file's diff. Doing so
+        // here previously returned an unrelated file (e.g. vendor/foo.c for a
+        // request of src/foo.c) or presented staged hunks as unstaged.
+        if let Some(file) = all_files
+            .iter()
+            .find(|f| f.path.eq_ignore_ascii_case(&normalized_file_path))
+        {
+            return Ok(maybe_truncate_diff(file.clone(), max_lines));
+        }
 
-    // Log available files for debugging
-    let available_paths: Vec<&str> = all_files.iter().map(|f| f.path.as_str()).collect();
-    tracing::warn!(
-        "File '{}' not found in diff. Staged: {}. Available files ({}):\n{}",
-        normalized_file_path,
-        is_staged,
-        available_paths.len(),
-        available_paths.join("\n")
-    );
+        // Log available files for debugging
+        let available_paths: Vec<&str> = all_files.iter().map(|f| f.path.as_str()).collect();
+        tracing::warn!(
+            "File '{}' not found in diff. Staged: {}. Available files ({}):\n{}",
+            normalized_file_path,
+            is_staged,
+            available_paths.len(),
+            available_paths.join("\n")
+        );
 
-    // File not found in diff - it might be untracked or have no changes
-    // Try to read the file and generate a synthetic diff for new/untracked files
-    let full_path = validate_path_within_repo(Path::new(&path), &normalized_file_path)?;
-    if full_path.exists() {
-        // Check if file is untracked
-        let statuses = repo.statuses(Some(
-            git2::StatusOptions::new()
-                .pathspec(&normalized_file_path)
-                .include_untracked(true)
-                .recurse_untracked_dirs(true),
-        ))?;
+        // File not found in diff - it might be untracked or have no changes
+        // Try to read the file and generate a synthetic diff for new/untracked files
+        let full_path = validate_path_within_repo(Path::new(&path), &normalized_file_path)?;
+        if full_path.exists() {
+            // Check if file is untracked
+            let statuses = repo.statuses(Some(
+                git2::StatusOptions::new()
+                    .pathspec(&normalized_file_path)
+                    .include_untracked(true)
+                    .recurse_untracked_dirs(true),
+            ))?;
 
-        for entry in statuses.iter() {
-            if let Ok(entry_path) = entry.path() {
-                let normalized_entry_path = entry_path.replace('\\', "/");
-                // Case-insensitive comparison on Windows
-                #[cfg(target_os = "windows")]
-                let paths_match = normalized_entry_path.eq_ignore_ascii_case(&normalized_file_path);
-                #[cfg(not(target_os = "windows"))]
-                let paths_match = normalized_entry_path == normalized_file_path;
+            for entry in statuses.iter() {
+                if let Ok(entry_path) = entry.path() {
+                    let normalized_entry_path = entry_path.replace('\\', "/");
+                    // Case-insensitive comparison on Windows
+                    #[cfg(target_os = "windows")]
+                    let paths_match =
+                        normalized_entry_path.eq_ignore_ascii_case(&normalized_file_path);
+                    #[cfg(not(target_os = "windows"))]
+                    let paths_match = normalized_entry_path == normalized_file_path;
 
-                if paths_match {
-                    let status = entry.status();
-                    if status.is_wt_new() || status.is_index_new() {
-                        // It's a new/untracked file - generate diff from file content
-                        return generate_new_file_diff(&full_path, &normalized_file_path)
-                            .map(|f| maybe_truncate_diff(f, max_lines));
+                    if paths_match {
+                        let status = entry.status();
+                        if status.is_wt_new() || status.is_index_new() {
+                            // It's a new/untracked file - generate diff from file content
+                            return generate_new_file_diff(&full_path, &normalized_file_path)
+                                .map(|f| maybe_truncate_diff(f, max_lines));
+                        }
                     }
                 }
             }
         }
-    }
 
-    // If we get here, the file might have changes that git considers empty
-    // (e.g., only whitespace/line-ending changes being ignored)
-    // Include debug info in error message for troubleshooting
-    let sample_paths: String = available_paths
-        .iter()
-        .take(10)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if available_paths.len() > 10 {
-        format!("... and {} more", available_paths.len() - 10)
-    } else {
-        String::new()
-    };
-    Err(crate::error::LeviathanError::OperationFailed(format!(
-        "File '{}' not found in diff. Staged: {}. Found {} files: [{}{}]",
-        normalized_file_path,
-        is_staged,
-        available_paths.len(),
-        sample_paths,
-        suffix
-    )))
+        // If we get here, the file might have changes that git considers empty
+        // (e.g., only whitespace/line-ending changes being ignored)
+        // Include debug info in error message for troubleshooting
+        let sample_paths: String = available_paths
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if available_paths.len() > 10 {
+            format!("... and {} more", available_paths.len() - 10)
+        } else {
+            String::new()
+        };
+        Err(crate::error::LeviathanError::OperationFailed(format!(
+            "File '{}' not found in diff. Staged: {}. Found {} files: [{}{}]",
+            normalized_file_path,
+            is_staged,
+            available_paths.len(),
+            sample_paths,
+            suffix
+        )))
+    })
+    .await
 }
 
 /// Generate a diff for a new/untracked file (entire content as additions)
@@ -549,71 +559,74 @@ pub struct CommitFileEntry {
 /// Get list of files changed in a commit
 #[command]
 pub async fn get_commit_files(path: String, commit_oid: String) -> Result<Vec<CommitFileEntry>> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
 
-    let parent = commit.parent(0).ok();
-    let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
-    let commit_tree = commit.tree()?;
+        let parent = commit.parent(0).ok();
+        let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
+        let commit_tree = commit.tree()?;
 
-    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+        let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
 
-    // Detect renames/copies (git's default) so a moved file is a single
-    // "renamed" entry instead of a delete + add pair.
-    detect_renames(&mut diff)?;
+        // Detect renames/copies (git's default) so a moved file is a single
+        // "renamed" entry instead of a delete + add pair.
+        detect_renames(&mut diff)?;
 
-    // First pass: collect file info
-    let mut files: Vec<CommitFileEntry> = Vec::new();
-    for delta in diff.deltas() {
-        let file_path = delta
-            .new_file()
-            .path()
-            .or_else(|| delta.old_file().path())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        let status = match delta.status() {
-            git2::Delta::Added => FileStatus::New,
-            git2::Delta::Deleted => FileStatus::Deleted,
-            git2::Delta::Modified => FileStatus::Modified,
-            git2::Delta::Renamed => FileStatus::Renamed,
-            git2::Delta::Copied => FileStatus::Copied,
-            git2::Delta::Typechange => FileStatus::Typechange,
-            _ => FileStatus::Modified,
-        };
-
-        // Surface the previous path for renames/copies so the UI can show it.
-        let old_path = match delta.status() {
-            git2::Delta::Renamed | git2::Delta::Copied => delta
-                .old_file()
+        // First pass: collect file info
+        let mut files: Vec<CommitFileEntry> = Vec::new();
+        for delta in diff.deltas() {
+            let file_path = delta
+                .new_file()
                 .path()
-                .map(|p| p.to_string_lossy().to_string()),
-            _ => None,
-        };
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
 
-        files.push(CommitFileEntry {
-            path: file_path,
-            old_path,
-            status,
-            additions: 0,
-            deletions: 0,
-        });
-    }
+            let status = match delta.status() {
+                git2::Delta::Added => FileStatus::New,
+                git2::Delta::Deleted => FileStatus::Deleted,
+                git2::Delta::Modified => FileStatus::Modified,
+                git2::Delta::Renamed => FileStatus::Renamed,
+                git2::Delta::Copied => FileStatus::Copied,
+                git2::Delta::Typechange => FileStatus::Typechange,
+                _ => FileStatus::Modified,
+            };
 
-    // Second pass: count additions/deletions
-    let stats = diff.stats()?;
-    for i in 0..stats.files_changed() {
-        if i < files.len() {
-            // Get stats for this file from the diff
-            if let Some(patch) = git2::Patch::from_diff(&diff, i).ok().flatten() {
-                let (_, additions, deletions) = patch.line_stats()?;
-                files[i].additions = additions;
-                files[i].deletions = deletions;
+            // Surface the previous path for renames/copies so the UI can show it.
+            let old_path = match delta.status() {
+                git2::Delta::Renamed | git2::Delta::Copied => delta
+                    .old_file()
+                    .path()
+                    .map(|p| p.to_string_lossy().to_string()),
+                _ => None,
+            };
+
+            files.push(CommitFileEntry {
+                path: file_path,
+                old_path,
+                status,
+                additions: 0,
+                deletions: 0,
+            });
+        }
+
+        // Second pass: count additions/deletions
+        let stats = diff.stats()?;
+        for i in 0..stats.files_changed() {
+            if i < files.len() {
+                // Get stats for this file from the diff
+                if let Some(patch) = git2::Patch::from_diff(&diff, i).ok().flatten() {
+                    let (_, additions, deletions) = patch.line_stats()?;
+                    files[i].additions = additions;
+                    files[i].deletions = deletions;
+                }
             }
         }
-    }
 
-    Ok(files)
+        Ok(files)
+    })
+    .await
 }
 
 /// Stats for a single commit
@@ -630,100 +643,103 @@ pub struct CommitStats {
 /// This is optimized for the graph view to show commit sizes
 #[command]
 pub async fn get_commits_stats(path: String, commit_oids: Vec<String>) -> Result<Vec<CommitStats>> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let mut results = Vec::with_capacity(commit_oids.len());
-    let mut skipped_oid_parse = 0;
-    let mut skipped_commit_find = 0;
-    let mut skipped_tree = 0;
-    let mut skipped_diff = 0;
-    let mut skipped_stats = 0;
-    let mut zero_stats = 0;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let mut results = Vec::with_capacity(commit_oids.len());
+        let mut skipped_oid_parse = 0;
+        let mut skipped_commit_find = 0;
+        let mut skipped_tree = 0;
+        let mut skipped_diff = 0;
+        let mut skipped_stats = 0;
+        let mut zero_stats = 0;
 
-    for oid_str in &commit_oids {
-        let oid = match git2::Oid::from_str(oid_str) {
-            Ok(o) => o,
-            Err(_) => {
-                skipped_oid_parse += 1;
-                continue;
-            }
-        };
+        for oid_str in &commit_oids {
+            let oid = match git2::Oid::from_str(oid_str) {
+                Ok(o) => o,
+                Err(_) => {
+                    skipped_oid_parse += 1;
+                    continue;
+                }
+            };
 
-        let commit = match repo.find_commit(oid) {
-            Ok(c) => c,
-            Err(_) => {
-                skipped_commit_find += 1;
-                continue;
-            }
-        };
+            let commit = match repo.find_commit(oid) {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped_commit_find += 1;
+                    continue;
+                }
+            };
 
-        let parent = commit.parent(0).ok();
-        let parent_tree = parent.as_ref().and_then(|p| p.tree().ok());
-        let commit_tree = match commit.tree() {
-            Ok(t) => t,
-            Err(_) => {
-                skipped_tree += 1;
-                continue;
-            }
-        };
+            let parent = commit.parent(0).ok();
+            let parent_tree = parent.as_ref().and_then(|p| p.tree().ok());
+            let commit_tree = match commit.tree() {
+                Ok(t) => t,
+                Err(_) => {
+                    skipped_tree += 1;
+                    continue;
+                }
+            };
 
-        let mut diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)
-        {
-            Ok(d) => d,
-            Err(_) => {
+            let mut diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)
+            {
+                Ok(d) => d,
+                Err(_) => {
+                    skipped_diff += 1;
+                    continue;
+                }
+            };
+
+            // Detect renames so a pure rename reports 0/0 like git, rather than
+            // over-counting the full file as +N/-N (delete + add).
+            if detect_renames(&mut diff).is_err() {
                 skipped_diff += 1;
                 continue;
             }
-        };
 
-        // Detect renames so a pure rename reports 0/0 like git, rather than
-        // over-counting the full file as +N/-N (delete + add).
-        if detect_renames(&mut diff).is_err() {
-            skipped_diff += 1;
-            continue;
-        }
+            let (additions, deletions, files_changed) = match diff.stats() {
+                Ok(s) => (s.insertions(), s.deletions(), s.files_changed()),
+                Err(e) => {
+                    // Stats can fail for binary-only diffs or very large diffs
+                    // Return 0/0/0 instead of skipping to avoid missing commits
+                    tracing::debug!("get_commits_stats: stats failed for {}: {}", oid_str, e);
+                    skipped_stats += 1;
+                    (0, 0, 0)
+                }
+            };
 
-        let (additions, deletions, files_changed) = match diff.stats() {
-            Ok(s) => (s.insertions(), s.deletions(), s.files_changed()),
-            Err(e) => {
-                // Stats can fail for binary-only diffs or very large diffs
-                // Return 0/0/0 instead of skipping to avoid missing commits
-                tracing::debug!("get_commits_stats: stats failed for {}: {}", oid_str, e);
-                skipped_stats += 1;
-                (0, 0, 0)
+            // Track commits with zero stats (may be merge commits or empty commits)
+            if additions == 0 && deletions == 0 && files_changed == 0 {
+                zero_stats += 1;
             }
-        };
 
-        // Track commits with zero stats (may be merge commits or empty commits)
-        if additions == 0 && deletions == 0 && files_changed == 0 {
-            zero_stats += 1;
+            results.push(CommitStats {
+                oid: oid_str.clone(),
+                additions,
+                deletions,
+                files_changed,
+            });
         }
 
-        results.push(CommitStats {
-            oid: oid_str.clone(),
-            additions,
-            deletions,
-            files_changed,
-        });
-    }
+        let total_skipped =
+            skipped_oid_parse + skipped_commit_find + skipped_tree + skipped_diff + skipped_stats;
+        if total_skipped > 0 || zero_stats > 0 {
+            tracing::warn!(
+                "get_commits_stats: processed {}/{} commits for {}. Skipped: oid_parse={}, commit_find={}, tree={}, diff={}, stats={}. Zero stats: {}",
+                results.len(),
+                commit_oids.len(),
+                path,
+                skipped_oid_parse,
+                skipped_commit_find,
+                skipped_tree,
+                skipped_diff,
+                skipped_stats,
+                zero_stats
+            );
+        }
 
-    let total_skipped =
-        skipped_oid_parse + skipped_commit_find + skipped_tree + skipped_diff + skipped_stats;
-    if total_skipped > 0 || zero_stats > 0 {
-        tracing::warn!(
-            "get_commits_stats: processed {}/{} commits for {}. Skipped: oid_parse={}, commit_find={}, tree={}, diff={}, stats={}. Zero stats: {}",
-            results.len(),
-            commit_oids.len(),
-            path,
-            skipped_oid_parse,
-            skipped_commit_find,
-            skipped_tree,
-            skipped_diff,
-            skipped_stats,
-            zero_stats
-        );
-    }
-
-    Ok(results)
+        Ok(results)
+    })
+    .await
 }
 
 /// Get diff for a specific file in a commit
@@ -734,117 +750,124 @@ pub async fn get_commit_file_diff(
     file_path: String,
     max_lines: Option<u32>,
 ) -> Result<DiffFile> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
 
-    let parent = commit.parent(0).ok();
-    let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
-    let commit_tree = commit.tree()?;
+        let parent = commit.parent(0).ok();
+        let parent_tree = parent.as_ref().map(|p| p.tree()).transpose()?;
+        let commit_tree = commit.tree()?;
 
-    // Normalize path separators for git (always use forward slashes)
-    let normalized_file_path = file_path.replace('\\', "/");
+        // Normalize path separators for git (always use forward slashes)
+        let normalized_file_path = file_path.replace('\\', "/");
 
-    let mut opts = git2::DiffOptions::new();
-    opts.pathspec(&normalized_file_path);
+        let mut opts = git2::DiffOptions::new();
+        opts.pathspec(&normalized_file_path);
 
-    let mut diff =
-        repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
+        let mut diff =
+            repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
 
-    detect_renames(&mut diff)?;
+        detect_renames(&mut diff)?;
 
-    let filtered = parse_diff(&diff)?.into_iter().next();
+        let filtered = parse_diff(&diff)?.into_iter().next();
 
-    // The two halves of a rename live at different paths, so the pathspec above
-    // keeps only one of them and `find_similar` has nothing left to pair it
-    // with: the file comes back as a whole-file add (or delete). Re-diff the
-    // whole tree, where both halves are present, and pick our file out of the
-    // rename-aware result — the same view the file list gets from
-    // `get_commit_files`. Only those two statuses can be half of a rename, so
-    // every other file still costs a single path-filtered diff.
-    //
-    // A root commit has no parent tree, so its diff holds nothing but `Added`
-    // deltas; a rename needs a deleted side, and `detect_renames` does not
-    // enable copy detection, so no `Renamed`/`Copied` delta can exist. Skip the
-    // whole fallback there rather than re-diffing the largest tree in the repo
-    // only to hand back what `filtered` already holds.
-    if parent_tree.is_some()
-        && filtered
-            .as_ref()
-            .is_some_and(|f| matches!(f.status, FileStatus::New | FileStatus::Deleted))
-    {
-        let mut full_diff =
-            repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
-        detect_renames(&mut full_diff)?;
-
-        // Decide from delta metadata alone. `deltas()` walks the delta list
-        // without generating a patch, whereas `parse_diff` prints every hunk of
-        // every file in the commit — so resolving one path used to cost a full
-        // render of the whole commit, which `max_lines` (applied only after the
-        // parse) could not bound.
+        // The two halves of a rename live at different paths, so the pathspec above
+        // keeps only one of them and `find_similar` has nothing left to pair it
+        // with: the file comes back as a whole-file add (or delete). Re-diff the
+        // whole tree, where both halves are present, and pick our file out of the
+        // rename-aware result — the same view the file list gets from
+        // `get_commit_files`. Only those two statuses can be half of a rename, so
+        // every other file still costs a single path-filtered diff.
         //
-        // libgit2 reports the new path in `old_file()` for a plain addition, so
-        // the old-path match must stay gated on Renamed/Copied or unrelated
-        // added files would match it. Prefer a delta owning this path as its
-        // new path: only when that delta is itself a rename/copy, or no such
-        // delta exists, does the old-path side apply.
-        let target = normalized_file_path.as_str();
-        let rename_paths = full_diff
-            .deltas()
-            .find(|delta| {
-                delta
-                    .new_file()
-                    .path()
-                    .map(|p| p.to_string_lossy())
-                    .as_deref()
-                    == Some(target)
-            })
-            .filter(|delta| matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied))
-            .or_else(|| {
-                full_diff.deltas().find(|delta| {
-                    matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
-                        && delta
-                            .old_file()
-                            .path()
-                            .map(|p| p.to_string_lossy())
-                            .as_deref()
-                            == Some(target)
+        // A root commit has no parent tree, so its diff holds nothing but `Added`
+        // deltas; a rename needs a deleted side, and `detect_renames` does not
+        // enable copy detection, so no `Renamed`/`Copied` delta can exist. Skip the
+        // whole fallback there rather than re-diffing the largest tree in the repo
+        // only to hand back what `filtered` already holds.
+        if parent_tree.is_some()
+            && filtered
+                .as_ref()
+                .is_some_and(|f| matches!(f.status, FileStatus::New | FileStatus::Deleted))
+        {
+            let mut full_diff =
+                repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+            detect_renames(&mut full_diff)?;
+
+            // Decide from delta metadata alone. `deltas()` walks the delta list
+            // without generating a patch, whereas `parse_diff` prints every hunk of
+            // every file in the commit — so resolving one path used to cost a full
+            // render of the whole commit, which `max_lines` (applied only after the
+            // parse) could not bound.
+            //
+            // libgit2 reports the new path in `old_file()` for a plain addition, so
+            // the old-path match must stay gated on Renamed/Copied or unrelated
+            // added files would match it. Prefer a delta owning this path as its
+            // new path: only when that delta is itself a rename/copy, or no such
+            // delta exists, does the old-path side apply.
+            let target = normalized_file_path.as_str();
+            let rename_paths = full_diff
+                .deltas()
+                .find(|delta| {
+                    delta
+                        .new_file()
+                        .path()
+                        .map(|p| p.to_string_lossy())
+                        .as_deref()
+                        == Some(target)
                 })
-            })
-            .and_then(|delta| {
-                let old_path = delta.old_file().path()?.to_string_lossy().into_owned();
-                let new_path = delta.new_file().path()?.to_string_lossy().into_owned();
-                Some((old_path, new_path))
-            });
+                .filter(|delta| {
+                    matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
+                })
+                .or_else(|| {
+                    full_diff.deltas().find(|delta| {
+                        matches!(delta.status(), git2::Delta::Renamed | git2::Delta::Copied)
+                            && delta
+                                .old_file()
+                                .path()
+                                .map(|p| p.to_string_lossy())
+                                .as_deref()
+                                == Some(target)
+                    })
+                })
+                .and_then(|delta| {
+                    let old_path = delta.old_file().path()?.to_string_lossy().into_owned();
+                    let new_path = delta.new_file().path()?.to_string_lossy().into_owned();
+                    Some((old_path, new_path))
+                });
 
-        // Both halves of the pair are in this diff, so `find_similar` can still
-        // match them, but the patch we render is bounded to the one file.
-        if let Some((old_path, new_path)) = rename_paths {
-            let mut pair_opts = git2::DiffOptions::new();
-            pair_opts.pathspec(&old_path);
-            pair_opts.pathspec(&new_path);
-            let mut pair_diff = repo.diff_tree_to_tree(
-                parent_tree.as_ref(),
-                Some(&commit_tree),
-                Some(&mut pair_opts),
-            )?;
-            detect_renames(&mut pair_diff)?;
+            // Both halves of the pair are in this diff, so `find_similar` can still
+            // match them, but the patch we render is bounded to the one file.
+            if let Some((old_path, new_path)) = rename_paths {
+                let mut pair_opts = git2::DiffOptions::new();
+                pair_opts.pathspec(&old_path);
+                pair_opts.pathspec(&new_path);
+                let mut pair_diff = repo.diff_tree_to_tree(
+                    parent_tree.as_ref(),
+                    Some(&commit_tree),
+                    Some(&mut pair_opts),
+                )?;
+                detect_renames(&mut pair_diff)?;
 
-            let matched = parse_diff(&pair_diff)?.into_iter().find(|f| {
-                f.path == normalized_file_path
-                    || (matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
-                        && f.old_path.as_deref() == Some(target))
-            });
-            if let Some(found) = matched {
-                return Ok(maybe_truncate_diff(found, max_lines));
+                let matched = parse_diff(&pair_diff)?.into_iter().find(|f| {
+                    f.path == normalized_file_path
+                        || (matches!(f.status, FileStatus::Renamed | FileStatus::Copied)
+                            && f.old_path.as_deref() == Some(target))
+                });
+                if let Some(found) = matched {
+                    return Ok(maybe_truncate_diff(found, max_lines));
+                }
             }
         }
-    }
 
-    filtered
-        .map(|f| maybe_truncate_diff(f, max_lines))
-        .ok_or_else(|| {
-            crate::error::LeviathanError::OperationFailed("File not found in commit".to_string())
-        })
+        filtered
+            .map(|f| maybe_truncate_diff(f, max_lines))
+            .ok_or_else(|| {
+                crate::error::LeviathanError::OperationFailed(
+                    "File not found in commit".to_string(),
+                )
+            })
+    })
+    .await
 }
 
 /// A single line of blame output
@@ -887,127 +910,130 @@ pub async fn get_file_blame(
     start_line: Option<u32>,
     end_line: Option<u32>,
 ) -> Result<BlameResult> {
-    let repo = git2::Repository::open(Path::new(&path))?;
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
 
-    let mut blame_opts = git2::BlameOptions::new();
+        let mut blame_opts = git2::BlameOptions::new();
 
-    // If a specific commit is provided, blame up to that commit
-    if let Some(ref oid_str) = commit_oid {
-        let oid = git2::Oid::from_str(oid_str)?;
-        blame_opts.newest_commit(oid);
-    }
+        // If a specific commit is provided, blame up to that commit
+        if let Some(ref oid_str) = commit_oid {
+            let oid = git2::Oid::from_str(oid_str)?;
+            blame_opts.newest_commit(oid);
+        }
 
-    // Apply line range if provided (git2 uses 1-indexed lines)
-    if let Some(start) = start_line {
-        blame_opts.min_line(start as usize);
-    }
-    if let Some(end) = end_line {
-        blame_opts.max_line(end as usize);
-    }
+        // Apply line range if provided (git2 uses 1-indexed lines)
+        if let Some(start) = start_line {
+            blame_opts.min_line(start as usize);
+        }
+        if let Some(end) = end_line {
+            blame_opts.max_line(end as usize);
+        }
 
-    let blame = repo.blame_file(Path::new(&file_path), Some(&mut blame_opts))?;
+        let blame = repo.blame_file(Path::new(&file_path), Some(&mut blame_opts))?;
 
-    // Read the file content
-    let file_content = if let Some(ref oid_str) = commit_oid {
-        // Read from specific commit
-        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
-        let tree = commit.tree()?;
-        let entry = tree.get_path(Path::new(&file_path))?;
-        let blob = repo.find_blob(entry.id())?;
-        String::from_utf8_lossy(blob.content()).to_string()
-    } else {
-        // Read from working directory
-        let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
-        std::fs::read_to_string(full_path).unwrap_or_default()
-    };
+        // Read the file content
+        let file_content = if let Some(ref oid_str) = commit_oid {
+            // Read from specific commit
+            let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+            let tree = commit.tree()?;
+            let entry = tree.get_path(Path::new(&file_path))?;
+            let blob = repo.find_blob(entry.id())?;
+            String::from_utf8_lossy(blob.content()).to_string()
+        } else {
+            // Read from working directory
+            let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
+            std::fs::read_to_string(full_path).unwrap_or_default()
+        };
 
-    // For a working-tree blame (no explicit commit), libgit2 blamed the file
-    // as of HEAD, which misaligns with a modified working copy. Reconcile the
-    // committed blame with the actual working-tree buffer so inserted/deleted
-    // lines stay aligned and uncommitted lines are attributed to the zero OID
-    // (git's "Not Committed Yet"). libgit2 has no direct working-tree blame.
-    let buffer_blame = if commit_oid.is_none() {
-        Some(blame.blame_buffer(file_content.as_bytes())?)
-    } else {
-        None
-    };
-    let active_blame = buffer_blame.as_ref().unwrap_or(&blame);
+        // For a working-tree blame (no explicit commit), libgit2 blamed the file
+        // as of HEAD, which misaligns with a modified working copy. Reconcile the
+        // committed blame with the actual working-tree buffer so inserted/deleted
+        // lines stay aligned and uncommitted lines are attributed to the zero OID
+        // (git's "Not Committed Yet"). libgit2 has no direct working-tree blame.
+        let buffer_blame = if commit_oid.is_none() {
+            Some(blame.blame_buffer(file_content.as_bytes())?)
+        } else {
+            None
+        };
+        let active_blame = buffer_blame.as_ref().unwrap_or(&blame);
 
-    let content_lines: Vec<&str> = file_content.lines().collect();
-    let total_lines = content_lines.len() as u32;
+        let content_lines: Vec<&str> = file_content.lines().collect();
+        let total_lines = content_lines.len() as u32;
 
-    // Determine the line range to process
-    let start_idx = start_line
-        .map(|l| (l as usize).saturating_sub(1))
-        .unwrap_or(0);
-    let end_idx = end_line
-        .map(|l| (l as usize).min(content_lines.len()))
-        .unwrap_or(content_lines.len());
+        // Determine the line range to process
+        let start_idx = start_line
+            .map(|l| (l as usize).saturating_sub(1))
+            .unwrap_or(0);
+        let end_idx = end_line
+            .map(|l| (l as usize).min(content_lines.len()))
+            .unwrap_or(content_lines.len());
 
-    let mut lines = Vec::new();
+        let mut lines = Vec::new();
 
-    for (i, line_content) in content_lines
-        .iter()
-        .enumerate()
-        .skip(start_idx)
-        .take(end_idx - start_idx)
-    {
-        let line_num = i + 1;
+        for (i, line_content) in content_lines
+            .iter()
+            .enumerate()
+            .skip(start_idx)
+            .take(end_idx - start_idx)
+        {
+            let line_num = i + 1;
 
-        if let Some(hunk) = active_blame.get_line(line_num) {
-            let commit_id = hunk.final_commit_id();
-            let short_id = commit_id.to_string()[..7].to_string();
+            if let Some(hunk) = active_blame.get_line(line_num) {
+                let commit_id = hunk.final_commit_id();
+                let short_id = commit_id.to_string()[..7].to_string();
 
-            // A zero OID means the line differs from HEAD, i.e. it is not yet
-            // committed (git shows "Not Committed Yet").
-            if commit_id.is_zero() {
+                // A zero OID means the line differs from HEAD, i.e. it is not yet
+                // committed (git shows "Not Committed Yet").
+                if commit_id.is_zero() {
+                    lines.push(BlameLine {
+                        line_number: line_num,
+                        content: line_content.to_string(),
+                        commit_oid: commit_id.to_string(),
+                        commit_short_id: short_id,
+                        author_name: "Not Committed Yet".to_string(),
+                        author_email: String::new(),
+                        timestamp: 0,
+                        summary: String::new(),
+                        is_boundary: hunk.is_boundary(),
+                    });
+                    continue;
+                }
+
+                // Get commit details
+                let (author_name, author_email, timestamp, summary) =
+                    if let Ok(commit) = repo.find_commit(commit_id) {
+                        let author = commit.author();
+                        (
+                            author.name().unwrap_or("Unknown").to_string(),
+                            author.email().unwrap_or("").to_string(),
+                            author.when().seconds(),
+                            commit.summary().ok().flatten().unwrap_or("").to_string(),
+                        )
+                    } else {
+                        ("Unknown".to_string(), "".to_string(), 0, "".to_string())
+                    };
+
                 lines.push(BlameLine {
                     line_number: line_num,
                     content: line_content.to_string(),
                     commit_oid: commit_id.to_string(),
                     commit_short_id: short_id,
-                    author_name: "Not Committed Yet".to_string(),
-                    author_email: String::new(),
-                    timestamp: 0,
-                    summary: String::new(),
+                    author_name,
+                    author_email,
+                    timestamp,
+                    summary,
                     is_boundary: hunk.is_boundary(),
                 });
-                continue;
             }
-
-            // Get commit details
-            let (author_name, author_email, timestamp, summary) =
-                if let Ok(commit) = repo.find_commit(commit_id) {
-                    let author = commit.author();
-                    (
-                        author.name().unwrap_or("Unknown").to_string(),
-                        author.email().unwrap_or("").to_string(),
-                        author.when().seconds(),
-                        commit.summary().ok().flatten().unwrap_or("").to_string(),
-                    )
-                } else {
-                    ("Unknown".to_string(), "".to_string(), 0, "".to_string())
-                };
-
-            lines.push(BlameLine {
-                line_number: line_num,
-                content: line_content.to_string(),
-                commit_oid: commit_id.to_string(),
-                commit_short_id: short_id,
-                author_name,
-                author_email,
-                timestamp,
-                summary,
-                is_boundary: hunk.is_boundary(),
-            });
         }
-    }
 
-    Ok(BlameResult {
-        path: file_path,
-        lines,
-        total_lines,
+        Ok(BlameResult {
+            path: file_path,
+            lines,
+            total_lines,
+        })
     })
+    .await
 }
 
 /// Image version data for comparison
@@ -1030,37 +1056,26 @@ pub async fn get_image_versions(
     staged: Option<bool>,
     commit_oid: Option<String>,
 ) -> Result<ImageVersions> {
-    let repo = git2::Repository::open(Path::new(&path))?;
-    let is_staged = staged.unwrap_or(false);
+    crate::utils::blocking_git(move || {
+        let repo = git2::Repository::open(Path::new(&path))?;
+        let is_staged = staged.unwrap_or(false);
 
-    let image_type = get_image_type(&file_path);
+        let image_type = get_image_type(&file_path);
 
-    // Get old version (from HEAD or parent commit)
-    let old_data = if let Some(ref oid_str) = commit_oid {
-        // For commit diff, get from parent
-        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
-        if let Ok(parent) = commit.parent(0) {
-            get_blob_base64(&repo, &parent.tree()?, &file_path)
-        } else {
-            None
-        }
-    } else if is_staged {
-        // For staged changes, old is from HEAD
-        if let Ok(head) = repo.head() {
-            if let Ok(tree) = head.peel_to_tree() {
-                get_blob_base64(&repo, &tree, &file_path)
+        // Get old version (from HEAD or parent commit)
+        let old_data = if let Some(ref oid_str) = commit_oid {
+            // For commit diff, get from parent
+            let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+            if let Ok(parent) = commit.parent(0) {
+                get_blob_base64(&repo, &parent.tree()?, &file_path)
             } else {
                 None
             }
-        } else {
-            None
-        }
-    } else {
-        // For unstaged changes, old is from index
-        if let Ok(index) = repo.index() {
-            if let Some(entry) = index.get_path(Path::new(&file_path), 0) {
-                if let Ok(blob) = repo.find_blob(entry.id) {
-                    Some(STANDARD.encode(blob.content()))
+        } else if is_staged {
+            // For staged changes, old is from HEAD
+            if let Ok(head) = repo.head() {
+                if let Ok(tree) = head.peel_to_tree() {
+                    get_blob_base64(&repo, &tree, &file_path)
                 } else {
                     None
                 }
@@ -1068,49 +1083,63 @@ pub async fn get_image_versions(
                 None
             }
         } else {
-            None
-        }
-    };
+            // For unstaged changes, old is from index
+            if let Ok(index) = repo.index() {
+                if let Some(entry) = index.get_path(Path::new(&file_path), 0) {
+                    if let Ok(blob) = repo.find_blob(entry.id) {
+                        Some(STANDARD.encode(blob.content()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
 
-    // Get new version
-    let new_data = if let Some(ref oid_str) = commit_oid {
-        // For commit diff, get from commit tree
-        let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
-        get_blob_base64(&repo, &commit.tree()?, &file_path)
-    } else if is_staged {
-        // The staged diff is HEAD vs INDEX, so "after" is the index blob — not
-        // the file on disk.
-        //
-        // Reading from disk meant that staging an image and then editing it
-        // again showed the newer worktree pixels as the staged content: the user
-        // commits believing the image on screen is what will be committed, and
-        // it is not. The text path (diff_tree_to_index) reads the index, so the
-        // image view also contradicted the text view for the same file.
-        repo.index()
-            .ok()
-            .and_then(|index| index.get_path(Path::new(&file_path), 0))
-            .and_then(|entry| repo.find_blob(entry.id).ok())
-            .map(|blob| STANDARD.encode(blob.content()))
-    } else {
-        // For working directory changes, read from disk
-        let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
-        if full_path.exists() {
-            std::fs::read(&full_path)
+        // Get new version
+        let new_data = if let Some(ref oid_str) = commit_oid {
+            // For commit diff, get from commit tree
+            let commit = repo.find_commit(git2::Oid::from_str(oid_str)?)?;
+            get_blob_base64(&repo, &commit.tree()?, &file_path)
+        } else if is_staged {
+            // The staged diff is HEAD vs INDEX, so "after" is the index blob — not
+            // the file on disk.
+            //
+            // Reading from disk meant that staging an image and then editing it
+            // again showed the newer worktree pixels as the staged content: the user
+            // commits believing the image on screen is what will be committed, and
+            // it is not. The text path (diff_tree_to_index) reads the index, so the
+            // image view also contradicted the text view for the same file.
+            repo.index()
                 .ok()
-                .map(|data| STANDARD.encode(&data))
+                .and_then(|index| index.get_path(Path::new(&file_path), 0))
+                .and_then(|entry| repo.find_blob(entry.id).ok())
+                .map(|blob| STANDARD.encode(blob.content()))
         } else {
-            None
-        }
-    };
+            // For working directory changes, read from disk
+            let full_path = validate_path_within_repo(Path::new(&path), &file_path)?;
+            if full_path.exists() {
+                std::fs::read(&full_path)
+                    .ok()
+                    .map(|data| STANDARD.encode(&data))
+            } else {
+                None
+            }
+        };
 
-    Ok(ImageVersions {
-        path: file_path,
-        old_data,
-        new_data,
-        old_size: None, // Size detection would require image parsing
-        new_size: None,
-        image_type,
+        Ok(ImageVersions {
+            path: file_path,
+            old_data,
+            new_data,
+            old_size: None, // Size detection would require image parsing
+            new_size: None,
+            image_type,
+        })
     })
+    .await
 }
 
 /// Get base64-encoded blob content from a tree
