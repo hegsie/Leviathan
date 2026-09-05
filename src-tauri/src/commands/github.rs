@@ -275,9 +275,9 @@ async fn github_app_installation_token() -> Result<Option<String>> {
 
     let jwt = github_app::generate_jwt(cfg.app_id, &cfg.private_key_pem)
         .map_err(LeviathanError::OperationFailed)?;
-    let token = github_app::get_installation_token(&jwt, cfg.installation_id)
-        .await
-        .map_err(LeviathanError::OperationFailed)?;
+    // Already a `LeviathanError`, so a gate refusal stays `NetworkBlocked`
+    // rather than being flattened into a generic failure.
+    let token = github_app::get_installation_token(&jwt, cfg.installation_id).await?;
 
     Ok(Some(token.token))
 }
@@ -586,7 +586,7 @@ pub async fn list_github_repositories(
     let page = page.unwrap_or(1).max(1);
     let from_app = source == GitHubTokenSource::AppInstallation;
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     // An App installation token authenticates as the installation, not a user,
     // so `/user/repos` answers it with 403. Its repositories live behind the
     // installation endpoint instead — the same one `configure_github_app` uses
@@ -3133,10 +3133,10 @@ pub async fn configure_github_app(
     let jwt = github_app::generate_jwt(app_id, &private_key_pem)
         .map_err(LeviathanError::OperationFailed)?;
 
-    // Get an installation token to verify it works
-    let token = github_app::get_installation_token(&jwt, installation_id)
-        .await
-        .map_err(LeviathanError::OperationFailed)?;
+    // Get an installation token to verify it works. `get_installation_token`
+    // goes through the module's guarded client, so this no longer reaches
+    // GitHub before the gate has had its say.
+    let token = github_app::get_installation_token(&jwt, installation_id).await?;
 
     // Verify the token works by checking connection
     let client = api_client()?;
@@ -3234,7 +3234,5 @@ pub async fn list_github_app_installations(
     let jwt = github_app::generate_jwt(app_id, &private_key_pem)
         .map_err(LeviathanError::OperationFailed)?;
 
-    github_app::list_installations(&jwt)
-        .await
-        .map_err(LeviathanError::OperationFailed)
+    github_app::list_installations(&jwt).await
 }

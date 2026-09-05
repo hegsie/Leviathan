@@ -9,9 +9,16 @@
  * was another hand-written list of *functions*.
  *
  * This test inverts it. It turns offline mode on, calls EVERY exported function
- * in git.service, and asserts that not one of them reaches a command known to
- * make an outbound request. Adding an ungated network call fails this test
- * without anyone having to remember to register it.
+ * in the services that can reach the network, and asserts that not one of them
+ * reaches a command known to make an outbound request. Adding an ungated
+ * network call fails this test without anyone having to remember to register it.
+ *
+ * Round 20 showed the inversion was only half done: the sweep enumerated
+ * git.service and nothing else, so `download_model` (multi-GB, huggingface.co),
+ * `download_embedding_model` and the two GitHub App endpoints in
+ * credential.service shipped with no frontend gate and a green suite. Every
+ * service that invokes a command capable of leaving the machine is swept here
+ * now — see SWEPT_MODULES.
  */
 
 type MockInvoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -48,6 +55,9 @@ Object.defineProperty(navigator, 'clipboard', {
 
 import { expect } from '@open-wc/testing';
 import * as gitService from '../git.service.ts';
+import * as credentialService from '../credential.service.ts';
+import * as localAiService from '../local-ai.service.ts';
+import { embeddingIndexService } from '../embedding-index.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 
 /**
@@ -84,6 +94,12 @@ const NETWORK_COMMANDS = new Set([
   // account repository listings (clone dialog's "From account" picker)
   'list_github_repositories', 'list_gitlab_projects',
   'list_bitbucket_repositories', 'list_ado_repositories',
+  // GitHub App auth — `configure_github_app` mints an installation token from
+  // api.github.com before it stores anything, and the installation listing is
+  // a plain API read.
+  'configure_github_app', 'list_github_app_installations',
+  // model weights, fetched from huggingface.co
+  'download_model', 'download_embedding_model',
 ]);
 
 /**
@@ -93,6 +109,18 @@ const NETWORK_COMMANDS = new Set([
  * readers, latent only because nothing calls them yet.
  */
 const LOCAL_COMMANDS = new Set([
+  // keyring reads/writes and the local-AI + embedding operations that only
+  // touch this machine. Gating any of these would make offline mode hide the
+  // controls that turn offline mode off, or refuse an already-downloaded model.
+  'get_keyring_token', 'store_keyring_token', 'delete_keyring_token',
+  'get_github_app_config', 'remove_github_app_config',
+  'detect_credential_manager',
+  'get_system_capabilities', 'get_available_models', 'get_downloaded_models',
+  'get_recommended_model', 'get_model_status', 'get_loaded_model_name',
+  'load_model', 'unload_model', 'delete_model', 'cancel_model_download',
+  'build_embedding_index', 'refresh_embedding_index', 'semantic_search',
+  'get_embedding_index_status', 'cancel_embedding_build',
+  'is_embedding_model_downloaded',
   'get_issue_templates',
   'get_issue_template_content',
   'lfs_prune',
@@ -116,7 +144,70 @@ const SKIP = new Set([
   'onFileChange',
   'onOperationProgress',
   'isNetworkGateRefusal',
+  // local-ai.service: registers app-lifetime Tauri event listeners.
+  'listenForModelDownloadFailures',
+  // embedding-index.service: same, for the index progress events.
+  'onProgress',
 ]);
+
+/**
+ * Every service whose exports can reach a Tauri command that leaves the
+ * machine. A service listed here is swept whole — no per-function registry to
+ * keep up to date, which is the entire point of this file.
+ *
+ * Deliberately NOT listed: services that only ever invoke commands in
+ * LOCAL_COMMANDS, and ai.service, whose gate is pinned by its own
+ * `ai.service.test.ts` because its refusal depends on which provider is active.
+ */
+const SWEPT_MODULES: Array<{ label: string; entries: Array<[string, unknown]> }> = [
+  { label: 'git.service', entries: Object.entries(gitService) },
+  { label: 'credential.service', entries: Object.entries(credentialService) },
+  { label: 'local-ai.service', entries: Object.entries(localAiService) },
+  {
+    label: 'embedding-index.service',
+    // A class instance: its methods live on the prototype, so Object.entries
+    // would return nothing and the sweep would pass vacuously.
+    entries: Object.getOwnPropertyNames(
+      Object.getPrototypeOf(embeddingIndexService) as object,
+    )
+      .filter((name) => name !== 'constructor')
+      .map((name) => [
+        name,
+        (embeddingIndexService as unknown as Record<string, unknown>)[name],
+      ]) as Array<[string, unknown]>,
+  },
+];
+
+/**
+ * Every callable the sweep will exercise: each module's exported functions,
+ * plus the methods of exported namespace objects (credential.service groups
+ * per-provider credential helpers that way, and a gap could hide in one).
+ */
+function sweptCallables(): Array<{ label: string; name: string; fn: (...a: unknown[]) => unknown }> {
+  const out: Array<{ label: string; name: string; fn: (...a: unknown[]) => unknown }> = [];
+  for (const { label, entries } of SWEPT_MODULES) {
+    for (const [name, value] of entries) {
+      if (SKIP.has(name)) continue;
+      if (typeof value === 'function') {
+        out.push({ label, name, fn: value as (...a: unknown[]) => unknown });
+        continue;
+      }
+      // A plain namespace object of helpers (GitHubCredentials, ...).
+      if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+        for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
+          if (typeof member === 'function' && !SKIP.has(key)) {
+            out.push({
+              label,
+              name: `${name}.${key}`,
+              fn: (member as (...a: unknown[]) => unknown).bind(value),
+            });
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
 
 /** A grab-bag of arguments wide enough to get any of these functions to its
  * invoke. Extra arguments are ignored by JS; missing ones arrive undefined. */
@@ -137,16 +228,15 @@ describe('network gate coverage', () => {
     settingsStore.setState({ offlineMode: true, confirmNetworkOps: false, remoteAllowlist: [] });
 
     const leaked = new Map<string, string>();
-    for (const [name, value] of Object.entries(gitService)) {
-      if (typeof value !== 'function' || SKIP.has(name)) continue;
+    for (const { label, name, fn } of sweptCallables()) {
       invoked.length = 0;
       try {
-        await (value as (...a: unknown[]) => unknown)(...ARGS);
+        await fn(...ARGS);
       } catch {
         // A rejected call is fine — it certainly didn't reach the network.
       }
       const hit = invoked.find((c) => NETWORK_COMMANDS.has(c));
-      if (hit) leaked.set(name, hit);
+      if (hit) leaked.set(`${label}: ${name}`, hit);
     }
 
     expect(
@@ -232,17 +322,79 @@ describe('network gate coverage', () => {
     expect(invoked.includes('list_gitlab_issues')).to.equal(false);
   });
 
+  /**
+   * A refusal the user cannot read is barely better than a silent one: each of
+   * these is rendered by its caller (`aiError` in the settings dialog, a thrown
+   * message in the GitHub App flow), so the text has to name the setting and
+   * where to change it.
+   */
+  it('a refused download or GitHub App call explains itself', async () => {
+    settingsStore.setState({ offlineMode: true, confirmNetworkOps: false, remoteAllowlist: [] });
+
+    const model = await localAiService.downloadModel('gemma-3-1b-q4km');
+    expect(model.success).to.equal(false);
+    expect(model.error?.code, 'the code every other refusal uses').to.equal('BLOCKED');
+    expect(model.error?.message).to.contain('Offline mode');
+    expect(model.error?.message).to.contain('Settings > Security');
+
+    let embeddingError: string | null = null;
+    try {
+      await embeddingIndexService.downloadModel();
+    } catch (err) {
+      embeddingError = (err as Error).message;
+    }
+    expect(embeddingError, 'the embedding model download must refuse too').to.contain(
+      'Offline mode',
+    );
+
+    let appError: string | null = null;
+    try {
+      await credentialService.configureGitHubApp(1, 'pem', 2);
+    } catch (err) {
+      appError = (err as Error).message;
+    }
+    expect(appError).to.contain('api.github.com');
+    expect(appError).to.contain('offline mode');
+
+    let listError: string | null = null;
+    try {
+      await credentialService.listGitHubAppInstallations(1, 'pem');
+    } catch (err) {
+      listError = (err as Error).message;
+    }
+    expect(listError).to.contain('api.github.com');
+  });
+
+  it('an allowlist refusal names the host that is missing from it', async () => {
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: ['github.com'] });
+
+    const model = await localAiService.downloadModel('gemma-3-1b-q4km');
+    expect(model.success).to.equal(false);
+    expect(model.error?.message).to.contain('huggingface.co');
+    expect(model.error?.message).to.contain('allowlist');
+
+    // The same allowlist names api.github.com's domain, so the GitHub App
+    // calls are permitted — an allowlist that refused everything would just be
+    // offline mode with extra steps.
+    invoked.length = 0;
+    try {
+      await credentialService.listGitHubAppInstallations(1, 'pem');
+    } catch {
+      /* the mocked command returns null, which the caller rejects — fine */
+    }
+    expect(invoked.includes('list_github_app_installations')).to.equal(true);
+  });
+
   it('the same sweep does reach those commands when offline mode is off', async () => {
     // Guards the test itself: if the sweep stopped exercising anything (an
     // argument shape drifting, say), the assertion above would pass vacuously.
     settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
 
     const reached = new Set<string>();
-    for (const [name, value] of Object.entries(gitService)) {
-      if (typeof value !== 'function' || SKIP.has(name)) continue;
+    for (const { fn } of sweptCallables()) {
       invoked.length = 0;
       try {
-        await (value as (...a: unknown[]) => unknown)(...ARGS);
+        await fn(...ARGS);
       } catch {
         /* ignore */
       }
@@ -250,5 +402,18 @@ describe('network gate coverage', () => {
     }
 
     expect(reached.size, 'the sweep actually exercises network commands').to.be.greaterThan(10);
+    // The four that shipped ungated. Without these the sweep could stop
+    // exercising them (an argument shape drifting, an export renamed) and the
+    // offline assertion above would pass without proving anything.
+    for (const command of [
+      'download_model',
+      'download_embedding_model',
+      'configure_github_app',
+      'list_github_app_installations',
+    ]) {
+      expect(reached.has(command), `the sweep reaches ${command} when nothing blocks it`).to.equal(
+        true,
+      );
+    }
   });
 });

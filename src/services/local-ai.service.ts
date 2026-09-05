@@ -5,8 +5,20 @@
 
 import { invokeCommand, listenToEvent } from './tauri-api.ts';
 import { showToast } from './notification.service.ts';
+import { checkOutboundHostAllowed } from './git.service.ts';
 import type { CommandResult } from '../types/api.types.ts';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+
+/**
+ * Where a model's weights come from
+ * (`model_download_url` in src-tauri/src/services/ai/local/model_manager.rs).
+ *
+ * Running the model afterwards never leaves the machine, but FETCHING it is a
+ * multi-gigabyte transfer to a third party — exactly what offline mode and the
+ * allowlist exist to refuse. The backend guards the same URL; this half is the
+ * one that can refuse before anything starts.
+ */
+const MODEL_DOWNLOAD_HOST = 'https://huggingface.co';
 
 /**
  * GPU vendor types
@@ -110,8 +122,27 @@ export async function getDownloadedModels(): Promise<CommandResult<DownloadedMod
 
 /**
  * Start downloading a model (returns immediately, progress via events)
+ *
+ * Gated: `download_model` spawns the transfer in the background and returns at
+ * once, so an ungated call gave no refusal, no toast and no way back — just
+ * gigabytes leaving a machine the user had told the app to keep offline.
+ * `BLOCKED` is the code every other refusal uses, so `isNetworkGateRefusal`
+ * recognises it; the caller renders `error.message`, hence no toast here.
  */
 export async function downloadModel(modelId: string): Promise<CommandResult<void>> {
+  const reason = await checkOutboundHostAllowed(MODEL_DOWNLOAD_HOST);
+  if (reason) {
+    return {
+      success: false,
+      error: {
+        code: 'BLOCKED',
+        message:
+          reason === 'allowlist'
+            ? `Downloading a model needs huggingface.co, which is not in your remote allowlist. Add it in Settings > Security.`
+            : 'Offline mode is enabled, so the model cannot be downloaded. Turn it off in Settings > Security.',
+      },
+    };
+  }
   return invokeCommand<void>('download_model', { modelId });
 }
 

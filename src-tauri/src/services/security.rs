@@ -845,6 +845,185 @@ mod tests {
         assert!(service.provider_network_allowed(AiProviderType::LocalInference));
     }
 
+    // ---- the paths that used to have NEITHER gate ----
+    //
+    // Model downloads and the GitHub App endpoints each built their own
+    // `reqwest::Client`, so they reached huggingface.co / api.github.com with
+    // offline mode on and no refusal anywhere. These pin the backstop.
+
+    /// A PEM the GitHub App commands will actually accept.
+    ///
+    /// `configure_github_app` and `list_github_app_installations` sign a JWT
+    /// before they reach the network, so an obviously fake key would fail on
+    /// PEM parsing and never exercise the guard at all.
+    fn test_private_key_pem() -> String {
+        use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+        use aws_lc_rs::rsa::{KeyPair, KeySize};
+
+        let keypair = KeyPair::generate(KeySize::Rsa2048).expect("generate RSA key");
+        let der: Pkcs8V1Der = keypair.as_der().expect("private key DER");
+        pem::encode(&pem::Pem::new("PRIVATE KEY", der.as_ref()))
+    }
+
+    /// The first model the registry offers — any entry will do, they all come
+    /// from the same host.
+    fn a_registry_model() -> crate::services::ai::local::ModelEntry {
+        crate::services::ai::local::ModelRegistry::default()
+            .get_all()
+            .first()
+            .expect("the registry ships at least one model")
+            .clone()
+    }
+
+    #[test]
+    fn offline_mode_refuses_ai_model_downloads() {
+        use crate::services::ai::local::model_manager::guard_model_download;
+        use crate::services::embedding::embedding_model::guard_embedding_model_download;
+
+        let entry = a_registry_model();
+        let _guard = test_support::offline();
+
+        // Both the command that starts the download and the request that opens
+        // the socket run exactly these.
+        expect_blocked(guard_model_download(&entry), "download_model");
+        expect_blocked(guard_embedding_model_download(), "download_embedding_model");
+    }
+
+    #[test]
+    fn an_allowlist_without_huggingface_refuses_model_downloads() {
+        use crate::services::ai::local::model_manager::guard_model_download;
+        use crate::services::embedding::embedding_model::guard_embedding_model_download;
+
+        let entry = a_registry_model();
+
+        {
+            let _guard = test_support::allowlist(&["github.com"]);
+            expect_blocked(guard_model_download(&entry), "download_model");
+            expect_blocked(guard_embedding_model_download(), "download_embedding_model");
+        }
+
+        // Naming the host is what makes the download possible again — a guard
+        // that refused either way would just be offline mode by another name.
+        let _guard = test_support::allowlist(&["huggingface.co"]);
+        assert!(guard_model_download(&entry).is_ok());
+        assert!(guard_embedding_model_download().is_ok());
+    }
+
+    #[tokio::test]
+    async fn offline_mode_refuses_the_github_app_endpoints() {
+        let pem = test_private_key_pem();
+        let _guard = test_support::offline();
+
+        expect_blocked(
+            crate::commands::github::configure_github_app(1, pem.clone(), 2).await,
+            "configure_github_app",
+        );
+        expect_blocked(
+            crate::commands::github::list_github_app_installations(1, pem).await,
+            "list_github_app_installations",
+        );
+        // The two service functions the commands share, including the one
+        // `check_github_connection` falls back to when no user token is stored.
+        expect_blocked(
+            crate::services::github_app::get_installation_token("jwt", 2).await,
+            "get_installation_token",
+        );
+        expect_blocked(
+            crate::services::github_app::list_installations("jwt").await,
+            "list_installations",
+        );
+    }
+
+    /// Every provider's "list my repositories" command, which the clone
+    /// dialog's account picker calls.
+    #[tokio::test]
+    async fn offline_mode_refuses_provider_repository_listings() {
+        let _guard = test_support::offline();
+
+        expect_blocked(
+            crate::commands::github::list_github_repositories(
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+            )
+            .await,
+            "list_github_repositories",
+        );
+        expect_blocked(
+            crate::commands::gitlab::list_gitlab_projects(
+                "https://gitlab.com".to_string(),
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+            )
+            .await,
+            "list_gitlab_projects",
+        );
+        expect_blocked(
+            crate::commands::bitbucket::list_bitbucket_repositories(
+                None,
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+                None,
+                None,
+            )
+            .await,
+            "list_bitbucket_repositories",
+        );
+        expect_blocked(
+            crate::commands::azure_devops::list_ado_repositories(
+                "org".to_string(),
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+            )
+            .await,
+            "list_ado_repositories",
+        );
+    }
+
+    /// An allowlist naming only GitHub refuses the other three listings and
+    /// lets GitHub's through to fail on the network instead.
+    #[tokio::test]
+    async fn an_allowlist_refuses_only_the_repository_listings_it_does_not_name() {
+        let _guard = test_support::allowlist(&["github.com"]);
+
+        expect_blocked(
+            crate::commands::bitbucket::list_bitbucket_repositories(
+                None,
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+                None,
+                None,
+            )
+            .await,
+            "list_bitbucket_repositories",
+        );
+        expect_blocked(
+            crate::commands::azure_devops::list_ado_repositories(
+                "org".to_string(),
+                Some(10),
+                Some(1),
+                Some("token".to_string()),
+            )
+            .await,
+            "list_ado_repositories",
+        );
+
+        let allowed = crate::commands::github::list_github_repositories(
+            Some(10),
+            Some(1),
+            Some("token".to_string()),
+        )
+        .await;
+        assert!(
+            !matches!(allowed, Err(LeviathanError::NetworkBlocked(_))),
+            "an allowlisted host must not be refused by the gate"
+        );
+    }
+
     #[test]
     fn a_named_remote_resolves_to_its_url() {
         let repo = crate::test_utils::TestRepo::with_initial_commit();
