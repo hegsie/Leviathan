@@ -3,6 +3,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import * as gitService from '../../services/git.service.ts';
 import { showConfirm, showPrompt } from '../../services/dialog.service.ts';
+import { mergePreviewSummary } from '../../utils/merge-preview.ts';
 import { showToast } from '../../services/notification.service.ts';
 import { sweepRepoScopedDialogs } from '../../utils/repo-scoped-dialogs.ts';
 import { showErrorWithSuggestion } from '../../services/error-suggestion.service.ts';
@@ -1525,9 +1526,14 @@ export class LvBranchList extends LitElement {
     // Captured BEFORE the confirm await: the merge must run on the repo it was
     // invoked on, even if the user switches tabs while the confirm is up.
     const repoPath = this.repositoryPath;
+    // Predicted BEFORE the confirm, inside the claim taken above: the user has
+    // to be able to see "N files would conflict" while deciding, not discover
+    // it from a working tree that is already conflicted. Read-only and
+    // in-memory in the backend, so it cannot race the merge it precedes.
+    const prediction = await mergePreviewSummary(repoPath, branch.name);
     const confirmed = await showConfirm(
       'Merge Branch',
-      `Merge "${branch.name}" into the current branch?`,
+      `Merge "${branch.name}" into the current branch?${prediction}`,
       'info'
     );
 
@@ -2010,10 +2016,13 @@ export class LvBranchList extends LitElement {
     // If target is HEAD, merge source into current
     if (targetBranch.isHead) {
       if (action === 'merge') {
-        // Merge source branch into current (HEAD)
+        // Merge source branch into current (HEAD). Same conflict prediction the
+        // context menu shows — a drag is the least deliberate of the merge
+        // gestures, so it is the one that most needs the warning.
+        const prediction = await mergePreviewSummary(repoPath, sourceBranch.name);
         const confirmed = await showConfirm(
           'Merge Branch',
-          `Merge "${sourceBranch.name}" into the current branch?`,
+          `Merge "${sourceBranch.name}" into the current branch?${prediction}`,
           'info'
         );
         if (!confirmed) return;
@@ -2078,10 +2087,18 @@ export class LvBranchList extends LitElement {
     } else {
       // Dropping on a non-HEAD branch: need to checkout first, then merge/rebase
       const actionText = action === 'merge' ? 'merge' : 'rebase onto';
+      // Previewed against the TARGET branch, not HEAD: this arm checks the
+      // target out first and merges into that, so a prediction against the
+      // branch the user is leaving would describe a different merge.
+      const prediction =
+        action === 'merge'
+          ? await mergePreviewSummary(repoPath, sourceBranch.name, targetBranch.name)
+          : '';
       const confirmed = await showConfirm(
         action === 'merge' ? 'Merge Branch' : 'Rebase Branch',
         `This will checkout "${targetBranch.name}" and ${actionText} "${sourceBranch.name}". Continue?` +
-          (action === 'rebase' ? `\n\nThis will rewrite commit history.` : ''),
+          (action === 'rebase' ? `\n\nThis will rewrite commit history.` : '') +
+          prediction,
         action === 'merge' ? 'info' : 'warning'
       );
       if (!confirmed) return;
