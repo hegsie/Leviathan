@@ -45,7 +45,12 @@ interface FileStatusInternal {
   unstagedFiles: StatusEntry[];
   selectedFiles: Set<string>;
   handleStageFile: (file: StatusEntry, e: Event) => Promise<void>;
-  handleStageAll: () => Promise<void>;
+  /**
+   * "Stage everything the list shows" — what the section button, the s
+   * shortcut and the palette's "Stage all changes" all reach. With no path
+   * filter typed (as here) the shown set is the whole unstaged list.
+   */
+  handleStageAllShown: () => Promise<void>;
   handleStageSelected: () => Promise<void>;
 }
 
@@ -110,7 +115,7 @@ describe('lv-file-status conflicted staging guards', () => {
     const el = await renderFileStatus([clean, conflicted]);
 
     invokeHistory.length = 0;
-    await internalOf(el).handleStageAll();
+    await internalOf(el).handleStageAllShown();
 
     const calls = stageCalls();
     expect(calls.length).to.equal(1);
@@ -122,7 +127,7 @@ describe('lv-file-status conflicted staging guards', () => {
     const el = await renderFileStatus([conflicted]);
 
     invokeHistory.length = 0;
-    await internalOf(el).handleStageAll();
+    await internalOf(el).handleStageAllShown();
 
     expect(stageCalls().length).to.equal(0);
   });

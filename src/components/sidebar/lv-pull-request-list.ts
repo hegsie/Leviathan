@@ -69,7 +69,11 @@ export class LvPullRequestList extends LitElement {
       }
 
       /* Full-bleed row inside a scrolling list: draw the shared keyboard focus
-         ring inside the row so the scroll container cannot clip it. */
+         ring inside the row so the scroll container cannot clip it.
+
+         The row is an <a href> so assistive tech announces a link that opens
+         the pull request, and the anchor is stripped back to look exactly like
+         the plain row it replaced. */
       .pr-item {
         --lv-focus-ring-offset: -2px;
         display: flex;
@@ -78,6 +82,10 @@ export class LvPullRequestList extends LitElement {
         padding: 3px 12px;
         cursor: pointer;
         font-size: var(--font-size-sm);
+        color: inherit;
+        text-decoration: none;
+        box-sizing: border-box;
+        width: 100%;
       }
 
       .pr-item:hover {
@@ -422,10 +430,25 @@ export class LvPullRequestList extends LitElement {
     }
   }
 
+  /**
+   * Open in the user's browser rather than following the anchor: the webview
+   * has no business navigating away from the app. The href is still real so
+   * the row is a link to assistive tech, and so "copy link address" works.
+   */
+  private handleItemClick(e: MouseEvent, pr: SidebarPullRequest): void {
+    e.preventDefault();
+    this.handleOpen(pr);
+  }
+
   private handleOpen(pr: SidebarPullRequest): void {
     void openExternalUrl(pr.url);
   }
 
+  /**
+   * Enter AND Space, both cancelled. Enter is the anchor's own activation key,
+   * so letting the default through would open the pull request twice; Space
+   * does nothing on a link at all, and this list has always accepted it.
+   */
   private handleItemKeydown(e: KeyboardEvent, pr: SidebarPullRequest): void {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -533,39 +556,42 @@ export class LvPullRequestList extends LitElement {
               this.pullRequests,
               (pr) => pr.key,
               (pr) => html`
-                <li
-                  class="pr-item"
-                  role="listitem"
-                  tabindex="0"
-                  title="${pr.title} (${pr.sourceBranch} → ${pr.targetBranch}) - opens in your browser"
-                  @click=${() => this.handleOpen(pr)}
-                  @keydown=${(e: KeyboardEvent) => this.handleItemKeydown(e, pr)}
-                >
-                  <svg
-                    class="pr-icon ${pr.draft ? 'draft' : ''}"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    aria-hidden="true"
+                <li class="pr-row" role="listitem">
+                  <a
+                    class="pr-item"
+                    href=${pr.url}
+                    rel="noreferrer noopener"
+                    aria-label="${pr.title}, #${pr.number}, opens in browser"
+                    title="${pr.title} (${pr.sourceBranch} → ${pr.targetBranch}) - opens in your browser"
+                    @click=${(e: MouseEvent) => this.handleItemClick(e, pr)}
+                    @keydown=${(e: KeyboardEvent) => this.handleItemKeydown(e, pr)}
                   >
-                    <circle cx="18" cy="18" r="3"></circle>
-                    <circle cx="6" cy="6" r="3"></circle>
-                    <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
-                    <line x1="6" y1="9" x2="6" y2="21"></line>
-                  </svg>
-                  <div class="pr-body">
-                    <div class="pr-title">${pr.title}</div>
-                    <div class="pr-meta">
-                      <span class="pr-number">#${pr.number}</span>
-                      ${pr.author ? html`<span>${pr.author}</span>` : nothing}
-                      <span>${pr.sourceBranch} → ${pr.targetBranch}</span>
+                    <svg
+                      class="pr-icon ${pr.draft ? 'draft' : ''}"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <circle cx="18" cy="18" r="3"></circle>
+                      <circle cx="6" cy="6" r="3"></circle>
+                      <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+                      <line x1="6" y1="9" x2="6" y2="21"></line>
+                    </svg>
+                    <div class="pr-body">
+                      <div class="pr-title">${pr.title}</div>
+                      <div class="pr-meta">
+                        <span class="pr-number">#${pr.number}</span>
+                        ${pr.author ? html`<span>${pr.author}</span>` : nothing}
+                        <span>${pr.sourceBranch} → ${pr.targetBranch}</span>
+                      </div>
                     </div>
-                  </div>
-                  ${pr.draft ? html`<span class="pr-badge">Draft</span>` : nothing}
-                  ${pr.status
-                    ? html`<span class="pr-badge conflicts">${pr.status}</span>`
-                    : nothing}
+                    ${pr.draft ? html`<span class="pr-badge">Draft</span>` : nothing}
+                    ${pr.status
+                      ? html`<span class="pr-badge conflicts">${pr.status}</span>`
+                      : nothing}
+                  </a>
                 </li>
               `,
             )}

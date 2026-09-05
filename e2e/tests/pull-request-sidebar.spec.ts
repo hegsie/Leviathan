@@ -90,6 +90,13 @@ test.describe('Pull Requests sidebar section', () => {
     await expect(item).toContainText('Add the pull request sidebar');
     await expect(item).toContainText('#42');
     await expect(item).toContainText('Octo Cat');
+    // The row is a real link, so assistive tech gets an activatable control
+    // with a name that says where activating it goes.
+    await expect(
+      prList(page).getByRole('link', {
+        name: 'Add the pull request sidebar, #42, opens in browser',
+      }),
+    ).toBeVisible();
     // And the header badge reports the count.
     await expect(prSectionHeader(page).locator('.count')).toHaveText('1');
   });
@@ -168,6 +175,43 @@ test.describe('Pull Requests sidebar section', () => {
     await prSectionHeader(page).click();
     await expect(prList(page)).toContainText('offline mode');
     expect(await findCommand(page, 'list_pull_requests')).toHaveLength(0);
+  });
+
+  test('names the allowlist as the reason and recovers once it is widened', async ({ page }) => {
+    await openWithGitHub(page, {
+      get_keyring_token: 'gh-token',
+      list_pull_requests: [PR_FIXTURE],
+    });
+
+    // An allowlist that does not contain api.github.com makes the shared
+    // network gate refuse the listing call before it reaches the backend.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        settingsStore: { getState: () => { setRemoteAllowlist: (v: string[]) => void } };
+      };
+      stores.settingsStore.getState().setRemoteAllowlist(['example.invalid']);
+    });
+
+    await prSectionHeader(page).click();
+
+    await expect(prList(page)).toContainText('not in your remote allowlist');
+    await expect(prList(page)).toContainText('Settings > Security');
+    // A blocked section must not look like a repository with no pull requests.
+    await expect(prList(page).locator('.pr-item')).toHaveCount(0);
+    await expect(prList(page).locator('.empty')).toHaveCount(0);
+    expect(await findCommand(page, 'list_pull_requests')).toHaveLength(0);
+
+    // Widening the allowlist and using the notice's own action loads the list.
+    await page.evaluate(() => {
+      const stores = (window as unknown as Record<string, unknown>).__LEVIATHAN_STORES__ as {
+        settingsStore: { getState: () => { setRemoteAllowlist: (v: string[]) => void } };
+      };
+      stores.settingsStore.getState().setRemoteAllowlist([]);
+    });
+    await prList(page).locator('button', { hasText: 'Try again' }).click();
+
+    await waitForCommand(page, 'list_pull_requests');
+    await expect(prList(page).locator('.pr-item')).toHaveCount(1);
   });
 
   test('explains when the repository has no supported hosting provider', async ({ page }) => {

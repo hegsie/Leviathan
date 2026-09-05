@@ -9,7 +9,8 @@
  * Deliberately its own element rather than more state inside lv-clone-dialog:
  * the dialog keeps one small source-selection block, and every listing state
  * (no accounts, no credential, expired token, API error, blocked by the
- * security gate, empty, loading, loading more) is testable on its own.
+ * security gate, empty, loading, loading more, a failed load more) is testable
+ * on its own.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -240,6 +241,16 @@ export class LvAccountRepoPicker extends LitElement {
   @state() private errorKind: PickerErrorKind | null = null;
   @state() private errorMessage = '';
   @state() private selectedRepoId: string | null = null;
+  /**
+   * The page a failed "Load more" was asking for, or null when the failure
+   * belongs to a first-page load.
+   *
+   * A failed append must not take the list with it: the 30/60/90 repositories
+   * already on screen (and the row the user had highlighted) are still valid,
+   * so the error renders BENEATH them and Retry re-requests this page instead
+   * of restarting the account from page 1.
+   */
+  @state() private failedAppendPage: number | null = null;
 
   private unsubscribe?: () => void;
   /**
@@ -255,6 +266,12 @@ export class LvAccountRepoPicker extends LitElement {
    * account cannot overwrite the list of the second.
    */
   private loadSequence = 0;
+  /**
+   * The append page of the load currently running, so `failWith` — which is
+   * also reached from `fetchPage` — knows whether the failure it is recording
+   * belongs to a "Load more" or to a first-page load.
+   */
+  private currentLoadAppendPage: number | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -321,6 +338,7 @@ export class LvAccountRepoPicker extends LitElement {
     this.hasLoaded = false;
     this.errorKind = null;
     this.errorMessage = '';
+    this.failedAppendPage = null;
     this.selectedRepoId = null;
     // Drop any response still in flight for the previous account.
     this.loadSequence++;
@@ -340,6 +358,7 @@ export class LvAccountRepoPicker extends LitElement {
     if (!account || this.disabled) return;
 
     const sequence = ++this.loadSequence;
+    this.currentLoadAppendPage = append ? page : null;
     if (append) {
       this.isLoadingMore = true;
     } else {
@@ -349,6 +368,7 @@ export class LvAccountRepoPicker extends LitElement {
     }
     this.errorKind = null;
     this.errorMessage = '';
+    this.failedAppendPage = null;
 
     try {
       const token = await this.resolveToken(account);
@@ -396,6 +416,7 @@ export class LvAccountRepoPicker extends LitElement {
       if (sequence === this.loadSequence) {
         this.isLoading = false;
         this.isLoadingMore = false;
+        this.currentLoadAppendPage = null;
       }
     }
   }
@@ -403,6 +424,9 @@ export class LvAccountRepoPicker extends LitElement {
   private failWith(kind: PickerErrorKind, message: string): void {
     this.errorKind = kind;
     this.errorMessage = message;
+    // Which load failed decides where the message goes: a first page replaces
+    // the list area, a "Load more" is reported under the pages already loaded.
+    this.failedAppendPage = this.currentLoadAppendPage;
     // A failed load has still "answered" — the list area shows the failure
     // rather than a stale "choose an account" prompt.
     this.hasLoaded = true;
@@ -547,6 +571,13 @@ export class LvAccountRepoPicker extends LitElement {
   }
 
   private handleRetry(): void {
+    // Resume where the failure happened. Restarting at page 1 after a flaky
+    // page 4 threw away every page the user had already waited for.
+    const appendPage = this.failedAppendPage;
+    if (appendPage !== null) {
+      void this.loadPage(appendPage, true);
+      return;
+    }
     void this.loadFirstPage();
   }
 
@@ -639,7 +670,9 @@ export class LvAccountRepoPicker extends LitElement {
       </div>`;
     }
 
-    if (this.errorKind) {
+    // A failed "Load more" keeps its list: only a first-page failure has
+    // nothing to show behind it.
+    if (this.errorKind && this.failedAppendPage === null) {
       return this.renderError();
     }
 
@@ -690,20 +723,24 @@ export class LvAccountRepoPicker extends LitElement {
           ? `, ${REPO_PICKER_PAGE_SIZE} at a time`
           : ''}.
       </div>
-      ${this.nextPage !== null
-        ? html`
-            <div class="state-actions">
-              <button
-                class="link-btn"
-                data-action="load-more"
-                @click=${this.handleLoadMore}
-                ?disabled=${this.disabled || this.isLoadingMore}
-              >
-                ${this.isLoadingMore ? 'Loading more…' : 'Load more'}
-              </button>
-            </div>
-          `
-        : nothing}
+      ${this.errorKind
+        ? html`<div class="append-error" data-state="load-more-error">
+            ${this.renderError()}
+          </div>`
+        : this.nextPage !== null
+          ? html`
+              <div class="state-actions">
+                <button
+                  class="link-btn"
+                  data-action="load-more"
+                  @click=${this.handleLoadMore}
+                  ?disabled=${this.disabled || this.isLoadingMore}
+                >
+                  ${this.isLoadingMore ? 'Loading more…' : 'Load more'}
+                </button>
+              </div>
+            `
+          : nothing}
     `;
   }
 
@@ -745,6 +782,11 @@ export class LvAccountRepoPicker extends LitElement {
             ? 'Offline mode is on, so your repositories cannot be listed. Turn it off in Settings > Security.'
             : `Your remote allowlist does not include ${providerName}, so its repositories cannot be listed. Add it in Settings > Security.`}
           You can still paste a clone URL under "From URL".
+          ${this.failedAppendPage !== null
+            ? html`<div class="state-actions">
+                <button class="link-btn" @click=${this.handleRetry}>Retry</button>
+              </div>`
+            : nothing}
         </div>
       `;
     }

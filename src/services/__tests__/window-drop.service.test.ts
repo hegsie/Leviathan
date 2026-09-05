@@ -249,6 +249,42 @@ describe('window drop handler', () => {
     expect(invokeCallArgs.length).to.equal(0);
   });
 
+  it('says so when a drop arrives while the previous one is still opening', async () => {
+    mockClassifications({});
+    // Hold the first drop inside open_repository so the second one lands while
+    // it is still in flight.
+    let releaseFirst: () => void = () => {};
+    const firstOpened = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let opens = 0;
+    mockResponses['open_repository'] = (args) => {
+      opens++;
+      const payload = mockRepoPayload(args.path as string);
+      return opens === 1 ? firstOpened.then(() => payload) : payload;
+    };
+
+    const first = handleDroppedPaths(['/repos/alpha']);
+    const second = await handleDroppedPaths(['/repos/beta']);
+
+    // The refused drop opened nothing and, crucially, SAID so.
+    expect(second.opened).to.deep.equal([]);
+    expect(toastMessages().some((m) => m.includes('Still opening the previous drop'))).to.equal(
+      true,
+    );
+    expect(uiStore.getState().toasts[0].type).to.equal('info');
+    expect(repositoryStore.getState().openRepositories.length).to.equal(0);
+
+    releaseFirst();
+    const firstOutcome = await first;
+    expect(firstOutcome.opened).to.deep.equal(['/repos/alpha']);
+    expect(repositoryStore.getState().openRepositories.length).to.equal(1);
+
+    // And the guard released: a later drop works normally.
+    const third = await handleDroppedPaths(['/repos/gamma']);
+    expect(third.opened).to.deep.equal(['/repos/gamma']);
+  });
+
   it('dispatches the scan offer on the window', () => {
     const offers: string[] = [];
     const listener = (e: Event) => offers.push((e as CustomEvent<{ path: string }>).detail.path);

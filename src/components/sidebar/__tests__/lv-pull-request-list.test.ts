@@ -459,5 +459,69 @@ describe('lv-pull-request-list', () => {
 
       expect(openedUrls()).to.contain('https://github.com/octo/leviathan/pull/42');
     });
+
+    it('opens the pull request on Space', async () => {
+      setupMocks({ pullRequests: [makePr()] });
+      const el = await renderList();
+
+      const item = el.shadowRoot!.querySelector('.pr-item') as HTMLElement;
+      item.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(openedUrls()).to.contain('https://github.com/octo/leviathan/pull/42');
+    });
+  });
+
+  // ── Semantics ──────────────────────────────────────────────────────────
+  describe('row semantics', () => {
+    it('renders each row as a link whose accessible name says it opens in the browser', async () => {
+      setupMocks({ pullRequests: [makePr()] });
+      const el = await renderList();
+
+      const row = el.shadowRoot!.querySelector('.pr-item') as HTMLAnchorElement;
+      // A real control, not a static list item dressed up with a click
+      // handler: assistive tech has to announce something activatable.
+      expect(row.tagName).to.equal('A');
+      expect(row.getAttribute('href')).to.equal('https://github.com/octo/leviathan/pull/42');
+      expect(row.getAttribute('aria-label')).to.equal(
+        'Add the pull request sidebar, #42, opens in browser',
+      );
+
+      // The <li> keeps the list semantics and stops pretending to be clickable.
+      const li = el.shadowRoot!.querySelector('.pr-list > li') as HTMLElement;
+      expect(li.getAttribute('role')).to.equal('listitem');
+      expect(li.hasAttribute('tabindex')).to.equal(false);
+      expect(li.querySelector('.pr-item')).to.equal(row);
+    });
+
+    it('never lets the webview navigate to the pull request itself', async () => {
+      setupMocks({ pullRequests: [makePr()] });
+      const el = await renderList();
+
+      const row = el.shadowRoot!.querySelector('.pr-item') as HTMLAnchorElement;
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+      row.dispatchEvent(click);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(click.defaultPrevented).to.equal(true);
+      expect(openedUrls()).to.contain('https://github.com/octo/leviathan/pull/42');
+    });
+
+    it('cancels Enter so the anchor cannot also open the pull request', async () => {
+      setupMocks({ pullRequests: [makePr()] });
+      const el = await renderList();
+
+      const row = el.shadowRoot!.querySelector('.pr-item') as HTMLElement;
+      const key = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      row.dispatchEvent(key);
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(key.defaultPrevented).to.equal(true);
+      expect(openedUrls().filter((u) => u.endsWith('/pull/42')).length).to.equal(1);
+    });
   });
 });
