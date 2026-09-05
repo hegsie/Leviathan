@@ -1593,7 +1593,7 @@ pub async fn list_ado_repositories(
     );
     debug!("Requesting: {}", url);
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", get_auth_header(&token))

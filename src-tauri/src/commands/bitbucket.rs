@@ -1390,7 +1390,7 @@ pub async fn list_bitbucket_repositories(
         page
     );
 
-    let client = reqwest::Client::new();
+    let client = api_client()?;
     let response = client
         .get(&url)
         .header("Authorization", auth_header)
