@@ -1,6 +1,7 @@
 import { expect } from '@open-wc/testing';
 
 import {
+  gitSubcommand,
   redactSecrets,
   synthesizeGitCommand,
   SYNTHESIZED_COMMANDS,
@@ -231,8 +232,22 @@ describe('git-command-format', () => {
       [
         'remote tag delete',
         'delete_remote_tag',
+        { path: '/r', name: 'v1.0.0', remote: 'upstream' },
+        'git push upstream --delete refs/tags/v1.0.0',
+      ],
+      [
+        // No remote given: the backend resolves one, so the line must not
+        // invent `origin` — it names the default remote by omitting it.
+        'a tag push with no explicit remote',
+        'push_tag',
         { path: '/r', name: 'v1.0.0' },
-        'git push origin --delete refs/tags/v1.0.0',
+        'git push refs/tags/v1.0.0',
+      ],
+      [
+        'a remote tag delete with no explicit remote',
+        'delete_remote_tag',
+        { path: '/r', name: 'v1.0.0' },
+        'git push --delete refs/tags/v1.0.0',
       ],
     ];
 
@@ -335,6 +350,39 @@ describe('git-command-format', () => {
       });
       expect(line).to.not.contain('glpat-');
       expect(line).to.contain('***');
+    });
+  });
+
+
+  // The Output panel matches a REAL backend invocation against the IPC
+  // operation that caused it partly by subcommand, so a background fetch never
+  // swallows a commit's row. Misreading a line here would only ever make that
+  // match fail, but it must not misread the shapes the backend actually emits.
+  describe('gitSubcommand', () => {
+    it('reads the subcommand of a plain line', () => {
+      expect(gitSubcommand('git commit -m "fix parser" -S')).to.equal('commit');
+      expect(gitSubcommand('git stash push --include-untracked')).to.equal('stash');
+    });
+
+    it('skips global options and their values', () => {
+      // The backend's push shells out with `-C <path>`, not a working directory.
+      expect(gitSubcommand('git -C /repo push --force-with-lease origin main')).to.equal(
+        'push',
+      );
+      expect(gitSubcommand('git -c core.hooksPath=/dev/null commit --amend')).to.equal(
+        'commit',
+      );
+      expect(gitSubcommand('git --git-dir /r/.git --no-pager log')).to.equal('log');
+    });
+
+    it('tolerates a fully qualified program path', () => {
+      expect(gitSubcommand('/usr/bin/git rebase --continue')).to.equal('rebase');
+    });
+
+    it('is undefined when there is no line or no subcommand', () => {
+      expect(gitSubcommand(undefined)).to.equal(undefined);
+      expect(gitSubcommand('')).to.equal(undefined);
+      expect(gitSubcommand('git --version')).to.equal(undefined);
     });
   });
 

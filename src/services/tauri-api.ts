@@ -6,7 +6,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommandResult } from '../types/api.types.ts';
-import { logGitCommand, shouldLogToOutput } from './output-log.service.ts';
+import {
+  beginGitOperation,
+  settleGitOperation,
+  shouldLogToOutput,
+} from './output-log.service.ts';
 import { redactSecrets, synthesizeGitCommand } from './git-command-format.ts';
 
 /**
@@ -34,15 +38,21 @@ export async function invokeCommand<T, A = unknown>(
   // `synthesizeGitCommand` reads an explicit per-command allowlist of fields
   // (never `token`) and redacts what it renders; anything it does not cover
   // falls back to the command name, exactly as before.
-  const gitCommand = shouldLogToOutput(command)
-    ? synthesizeGitCommand(command, args)
+  const logged = shouldLogToOutput(command);
+  const gitCommand = logged ? synthesizeGitCommand(command, args) : undefined;
+  // Register the operation for the duration of the call so a REAL `git` run
+  // reported by the backend can claim it. Operations that shell out (a signed
+  // commit, `push --force-with-lease`, a CLI clone, `rebase --continue`) would
+  // otherwise produce two rows for one action — see output-log.service.ts.
+  const operationId = logged
+    ? beginGitOperation(command, repoPath, gitCommand)
     : undefined;
   const startedAt = Date.now();
 
   try {
     const data = await invoke<T>(command, args as Record<string, unknown>);
-    if (shouldLogToOutput(command)) {
-      logGitCommand(command, '', true, {
+    if (operationId !== undefined) {
+      settleGitOperation(operationId, command, '', true, {
         repoPath,
         gitCommand,
         synthesized: gitCommand !== undefined,
@@ -66,10 +76,12 @@ export async function invokeCommand<T, A = unknown>(
       message = String(error);
     }
 
-    if (shouldLogToOutput(command)) {
+    if (operationId !== undefined) {
       // Backend error messages routinely quote a remote URL, which can carry
-      // `user:token@host` — scrub before it reaches the panel.
-      logGitCommand(command, redactSecrets(message), false, {
+      // `user:token@host` — scrub before it reaches the panel. When a real
+      // invocation already claimed this operation, the error is carried onto
+      // ITS row rather than opening a second one.
+      settleGitOperation(operationId, command, redactSecrets(message), false, {
         repoPath,
         gitCommand,
         synthesized: gitCommand !== undefined,

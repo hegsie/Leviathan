@@ -15,12 +15,15 @@ import {
   clearLogEntries,
   subscribeOutputLog,
   shouldLogToOutput,
+  resetGitOperationTracking,
 } from '../output-log.service.ts';
 import { invokeCommand } from '../tauri-api.ts';
+import { recordGitCommandEvent } from '../git-output.service.ts';
 
 describe('output-log.service', () => {
   beforeEach(() => {
     clearLogEntries();
+    resetGitOperationTracking();
     mockInvoke = () => Promise.resolve(null);
   });
 
@@ -241,6 +244,242 @@ describe('output-log.service', () => {
       await invokeCommand('check_bitbucket_connection');
 
       expect(getLogEntries().length).to.equal(0);
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // The panel has TWO feeds: the synthesised line this IPC layer records, and
+  // the REAL `git` invocations the backend reports. Every operation that falls
+  // back to the CLI used to produce one row from each — and the synthesised one
+  // could contradict the real one, because it is built from the IPC arguments
+  // and cannot see flags the backend added.
+  // ------------------------------------------------------------------------
+  describe('reconciling the synthesised and real feeds', () => {
+    /** Make `command` report a real `git` run the way the backend would. */
+    function shellsOut(
+      command: string,
+      event: {
+        command: string;
+        output?: string;
+        success?: boolean;
+        repoPath?: string | null;
+      },
+      result: () => Promise<unknown> = () => Promise.resolve(null),
+    ): void {
+      mockInvoke = (invoked: string) => {
+        if (invoked !== command) return Promise.resolve(null);
+        recordGitCommandEvent({
+          command: event.command,
+          output: event.output ?? '',
+          success: event.success ?? true,
+          durationMs: 412,
+          repoPath: event.repoPath ?? null,
+        });
+        return result();
+      };
+    }
+
+    it('a CLI-backed signed commit logs ONE row, and it carries -S', async () => {
+      // `commit.gpgsign = true` with no explicit toggle: the frontend passes no
+      // signCommit, so its synthesised line cannot know about `-S`.
+      shellsOut('create_commit', {
+        command: 'git commit -m "fix parser" -S',
+        output: '[main abc1234] fix parser',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('create_commit', { path: '/repo', message: 'fix parser' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git commit -m "fix parser" -S');
+      // The real argv is the truth — it must not be marked as an equivalent.
+      expect(entries[0].synthesized).to.be.false;
+      expect(entries[0].output).to.contain('fix parser');
+    });
+
+    it('a git2-backed commit still logs its ONE synthesised row', async () => {
+      await invokeCommand('create_commit', { path: '/repo', message: 'plain' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git commit -m plain');
+      expect(entries[0].synthesized).to.be.true;
+    });
+
+    it('a CLI-backed force push logs ONE row carrying --force-with-lease', async () => {
+      // The backend push shells out with `-C <path>`, so the subcommand is not
+      // the first token of the line.
+      shellsOut('push', {
+        command: 'git -C /repo push --force-with-lease origin main',
+        output: 'forced update',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('push', {
+        path: '/repo',
+        remote: 'origin',
+        branch: 'main',
+        forceWithLease: true,
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal(
+        'git -C /repo push --force-with-lease origin main',
+      );
+      expect(entries[0].synthesized).to.be.false;
+    });
+
+    it('an operation that never shells out keeps its synthesised row', async () => {
+      await invokeCommand('create_stash', {
+        path: '/repo',
+        message: 'wip',
+        includeUntracked: true,
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal(
+        'git stash push --include-untracked -m wip',
+      );
+      expect(entries[0].synthesized).to.be.true;
+    });
+
+    it('a real run in one repository never suppresses another repository\'s row', async () => {
+      const resolvers = new Map<string, () => void>();
+      mockInvoke = (_command: string, args?: unknown) => {
+        const path = (args as { path?: string } | undefined)?.path ?? '';
+        return new Promise((resolve) => {
+          resolvers.set(path, () => resolve(null));
+        });
+      };
+
+      const a = invokeCommand('create_commit', { path: '/repoA', message: 'A' });
+      const b = invokeCommand('create_commit', { path: '/repoB', message: 'B' });
+
+      // Repo A shells out while BOTH operations are in flight.
+      recordGitCommandEvent({
+        command: 'git commit -m A -S',
+        output: '',
+        success: true,
+        durationMs: 7,
+        repoPath: '/repoA',
+      });
+
+      resolvers.get('/repoA')?.();
+      resolvers.get('/repoB')?.();
+      await Promise.all([a, b]);
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(2);
+
+      const forA = entries.find((e) => e.repoPath === '/repoA');
+      expect(forA?.synthesized).to.be.false;
+      expect(forA?.gitCommand).to.contain('-S');
+
+      // Repo B never shelled out, so its own equivalent line must survive.
+      const forB = entries.find((e) => e.repoPath === '/repoB');
+      expect(forB?.synthesized).to.be.true;
+      expect(forB?.gitCommand).to.equal('git commit -m B');
+    });
+
+    it('an unrelated real run in the same repository does not swallow a row', async () => {
+      // An auto-fetch firing while a commit is in flight is a DIFFERENT git
+      // subcommand, so it gets its own row and the commit keeps its own.
+      shellsOut('create_commit', {
+        command: 'git fetch --prune origin',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('create_commit', { path: '/repo', message: 'unrelated' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(2);
+      expect(entries.some((e) => e.gitCommand === 'git fetch --prune origin')).to.be
+        .true;
+      expect(entries.some((e) => e.gitCommand === 'git commit -m unrelated')).to.be
+        .true;
+    });
+
+    it('a real run reported AFTER the operation settles replaces its row', async () => {
+      // Event delivery and IPC resolution are separate channels, so the real
+      // line can arrive either side of the command returning.
+      await invokeCommand('create_commit', { path: '/repo', message: 'late' });
+      expect(getLogEntries().length).to.equal(1);
+
+      recordGitCommandEvent({
+        command: 'git commit -m late -S',
+        output: '[main def5678] late',
+        success: true,
+        durationMs: 9,
+        repoPath: '/repo',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].synthesized).to.be.false;
+      expect(entries[0].gitCommand).to.equal('git commit -m late -S');
+    });
+
+    it('a late run of a different subcommand keeps both rows', async () => {
+      await invokeCommand('create_commit', { path: '/repo', message: 'keep' });
+
+      recordGitCommandEvent({
+        command: 'git gc --auto',
+        output: '',
+        success: true,
+        durationMs: 30,
+        repoPath: '/repo',
+      });
+
+      expect(getLogEntries().length).to.equal(2);
+    });
+
+    it('a failure after a successful real run is carried onto that row', async () => {
+      // The commit itself ran; something after it (a hook, a refresh) failed.
+      // The user must still see why, without a second row appearing.
+      shellsOut(
+        'create_commit',
+        { command: 'git commit -m x -S', repoPath: '/repo' },
+        () => Promise.reject({ code: 'HOOK', message: 'post-commit hook failed' }),
+      );
+
+      const result = await invokeCommand('create_commit', {
+        path: '/repo',
+        message: 'x',
+      });
+      expect(result.success).to.be.false;
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].success).to.be.false;
+      expect(entries[0].output).to.contain('post-commit hook failed');
+    });
+
+    it('does not repeat the git error the backend already reported', async () => {
+      shellsOut(
+        'create_commit',
+        {
+          command: 'git commit -m x -S',
+          output: 'error: gpg failed to sign the data',
+          success: false,
+          repoPath: '/repo',
+        },
+        () =>
+          Promise.reject({
+            code: 'COMMIT_FAILED',
+            message: 'Git commit failed: error: gpg failed to sign the data',
+          }),
+      );
+
+      await invokeCommand('create_commit', { path: '/repo', message: 'x' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].success).to.be.false;
+      const occurrences = entries[0].output.split('gpg failed to sign').length - 1;
+      expect(occurrences).to.equal(1);
     });
   });
 });

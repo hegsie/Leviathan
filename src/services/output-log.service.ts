@@ -5,6 +5,8 @@
  * commands; read queries are excluded so the log stays meaningful.
  */
 
+import { gitSubcommand } from './git-command-format.ts';
+
 const MAX_ENTRIES = 100;
 
 export interface OutputLogEntry {
@@ -64,7 +66,7 @@ export function subscribeOutputLog(listener: () => void): () => void {
 }
 
 /**
- * Log a git command execution result.
+ * Log a git command execution result. Returns the new entry's id.
  *
  * The fourth parameter accepts either a bare repository path (its original
  * shape, still used by tests and injected setups) or a details object carrying
@@ -75,14 +77,15 @@ export function logGitCommand(
   output: string,
   success: boolean,
   repoPathOrDetails?: string | OutputLogDetails,
-): void {
+): number {
   const details: OutputLogDetails =
     typeof repoPathOrDetails === 'string'
       ? { repoPath: repoPathOrDetails }
       : (repoPathOrDetails ?? {});
 
+  const id = nextEntryId++;
   logEntries.unshift({
-    id: nextEntryId++,
+    id,
     timestamp: Date.now(),
     command,
     output,
@@ -99,6 +102,7 @@ export function logGitCommand(
   }
 
   notifyListeners();
+  return id;
 }
 
 /**
@@ -122,6 +126,9 @@ export function getLogEntries(): ReadonlyArray<OutputLogEntry> {
  * so clearing repo A never destroys repo B's history.
  */
 export function clearLogEntries(repoPath?: string): void {
+  // The entries a settled operation still points at are about to disappear, so
+  // a late backend event must no longer try to replace one of them.
+  recentlySettled.length = 0;
   if (repoPath === undefined) {
     logEntries.length = 0;
   } else {
@@ -133,6 +140,277 @@ export function clearLogEntries(repoPath?: string): void {
     logEntries.push(...kept);
   }
   notifyListeners();
+}
+
+// ---------------------------------------------------------------------------
+// Reconciling the panel's TWO feeds
+// ---------------------------------------------------------------------------
+//
+// The Output panel is fed from two independent places:
+//
+//   1. `tauri-api.ts` records one row for every state-changing IPC command,
+//      showing the EQUIVALENT `git` line it synthesises from the arguments.
+//   2. `git-output.service.ts` records one row for every REAL `git` subprocess
+//      the backend runs, from the `git-command-executed` event.
+//
+// Most operations run through libgit2 and only produce (1). But a large share
+// fall back to the CLI — a signed commit, `push --force-with-lease`, a shallow
+// clone, `rebase --continue` — and those produce BOTH, which showed the user
+// two rows for one operation. Worse, the two could contradict each other: the
+// synthesised line is built from the IPC arguments, so a commit signed because
+// `commit.gpgsign` is set in the repository config rendered WITHOUT `-S` next
+// to the real invocation that carried it.
+//
+// The real line is the truthful one — it is the actual argv — so it wins. An
+// IPC call registers itself here for the duration of the operation; a real
+// invocation reported while it is registered CLAIMS it, and the synthesised row
+// is then never written. Nothing is suppressed on a guess: a claim requires the
+// repository AND the git subcommand to be compatible, so a background fetch in
+// the same repository cannot swallow a commit's row, and repository A's real
+// line cannot swallow repository B's synthesised one.
+//
+// Event delivery and IPC resolution are separate channels, so the real line can
+// also arrive just AFTER the operation settles. A briefly-remembered settled
+// operation covers that order too, replacing the row it already wrote.
+
+/** An IPC operation that may or may not turn into a real `git` subprocess. */
+interface GitOperation {
+  id: number;
+  /** IPC command name, e.g. `create_commit`. */
+  command: string;
+  /** Repository the operation targets, when it has one. */
+  repoPath?: string;
+  /** git subcommand the operation is expected to produce, when known. */
+  subcommand?: string;
+  /** Log entry id of the real invocation that claimed this operation. */
+  claimedEntryId?: number;
+  /** Log entry id of the synthesised row written when it settled unclaimed. */
+  settledEntryId?: number;
+  /** Error text of a settled failure, so a late claim can carry it over. */
+  settledFailure?: string;
+  settledAt?: number;
+}
+
+/**
+ * How long after an operation settles a real invocation may still be its own.
+ * Long enough to absorb event-delivery lag, short enough that the NEXT
+ * operation of the same shape is never mistaken for this one.
+ */
+const LATE_CLAIM_WINDOW_MS = 1500;
+/** How many settled operations stay claimable. */
+const RECENTLY_SETTLED_LIMIT = 4;
+/** Guards against a caller that begins an operation and never settles it. */
+const MAX_PENDING_OPERATIONS = 64;
+
+/** In flight, oldest first. */
+const pendingOperations: GitOperation[] = [];
+/** Settled but still claimable, newest first. */
+const recentlySettled: GitOperation[] = [];
+let nextOperationId = 1;
+
+/**
+ * Whether a real invocation could belong to this operation.
+ *
+ * Deliberately permissive about what it does not know and strict about what it
+ * does: an unknown repository or an unknown subcommand on either side is not
+ * evidence of a mismatch, but two KNOWN values that differ are.
+ */
+function operationMatches(
+  operation: GitOperation,
+  repoPath: string | undefined,
+  subcommand: string | undefined,
+): boolean {
+  if (operation.claimedEntryId !== undefined) return false;
+  if (
+    operation.repoPath !== undefined &&
+    repoPath !== undefined &&
+    operation.repoPath !== repoPath
+  ) {
+    return false;
+  }
+  if (
+    operation.subcommand !== undefined &&
+    subcommand !== undefined &&
+    operation.subcommand !== subcommand
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function findClaimable(
+  candidates: readonly GitOperation[],
+  repoPath: string | undefined,
+  subcommand: string | undefined,
+): GitOperation | undefined {
+  const matches = candidates.filter((op) =>
+    operationMatches(op, repoPath, subcommand),
+  );
+  if (matches.length === 0) return undefined;
+  // A run whose repository could not be determined (`git clone` has no working
+  // directory yet) is only attributed when there is exactly one candidate —
+  // otherwise it could be attributed to the wrong repository's operation.
+  if (repoPath === undefined && matches.length > 1) return undefined;
+  return matches[0];
+}
+
+function entryIndex(id: number): number {
+  return logEntries.findIndex((e) => e.id === id);
+}
+
+/**
+ * Combine an entry's existing output with an operation error.
+ *
+ * The backend usually wraps the git stderr it already reported into the error
+ * it returns, so one text routinely contains the other; keeping the longer of
+ * the two avoids showing the same failure twice in one row.
+ */
+function mergeFailureText(existing: string, message: string): string {
+  if (message === '') return existing;
+  if (existing === '') return message;
+  if (existing.includes(message)) return existing;
+  if (message.includes(existing)) return message;
+  return `${existing}\n${message}`;
+}
+
+/**
+ * Mark an already-recorded entry as failed, carrying the IPC error onto it.
+ *
+ * Used when a real invocation reported success but the operation as a whole
+ * failed afterwards: the user must still see why, and a second row would be the
+ * doubling this module exists to remove. Returns false when the entry is gone
+ * (trimmed or cleared), so the caller can fall back to a row of its own.
+ */
+function applyFailureToEntry(id: number, message: string): boolean {
+  const index = entryIndex(id);
+  if (index < 0) return false;
+  const entry = logEntries[index];
+  logEntries[index] = {
+    ...entry,
+    success: false,
+    output: mergeFailureText(entry.output, message),
+  };
+  notifyListeners();
+  return true;
+}
+
+/**
+ * Register an IPC operation that is about to run.
+ *
+ * Returns the id to hand back to `settleGitOperation` when it finishes.
+ */
+export function beginGitOperation(
+  command: string,
+  repoPath: string | undefined,
+  gitCommand: string | undefined,
+): number {
+  // A caller that never settles would otherwise pin an operation forever and
+  // let it swallow an unrelated real invocation later on.
+  if (pendingOperations.length >= MAX_PENDING_OPERATIONS) {
+    pendingOperations.shift();
+  }
+  const id = nextOperationId++;
+  pendingOperations.push({
+    id,
+    command,
+    repoPath,
+    subcommand: gitSubcommand(gitCommand),
+  });
+  return id;
+}
+
+/**
+ * Finish an operation started with `beginGitOperation`.
+ *
+ * Writes the synthesised row, UNLESS a real `git` invocation already reported
+ * this operation — in which case that row is the whole truth and this one would
+ * only repeat (or contradict) it.
+ */
+export function settleGitOperation(
+  id: number,
+  command: string,
+  output: string,
+  success: boolean,
+  details: OutputLogDetails,
+): void {
+  const index = pendingOperations.findIndex((op) => op.id === id);
+  const operation = index >= 0 ? pendingOperations[index] : undefined;
+  if (index >= 0) pendingOperations.splice(index, 1);
+
+  if (!operation) {
+    // Unknown id (settled twice, or evicted by the pending cap): recording the
+    // row is the safe fallback — a duplicate row beats a missing one.
+    logGitCommand(command, output, success, details);
+    return;
+  }
+
+  if (operation.claimedEntryId !== undefined) {
+    if (!success && applyFailureToEntry(operation.claimedEntryId, output)) return;
+    if (success) return;
+    // The claimed entry is gone (cleared or trimmed) and the operation failed —
+    // fall through and record the failure rather than losing it.
+  }
+
+  operation.settledAt = Date.now();
+  operation.settledFailure = success ? undefined : output;
+  operation.settledEntryId = logGitCommand(command, output, success, details);
+  recentlySettled.unshift(operation);
+  if (recentlySettled.length > RECENTLY_SETTLED_LIMIT) {
+    recentlySettled.length = RECENTLY_SETTLED_LIMIT;
+  }
+}
+
+/**
+ * Attribute a real `git` invocation (already recorded as `entryId`) to the IPC
+ * operation that caused it, so that operation writes no second row.
+ *
+ * Called by `git-output.service.ts` right after it records the backend event.
+ */
+export function claimGitOperationForEntry(
+  entryId: number,
+  repoPath: string | undefined,
+  commandLine: string,
+): void {
+  const subcommand = gitSubcommand(commandLine);
+
+  const inFlight = findClaimable(pendingOperations, repoPath, subcommand);
+  if (inFlight) {
+    inFlight.claimedEntryId = entryId;
+    return;
+  }
+
+  // The event arrived after its own operation settled. Drop the synthesised row
+  // it already wrote, carrying over an error the real run cannot know about.
+  const now = Date.now();
+  const settled = findClaimable(
+    recentlySettled.filter(
+      (op) =>
+        op.settledEntryId !== undefined &&
+        op.settledAt !== undefined &&
+        now - op.settledAt <= LATE_CLAIM_WINDOW_MS,
+    ),
+    repoPath,
+    subcommand,
+  );
+  if (!settled || settled.settledEntryId === undefined) return;
+
+  const index = entryIndex(settled.settledEntryId);
+  if (index < 0) return;
+  settled.claimedEntryId = entryId;
+  logEntries.splice(index, 1);
+  if (settled.settledFailure !== undefined) {
+    // applyFailureToEntry notifies; when it cannot (entry gone) notify anyway
+    // so the panel drops the row that was just removed.
+    if (!applyFailureToEntry(entryId, settled.settledFailure)) notifyListeners();
+  } else {
+    notifyListeners();
+  }
+}
+
+/** Reset the two-feed bookkeeping. Exported for tests. */
+export function resetGitOperationTracking(): void {
+  pendingOperations.length = 0;
+  recentlySettled.length = 0;
 }
 
 // Read queries would flood the 100-entry buffer with noise (status polls,
