@@ -5671,6 +5671,7 @@ export class AppShell extends LitElement {
         @open-profile-manager=${() => { this.showProfileManager = true; }}
         @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
         @search-change=${this.handleSearchChange}
+        @manage-accounts=${this.handleManageAccounts}
       ></lv-toolbar>
 
       ${this.activeRepository
@@ -5904,6 +5905,7 @@ export class AppShell extends LitElement {
         : html`<lv-welcome
             @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
             @open-profile-manager=${() => { this.showProfileManager = true; }}
+            @manage-accounts=${this.handleManageAccounts}
           ></lv-welcome>`}
 
       ${this.showSettings

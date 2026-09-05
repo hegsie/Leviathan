@@ -5181,6 +5181,103 @@ export async function listBitbucketPipelines(
 }
 
 // ============================================================================
+// Account Repository Listings
+// ============================================================================
+
+/**
+ * One repository owned by (or shared with) a connected account.
+ *
+ * Every provider's listing command normalises into this shape, so the clone
+ * dialog's picker renders one list whatever the account is.
+ */
+export interface ProviderRepository {
+  /** Provider-assigned id, stringified. Used as the list key only. */
+  id: string;
+  name: string;
+  /** Owner / namespace / workspace / project the repository lives under. */
+  owner: string;
+  /** "owner/name" as the provider spells it. */
+  fullName: string;
+  description: string | null;
+  isPrivate: boolean;
+  /** HTTPS clone URL — what selecting the repository fills in. */
+  cloneUrl: string;
+  webUrl: string | null;
+  defaultBranch: string | null;
+  /** ISO timestamp of the last push, when the provider reports one. */
+  lastPushedAt: string | null;
+}
+
+/** One page of an account's repository listing. */
+export interface ProviderRepositoryPage {
+  repositories: ProviderRepository[];
+  /** Page to request next, or null when the listing is exhausted. */
+  nextPage: number | null;
+}
+
+/** List the repositories a GitHub account can clone (one page per call). */
+export async function listGitHubRepositories(
+  perPage?: number,
+  page?: number,
+  token?: string | null,
+): Promise<CommandResult<ProviderRepositoryPage>> {
+  return invokeProviderCommand<ProviderRepositoryPage>("list_github_repositories", {
+    perPage,
+    page,
+    token,
+  });
+}
+
+/** List the projects a GitLab account is a member of (one page per call). */
+export async function listGitLabProjects(
+  instanceUrl: string,
+  perPage?: number,
+  page?: number,
+  token?: string | null,
+): Promise<CommandResult<ProviderRepositoryPage>> {
+  return invokeProviderCommand<ProviderRepositoryPage>("list_gitlab_projects", {
+    instanceUrl,
+    perPage,
+    page,
+    token,
+  });
+}
+
+/**
+ * List the repositories a Bitbucket account can clone (one page per call).
+ * A workspace narrows the listing; omitting it lists every workspace the
+ * account belongs to.
+ */
+export async function listBitbucketRepositories(
+  workspace?: string | null,
+  pagelen?: number,
+  page?: number,
+  token?: string | null,
+): Promise<CommandResult<ProviderRepositoryPage>> {
+  return invokeProviderCommand<ProviderRepositoryPage>("list_bitbucket_repositories", {
+    workspace,
+    pagelen,
+    page,
+    token,
+  });
+}
+
+/** List the Git repositories in an Azure DevOps organization. */
+export async function listAdoRepositories(
+  organization: string,
+  perPage?: number,
+  page?: number,
+  token?: string | null,
+): Promise<CommandResult<ProviderRepositoryPage>> {
+  return invokeProviderCommand<ProviderRepositoryPage>("list_ado_repositories", {
+    organization,
+    perPage,
+    page,
+    token,
+  });
+}
+
+// ============================================================================
 // Commit Templates
 // ============================================================================
 

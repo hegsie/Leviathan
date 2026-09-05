@@ -63,6 +63,9 @@ const NETWORK_COMMANDS = new Set([
   'test_ssh_connection', 'update_issue_state', 'add_issue_comment',
   'get_repo_labels', 'check_bitbucket_connection',
   'check_bitbucket_connection_with_token',
+  // account repository listings (clone dialog's "From account" picker)
+  'list_github_repositories', 'list_gitlab_projects',
+  'list_bitbucket_repositories', 'list_ado_repositories',
 ]);
 
 /**
