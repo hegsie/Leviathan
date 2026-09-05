@@ -88,6 +88,27 @@ describe('lv-welcome localisation', () => {
     );
   });
 
+  it('translates the drop overlay, not just the buttons', async () => {
+    // The overlay only exists while a folder is being dragged over the window,
+    // which is exactly when a user is least able to puzzle out a foreign
+    // string — it has to follow the locale like everything else here.
+    el.dragActive = true;
+    await el.updateComplete;
+    expect(text(el, '.drop-overlay-title')).to.equal('Drop a folder to open it');
+    expect(text(el, '.drop-overlay-hint')).to.equal(
+      'Git repositories open straight away; any other folder can be scanned or initialized.'
+    );
+
+    await setAppLocale('fr');
+    await waitUntil(
+      () => text(el, '.drop-overlay-title') === "Déposez un dossier pour l'ouvrir",
+      'the drop overlay re-rendered in French'
+    );
+    expect(text(el, '.drop-overlay-hint')).to.equal(
+      "Les dépôts Git s'ouvrent directement ; tout autre dossier peut être analysé ou initialisé."
+    );
+  });
+
   it('keeps rendering English for a locale it does not ship', async () => {
     await setAppLocale('xx');
     await el.updateComplete;

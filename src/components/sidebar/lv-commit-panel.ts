@@ -969,8 +969,10 @@ export class LvCommitPanel extends LitElement {
     await this.checkAiAvailability();
     await this.loadAuthorName();
     // "Always sign off" seeds a fresh draft; it never overrides a choice the
-    // user made on the draft in front of them.
-    this.signOff = settingsStore.getState().alwaysSignOff;
+    // user made on the draft in front of them, and it cannot arm a sign-off
+    // this repository has no identity to write (the identity load above has
+    // already settled by now).
+    this.signOff = settingsStore.getState().alwaysSignOff && this.hasIdentity;
     this._onDocumentClick = this._onDocumentClick.bind(this);
     document.addEventListener('click', this._onDocumentClick);
 
@@ -1070,6 +1072,16 @@ export class LvCommitPanel extends LitElement {
       this.identityEmail = '';
       this.identityLoaded = false;
       void this.loadAuthorName();
+    }
+
+    // Once we KNOW there is no identity, sign-off cannot be armed: the
+    // Signed-off-by trailer needs a `Name <email>`, so `pendingTrailers` adds
+    // nothing and the checkbox — checked and disabled — would be claiming
+    // something the commit will not do. Enforced here rather than at each of
+    // the places that arm it ("always sign off", a restored draft, adopting an
+    // amended commit's footer), so no path can leave the box lying.
+    if (this.identityLoaded && !this.hasIdentity && this.signOff) {
+      this.signOff = false;
     }
   }
 
@@ -1776,7 +1788,7 @@ export class LvCommitPanel extends LitElement {
           // Co-authors belong to the commit that was just made, not to the next
           // one; sign-off falls back to the user's standing preference.
           this.coAuthors = [];
-          this.signOff = settingsStore.getState().alwaysSignOff;
+          this.signOff = settingsStore.getState().alwaysSignOff && this.hasIdentity;
           this.originalSignOff = this.signOff;
           this.originalCoAuthors = [];
           this.showCoAuthors = false;
@@ -1855,6 +1867,9 @@ export class LvCommitPanel extends LitElement {
               <button
                 class="trailer-remove"
                 title=${coAuthor ? `Remove ${coAuthor.email}` : 'Turn off sign-off'}
+                aria-label=${coAuthor
+                  ? `Remove co-author ${coAuthor.name} <${coAuthor.email}>`
+                  : 'Turn off sign-off'}
                 @click=${() => (coAuthor ? this.handleRemoveCoAuthor(coAuthor) : (this.signOff = false))}
               >
                 ✕
@@ -1868,12 +1883,13 @@ export class LvCommitPanel extends LitElement {
 
   private renderCoAuthorDropdown() {
     return html`
-      <div class="coauthor-dropdown">
+      <div class="coauthor-dropdown" id="coauthor-dropdown">
         <div class="coauthor-dropdown-header">Add co-author</div>
         <div class="coauthor-entry">
           <input
             type="text"
             class="coauthor-input"
+            aria-label="Co-author name and email"
             placeholder="Name &lt;email@example.com&gt;"
             .value=${this.coAuthorInput}
             @input=${this.handleCoAuthorInput}
@@ -2173,6 +2189,8 @@ export class LvCommitPanel extends LitElement {
             class="coauthor-btn"
             @click=${this.handleCoAuthorsToggle}
             title="Add Co-authored-by trailers"
+            aria-expanded=${this.showCoAuthors ? 'true' : 'false'}
+            aria-controls="coauthor-dropdown"
           >
             Co-authors${this.coAuthors.length > 0 ? ` (${this.coAuthors.length})` : ''}
           </button>

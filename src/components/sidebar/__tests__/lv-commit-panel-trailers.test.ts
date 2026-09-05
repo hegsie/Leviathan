@@ -271,6 +271,43 @@ describe('lv-commit-panel trailers', () => {
       await el.updateComplete;
       expect(internals(el).signOff).to.be.true;
     });
+
+    it('never starts armed when there is no identity to sign with', async () => {
+      // A checkbox that is checked AND disabled, next to a hint saying commits
+      // cannot be signed off, states something the commit will not do: with no
+      // identity the footer gets no Signed-off-by line at all.
+      identity = { name: null, email: null };
+      settingsStore.getState().setAlwaysSignOff(true);
+      const el = await renderCommitPanel();
+      await el.updateComplete;
+
+      const checkbox = el.shadowRoot!.querySelector('.signoff-toggle input') as HTMLInputElement;
+      expect(checkbox.disabled, 'the toggle is not armable').to.be.true;
+      expect(checkbox.checked, 'and it does not claim to be armed').to.be.false;
+      expect(internals(el).signOff).to.be.false;
+      expect(
+        el.shadowRoot!.querySelector('.trailers-preview'),
+        'nothing is promised in the footer either'
+      ).to.not.exist;
+    });
+
+    it('disarms a sign-off carried into a repository with no identity', async () => {
+      settingsStore.getState().setAlwaysSignOff(true);
+      const el = await renderCommitPanel();
+      const panel = internals(el);
+      expect(panel.signOff, 'armed while the first repo has an identity').to.be.true;
+
+      identity = { name: null, email: null };
+      el.repositoryPath = '/test/no-identity';
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 50));
+      await el.updateComplete;
+
+      expect(panel.signOff).to.be.false;
+      const checkbox = el.shadowRoot!.querySelector('.signoff-toggle input') as HTMLInputElement;
+      expect(checkbox.checked).to.be.false;
+      expect(checkbox.disabled).to.be.true;
+    });
   });
 
   // ── Co-authors ─────────────────────────────────────────────────────────
@@ -571,6 +608,57 @@ describe('lv-commit-panel trailers', () => {
       expect(panel.summary).to.equal('draft for repo one');
       expect(panel.signOff).to.be.true;
       expect(panel.coAuthors.map((c) => c.email)).to.deep.equal(['grace@example.com']);
+    });
+  });
+
+  // ── Accessibility ──────────────────────────────────────────────────────
+  describe('accessibility', () => {
+    it('reports the co-author dropdown state on the toggle that owns it', async () => {
+      const el = await renderCommitPanel();
+      const button = el.shadowRoot!.querySelector('.coauthor-btn') as HTMLButtonElement;
+
+      expect(button.getAttribute('aria-expanded'), 'collapsed to start with').to.equal('false');
+      const controls = button.getAttribute('aria-controls');
+      expect(controls, 'the toggle names what it opens').to.be.a('string').and.not.equal('');
+
+      button.click();
+      await el.updateComplete;
+
+      expect(button.getAttribute('aria-expanded')).to.equal('true');
+      const dropdown = el.shadowRoot!.querySelector(`#${controls}`);
+      expect(dropdown, 'aria-controls points at the dropdown that appeared').to.exist;
+      expect(dropdown!.classList.contains('coauthor-dropdown')).to.be.true;
+
+      button.click();
+      await el.updateComplete;
+      expect(button.getAttribute('aria-expanded'), 'and back again').to.equal('false');
+    });
+
+    it('names the co-author entry box — a placeholder is not a label', async () => {
+      const el = await renderCommitPanel();
+      (el.shadowRoot!.querySelector('.coauthor-btn') as HTMLButtonElement).click();
+      await el.updateComplete;
+
+      const input = el.shadowRoot!.querySelector('.coauthor-input') as HTMLInputElement;
+      expect(input).to.exist;
+      expect(input.getAttribute('aria-label')).to.equal('Co-author name and email');
+    });
+
+    it('names every trailer remove button — "✕" says nothing on its own', async () => {
+      const el = await renderCommitPanel();
+      const panel = internals(el);
+      panel.signOff = true;
+      panel.coAuthorInput = 'Grace Hopper <grace@example.com>';
+      panel.handleAddCoAuthor();
+      await el.updateComplete;
+
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('.trailer-remove')).map((b) =>
+        b.getAttribute('aria-label')
+      );
+      expect(labels).to.deep.equal([
+        'Turn off sign-off',
+        'Remove co-author Grace Hopper <grace@example.com>',
+      ]);
     });
   });
 });

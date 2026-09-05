@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { setupTauriMocks, emptyRepository } from '../fixtures/tauri-mock';
+import { setupTauriMocks, setupOpenRepository, emptyRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import {
@@ -1173,6 +1173,116 @@ test.describe('Language setting with an unsupported persisted locale', () => {
       localStorage.setItem(
         'leviathan-settings',
         JSON.stringify({ state: { language: 'xx-YY' }, version: 7 })
+      );
+    });
+
+    const app = new AppPage(page);
+    await app.goto();
+
+    await expect(app.welcomeTagline).toHaveText('A powerful, open-source Git client');
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator('lv-settings-dialog #language-select')).toHaveValue('en');
+  });
+});
+
+/**
+ * The scan offer's "Initialize a repository here" with a repository ALREADY
+ * open. Every other init test runs from the welcome screen, where the welcome
+ * component owns the init dialog; once a repository is open it is app-shell's
+ * copy that has to answer — with the toolbar's own dialog mounted alongside it.
+ */
+test.describe('Initialize a repository here - with a repository already open', () => {
+  let app: AppPage;
+  let dialogs: DialogsPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    app = new AppPage(page);
+    dialogs = new DialogsPage(page);
+    await expect(app.welcomeScreen).toHaveCount(0);
+  });
+
+  test('opens the shell init dialog, pre-filled with the dropped folder', async ({ page }) => {
+    await injectCommandMock(page, {
+      classify_repository_path: {
+        path: '/projects/new-thing',
+        name: 'new-thing',
+        exists: true,
+        isDirectory: true,
+        isRepository: false,
+        isBare: false,
+      },
+    });
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/projects/new-thing']);
+
+    const scanDialog = page.locator('lv-scan-repositories-dialog');
+    await scanDialog.getByRole('button', { name: 'Initialize a repository here' }).click();
+
+    // Exactly one init dialog is on screen, even though the toolbar mounts one
+    // of its own: the page object must resolve to that one and no other.
+    await expect(app.initDialog).toHaveCount(1);
+    await expect(app.initDialog).toBeVisible();
+    await expect(dialogs.init.dialog).toBeVisible();
+    await expect(dialogs.init.pathInput).toHaveValue('/projects/new-thing');
+  });
+
+  test('initializes the dropped folder from that dialog', async ({ page }) => {
+    await injectCommandMock(page, {
+      classify_repository_path: {
+        path: '/projects/new-thing',
+        name: 'new-thing',
+        exists: true,
+        isDirectory: true,
+        isRepository: false,
+        isBare: false,
+      },
+      init_repository: repositoryPayload('/projects/new-thing'),
+      get_repository_info: repositoryPayload('/projects/new-thing'),
+    });
+
+    await emitDragEvent(page, 'tauri://drag-drop', ['/projects/new-thing']);
+    await page
+      .locator('lv-scan-repositories-dialog')
+      .getByRole('button', { name: 'Initialize a repository here' })
+      .click();
+    await expect(app.initDialog).toBeVisible();
+
+    await startCommandCapture(page);
+    await dialogs.init.init();
+
+    await waitForCommand(page, 'init_repository');
+    const args = (await findCommand(page, 'init_repository'))[0].args as { path?: string };
+    expect(args.path).toBe('/projects/new-thing');
+    // The dialog closes on success, so nothing is left open behind the repo.
+    await expect(app.initDialog).toHaveCount(0);
+  });
+});
+
+/**
+ * The language a user ends up in on first launch after an UPGRADE. The system
+ * locale is what a FRESH install starts from; an install that has been running
+ * in English must not be switched to another language by an update.
+ */
+test.describe('Language on a French-locale machine', () => {
+  test.use({ locale: 'fr-FR' });
+
+  test('a fresh install follows the system language', async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    const app = new AppPage(page);
+    await app.goto();
+
+    await expect(app.welcomeTagline).toHaveText('Un client Git puissant et open source');
+  });
+
+  test('an upgrade keeps the English the user has always had', async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    // A settings blob from before the language setting existed: it has no
+    // `language` key at all, and that install has only ever rendered English.
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'leviathan-settings',
+        JSON.stringify({ state: { theme: 'dark' }, version: 7 })
       );
     });
 

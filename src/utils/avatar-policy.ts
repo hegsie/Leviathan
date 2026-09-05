@@ -15,6 +15,7 @@
  * `showAvatars` directly.
  */
 
+import { msg, str } from '@lit/localize';
 import { settingsStore, type SettingsState } from '../stores/settings.store.ts';
 
 /** The host every avatar request goes to. */
@@ -109,9 +110,9 @@ export function avatarBlockedExplanation(settings: AvatarPolicyInput): string | 
   const settingsWithFeatureOn = { ...settings, showAvatars: true };
   switch (avatarFetchBlockReason(settingsWithFeatureOn)) {
     case 'offline':
-      return 'Unavailable while Offline Mode is on — avatars are fetched from gravatar.com.';
+      return msg('Unavailable while Offline Mode is on — avatars are fetched from gravatar.com.');
     case 'allowlist':
-      return `Unavailable: your remote allowlist does not include ${GRAVATAR_HOST}.`;
+      return msg(str`Unavailable: your remote allowlist does not include ${GRAVATAR_HOST}.`);
     default:
       return null;
   }

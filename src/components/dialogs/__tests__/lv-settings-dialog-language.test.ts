@@ -64,6 +64,12 @@ function select(el: LvSettingsDialog): HTMLSelectElement {
   return node as HTMLSelectElement;
 }
 
+function settingNames(el: LvSettingsDialog): string[] {
+  return Array.from(el.shadowRoot?.querySelectorAll('.setting-name') ?? []).map(
+    (node) => node.textContent?.trim() ?? ''
+  );
+}
+
 function sectionTitles(el: LvSettingsDialog): string[] {
   return Array.from(el.shadowRoot?.querySelectorAll('.section-title') ?? []).map(
     (node) => node.textContent?.trim() ?? ''
@@ -150,6 +156,33 @@ describe('lv-settings-dialog language setting', () => {
       'the settings dialog went back to English'
     );
     expect(settingsStore.getState().language).to.equal('en');
+  });
+
+  it('translates the rows this dialog gained along with the older ones', async () => {
+    // A half-translated screen is worse than an untranslated one: the rows
+    // added most recently must follow the locale like every other row.
+    await choose(el, 'fr');
+    await waitUntil(() => sectionTitles(el)[0] === 'Apparence');
+
+    const names = settingNames(el);
+    expect(names, 'Show Avatars').to.include('Afficher les avatars');
+    expect(names, 'Whitespace').to.include('Espaces');
+    expect(names, 'Context Lines').to.include('Lignes de contexte');
+    expect(names, 'Always Sign Off Commits').to.include(
+      'Toujours ajouter un Signed-off-by aux commits'
+    );
+
+    // The whitespace menu's labels live in the settings store, so they have to
+    // be localised there rather than baked into a module-level constant.
+    const options = Array.from(
+      el.shadowRoot?.querySelectorAll('#diff-whitespace-select option') ?? []
+    ).map((option) => option.textContent?.trim());
+    expect(options).to.deep.equal([
+      'Afficher tous les espaces',
+      'Ignorer les espaces en fin de ligne',
+      "Ignorer les modifications d'espaces",
+      'Ignorer tous les espaces',
+    ]);
   });
 
   it('falls back to English when asked for a locale the app does not ship', async () => {
