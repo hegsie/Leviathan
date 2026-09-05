@@ -822,6 +822,86 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
 });
 
 // ============================================================================
+// One runner behind every surface
+//
+// The dashboard's three buttons and the keyboard shortcuts / command palette
+// used to be two separate implementations. The dashboard's never called the
+// progress service, so a slow push showed nothing but a greyed-out button, and
+// it guarded on a component-local flag the other surface could not see — so
+// two gestures reached IPC and the backend refused the second with
+// "A fetch is already running for this repository".
+// ============================================================================
+
+/**
+ * The dashboard's own Fetch / Pull / Push control.
+ *
+ * Scoped to `.remote-btn` rather than matched by accessible name: once an
+ * operation is running its progress row adds a "Cancel fetch" button, which a
+ * bare `name: /Fetch/i` matches too — and a strict-mode violation is not the
+ * failure these tests are looking for.
+ */
+function remoteButton(page: Page, label: 'Fetch' | 'Pull' | 'Push') {
+  return page.locator(`.remote-btn[title^="${label}"]`);
+}
+
+test.describe('Shared remote-operation runner', () => {
+  test('a dashboard fetch shows a progress row while it runs', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    const fetchButton = remoteButton(page, 'Fetch');
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    // The same labelled row the shortcut has always produced.
+    await expect(page.locator('.progress-message')).toHaveText('Fetching from remote...');
+    // And every remote control is refused for the duration, rather than left
+    // lit and doing nothing but raising a refusal toast.
+    await expect(fetchButton).toBeDisabled();
+    await expect(remoteButton(page, 'Pull')).toBeDisabled();
+    await expect(remoteButton(page, 'Push')).toBeDisabled();
+  });
+
+  test('the progress row is torn down when the fetch lands', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCaptureWithMocks(page, { fetch: null });
+
+    const fetchButton = remoteButton(page, 'Fetch');
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+
+    await expect(page.locator('.progress-message')).toHaveCount(0);
+    await expect(fetchButton).toBeEnabled();
+  });
+
+  test('a second attempt from another surface is not a duplicate command', async ({ page }) => {
+    await setupOpenRepository(page);
+    await startCommandCapture(page);
+    await injectCommandHang(page, 'fetch');
+
+    const fetchButton = remoteButton(page, 'Fetch');
+    await fetchButton.click();
+    await waitForCommand(page, 'fetch');
+    await expect(fetchButton).toBeDisabled();
+
+    // Ctrl+Shift+F is the OTHER surface for the very same operation — the one
+    // the dashboard's component-local flag could not see.
+    await page.keyboard.press('Control+Shift+F');
+    // Ctrl+Shift+P is pull, which shares the one per-repository slot the
+    // backend also keys on. Its refusal toast is the settle point: once it is
+    // on screen, both keypresses have been fully processed.
+    await page.keyboard.press('Control+Shift+P');
+    await expect(page.locator('.toast')).toContainText(
+      /Another operation is already running/i
+    );
+
+    expect((await findCommand(page, 'fetch')).length, 'one fetch, not two').toBe(1);
+    expect((await findCommand(page, 'pull')).length, 'and no pull behind it').toBe(0);
+  });
+});
+
+// ============================================================================
 // Cancelling a remote operation
 //
 // Fetch/pull/push used to advertise cancellation that did not exist: the
