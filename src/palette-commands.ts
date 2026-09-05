@@ -481,6 +481,12 @@ export function buildPaletteCommands(shell: PaletteCommandHost): PaletteCommand[
       icon: 'search',
       action: shell.requiresRepository(() => shell.openSearchDialog('commits')),
     },
+    // "all" means "everything the Changes list is showing" — the same set the
+    // section header button acts on, so the palette, the s/u shortcuts and the
+    // button can never disagree. The label stays unqualified because the path
+    // filter is a transient state and this table is built once (see
+    // app-shell's getPaletteCommands memoisation); lv-file-status reports the
+    // narrowed scope in a toast when a filter was in force.
     {
       id: 'stage-all',
       label: 'Stage all changes',

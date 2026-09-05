@@ -383,6 +383,87 @@ describe('lv-account-repo-picker', () => {
       release({ repositories: [repo('beta')], nextPage: null });
       await waitForRepoItems(el, 2);
     });
+
+    it('keeps the loaded pages and the selection when a load more fails', async () => {
+      unifiedProfileStore.getState().setAccounts([githubAccount]);
+      const attemptedPages: number[] = [];
+      let failPageThree = true;
+      withStoredToken((command, args) => {
+        if (command !== 'list_github_repositories') return null;
+        const page = (args as { page?: number }).page ?? 1;
+        attemptedPages.push(page);
+        if (page === 1) return { repositories: [repo('alpha')], nextPage: 2 };
+        if (page === 2) return { repositories: [repo('beta')], nextPage: 3 };
+        if (page === 3 && failPageThree) {
+          failPageThree = false;
+          return Promise.reject({
+            code: 'OPERATION_FAILED',
+            message: 'GitHub API error 502: bad gateway',
+          });
+        }
+        return { repositories: [repo('gamma')], nextPage: null };
+      });
+
+      const el = await mount();
+      await waitForRepoItems(el, 1);
+
+      const clickLoadMore = (): void => {
+        (
+          el.shadowRoot!.querySelector('[data-action="load-more"]') as HTMLButtonElement
+        ).click();
+      };
+      clickLoadMore();
+      await waitForRepoItems(el, 2);
+
+      // Pick a repository, then lose page 3.
+      (el.shadowRoot!.querySelectorAll('.repo-item')[1] as HTMLButtonElement).click();
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('.repo-item.selected')!.textContent).to.contain(
+        'beta',
+      );
+
+      clickLoadMore();
+      const failure = await waitForState(el, 'load-more-error');
+      expect(failure.textContent).to.contain('GitHub API error 502');
+
+      // The two pages already paid for are still on screen, still selectable,
+      // and the highlight survived.
+      const rows = el.shadowRoot!.querySelectorAll('.repo-item');
+      expect(rows.length).to.equal(2);
+      expect(rows[0].textContent).to.contain('alpha');
+      expect(rows[1].textContent).to.contain('beta');
+      expect(el.shadowRoot!.querySelector('.repo-item.selected')!.textContent).to.contain(
+        'beta',
+      );
+
+      // Retry resumes at page 3 rather than restarting the account.
+      (failure.querySelector('button') as HTMLButtonElement).click();
+      await waitForRepoItems(el, 3);
+      expect(attemptedPages).to.deep.equal([1, 2, 3, 3]);
+      expect(el.shadowRoot!.querySelector('[data-state="load-more-error"]')).to.equal(null);
+      expect(el.shadowRoot!.querySelectorAll('.repo-item')[2].textContent).to.contain('gamma');
+      expect(el.shadowRoot!.querySelector('.repo-item.selected')!.textContent).to.contain(
+        'beta',
+      );
+    });
+
+    it('replaces the whole list when the FIRST page fails, not just part of it', async () => {
+      unifiedProfileStore.getState().setAccounts([githubAccount]);
+      withStoredToken((command) => {
+        if (command !== 'list_github_repositories') return null;
+        return Promise.reject({
+          code: 'OPERATION_FAILED',
+          message: 'GitHub API error 500: upstream',
+        });
+      });
+
+      const el = await mount();
+      await waitForState(el, 'error');
+      // A first-page failure has nothing behind it, so it still takes over the
+      // list area rather than rendering as an inline "load more" failure.
+      expect(el.shadowRoot!.querySelector('[data-state="load-more-error"]')).to.equal(null);
+      expect(el.shadowRoot!.querySelectorAll('.repo-item').length).to.equal(0);
+    });
   });
 
   describe('failures', () => {

@@ -8,8 +8,9 @@
  *
  * Every dropped path is classified in the backend first so each case can be
  * reported for what it is: a repository is opened, a folder that is not a
- * repository offers a scan or an init, and a file, a missing path or a failed
- * open says so instead of failing silently.
+ * repository offers a scan or an init, and a file, a missing path, a failed
+ * open or a drop that arrives while the previous one is still opening says so
+ * instead of failing silently.
  */
 
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -65,6 +66,9 @@ export function offerDirectoryScan(path: string): void {
   );
 }
 
+/** Guards against a second drop landing while the first is still opening. */
+let dropInFlight = false;
+
 /**
  * Open every repository among `paths`, and report everything else.
  *
@@ -76,6 +80,34 @@ export async function handleDroppedPaths(paths: string[]): Promise<DroppedPathsO
   const outcome = emptyOutcome();
   if (paths.length === 0) return outcome;
 
+  // A second drop landing while the first is still opening would interleave
+  // two batches of store writes and two sets of toasts. Refusing is right;
+  // refusing SILENTLY was not — opening a large repository takes seconds, and
+  // the dropped folder simply vanished with no toast and no log. The guard
+  // lives here rather than in the listener so every entry point into a drop
+  // batch is covered by it, and so it can be exercised without a webview.
+  if (dropInFlight) {
+    showToast('Still opening the previous drop — try again in a moment', 'info');
+    log.warn('Ignored a drop while another was still being opened:', paths);
+    return outcome;
+  }
+  dropInFlight = true;
+
+  try {
+    await classifyAndOpen(paths, outcome);
+  } finally {
+    dropInFlight = false;
+  }
+
+  reportOutcome(outcome);
+  return outcome;
+}
+
+/** Classify every dropped path and open the repositories among them. */
+async function classifyAndOpen(
+  paths: string[],
+  outcome: DroppedPathsOutcome,
+): Promise<void> {
   for (const path of paths) {
     const classification = await classifyRepositoryPath(path);
     if (!classification.success || !classification.data) {
@@ -109,9 +141,6 @@ export async function handleDroppedPaths(paths: string[]): Promise<DroppedPathsO
       outcome.failures.push({ path, message: result.message ?? 'Failed to open repository' });
     }
   }
-
-  reportOutcome(outcome);
-  return outcome;
 }
 
 /** Turn an outcome into user-visible feedback. Every branch must say something. */
@@ -187,9 +216,6 @@ function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-/** Guards against a second drop landing while the first is still opening. */
-let dropInFlight = false;
-
 /**
  * Listen for OS folder drops on this window.
  *
@@ -212,15 +238,9 @@ export async function startRepositoryDropListener(
       onDragActiveChange(false);
       if (payload.type !== 'drop') return;
 
-      // Ignore a second drop while the first is still being opened: it would
-      // interleave two batches of store writes and two sets of toasts.
-      if (dropInFlight) return;
-      dropInFlight = true;
-      try {
-        await handleDroppedPaths(payload.paths ?? []);
-      } finally {
-        dropInFlight = false;
-      }
+      // handleDroppedPaths owns the re-entrancy guard (and reports a refused
+      // drop), so the listener just hands it the batch.
+      await handleDroppedPaths(payload.paths ?? []);
     });
   } catch (error) {
     // A webview that refuses the listener must not take the app down with it;

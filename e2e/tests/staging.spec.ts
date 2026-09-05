@@ -8,6 +8,7 @@ import {
   startCommandCaptureWithMocks,
   waitForCommand,
   autoConfirmDialogs,
+  openViaCommandPalette,
 } from '../fixtures/test-helpers';
 
 test.describe('File Staging', () => {
@@ -1050,6 +1051,61 @@ test.describe('Changes filter', () => {
     expect(calls.length).toBeGreaterThan(0);
     const args = calls[0].args as { paths: string[] };
     expect(args.paths).toEqual(['src/utils/helper.ts']);
+  });
+
+  test('the s shortcut stages the same set as the header button, and says what it did', async ({
+    page,
+  }) => {
+    await filterInput(page).fill('src/utils');
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+    // Leave the filter box: its own keystrokes are text, not shortcuts.
+    await filterInput(page).blur();
+
+    await startCommandCapture(page);
+    await page.keyboard.press('s');
+
+    await waitForCommand(page, 'stage_files');
+    const args = (await findCommand(page, 'stage_files'))[0].args as { paths: string[] };
+    // The global shortcut used to stage all four; it now matches the button.
+    expect(args.paths).toEqual(['src/utils/helper.ts']);
+
+    // Its label says ALL, so the result has to say what "all" meant.
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Staged 1 of 4 files' }),
+    ).toBeVisible();
+  });
+
+  test('the palette "Stage all changes" entry stages only the filtered files', async ({
+    page,
+  }) => {
+    await filterInput(page).fill('src/utils');
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+
+    await startCommandCapture(page);
+    await openViaCommandPalette(page, 'Stage all changes');
+
+    await waitForCommand(page, 'stage_files');
+    const args = (await findCommand(page, 'stage_files'))[0].args as { paths: string[] };
+    expect(args.paths).toEqual(['src/utils/helper.ts']);
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Staged 1 of 4 files' }),
+    ).toBeVisible();
+  });
+
+  test('a filter that matches nothing makes the s shortcut say so instead of nothing', async ({
+    page,
+  }) => {
+    await filterInput(page).fill('does-not-exist');
+    await expect(page.locator('lv-file-status .no-match-state')).toBeVisible();
+    await filterInput(page).blur();
+
+    await startCommandCapture(page);
+    await page.keyboard.press('s');
+
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Nothing to stage' }),
+    ).toBeVisible();
+    expect(await findCommand(page, 'stage_files')).toHaveLength(0);
   });
 
   test('the filter works in tree view, keeping only ancestors of matches', async ({ page }) => {
