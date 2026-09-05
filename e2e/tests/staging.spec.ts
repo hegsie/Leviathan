@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupOpenRepository, withModifiedFiles, withStagedFiles } from '../fixtures/tauri-mock';
 import { RightPanelPage } from '../pages/panels.page';
 import {
@@ -961,5 +961,106 @@ test.describe('Staging - Error Handling', () => {
     // File counts should be unchanged
     const unstagedAfter = await rightPanel.getUnstagedCount();
     expect(unstagedAfter).toBe(2);
+  });
+});
+
+test.describe('Changes filter', () => {
+  let rightPanel: RightPanelPage;
+
+  const filterInput = (page: Page) => page.locator('lv-file-status .filter-input');
+
+  test.beforeEach(async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/main.ts', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'src/utils/helper.ts', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'README.md', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'newfile.ts', status: 'untracked', isStaged: false, isConflicted: false },
+      ])
+    );
+  });
+
+  test('typing a filter narrows the list and the x button restores it', async ({ page }) => {
+    await expect(rightPanel.getUnstagedFile('README.md')).toBeVisible();
+
+    await filterInput(page).fill('src/');
+
+    await expect(rightPanel.getUnstagedFile('src/main.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('README.md')).toHaveCount(0);
+    await expect(rightPanel.getUnstagedFile('newfile.ts')).toHaveCount(0);
+
+    // The count stays honest about the real total
+    const changesCount = page.locator(
+      'lv-file-status .section-header:has-text("Changes") .section-count'
+    );
+    await expect(changesCount).toHaveText('2 of 4');
+
+    await page.locator('lv-file-status .filter-clear').click();
+
+    await expect(rightPanel.getUnstagedFile('README.md')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('newfile.ts')).toBeVisible();
+    await expect(changesCount).toHaveText('4');
+  });
+
+  test('Escape in the filter clears it', async ({ page }) => {
+    await filterInput(page).fill('helper');
+    await expect(rightPanel.getUnstagedFile('README.md')).toHaveCount(0);
+
+    await filterInput(page).press('Escape');
+
+    await expect(filterInput(page)).toHaveValue('');
+    await expect(rightPanel.getUnstagedFile('README.md')).toBeVisible();
+  });
+
+  test('shows an empty-result state with a clear action when nothing matches', async ({
+    page,
+  }) => {
+    await filterInput(page).fill('does-not-exist');
+
+    const empty = page.locator('lv-file-status .no-match-state');
+    await expect(empty).toBeVisible();
+    await expect(empty).toContainText('No files match');
+    await expect(empty).toContainText('does-not-exist');
+    await expect(page.locator('lv-file-status li.file-item')).toHaveCount(0);
+
+    await empty.locator('.no-match-clear').click();
+
+    await expect(empty).toHaveCount(0);
+    await expect(rightPanel.getUnstagedFile('README.md')).toBeVisible();
+  });
+
+  test('the section Stage-all button acts only on the filtered files', async ({ page }) => {
+    await filterInput(page).fill('src/utils');
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+
+    await startCommandCapture(page);
+
+    const stageMatching = page.getByRole('button', {
+      name: 'Stage 1 file matching the filter',
+      exact: true,
+    });
+    await expect(stageMatching).toBeVisible();
+    await stageMatching.click();
+
+    await waitForCommand(page, 'stage_files');
+    const calls = await findCommand(page, 'stage_files');
+    expect(calls.length).toBeGreaterThan(0);
+    const args = calls[0].args as { paths: string[] };
+    expect(args.paths).toEqual(['src/utils/helper.ts']);
+  });
+
+  test('the filter works in tree view, keeping only ancestors of matches', async ({ page }) => {
+    await page.locator('lv-file-status .view-toggle').click();
+    await expect(page.locator('lv-file-status .folder-item')).not.toHaveCount(0);
+
+    await filterInput(page).fill('helper');
+
+    const folderNames = page.locator('lv-file-status .folder-item .folder-name');
+    await expect(folderNames).toHaveText(['src', 'utils']);
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('src/main.ts')).toHaveCount(0);
   });
 });

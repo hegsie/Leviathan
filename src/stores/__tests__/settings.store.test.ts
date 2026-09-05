@@ -1,5 +1,11 @@
 import { expect } from '@open-wc/testing';
-import { settingsStore, getGraphColorSchemes } from '../settings.store.ts';
+import {
+  settingsStore,
+  getGraphColorSchemes,
+  migrateSettings,
+  watchSystemContrast,
+} from '../settings.store.ts';
+import type { SettingsState } from '../settings.store.ts';
 
 describe('settings.store', () => {
   beforeEach(() => {
@@ -420,8 +426,8 @@ describe('settings.store', () => {
       expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
     });
 
-    it('a pre-v4 state keeps a persisted showAvatars choice', () => {
-      // The v4 default flip (true -> false) must not reach anyone who already
+    it('a pre-v5 state keeps a persisted showAvatars choice', () => {
+      // The v5 default flip (true -> false) must not reach anyone who already
       // has settings: avatars were always drawn, so a persisted value IS a
       // real user choice. zustand's shallow merge preserves it and the
       // migration must not overwrite it.
@@ -440,7 +446,7 @@ describe('settings.store', () => {
       );
     });
 
-    it('a pre-v4 state with no showAvatars key gets the OLD default', () => {
+    it('a pre-v5 state with no showAvatars key gets the OLD default', () => {
       // Such a state predates the key and was rendered with the old default
       // of `true`; keep showing what those users saw rather than silently
       // switching avatars off under them.
@@ -459,9 +465,9 @@ describe('settings.store', () => {
       expect(migrated.theme, 'other settings survive').to.equal('light');
     });
 
-    it('a v4 state with no showAvatars key takes the new default', () => {
-      // v4 onwards the key is always written, so an absent one is not a
-      // pre-existing choice and must fall through to the `false` default.
+    it('a v4 state with no showAvatars key still gets the OLD default', () => {
+      // v4 was the last version whose default was `true`, so an absent key
+      // there means what it meant at v3: that user saw avatars.
       const persist = (
         settingsStore as unknown as {
           persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
@@ -470,6 +476,20 @@ describe('settings.store', () => {
       const migrate = persist.getOptions().migrate!;
 
       const migrated = migrate({ theme: 'light' }, 4) as { showAvatars?: boolean };
+      expect(migrated.showAvatars).to.equal(true);
+    });
+
+    it('a v5 state is left to the store default', () => {
+      // v5 onwards the key is always written with the new default, so an
+      // absent one is not a pre-existing choice and must fall through.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 5) as { showAvatars?: boolean };
       expect(migrated.showAvatars, 'left to the store default').to.equal(undefined);
     });
 
@@ -524,6 +544,238 @@ describe('settings.store', () => {
       rehydrate();
 
       expect(settingsStore.getState().wordWrap, 'a real setting is not clobbered').to.be.true;
+    });
+  });
+
+  describe('system high contrast (forced colors)', () => {
+    afterEach(() => {
+      // Leave the store the way the real environment reports it.
+      settingsStore.getState().resetToDefaults();
+      settingsStore.getState().applySystemContrast(false);
+    });
+
+    it('auto-selects the high-contrast palette when the OS asks for it', () => {
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+      expect(settingsStore.getState().systemHighContrast).to.be.true;
+      expect(settingsStore.getState().graphColorSchemeAuto, 'still automatic').to.be.true;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('high-contrast');
+    });
+
+    it('reverts to the default palette when the OS setting turns off again', () => {
+      settingsStore.getState().applySystemContrast(true);
+      settingsStore.getState().applySystemContrast(false);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      expect(settingsStore.getState().systemHighContrast).to.be.false;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('default');
+    });
+
+    it('a scheme picked by the user pins it and survives a contrast change', () => {
+      settingsStore.getState().setGraphColorScheme('vibrant');
+      expect(settingsStore.getState().graphColorSchemeAuto, 'picking pins the choice').to.be.false;
+
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme, 'the choice wins').to.equal('vibrant');
+      expect(settingsStore.getState().systemHighContrast, 'but the OS state is tracked').to.be.true;
+
+      settingsStore.getState().applySystemContrast(false);
+      expect(settingsStore.getState().graphColorScheme).to.equal('vibrant');
+    });
+
+    it('keeps following the OS again after a reset to defaults', () => {
+      settingsStore.getState().setGraphColorScheme('pastel');
+      settingsStore.getState().applySystemContrast(true);
+      expect(settingsStore.getState().graphColorScheme).to.equal('pastel');
+
+      settingsStore.getState().resetToDefaults();
+
+      expect(settingsStore.getState().graphColorSchemeAuto).to.be.true;
+      expect(settingsStore.getState().graphColorScheme, 'reset re-reads the OS').to.equal(
+        'high-contrast'
+      );
+    });
+
+    describe('watchSystemContrast', () => {
+      interface FakeQuery {
+        media: string;
+        matches: boolean;
+        listeners: Set<() => void>;
+        addEventListener: (type: string, fn: () => void) => void;
+        removeEventListener: (type: string, fn: () => void) => void;
+      }
+
+      let originalMatchMedia: typeof window.matchMedia;
+      let queries: Map<string, FakeQuery>;
+
+      const makeQuery = (media: string): FakeQuery => ({
+        media,
+        matches: false,
+        listeners: new Set<() => void>(),
+        addEventListener(_type, fn) {
+          this.listeners.add(fn);
+        },
+        removeEventListener(_type, fn) {
+          this.listeners.delete(fn);
+        },
+      });
+
+      const fire = (media: string, matches: boolean): void => {
+        const q = queries.get(media);
+        if (!q) throw new Error(`no query registered for ${media}`);
+        q.matches = matches;
+        q.listeners.forEach((fn) => fn());
+      };
+
+      beforeEach(() => {
+        originalMatchMedia = window.matchMedia;
+        queries = new Map();
+        window.matchMedia = ((media: string) => {
+          let q = queries.get(media);
+          if (!q) {
+            q = makeQuery(media);
+            queries.set(media, q);
+          }
+          return q as unknown as MediaQueryList;
+        }) as typeof window.matchMedia;
+      });
+
+      afterEach(() => {
+        window.matchMedia = originalMatchMedia;
+      });
+
+      it('watches both forced-colors and prefers-contrast', () => {
+        const stop = watchSystemContrast();
+
+        expect([...queries.keys()]).to.have.members([
+          '(forced-colors: active)',
+          '(prefers-contrast: more)',
+        ]);
+
+        stop();
+      });
+
+      it('applies the palette on either query matching, and on later changes', () => {
+        const stop = watchSystemContrast();
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(prefers-contrast: more)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        fire('(prefers-contrast: more)', false);
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(forced-colors: active)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        stop();
+      });
+
+      it('applies immediately when the OS is already in high contrast at startup', () => {
+        queries.set('(forced-colors: active)', {
+          ...makeQuery('(forced-colors: active)'),
+          matches: true,
+        });
+
+        const stop = watchSystemContrast();
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+        stop();
+      });
+
+      it('stops listening once disposed', () => {
+        const stop = watchSystemContrast();
+        stop();
+
+        fire('(forced-colors: active)', true);
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      });
+    });
+  });
+
+  describe('migrateSettings', () => {
+    it('leaves existing users who never picked a scheme on automatic', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', theme: 'light' } as Partial<SettingsState>,
+        3
+      );
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+      expect(migrated.theme, 'unrelated settings are untouched').to.equal('light');
+    });
+
+    it('treats a stored non-default scheme as a deliberate choice and pins it', () => {
+      const migrated = migrateSettings({ graphColorScheme: 'pastel' } as Partial<SettingsState>, 3);
+
+      expect(migrated.graphColorSchemeAuto).to.be.false;
+      expect(migrated.graphColorScheme).to.equal('pastel');
+    });
+
+    it('treats a state with no stored scheme at all as automatic', () => {
+      const migrated = migrateSettings({}, 1);
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+    });
+
+    it('does not re-run the colour-scheme rule for state already at v4', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', graphColorSchemeAuto: false } as Partial<SettingsState>,
+        4
+      );
+
+      expect(migrated.graphColorSchemeAuto, 'a pinned default stays pinned').to.be.false;
+    });
+
+    // The rules stack: a user who has not opened the app for several releases
+    // arrives with an old version number and must pick up EVERY step, not just
+    // the newest one.
+    it('applies every rule for a user upgrading all the way from v1', () => {
+      const migrated = migrateSettings(
+        {
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          graphColorScheme: 'default',
+          theme: 'light',
+        } as Partial<SettingsState>,
+        1
+      );
+
+      expect(migrated.autoStashOnCheckout, 'v2 rule').to.be.true;
+      expect(migrated.wordWrap, 'v3 rule').to.be.false;
+      expect(migrated.graphColorSchemeAuto, 'v4 rule').to.be.true;
+      expect(migrated.showAvatars, 'v5 rule').to.equal(true);
+      expect(migrated.theme, 'unrelated settings are untouched').to.equal('light');
+    });
+
+    it('applies only the v5 rule to a state already at v4', () => {
+      const migrated = migrateSettings(
+        {
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          graphColorScheme: 'pastel',
+          graphColorSchemeAuto: false,
+        } as Partial<SettingsState>,
+        4
+      );
+
+      expect(migrated.autoStashOnCheckout, 'a post-v2 choice stands').to.be.false;
+      expect(migrated.wordWrap, 'a post-v3 choice stands').to.be.true;
+      expect(migrated.graphColorSchemeAuto, 'the v4 pin stands').to.be.false;
+      expect(migrated.showAvatars, 'v5 fills in the old default').to.equal(true);
+    });
+
+    it('never overwrites a showAvatars the user actually chose', () => {
+      expect(migrateSettings({ showAvatars: false } as Partial<SettingsState>, 1).showAvatars).to.be
+        .false;
+      expect(migrateSettings({ showAvatars: true } as Partial<SettingsState>, 1).showAvatars).to.be
+        .true;
+    });
+
+    it('does not re-run the avatar rule for state already at the current version', () => {
+      expect(migrateSettings({}, 5).showAvatars, 'left to the store default').to.equal(undefined);
     });
   });
 });

@@ -675,7 +675,10 @@ type SettingsStoreWindow = {
 test.describe('Settings Dialog - Show Avatars privacy gate', () => {
   const avatarRow = 'lv-settings-dialog .setting-row:has(.setting-name:text-is("Show Avatars"))';
   const offlineRow = 'lv-settings-dialog .setting-row:has(.setting-name:text-is("Offline Mode"))';
-  const avatarToggle = `${avatarRow} input[type="checkbox"]`;
+  // The switch is an <lv-toggle>; its shadow `button[role="switch"]` is what
+  // carries the checked/disabled state (Playwright pierces the shadow root).
+  const avatarToggle = `${avatarRow} lv-toggle button[role="switch"]`;
+  const offlineToggle = `${offlineRow} lv-toggle button[role="switch"]`;
   const avatarReason = `${avatarRow} .setting-unavailable-reason`;
 
   test.beforeEach(async ({ page }) => {
@@ -733,7 +736,7 @@ test.describe('Settings Dialog - Show Avatars privacy gate', () => {
     await page.keyboard.press('Meta+,');
     await expect(page.locator(avatarToggle)).toBeEnabled();
 
-    await page.locator(`${offlineRow} .toggle-switch`).click();
+    await page.locator(offlineToggle).click();
 
     await expect(page.locator(avatarToggle)).toBeDisabled();
     await expect(page.locator(avatarReason)).toContainText('Offline Mode');
@@ -760,7 +763,7 @@ test.describe('Settings Dialog - Show Avatars privacy gate', () => {
   test('opting in turns avatar fetching on in the settings store', async ({ page }) => {
     await page.keyboard.press('Meta+,');
 
-    await page.locator(`${avatarRow} .toggle-switch`).click();
+    await page.locator(avatarToggle).click();
 
     await expect(page.locator(avatarToggle)).toBeChecked();
     await page.waitForFunction(

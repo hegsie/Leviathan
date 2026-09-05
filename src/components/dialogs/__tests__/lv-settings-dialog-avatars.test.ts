@@ -57,6 +57,7 @@ const mockInvoke: MockInvoke = async (command: string) => {
 import { expect, fixture, html } from '@open-wc/testing';
 import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+import type { LvToggle } from '../../common/lv-toggle.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 
 /** The `.setting-row` whose `.setting-name` reads exactly "Show Avatars". */
@@ -69,8 +70,13 @@ function avatarRow(el: LvSettingsDialog): HTMLElement {
   return row!;
 }
 
-function avatarToggle(el: LvSettingsDialog): HTMLInputElement {
-  return avatarRow(el).querySelector('input[type="checkbox"]') as HTMLInputElement;
+function avatarToggle(el: LvSettingsDialog): LvToggle {
+  return avatarRow(el).querySelector('lv-toggle') as LvToggle;
+}
+
+/** Click the switch the way a user would — through its shadow `role="switch"`. */
+function clickToggle(toggle: LvToggle): void {
+  toggle.shadowRoot!.querySelector<HTMLButtonElement>('button[role="switch"]')!.click();
 }
 
 function reasonText(el: LvSettingsDialog): string | null {
@@ -102,6 +108,11 @@ describe('lv-settings-dialog Show Avatars row', () => {
     expect(description).to.match(/hash/i);
     expect(description).to.match(/email/i);
     expect(description, 'says Offline Mode disables it').to.match(/offline mode/i);
+
+    // The switch itself is named and described, not just the visible text.
+    const toggle = avatarToggle(el);
+    expect(toggle.label).to.equal('Show Avatars');
+    expect(toggle.description).to.match(/gravatar/i);
   });
 
   it('is off and enabled with the shipped defaults', async () => {
@@ -118,11 +129,12 @@ describe('lv-settings-dialog Show Avatars row', () => {
     await open();
 
     const toggle = avatarToggle(el);
-    toggle.checked = true;
-    toggle.dispatchEvent(new Event('change'));
+    expect(toggle.checked).to.be.false;
+    clickToggle(toggle);
     await el.updateComplete;
 
     expect(settingsStore.getState().showAvatars).to.be.true;
+    expect(avatarToggle(el).checked, 'the switch follows the store').to.be.true;
   });
 
   it('is disabled with the reason shown when offline mode is on', async () => {
@@ -163,9 +175,7 @@ describe('lv-settings-dialog Show Avatars row', () => {
       (r) => r.querySelector('.setting-name')?.textContent?.trim() === 'Offline Mode'
     );
     expect(offlineRow, 'the Offline Mode row exists').to.not.be.undefined;
-    const offlineToggle = offlineRow!.querySelector('input[type="checkbox"]') as HTMLInputElement;
-    offlineToggle.checked = true;
-    offlineToggle.dispatchEvent(new Event('change'));
+    clickToggle(offlineRow!.querySelector('lv-toggle') as LvToggle);
     await el.updateComplete;
 
     expect(settingsStore.getState().offlineMode).to.be.true;

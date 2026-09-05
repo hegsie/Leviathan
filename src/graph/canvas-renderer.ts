@@ -130,8 +130,9 @@ const DEFAULT_CONFIG: RenderConfig = {
   showFps: false,
   showAvatars: false,
   // Default-deny: a renderer built without an explicit policy decision must
-  // not reach out to gravatar.com. Both construction sites pass an effective
-  // value computed by `utils/avatar-policy.ts`.
+  // not reach out to gravatar.com. The on-screen renderer passes an effective
+  // value computed by `utils/avatar-policy.ts`; the export renderer passes a
+  // literal `false` because it paints once, synchronously.
   fetchAvatars: false,
   showRefIcons: true,
   refsColumnWidth: 200,

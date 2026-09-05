@@ -195,6 +195,12 @@ export class LvGraphCanvas extends LitElement {
         position: absolute;
         bottom: var(--spacing-md);
         left: var(--spacing-md);
+        /*
+         * The canvas sits at z-index 2 and paints an opaque background, so
+         * without this the panel (and its Retry button) is drawn UNDER the
+         * graph — invisible and unclickable.
+         */
+        z-index: 10;
         padding: var(--spacing-sm) var(--spacing-md);
         background: var(--color-bg-secondary);
         border: 1px solid var(--color-border);
@@ -220,6 +226,99 @@ export class LvGraphCanvas extends LitElement {
         margin-top: var(--spacing-xs);
         font-size: var(--font-size-xs);
         color: var(--color-text-secondary);
+      }
+
+      .info-panel.error-panel {
+        background: var(--color-error-bg);
+        border-color: var(--color-error);
+      }
+
+      .info-panel .error-title {
+        color: var(--color-error);
+        font-weight: var(--font-weight-bold);
+      }
+
+      .info-panel .panel-actions {
+        margin-top: var(--spacing-sm);
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .retry-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px var(--spacing-sm);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        font-size: var(--font-size-xs);
+        cursor: pointer;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+
+      .retry-btn:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
+
+      .retry-btn:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+
+      /*
+       * Centered overlay for the two whole-graph states (loading the first
+       * page, and a repository with no commits at all). Deliberately NOT the
+       * bottom-right .loading-indicator slot, which belongs to the
+       * incremental stats/pagination spinners and would otherwise stack.
+       */
+      .graph-overlay {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--spacing-xs);
+        padding: var(--spacing-md) var(--spacing-lg);
+        max-width: 320px;
+        text-align: center;
+        background: var(--color-bg-secondary);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-md);
+        pointer-events: none;
+        z-index: 5;
+      }
+
+      .graph-overlay .overlay-title {
+        font-size: var(--font-size-sm);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-primary);
+      }
+
+      .graph-overlay .overlay-hint {
+        font-size: var(--font-size-xs);
+        color: var(--color-text-secondary);
+        line-height: 1.5;
+      }
+
+      .graph-overlay .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid var(--color-border);
+        border-top-color: var(--color-primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .graph-overlay .spinner,
+        .loading-indicator .spinner {
+          animation-duration: 2s;
+        }
       }
 
       .avatar-tooltip {
@@ -492,6 +591,52 @@ export class LvGraphCanvas extends LitElement {
         background: var(--color-primary);
         opacity: 0.5;
       }
+
+      /* ===========================================================
+         Forced colors (Windows High Contrast Mode)
+         The graph itself is canvas pixels the OS cannot recolor —
+         that is handled by auto-selecting the high-contrast palette
+         in settings.store.ts. This block only keeps the DOM chrome
+         around the canvas usable: focus rings and the states that
+         are otherwise shown by a custom background alone.
+         =========================================================== */
+      @media (forced-colors: active) {
+        canvas:focus,
+        canvas:focus-visible {
+          outline: 3px solid Highlight;
+          outline-offset: -3px;
+        }
+
+        .toolbar-btn:focus-visible,
+        .export-menu-item:focus-visible,
+        .branch-item:focus-within {
+          outline: 2px solid Highlight;
+          outline-offset: -2px;
+        }
+
+        .toolbar-btn.active,
+        .toolbar-btn:hover,
+        .branch-item:hover,
+        .export-menu-item:hover,
+        .branch-panel-actions button:hover {
+          background: Highlight;
+          color: HighlightText;
+        }
+
+        /* The minimap is a canvas overlay: forced colors leaves its pixels
+           alone, so give it a real edge and full opacity instead of the
+           translucent seam that disappears against a forced background. */
+        .minimap-canvas {
+          opacity: 1;
+          border-left: 1px solid CanvasText;
+        }
+
+        .resize-handle:hover,
+        .resize-handle.dragging {
+          background: Highlight;
+          opacity: 1;
+        }
+      }
     `,
   ];
 
@@ -510,6 +655,11 @@ export class LvGraphCanvas extends LitElement {
   @state() private isLoading = false;
   @state() private isLoadingStats = false;
   @state() private loadError: string | null = null;
+  // True once a load for the CURRENT repository has run to completion
+  // (success, failure, or an instant cached render). Without it the very
+  // first render — before firstUpdated has had a chance to start the load —
+  // would flash the "no commits yet" panel over every repository.
+  @state() private hasCompletedLoad = false;
   @state() private tooltipVisible = false;
   @state() private tooltipX = 0;
   @state() private tooltipY = 0;
@@ -557,7 +707,9 @@ export class LvGraphCanvas extends LitElement {
   @state() private hasMoreCommits = true;
   // True total commit count across all refs (null until fetched)
   @state() private commitTotal: number | null = null;
-  private totalLoadedCommits = 0;
+  // @state so the empty-state panel and the canvas aria-label repaint when a
+  // load lands on zero commits (nothing else in that path changes)
+  @state() private totalLoadedCommits = 0;
   // How many commits were loaded the last time the selection was validated
   // against the layout — the high-water mark validateSelection() needs to
   // tell "this commit is gone" apart from "this page isn't back yet"
@@ -881,6 +1033,12 @@ export class LvGraphCanvas extends LitElement {
       this.showExportMenu = false;
       this.showColumnsMenu = false;
 
+      // The previous repo's completed load says nothing about this one — and
+      // its commit count is about to be replaced, so clear both before the
+      // load starts or the empty state would flash between repositories
+      this.hasCompletedLoad = false;
+      this.totalLoadedCommits = 0;
+
       // Reload hidden branches for the new repository
       this.loadHiddenBranches();
 
@@ -978,7 +1136,11 @@ export class LvGraphCanvas extends LitElement {
       this.scheduleRender();
     });
 
-    // Listen for theme changes via data-theme attribute
+    // Listen for theme changes via data-theme attribute, and for graph colour
+    // scheme changes via data-graph-scheme — the lane colours live in CSS
+    // variables the canvas only re-reads through setTheme(), so without this
+    // the palette (including the automatic high-contrast switch) would not
+    // reach the already-painted graph.
     this.themeObserver = new MutationObserver(() => {
       this.renderer?.setTheme(getThemeFromCSS());
       this.rebuildMinimapDots();
@@ -986,7 +1148,7 @@ export class LvGraphCanvas extends LitElement {
     });
     this.themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-theme'],
+      attributeFilter: ['data-theme', 'data-graph-scheme'],
     });
 
     // Also listen for system theme changes
@@ -1108,12 +1270,18 @@ export class LvGraphCanvas extends LitElement {
     this.hasMoreCommits = cached.hasMore;
     this.isLoading = false;
     this.loadError = null;
+    // A cached page is a completed load for this repo: an empty cached page
+    // is a genuinely empty repository, so the empty state may show
+    this.hasCompletedLoad = true;
     this.processLayout();
   }
 
   private async loadCommits(options: { background?: boolean } = {}): Promise<void> {
     if (!this.repositoryPath) {
       this.loadError = 'No repository path specified';
+      // Nothing was loaded and nothing will be — the error panel owns this
+      // state, so the empty-state panel must stay out of it
+      this.hasCompletedLoad = false;
       return;
     }
 
@@ -1366,6 +1534,10 @@ export class LvGraphCanvas extends LitElement {
       if (this.loadVersion === currentVersion) {
         this.isLoading = false;
         this.inFlightLoadPath = null;
+        // The newest load has run to completion (success or failure), so the
+        // empty-state panel is now allowed to make a judgement about zero
+        // commits instead of flashing before the first walk ever finished
+        this.hasCompletedLoad = true;
         if (this.reloadQueued) {
           // A refresh was requested mid-load. reloadQueued is only ever set
           // by refresh() — i.e. a user/mutation-triggered reload (commit,
@@ -3501,6 +3673,46 @@ export class LvGraphCanvas extends LitElement {
     `;
   }
 
+  /**
+   * True when the repository genuinely has nothing to draw: the first load
+   * for THIS repository has finished, nothing is in flight, no error is
+   * showing, and the walk came back with zero commits — i.e. a repository
+   * that has just been `init`ed. Gated on hasCompletedLoad so the panel can
+   * never flash before the first load has had its chance to run.
+   */
+  private showEmptyState(): boolean {
+    return (
+      this.hasCompletedLoad &&
+      !this.isLoading &&
+      !this.loadError &&
+      this.totalLoadedCommits === 0
+    );
+  }
+
+  /**
+   * Canvas label for the three states the graph can be in. "Loading commit
+   * graph..." is reserved for an actual in-flight load — an empty repository
+   * used to announce it forever because the label was keyed only on the
+   * commit count.
+   */
+  private canvasAriaLabel(): string {
+    if (this.isLoading) return 'Loading commit graph...';
+    if (this.totalLoadedCommits > 0) {
+      const total = this.commitTotal !== null ? ` of ${this.commitTotal}` : '';
+      return `Git commit history showing ${this.totalLoadedCommits}${total} commits`;
+    }
+    if (this.loadError) return 'Commit graph failed to load';
+    return 'No commits';
+  }
+
+  /** Re-run the failed load from the error panel's Retry button */
+  private handleRetryLoad = (): void => {
+    if (this.isLoading) return;
+    // loadCommits() clears loadError and raises isLoading itself, so the
+    // panel swaps to "Retrying..." and the centered spinner appears
+    this.loadCommits();
+  };
+
   render() {
     const handlePositions = this.getResizeHandlePositions();
 
@@ -3513,11 +3725,7 @@ export class LvGraphCanvas extends LitElement {
           <canvas
             tabindex="0"
             role="img"
-            aria-label="${this.totalLoadedCommits > 0
-              ? `Git commit history showing ${this.totalLoadedCommits}${
-                  this.commitTotal !== null ? ` of ${this.commitTotal}` : ''
-                } commits`
-              : 'Loading commit graph...'}"
+            aria-label="${this.canvasAriaLabel()}"
           ></canvas>
 
           ${this.showMinimap
@@ -3547,12 +3755,46 @@ export class LvGraphCanvas extends LitElement {
 
           ${this.loadError
             ? html`
-                <div class="info-panel" style="background: var(--color-error-bg, #fee); border-color: var(--color-error, #f00);">
-                  <div style="color: var(--color-error, #f00); font-weight: bold;">Error</div>
+                <div class="info-panel error-panel" role="alert">
+                  <div class="error-title">Error</div>
                   <div class="message">${this.loadError}</div>
+                  <div class="panel-actions">
+                    <button
+                      class="retry-btn"
+                      title="Retry loading the commit graph"
+                      ?disabled=${this.isLoading}
+                      @click=${this.handleRetryLoad}
+                    >
+                      ${this.isLoading ? 'Retrying...' : 'Retry'}
+                    </button>
+                  </div>
                 </div>
               `
             : ''}
+
+          ${this.isLoading
+            ? html`
+                <!--
+                  Purely visual: the canvas aria-label already announces
+                  "Loading commit graph...", and a second live region would
+                  re-announce on every commit/pull/watcher refresh.
+                -->
+                <div class="graph-overlay loading-state" aria-hidden="true">
+                  <div class="spinner"></div>
+                  <div class="overlay-title">Loading commits...</div>
+                </div>
+              `
+            : this.showEmptyState()
+              ? html`
+                  <div class="graph-overlay empty-state" role="status">
+                    <div class="overlay-title">No commits yet</div>
+                    <div class="overlay-hint">
+                      Stage a file and write a message in the Commit panel to
+                      create the first commit in this repository.
+                    </div>
+                  </div>
+                `
+              : ''}
 
           <div
             class="avatar-tooltip ${this.tooltipVisible ? 'visible' : ''}"
