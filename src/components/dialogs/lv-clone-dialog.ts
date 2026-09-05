@@ -3,16 +3,25 @@
  * Allows users to clone a remote repository
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from '../../styles/shared-styles.ts';
-import { isNetworkGateRefusal, cloneRepository, cancelClone } from '../../services/git.service.ts';
+import {
+  isNetworkGateRefusal,
+  cloneRepository,
+  cancelClone,
+  type ProviderRepository,
+} from '../../services/git.service.ts';
 import { openCloneDestinationDialog } from '../../services/dialog.service.ts';
 import { repositoryStore } from '../../stores/index.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './lv-modal.ts';
+import './lv-account-repo-picker.ts';
 import type { LvModal } from './lv-modal.ts';
+
+/** Where the repository to clone comes from. */
+type CloneSource = 'url' | 'account';
 
 interface CloneProgress {
   stage: string;
@@ -174,9 +183,52 @@ export class LvCloneDialog extends LitElement {
         background: var(--color-bg-hover);
         color: var(--color-text-primary);
       }
+
+      /* Source selection ("From URL" / "From account"). Kept as its own block
+         so the URL and options rows below stay exactly as they were. */
+      .source-tabs {
+        display: flex;
+        gap: var(--spacing-xs);
+      }
+
+      .source-tab {
+        padding: var(--spacing-xs) var(--spacing-md);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-bg-secondary);
+        color: var(--color-text-secondary);
+        font-size: var(--font-size-sm);
+        font-family: inherit;
+        cursor: pointer;
+      }
+
+      .source-tab:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+        color: var(--color-text-primary);
+      }
+
+      .source-tab[aria-selected='true'] {
+        border-color: var(--color-primary);
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .source-tab:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
     `,
   ];
 
+  /**
+   * Which source block is showing. The account picker is only rendered — and
+   * therefore only fetches — while it is selected, so opening the dialog never
+   * calls a provider API on its own.
+   */
+  @state() private source: CloneSource = 'url';
+  /** "owner/name" of the repository picked from an account, for confirmation. */
+  @state() private selectedRepoLabel = '';
   @state() private url = '';
   @state() private destination = '';
   @state() private repoName = '';
@@ -236,6 +288,8 @@ export class LvCloneDialog extends LitElement {
   }
 
   private reset(): void {
+    this.source = 'url';
+    this.selectedRepoLabel = '';
     this.url = '';
     this.destination = '';
     this.repoName = '';
@@ -254,6 +308,49 @@ export class LvCloneDialog extends LitElement {
     this.url = input.value;
     this.repoName = this.extractRepoName(this.url);
     this.error = '';
+    // Typing over the URL means the picked repository is no longer what will
+    // be cloned, so its confirmation line must not keep claiming otherwise.
+    this.selectedRepoLabel = '';
+  }
+
+  /** Switch between pasting a URL and picking from a connected account. */
+  private handleSourceChange(source: CloneSource): void {
+    if (this.isCloning || this.source === source) return;
+    this.source = source;
+    this.error = '';
+  }
+
+  /**
+   * A repository was picked from a connected account: fill in the URL and the
+   * destination exactly as typing them would, so the clone below (progress,
+   * cancellation, token resolution) runs completely unchanged.
+   */
+  private handleRepositorySelected(
+    e: CustomEvent<{ repository: ProviderRepository }>,
+  ): void {
+    const repo = e.detail?.repository;
+    if (!repo) return;
+    this.url = repo.cloneUrl;
+    // The provider's own name, not one parsed back out of the URL: a GitLab
+    // project's path segment and its display name can differ.
+    this.repoName = this.extractRepoName(repo.cloneUrl) || repo.name;
+    this.selectedRepoLabel = repo.fullName;
+    if (!this.destination) {
+      this.destination = settingsStore.getState().defaultClonePath;
+    }
+    this.error = '';
+  }
+
+  /**
+   * The picker asked for the accounts manager. Close this dialog first — the
+   * manager opens as its own modal, and leaving the clone dialog stacked
+   * underneath it traps the user between two dialogs. The event keeps
+   * bubbling to the host, which opens the manager.
+   */
+  private handleManageAccounts(): void {
+    if (this.isCloning) return;
+    this.close();
+    this.reset();
   }
 
   private handleDestinationChange(e: Event): void {
@@ -442,6 +539,46 @@ export class LvCloneDialog extends LitElement {
         @close=${this.handleModalClose}
       >
         <div class="form">
+          <!-- Source selection. Deliberately a self-contained block above the
+               URL/options rows rather than edits woven through them. -->
+          <div class="source-tabs" role="tablist" aria-label="Repository source">
+            <button
+              class="source-tab"
+              role="tab"
+              id="source-url"
+              aria-selected=${this.source === 'url'}
+              @click=${() => this.handleSourceChange('url')}
+              ?disabled=${this.isCloning}
+            >
+              From URL
+            </button>
+            <button
+              class="source-tab"
+              role="tab"
+              id="source-account"
+              aria-selected=${this.source === 'account'}
+              @click=${() => this.handleSourceChange('account')}
+              ?disabled=${this.isCloning}
+            >
+              From account
+            </button>
+          </div>
+
+          ${this.source === 'account'
+            ? html`
+                <lv-account-repo-picker
+                  ?disabled=${this.isCloning}
+                  @repository-selected=${this.handleRepositorySelected}
+                  @manage-accounts=${this.handleManageAccounts}
+                ></lv-account-repo-picker>
+                ${this.selectedRepoLabel
+                  ? html`<div class="repo-name-preview">
+                      Selected: ${this.selectedRepoLabel}
+                    </div>`
+                  : nothing}
+              `
+            : nothing}
+
           <div class="field">
             <label for="url">Repository URL</label>
             <input

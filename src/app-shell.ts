@@ -6192,6 +6192,7 @@ export class AppShell extends LitElement {
           })}
         @remote-pull=${this.requiresRepository(() => void this.handlePull())}
         @remote-push=${this.requiresRepository(() => void this.handlePush())}
+        @manage-accounts=${this.handleManageAccounts}
       ></lv-toolbar>
 
       ${this.activeRepository
@@ -6428,6 +6429,7 @@ export class AppShell extends LitElement {
             @open-workspace-manager=${() => { this.showWorkspaceManager = true; }}
             @open-profile-manager=${() => { this.showProfileManager = true; }}
             @open-repository-scan=${this.handleOpenRepositoryScan}
+            @manage-accounts=${this.handleManageAccounts}
           ></lv-welcome>`}
 
       ${this.showSettings

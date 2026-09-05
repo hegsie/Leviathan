@@ -611,6 +611,7 @@ pub fn run() {
             commands::github::get_workflow_runs,
             commands::github::get_check_runs,
             commands::github::get_commit_status,
+            commands::github::list_github_repositories,
             // GitHub Issues
             commands::github::list_issues,
             commands::github::get_issue,
@@ -640,6 +641,7 @@ pub fn run() {
             commands::azure_devops::create_azure_devops_work_item,
             commands::azure_devops::list_ado_pipeline_runs,
             commands::azure_devops::list_ado_organizations,
+            commands::azure_devops::list_ado_repositories,
             // GitLab integration
             commands::gitlab::check_gitlab_connection,
             commands::gitlab::detect_gitlab_repo,
@@ -650,6 +652,7 @@ pub fn run() {
             commands::gitlab::create_gitlab_issue,
             commands::gitlab::list_gitlab_pipelines,
             commands::gitlab::get_gitlab_labels,
+            commands::gitlab::list_gitlab_projects,
             // Bitbucket integration
             commands::bitbucket::store_bitbucket_credentials,
             commands::bitbucket::get_bitbucket_credentials,
@@ -663,6 +666,7 @@ pub fn run() {
             commands::bitbucket::list_bitbucket_issues,
             commands::bitbucket::create_bitbucket_issue,
             commands::bitbucket::list_bitbucket_pipelines,
+            commands::bitbucket::list_bitbucket_repositories,
             // Commit templates
             commands::templates::get_commit_template,
             commands::templates::list_templates,
