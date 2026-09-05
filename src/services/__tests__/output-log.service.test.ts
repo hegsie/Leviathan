@@ -331,6 +331,70 @@ describe('output-log.service', () => {
       expect(entries[0].synthesized).to.be.false;
     });
 
+    it('a CLI-backed signed tag logs ONE row, and it says -s, not -a', async () => {
+      // `tag.gpgsign = true` sends create_tag through `git tag -s` (tags.rs,
+      // create_signed_tag_cli). The synthesised line is built from the IPC
+      // arguments, which carry no signing flag, so it says `-a` (annotated):
+      // the panel would claim the tag was unsigned when it was in fact signed.
+      shellsOut('create_tag', {
+        command: 'git tag -s -m release v1.0 abc1234',
+        output: '',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('create_tag', {
+        path: '/repo',
+        name: 'v1.0',
+        message: 'release',
+        target: 'abc1234',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git tag -s -m release v1.0 abc1234');
+      expect(entries[0].gitCommand).to.not.contain('-a');
+      expect(entries[0].synthesized).to.be.false;
+    });
+
+    it('a CLI-backed signed tag REPLACEMENT (tag -s -f) logs ONE row', async () => {
+      // edit_tag_message replaces a tag in place, and signs it when tag.gpgsign
+      // is on. It has no synthesis of its own, so without reconciliation the
+      // panel showed the real line plus a bare `edit_tag_message` row.
+      shellsOut('edit_tag_message', {
+        command: 'git tag -s -f -m reworded v1.0 abc1234',
+        output: '',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('edit_tag_message', {
+        path: '/repo',
+        name: 'v1.0',
+        message: 'reworded',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git tag -s -f -m reworded v1.0 abc1234');
+      expect(entries[0].synthesized).to.be.false;
+    });
+
+    it('an unsigned annotated tag keeps its synthesised -a row', async () => {
+      // The mirror image: with tag.gpgsign off, git2 creates the tag and there
+      // is no real invocation. The `-a` line is then CORRECT and must survive —
+      // reconciliation must not swallow the row it is the only source for.
+      await invokeCommand('create_tag', {
+        path: '/repo',
+        name: 'v1.0',
+        message: 'release',
+        target: 'abc1234',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git tag -a -m release v1.0 abc1234');
+      expect(entries[0].synthesized).to.be.true;
+    });
+
     it('an operation that never shells out keeps its synthesised row', async () => {
       await invokeCommand('create_stash', {
         path: '/repo',
