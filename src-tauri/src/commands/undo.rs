@@ -72,19 +72,19 @@ fn head_ref_name(repo: &git2::Repository) -> Option<String> {
 /// OID check and reset that OTHER branch to the redo target.
 fn set_redo_marker(repo: &git2::Repository, redo_target: &str, undo_head: &str) {
     if let Ok(mut cfg) = repo.config() {
-        let _ = cfg.set_str("leviathan.redotarget", redo_target);
-        let _ = cfg.set_str("leviathan.redohead", undo_head);
+        let _ = cfg.set_str("gitnado.redotarget", redo_target);
+        let _ = cfg.set_str("gitnado.redohead", undo_head);
         match head_ref_name(repo) {
             // A mixed reset does not change which ref HEAD points at, so reading
             // it after the undo names the ref the undo actually moved.
             Some(name) => {
-                let _ = cfg.set_str("leviathan.redoref", &name);
+                let _ = cfg.set_str("gitnado.redoref", &name);
             }
             // Without a recorded ref, redo_last_action refuses rather than
             // falling back to the OID-only check that lets it hit the wrong
             // branch. Remove any stale value so it cannot be inherited.
             None => {
-                let _ = cfg.remove("leviathan.redoref");
+                let _ = cfg.remove("gitnado.redoref");
             }
         }
     }
@@ -92,9 +92,9 @@ fn set_redo_marker(repo: &git2::Repository, redo_target: &str, undo_head: &str) 
 
 fn clear_redo_marker(repo: &git2::Repository) {
     if let Ok(mut cfg) = repo.config() {
-        let _ = cfg.remove("leviathan.redotarget");
-        let _ = cfg.remove("leviathan.redohead");
-        let _ = cfg.remove("leviathan.redoref");
+        let _ = cfg.remove("gitnado.redotarget");
+        let _ = cfg.remove("gitnado.redohead");
+        let _ = cfg.remove("gitnado.redoref");
     }
 }
 
@@ -486,9 +486,9 @@ pub async fn redo_last_action(path: String) -> Result<UndoAction> {
     // app undo, so there is nothing to redo.
     let (redo_target, undo_head, undo_ref) = {
         let cfg = repo.config()?;
-        let target = cfg.get_string("leviathan.redotarget").ok();
-        let head = cfg.get_string("leviathan.redohead").ok();
-        let reference = cfg.get_string("leviathan.redoref").ok();
+        let target = cfg.get_string("gitnado.redotarget").ok();
+        let head = cfg.get_string("gitnado.redohead").ok();
+        let reference = cfg.get_string("gitnado.redoref").ok();
         match (target, head) {
             (Some(t), Some(h)) if !t.is_empty() && !h.is_empty() => (t, h, reference),
             _ => {

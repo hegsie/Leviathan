@@ -1026,7 +1026,7 @@ mod tests {
              scoped to the remote's own host"
         );
         assert_eq!(
-            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            env_of(&cmd, "GITNADO_GIT_TOKEN").as_deref(),
             Some("s3cr3t"),
             "the helper reads the token from this env var"
         );
@@ -1034,7 +1034,7 @@ mod tests {
         // The token must reach git ONLY through the env var: argv is readable
         // by every other user on the machine.
         let helper = env_of(&cmd, "GIT_CONFIG_VALUE_1").expect("helper must be set");
-        assert!(helper.contains("LEVIATHAN_GIT_TOKEN"));
+        assert!(helper.contains("GITNADO_GIT_TOKEN"));
         assert!(!helper.contains("s3cr3t"));
         let args: Vec<String> = cmd
             .get_args()
@@ -1120,7 +1120,7 @@ mod tests {
         // would pass simply because nothing answered, proving nothing.
         let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
         assert_eq!(
-            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
+            env_of(&cmd, "GITNADO_GIT_TOKEN").as_deref(),
             Some("s3cr3t"),
             "the token IS installed here; what follows is about who git offers it to"
         );
@@ -1156,10 +1156,7 @@ mod tests {
             Some("credential.https://github.com.helper"),
             "an ssh remote must map to its provider's https host"
         );
-        assert_eq!(
-            env_of(&cmd, "LEVIATHAN_GIT_TOKEN").as_deref(),
-            Some("s3cr3t")
-        );
+        assert_eq!(env_of(&cmd, "GITNADO_GIT_TOKEN").as_deref(), Some("s3cr3t"));
     }
 
     #[test]
@@ -1169,7 +1166,7 @@ mod tests {
 
         let cmd = build_lfs_command(&repo.path, &["pull"], Some("s3cr3t"));
 
-        assert_eq!(env_of(&cmd, "LEVIATHAN_GIT_TOKEN"), None);
+        assert_eq!(env_of(&cmd, "GITNADO_GIT_TOKEN"), None);
         assert_eq!(env_of(&cmd, "GIT_CONFIG_KEY_0"), None);
     }
 
@@ -1203,7 +1200,7 @@ mod tests {
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_KEY_0",
             "GIT_CONFIG_VALUE_0",
-            "LEVIATHAN_GIT_TOKEN",
+            "GITNADO_GIT_TOKEN",
         ] {
             assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
         }
@@ -1220,7 +1217,7 @@ mod tests {
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_KEY_0",
             "GIT_CONFIG_VALUE_0",
-            "LEVIATHAN_GIT_TOKEN",
+            "GITNADO_GIT_TOKEN",
         ] {
             assert_eq!(env_of(&cmd, key), None, "{} must not be set", key);
         }

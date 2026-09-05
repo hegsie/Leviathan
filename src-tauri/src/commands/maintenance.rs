@@ -975,12 +975,12 @@ mod tests {
         };
 
         assert!(
-            !envs_for("origin").contains_key("LEVIATHAN_GIT_TOKEN"),
+            !envs_for("origin").contains_key("GITNADO_GIT_TOKEN"),
             "origin has no token in the map and must be offered none"
         );
         assert_eq!(
             envs_for("upstream")
-                .get("LEVIATHAN_GIT_TOKEN")
+                .get("GITNADO_GIT_TOKEN")
                 .map(String::as_str),
             Some("ghp_secret")
         );
@@ -1036,7 +1036,7 @@ mod tests {
                 dry_run
             );
             assert_eq!(
-                envs.get("LEVIATHAN_GIT_TOKEN").map(String::as_str),
+                envs.get("GITNADO_GIT_TOKEN").map(String::as_str),
                 Some("ghp_secret"),
                 "dry_run={}",
                 dry_run
@@ -1061,7 +1061,7 @@ mod tests {
             .collect();
 
         assert!(!keys.iter().any(|k| k == "GIT_CONFIG_COUNT"));
-        assert!(!keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"));
+        assert!(!keys.iter().any(|k| k == "GITNADO_GIT_TOKEN"));
     }
 
     #[tokio::test]

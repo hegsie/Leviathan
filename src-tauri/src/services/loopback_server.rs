@@ -491,7 +491,7 @@ impl LoopbackServer {
 <body>
     <div class="container">
         <h1>Authorization Successful!</h1>
-        <p>You can close this window and return to Leviathan.</p>
+        <p>You can close this window and return to Gitnado.</p>
     </div>
     <script>setTimeout(() => window.close(), 3000);</script>
 </body>

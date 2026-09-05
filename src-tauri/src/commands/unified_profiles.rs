@@ -21,38 +21,17 @@ use crate::utils::create_command;
 
 /// Get the path to the unified profiles config file
 fn get_unified_profiles_path() -> Result<std::path::PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find config directory".to_string())
-    })?;
-
-    let app_config_dir = config_dir.join("leviathan");
-
-    // Create directory if it doesn't exist
-    if !app_config_dir.exists() {
-        fs::create_dir_all(&app_config_dir).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to create config directory: {}", e))
-        })?;
-    }
-
-    Ok(app_config_dir.join("unified_profiles.json"))
+    Ok(crate::utils::app_paths::config_dir()?.join("unified_profiles.json"))
 }
 
 /// Get the path to the legacy profiles config file
 fn get_legacy_profiles_path() -> Result<std::path::PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find config directory".to_string())
-    })?;
-    Ok(config_dir.join("leviathan").join("profiles.json"))
+    Ok(crate::utils::app_paths::config_dir()?.join("profiles.json"))
 }
 
 /// Get the path to the legacy integration accounts config file
 fn get_legacy_accounts_path() -> Result<std::path::PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find config directory".to_string())
-    })?;
-    Ok(config_dir
-        .join("leviathan")
-        .join("integration_accounts.json"))
+    Ok(crate::utils::app_paths::config_dir()?.join("integration_accounts.json"))
 }
 
 // =============================================================================

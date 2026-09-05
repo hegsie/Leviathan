@@ -1,4 +1,4 @@
-//! Error types for Leviathan
+//! Error types for Gitnado
 
 use serde::Serialize;
 use thiserror::Error;
@@ -228,5 +228,5 @@ impl serde::Serialize for LeviathanError {
     }
 }
 
-/// Result type alias for Leviathan operations
+/// Result type alias for Gitnado operations
 pub type Result<T> = std::result::Result<T, LeviathanError>;

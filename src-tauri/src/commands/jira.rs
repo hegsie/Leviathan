@@ -61,19 +61,19 @@ fn build_jira_api_url(base_url: &str, path: &str) -> String {
     format!("{}/rest/api/3/{}", base, path)
 }
 
-/// Load JIRA config from the repository's .git/leviathan/jira.json
+/// Load JIRA config from the repository's .git/gitnado/jira.json
 /// Repo-level config lives beside the git dir. Resolved via `commondir` rather
 /// than joining ".git" onto the working tree: in a linked worktree `<wt>/.git`
 /// is a pointer FILE, so the join produced a path that could never be created
 /// or read. `commondir` also keeps one config shared across every worktree of
 /// the same repository, which is what repo-level settings should do.
-fn leviathan_config_dir(repo_path: &str) -> Result<std::path::PathBuf> {
+fn gitnado_config_dir(repo_path: &str) -> Result<std::path::PathBuf> {
     let repo = git2::Repository::open(Path::new(repo_path))?;
-    Ok(repo.commondir().join("leviathan"))
+    Ok(crate::utils::app_paths::repo_dir(repo.commondir()))
 }
 
 fn load_jira_config(repo_path: &str) -> Result<JiraConfig> {
-    let config_path = leviathan_config_dir(repo_path)?.join("jira.json");
+    let config_path = gitnado_config_dir(repo_path)?.join("jira.json");
 
     if !config_path.exists() {
         return Err(LeviathanError::OperationFailed(
@@ -169,19 +169,19 @@ pub async fn get_jira_config(path: String) -> Result<Option<JiraConfig>> {
 pub async fn save_jira_config(path: String, config: JiraConfig) -> Result<()> {
     debug!("Saving JIRA config for: {}", path);
 
-    let leviathan_dir = leviathan_config_dir(&path)?;
+    let gitnado_dir = gitnado_config_dir(&path)?;
 
-    // Create the leviathan directory if it doesn't exist
-    if !leviathan_dir.exists() {
-        std::fs::create_dir_all(&leviathan_dir).map_err(|e| {
+    // Create the gitnado directory if it doesn't exist
+    if !gitnado_dir.exists() {
+        std::fs::create_dir_all(&gitnado_dir).map_err(|e| {
             LeviathanError::OperationFailed(format!(
-                "Failed to create leviathan config directory: {}",
+                "Failed to create gitnado config directory: {}",
                 e
             ))
         })?;
     }
 
-    let config_path = leviathan_dir.join("jira.json");
+    let config_path = gitnado_dir.join("jira.json");
     let content = serde_json::to_string_pretty(&config).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to serialize JIRA config: {}", e))
     })?;
@@ -843,15 +843,15 @@ mod tests {
 
     #[test]
     fn test_save_and_load_config() {
-        // A REAL repository: leviathan_config_dir resolves the config location
-        // through git2::Repository::open, so a hand-made `.git/leviathan`
+        // A REAL repository: gitnado_config_dir resolves the config location
+        // through git2::Repository::open, so a hand-made `.git/gitnado`
         // directory with no HEAD, objects or refs is not a repository and the
         // open fails. The test asserted a round trip it never performed.
         let repo = TestRepo::with_initial_commit();
         let repo_path = repo.path.clone();
         let repo_path = repo_path.as_path();
 
-        std::fs::create_dir_all(repo_path.join(".git").join("leviathan")).unwrap();
+        std::fs::create_dir_all(repo_path.join(".git").join("gitnado")).unwrap();
 
         let config = JiraConfig {
             base_url: "https://test.atlassian.net".to_string(),
@@ -861,7 +861,7 @@ mod tests {
         };
 
         // Save
-        let config_path = repo_path.join(".git").join("leviathan").join("jira.json");
+        let config_path = repo_path.join(".git").join("gitnado").join("jira.json");
         let content = serde_json::to_string_pretty(&config).unwrap();
         std::fs::write(&config_path, content).unwrap();
 

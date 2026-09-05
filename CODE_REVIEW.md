@@ -1,4 +1,4 @@
-# Leviathan Code Review
+# Gitnado Code Review
 
 Comprehensive code review covering broken/incomplete features, UX issues, event wiring problems, architectural inconsistencies, and test coverage gaps.
 

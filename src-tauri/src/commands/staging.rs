@@ -519,7 +519,7 @@ fn apply_patch_to_index(repo_path: &str, patch: &str, reverse: bool) -> Result<(
     // NamedTempFile produces a unique name (random suffix) and removes
     // the file on drop, so concurrent calls cannot collide.
     let mut tmp = tempfile::Builder::new()
-        .prefix("leviathan_hunk_")
+        .prefix("gitnado_hunk_")
         .suffix(".patch")
         .tempfile()?;
     tmp.write_all(patch.as_bytes())?;
@@ -929,10 +929,7 @@ pub async fn stage_lines(
 
     // Apply the patch
     let temp_dir = std::env::temp_dir();
-    let patch_file = temp_dir.join(format!(
-        "leviathan_stage_lines_{}.patch",
-        std::process::id()
-    ));
+    let patch_file = temp_dir.join(format!("gitnado_stage_lines_{}.patch", std::process::id()));
 
     let mut file = std::fs::File::create(&patch_file)?;
     file.write_all(patch.as_bytes())?;
@@ -1354,7 +1351,7 @@ mod tests {
 
         // Either Ok (file has no real changes, returned as empty diff via
         // fallback) or Err (the explicit "not found in diff" path). Must
-        // not panic or produce a non-Leviathan error.
+        // not panic or produce a non-Gitnado error.
         match result {
             Ok(_) => {}
             Err(crate::error::LeviathanError::OperationFailed(msg)) => {

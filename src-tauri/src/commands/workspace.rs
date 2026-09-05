@@ -240,19 +240,7 @@ fn search_repositories(
 
 /// Get the path to the workspaces config file
 fn get_workspaces_path() -> Result<std::path::PathBuf> {
-    let config_dir = dirs::config_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find config directory".to_string())
-    })?;
-
-    let app_config_dir = config_dir.join("leviathan");
-
-    if !app_config_dir.exists() {
-        fs::create_dir_all(&app_config_dir).map_err(|e| {
-            LeviathanError::OperationFailed(format!("Failed to create config directory: {}", e))
-        })?;
-    }
-
-    Ok(app_config_dir.join("workspaces.json"))
+    Ok(crate::utils::app_paths::config_dir()?.join("workspaces.json"))
 }
 
 /// Load workspaces config from disk

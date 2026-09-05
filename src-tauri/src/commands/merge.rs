@@ -708,7 +708,7 @@ pub async fn rebase(path: String, onto: String) -> Result<usize> {
 /// when the rebase finishes or is aborted — so a file there is scoped to
 /// exactly one rebase and needs no separate cleanup.
 fn rewritten_list_path(repo: &git2::Repository) -> std::path::PathBuf {
-    repo.path().join("rebase-merge").join("leviathan-rewritten")
+    repo.path().join("rebase-merge").join("gitnado-rewritten")
 }
 
 /// Append pairs replayed so far, so a conflict pause does not lose them.
@@ -750,7 +750,7 @@ fn take_rewritten(repo: &git2::Repository) -> Vec<String> {
 /// removes the directory when the rebase finishes or is aborted, so the file is
 /// scoped to exactly one rebase and needs no separate cleanup.
 fn skipped_count_path(repo: &git2::Repository) -> std::path::PathBuf {
-    repo.path().join("rebase-merge").join("leviathan-skipped")
+    repo.path().join("rebase-merge").join("gitnado-skipped")
 }
 
 /// Add the skips of one leg to the running total, so a conflict pause does not
@@ -1489,12 +1489,12 @@ pub async fn execute_interactive_rebase(
     crate::utils::reject_flag_like(&onto, "Rebase target")?;
 
     // A unique name per call, like apply_patch_to_index. The fixed
-    // /tmp/leviathan-rebase-todo it replaces meant two rebases running at
+    // /tmp/gitnado-rebase-todo it replaces meant two rebases running at
     // once would read each other's plan — one repo silently rewritten with the
     // other's drops — and the predictable path in a world-writable directory
     // was a symlink target for anyone on the machine.
     let mut todo_file = tempfile::Builder::new()
-        .prefix("leviathan-rebase-todo-")
+        .prefix("gitnado-rebase-todo-")
         .tempfile()?;
     todo_file.write_all(todo.as_bytes())?;
     todo_file.flush()?;
@@ -3369,7 +3369,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         let err = execute_interactive_rebase(
             repo.path_str(),
-            "--exec=touch /tmp/leviathan-should-not-exist".to_string(),
+            "--exec=touch /tmp/gitnado-should-not-exist".to_string(),
             "pick abc123\n".to_string(),
         )
         .await
@@ -3380,7 +3380,7 @@ mod tests {
             err
         );
         assert!(
-            !std::path::Path::new("/tmp/leviathan-should-not-exist").exists(),
+            !std::path::Path::new("/tmp/gitnado-should-not-exist").exists(),
             "and refuse BEFORE spawning anything"
         );
     }

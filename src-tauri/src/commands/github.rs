@@ -285,7 +285,7 @@ pub async fn check_github_connection(token: Option<String>) -> Result<GitHubConn
     let response = client
         .get(format!("{}/user", GITHUB_API_BASE))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -458,7 +458,7 @@ pub async fn list_pull_requests(
         .query(&[("state", state.as_str())])
         .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -560,7 +560,7 @@ pub async fn get_pull_request(
             GITHUB_API_BASE, owner, repo, number
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -734,7 +734,7 @@ pub async fn create_pull_request(
             GITHUB_API_BASE, owner, repo
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&body)
@@ -829,7 +829,7 @@ pub async fn get_pull_request_reviews(
             GITHUB_API_BASE, owner, repo, number
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -914,7 +914,7 @@ pub async fn get_workflow_runs(
         ))
         .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28");
 
@@ -997,7 +997,7 @@ pub async fn get_check_runs(
             GITHUB_API_BASE, owner, repo, commit_sha
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -1067,7 +1067,7 @@ pub async fn get_commit_status(
             GITHUB_API_BASE, owner, repo, commit_sha
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -1229,7 +1229,7 @@ pub async fn list_issues(
             .query(&[("state", state.as_str())])
             .query(&pagination_query(per_page, Some(current)))
             .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "Leviathan-Git-Client")
+            .header("User-Agent", "Gitnado-Git-Client")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
 
@@ -1334,7 +1334,7 @@ pub async fn get_issue(
             GITHUB_API_BASE, owner, repo, number
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -1464,7 +1464,7 @@ pub async fn create_issue(
             GITHUB_API_BASE, owner, repo
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&body)
@@ -1583,7 +1583,7 @@ pub async fn update_issue_state(
             GITHUB_API_BASE, owner, repo, number
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&UpdateBody { state })
@@ -1700,7 +1700,7 @@ pub async fn get_issue_comments(
         ))
         .query(&[("per_page", per_page.to_string())])
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -1782,7 +1782,7 @@ pub async fn add_issue_comment(
             GITHUB_API_BASE, owner, repo, number
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&CommentBody { body })
@@ -1876,7 +1876,7 @@ pub async fn get_repo_labels(
             ))
             .query(&pagination_query(per_page, Some(current)))
             .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "Leviathan-Git-Client")
+            .header("User-Agent", "Gitnado-Git-Client")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -1990,7 +1990,7 @@ pub async fn list_releases(
         ))
         .query(&pagination_query(per_page, page))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -2076,7 +2076,7 @@ pub async fn get_release_by_tag(
             GITHUB_API_BASE, owner, repo, tag
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -2158,7 +2158,7 @@ pub async fn get_latest_release(
             GITHUB_API_BASE, owner, repo
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -2269,7 +2269,7 @@ pub async fn create_release(
             GITHUB_API_BASE, owner, repo
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&body)
@@ -2353,7 +2353,7 @@ pub async fn delete_release(
             GITHUB_API_BASE, owner, repo, release_id
         ))
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -2752,7 +2752,7 @@ mod tests {
 
 /// Keyring key used to store the GitHub App configuration JSON.
 ///
-/// A single key is used (no per-app-id sharding) because Leviathan supports
+/// A single key is used (no per-app-id sharding) because Gitnado supports
 /// at most one GitHub App installation at a time.  The stored value is a JSON
 /// object containing `appId`, `installationId`, and `privateKeyPem`.
 const GITHUB_APP_KEYRING_KEY: &str = "github_app_config";
@@ -2816,7 +2816,7 @@ pub async fn configure_github_app(
         ))
         .header("Authorization", format!("Bearer {}", token.token))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "Leviathan-Git-Client")
+        .header("User-Agent", "Gitnado-Git-Client")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await

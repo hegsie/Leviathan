@@ -20,16 +20,7 @@ pub struct CommitTemplate {
 
 /// Get the templates file path
 fn get_templates_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_dir().ok_or_else(|| {
-        LeviathanError::OperationFailed("Could not find data directory".to_string())
-    })?;
-
-    let app_dir = data_dir.join("leviathan");
-    fs::create_dir_all(&app_dir).map_err(|e| {
-        LeviathanError::OperationFailed(format!("Failed to create app directory: {}", e))
-    })?;
-
-    Ok(app_dir.join("commit-templates.json"))
+    Ok(crate::utils::app_paths::data_dir()?.join("commit-templates.json"))
 }
 
 /// Load templates from file

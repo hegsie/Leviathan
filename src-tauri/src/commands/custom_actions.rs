@@ -34,10 +34,7 @@ pub struct ActionResult {
 
 /// Path to the custom actions config file within the repo
 fn actions_file_path(repo_path: &Path) -> std::path::PathBuf {
-    repo_path
-        .join(".git")
-        .join("leviathan")
-        .join("custom_actions.json")
+    crate::utils::app_paths::repo_dir(&repo_path.join(".git")).join("custom_actions.json")
 }
 
 /// Read custom actions from disk
@@ -198,7 +195,7 @@ pub async fn delete_custom_action(path: String, action_id: String) -> Result<Vec
 /// # Security
 ///
 /// This command executes arbitrary shell commands defined by the user in
-/// `.git/leviathan/custom_actions.json`. Because the action definitions live
+/// `.git/gitnado/custom_actions.json`. Because the action definitions live
 /// inside the repository's `.git/` directory (not tracked by Git) and the
 /// user must explicitly create them through the UI, the trust boundary is
 /// equivalent to the user running commands in their own terminal.
@@ -652,7 +649,7 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
 
         // Write malformed JSON to the actions file
-        let actions_dir = repo.path.join(".git").join("leviathan");
+        let actions_dir = repo.path.join(".git").join("gitnado");
         std::fs::create_dir_all(&actions_dir).unwrap();
         std::fs::write(actions_dir.join("custom_actions.json"), "not valid json").unwrap();
 
@@ -666,7 +663,7 @@ mod tests {
         let result = actions_file_path(path);
         assert_eq!(
             result,
-            Path::new("/my/repo/.git/leviathan/custom_actions.json")
+            Path::new("/my/repo/.git/gitnado/custom_actions.json")
         );
     }
 

@@ -376,7 +376,7 @@ describe('error-suggestion.service', () => {
 
     it('a tag already on the remote offers Force Push Tag', () => {
       // The old copy said to delete the remote tag first — an operation
-      // Leviathan implements nowhere, so the advice dead-ended.
+      // Gitnado implements nowhere, so the advice dead-ended.
       const result = getErrorSuggestion('cannot push non-fastforwardable reference', {
         operation: 'push-tag',
         branchName: 'v1.2.0',

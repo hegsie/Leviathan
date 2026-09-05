@@ -314,8 +314,7 @@ fn squash_marker_path(repo: &git2::Repository, branch_name: &str) -> std::path::
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    repo.commondir()
-        .join("leviathan")
+    crate::utils::app_paths::repo_dir(repo.commondir())
         .join("gitflow-squash")
         .join(format!("{}.json", branch_hash))
 }
@@ -515,7 +514,7 @@ pub async fn gitflow_finish_feature(
         // deletion so the user can resolve them.
         //
         // An ancestry check handles externally completed merges. The marker
-        // handles Leviathan's own squash commit because a squash never makes
+        // handles Gitnado's own squash commit because a squash never makes
         // the feature tip an ancestor of develop, and develop may have moved
         // before the user retries failed branch cleanup.
         let develop_commit = develop_branch.get().peel_to_commit()?;
@@ -1289,7 +1288,7 @@ mod tests {
         // save_rules is a non-atomic write, so a crash mid-save can leave this
         // truncated.
         let git_repo = repo.repo();
-        let rules_dir = git_repo.path().join("leviathan");
+        let rules_dir = git_repo.path().join("gitnado");
         std::fs::create_dir_all(&rules_dir).unwrap();
         std::fs::write(rules_dir.join("branch_rules.json"), "{ not json").unwrap();
 

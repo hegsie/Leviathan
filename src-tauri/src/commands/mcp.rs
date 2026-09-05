@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) server management commands
 //!
 //! Provides Tauri commands for starting, stopping, and configuring
-//! the MCP server that allows external tools to query Leviathan.
+//! the MCP server that allows external tools to query Gitnado.
 
 use crate::error::{LeviathanError, Result};
 use crate::services::ai::mcp::{McpConfig, McpState, McpStatus};

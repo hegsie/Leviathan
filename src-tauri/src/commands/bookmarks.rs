@@ -25,7 +25,7 @@ const MAX_RECENT_REPOS: usize = 50;
 fn get_bookmarks_path() -> Result<PathBuf> {
     let data_dir = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
 
-    let app_dir = data_dir.join("leviathan");
+    let app_dir = crate::utils::app_paths::app_subdir(&data_dir);
     fs::create_dir_all(&app_dir).map_err(|e| {
         LeviathanError::OperationFailed(format!("Failed to create app directory: {}", e))
     })?;

@@ -205,7 +205,7 @@ fn build_clone_command(
     // same way, so an ssh:// or git:// clone keeps using the user's own
     // credentials exactly as before.
     if let (Some(token_value), true) = (token, url.starts_with("https://")) {
-        cmd.env("LEVIATHAN_CLONE_TOKEN", token_value);
+        cmd.env("GITNADO_CLONE_TOKEN", token_value);
         // Two entries: the empty helper resets the list, so the token the
         // caller gave us wins outright the way in-URL credentials did. Without
         // the reset, a system helper holding a stale credential for the same
@@ -221,7 +221,7 @@ fn build_clone_command(
         // ignores the username.
         cmd.env(
             "GIT_CONFIG_VALUE_1",
-            "!f() { echo username=git; echo \"password=$LEVIATHAN_CLONE_TOKEN\"; }; f",
+            "!f() { echo username=git; echo \"password=$GITNADO_CLONE_TOKEN\"; }; f",
         );
     }
 
@@ -1459,7 +1459,7 @@ mod tests {
         );
 
         assert_eq!(
-            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            env_of(&cmd, "GITNADO_CLONE_TOKEN"),
             Some("ghp_s3cret".to_string())
         );
         assert_eq!(env_of(&cmd, "GIT_CONFIG_COUNT"), Some("2".to_string()));
@@ -1476,7 +1476,7 @@ mod tests {
         );
         let helper = env_of(&cmd, "GIT_CONFIG_VALUE_1").expect("helper must be configured");
         assert!(
-            helper.contains("$LEVIATHAN_CLONE_TOKEN"),
+            helper.contains("$GITNADO_CLONE_TOKEN"),
             "helper must read the token from the environment: {}",
             helper
         );
@@ -1509,7 +1509,7 @@ mod tests {
             args
         );
         assert_eq!(
-            env_of(&cmd, "LEVIATHAN_CLONE_TOKEN"),
+            env_of(&cmd, "GITNADO_CLONE_TOKEN"),
             Some("to/ken@we:ird".to_string())
         );
     }
@@ -1535,7 +1535,7 @@ mod tests {
         // nothing to do with credentials. The guard's subject is the
         // credential.helper override, and that must still be absent.
         for key in [
-            "LEVIATHAN_CLONE_TOKEN",
+            "GITNADO_CLONE_TOKEN",
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_KEY_0",
             "GIT_CONFIG_VALUE_0",
@@ -1562,7 +1562,7 @@ mod tests {
             false,
             Some("ghp_s3cret"),
         );
-        assert_eq!(env_of(&ssh, "LEVIATHAN_CLONE_TOKEN"), None);
+        assert_eq!(env_of(&ssh, "GITNADO_CLONE_TOKEN"), None);
         assert_eq!(env_of(&ssh, "GIT_CONFIG_COUNT"), None);
         assert!(args_of(&ssh).contains(&"ssh://git@host/o/r.git".to_string()));
     }

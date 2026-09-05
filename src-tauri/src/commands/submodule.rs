@@ -830,7 +830,7 @@ mod tests {
         let out_dir = tempfile::tempdir().unwrap();
         let seen = out_dir.path().join("token-seen.txt");
         let update_cmd = format!(
-            "!sh -c 'printf \"%s\" \"$LEVIATHAN_GIT_TOKEN\" > \"{}\"'",
+            "!sh -c 'printf \"%s\" \"$GITNADO_GIT_TOKEN\" > \"{}\"'",
             seen.display()
         );
         git_in(
@@ -1117,7 +1117,7 @@ mod tests {
             "a token with no remote to scope it to must not be injected under a guessed host"
         );
         assert!(
-            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            !keys.iter().any(|k| k == "GITNADO_GIT_TOKEN"),
             "a token with no remote to scope it to must not be exported"
         );
     }
@@ -1142,7 +1142,7 @@ mod tests {
             .collect();
 
         assert!(
-            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            !keys.iter().any(|k| k == "GITNADO_GIT_TOKEN"),
             "an unresolvable remote must not fall back to another remote's host"
         );
     }
@@ -1165,7 +1165,7 @@ mod tests {
             "a tokenless update must not clobber GIT_CONFIG_COUNT or shadow the user's credential helper"
         );
         assert!(
-            !keys.iter().any(|k| k == "LEVIATHAN_GIT_TOKEN"),
+            !keys.iter().any(|k| k == "GITNADO_GIT_TOKEN"),
             "a tokenless update must not export an empty token"
         );
     }

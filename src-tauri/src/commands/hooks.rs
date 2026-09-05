@@ -382,12 +382,12 @@ const HOOKS: &[(&str, &str)] = &[
     (
         "prepare-commit-msg",
         // Honest about reachability: git runs this to seed the message the
-        // editor opens on, and Leviathan commits from its own message box with
+        // editor opens on, and Gitnado commits from its own message box with
         // no editor, so it has no point to call it from. Advertising it
         // unqualified — and shipping a one-click template for it — meant a hook
         // could be installed, badged Enabled and counted as active while no
         // commit made in the app would ever run it.
-        "Run by git before the commit editor opens. Leviathan commits without an editor, so it does not run this hook.",
+        "Run by git before the commit editor opens. Gitnado commits without an editor, so it does not run this hook.",
     ),
     (
         "commit-msg",
@@ -408,7 +408,7 @@ const HOOKS: &[(&str, &str)] = &[
     ),
     (
         "pre-merge-commit",
-        // Leviathan runs this as a blocking hook on merge and on the merge leg
+        // Gitnado runs this as a blocking hook on merge and on the merge leg
         // of pull, exactly as git does. Leaving it out of this list meant the
         // dialog never listed it: a merge vetoed by a broken hook (husky
         // installs these under core.hooksPath) had no entry to read, edit or
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_existing_hookspath_hook_is_visible() {
-        // The inverse: a hook installed by husky before Leviathan ever opened
+        // The inverse: a hook installed by husky before Gitnado ever opened
         // the repo must not read as "not configured".
         let repo = TestRepo::with_initial_commit();
         let alt = repo.path.join(".husky");
