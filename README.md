@@ -495,6 +495,23 @@ Before submitting a pull request:
 
 For detailed OAuth setup instructions (for integration features), see [docs/oauth-setup.md](docs/oauth-setup.md).
 
+### Localisation
+
+The UI is translated with [`@lit/localize`](https://lit.dev/docs/localization/overview/)
+in runtime mode, so the language can be changed in Settings → Appearance →
+Language and applies immediately, without a restart. English (`en`) is the source
+locale; French (`fr`) ships alongside it.
+
+```bash
+npm run localize:extract   # pull new msg() strings into src/i18n/xliff/*.xlf
+npm run localize:build     # regenerate src/i18n/generated/ from the translations
+```
+
+Adoption is incremental: the welcome screen and the Settings dialog are
+localised, the rest of the app is still English. See
+[docs/localisation.md](docs/localisation.md) for how to add a string, translate
+it, or add a locale.
+
 ## Tech Stack
 
 ### Frontend

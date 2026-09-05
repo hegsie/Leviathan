@@ -1,5 +1,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
+import { localized, msg } from '@lit/localize';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
@@ -202,6 +203,10 @@ import {
  * Provides the top-level layout and routing
  */
 @customElement('lv-app-shell')
+// Only the Settings modal's own title is localised here so far — but the shell
+// still has to re-render on a locale change, or that title would go stale while
+// the dialog inside it switches language.
+@localized()
 export class AppShell extends LitElement {
   static styles = [
     sharedStyles,
@@ -6517,7 +6522,7 @@ export class AppShell extends LitElement {
         ? html`
             <lv-modal
               open
-              modalTitle="Settings"
+              modalTitle=${msg('Settings')}
               @close=${this.handleCloseSettings}
             >
               <lv-settings-dialog
