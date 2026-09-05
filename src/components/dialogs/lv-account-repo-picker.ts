@@ -107,13 +107,24 @@ export class LvAccountRepoPicker extends LitElement {
         flex-direction: column;
         max-height: 220px;
         overflow-y: auto;
+        margin: 0;
+        padding: 0;
+        /* The rows carry their own separators; the explicit role="list" keeps
+           the list semantics that list-style: none strips in Safari. */
+        list-style: none;
         border: 1px solid var(--color-border);
         border-radius: var(--radius-md);
         background: var(--color-bg-primary);
       }
 
+      .repo-row {
+        display: flex;
+      }
+
       .repo-item {
         display: flex;
+        flex: 1;
+        min-width: 0;
         flex-direction: column;
         gap: 2px;
         padding: var(--spacing-sm) var(--spacing-md);
@@ -127,7 +138,7 @@ export class LvAccountRepoPicker extends LitElement {
         cursor: pointer;
       }
 
-      .repo-item:last-child {
+      .repo-row:last-child .repo-item {
         border-bottom: none;
       }
 
@@ -712,9 +723,9 @@ export class LvAccountRepoPicker extends LitElement {
             ${this.nextPage !== null ? 'Load more to keep looking.' : ''}
           </div>`
         : html`
-            <div class="repo-list" role="list">
+            <ul class="repo-list" role="list" aria-label="Repositories">
               ${matches.map((repo) => this.renderRepository(repo))}
-            </div>
+            </ul>
           `}
       <div class="hint">
         Showing ${matches.length} of ${this.repositories.length} loaded
@@ -750,21 +761,30 @@ export class LvAccountRepoPicker extends LitElement {
       .filter(Boolean)
       .join(' · ');
 
+    const selected = this.selectedRepoId === repo.id;
+
+    // A real <button> inside a plain list row: putting role="listitem" ON the
+    // button would override its implicit button role, so a screen reader would
+    // announce each repository as static list text instead of something you can
+    // activate. Selection is stated with aria-pressed, not left to the
+    // `.selected` background alone.
     return html`
-      <button
-        class="repo-item ${this.selectedRepoId === repo.id ? 'selected' : ''}"
-        role="listitem"
-        title=${repo.fullName}
-        @click=${() => this.handleSelectRepository(repo)}
-        ?disabled=${this.disabled}
-      >
-        <span class="repo-title">
-          <span class="repo-name">${repo.name}</span>
-          <span class="repo-owner">${repo.owner}</span>
-          <span class="badge">${repo.isPrivate ? 'Private' : 'Public'}</span>
-        </span>
-        ${meta ? html`<span class="repo-meta">${meta}</span>` : nothing}
-      </button>
+      <li class="repo-row" role="listitem">
+        <button
+          class="repo-item ${selected ? 'selected' : ''}"
+          aria-pressed=${selected ? 'true' : 'false'}
+          title=${repo.fullName}
+          @click=${() => this.handleSelectRepository(repo)}
+          ?disabled=${this.disabled}
+        >
+          <span class="repo-title">
+            <span class="repo-name">${repo.name}</span>
+            <span class="repo-owner">${repo.owner}</span>
+            <span class="badge">${repo.isPrivate ? 'Private' : 'Public'}</span>
+          </span>
+          ${meta ? html`<span class="repo-meta">${meta}</span>` : nothing}
+        </button>
+      </li>
     `;
   }
 

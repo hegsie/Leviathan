@@ -1960,7 +1960,11 @@ export class LvFileStatus extends LitElement {
     const result = await gitService.stageFiles(this.repositoryPath, { paths });
     if (result.success) {
       // Before loadStatus, which rewrites unstagedFiles out from under `total`.
-      this.reportFilteredScope('Staged', files.length, total);
+      // `paths` — not `files` — is what was actually staged: stageablePaths has
+      // already dropped conflicted entries, and counting them here would have
+      // the toast claim files the separate "conflicted file skipped" warning
+      // says were left alone.
+      this.reportFilteredScope('Staged', paths.length, total);
       await this.loadStatus();
     } else {
       showToast(result.error?.message ?? 'Failed to stage files', 'error');
@@ -1979,7 +1983,9 @@ export class LvFileStatus extends LitElement {
       paths,
     });
     if (result.success) {
-      this.reportFilteredScope('Unstaged', files.length, total);
+      // `paths` is the set actually sent, so the count cannot drift from what
+      // was unstaged (as it did for the staging path above).
+      this.reportFilteredScope('Unstaged', paths.length, total);
       await this.loadStatus();
     } else {
       showToast(result.error?.message ?? 'Failed to unstage files', 'error');

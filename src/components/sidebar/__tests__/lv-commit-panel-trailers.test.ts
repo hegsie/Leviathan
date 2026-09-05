@@ -26,7 +26,7 @@ const invokeHistory: Array<{ command: string; args?: unknown }> = [];
 };
 
 // ── Imports (after Tauri mock) ─────────────────────────────────────────────
-import { expect, fixture, html } from '@open-wc/testing';
+import { expect, fixture, html, waitUntil } from '@open-wc/testing';
 import { repositoryStore } from '../../../stores/repository.store.ts';
 import { settingsStore } from '../../../stores/settings.store.ts';
 import { uiStore } from '../../../stores/ui.store.ts';
@@ -263,6 +263,36 @@ describe('lv-commit-panel trailers', () => {
       window.removeEventListener('open-git-config', listener);
 
       expect(opened).to.be.true;
+    });
+
+    it('recovers as soon as an identity is configured, without any other refresh', async () => {
+      // The hint's button opens the Git Configuration dialog; saving there
+      // announces `git-identity-changed`. If the panel ignored it, the user
+      // would come back to the same disabled control they went to fix.
+      identity = { name: null, email: null };
+      const el = await renderCommitPanel();
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('.trailer-hint')).to.exist;
+      expect(
+        (el.shadowRoot!.querySelector('.signoff-toggle input') as HTMLInputElement).disabled,
+      ).to.be.true;
+
+      identity = IDENTITY;
+      window.dispatchEvent(new CustomEvent('git-identity-changed'));
+      await waitUntil(
+        async () => {
+          await el.updateComplete;
+          return el.shadowRoot!.querySelector('.trailer-hint') === null;
+        },
+        'the "no git identity" hint should disappear once one is configured',
+      );
+
+      expect(
+        (el.shadowRoot!.querySelector('.signoff-toggle input') as HTMLInputElement).disabled,
+      ).to.be.false;
+      expect(internals(el).identityName).to.equal(IDENTITY.name);
+      expect(internals(el).identityEmail).to.equal(IDENTITY.email);
     });
 
     it('starts armed when "always sign off" is enabled', async () => {

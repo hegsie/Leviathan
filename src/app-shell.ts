@@ -6456,6 +6456,7 @@ export class AppShell extends LitElement {
         <lv-config-dialog
           ?open=${dialogs.isOpen('config')}
           .repositoryPath=${this.activeRepository.repository.path}
+          @git-identity-changed=${() => this.handleRefresh()}
           @close=${() => { dialogs.close('config'); }}
         ></lv-config-dialog>
       ` : ''}

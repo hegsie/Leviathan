@@ -1122,6 +1122,43 @@ test.describe('Changes filter', () => {
     expect(await findCommand(page, 'stage_files')).toHaveLength(0);
   });
 
+  test('a filtered stage-all counts what it staged, not what it showed', async ({ page }) => {
+    // A conflicted file inside the filtered set is dropped before the backend
+    // call, so counting the SHOWN files made the toast claim a file the
+    // "conflicted file skipped" warning next to it says was left alone.
+    await setupOpenRepository(
+      page,
+      withModifiedFiles([
+        { path: 'src/utils/helper.ts', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'src/utils/merge.ts', status: 'conflicted', isStaged: false, isConflicted: true },
+        { path: 'README.md', status: 'modified', isStaged: false, isConflicted: false },
+        { path: 'newfile.ts', status: 'untracked', isStaged: false, isConflicted: false },
+      ])
+    );
+
+    await filterInput(page).fill('src/utils');
+    await expect(rightPanel.getUnstagedFile('src/utils/helper.ts')).toBeVisible();
+    await expect(rightPanel.getUnstagedFile('src/utils/merge.ts')).toBeVisible();
+    await filterInput(page).blur();
+
+    await startCommandCapture(page);
+    await page.keyboard.press('s');
+
+    await waitForCommand(page, 'stage_files');
+    const args = (await findCommand(page, 'stage_files'))[0].args as { paths: string[] };
+    expect(args.paths).toEqual(['src/utils/helper.ts']);
+
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: '1 conflicted file skipped' }),
+    ).toBeVisible();
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Staged 1 of 4 files' }),
+    ).toBeVisible();
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Staged 2 of 4 files' }),
+    ).toHaveCount(0);
+  });
+
   test('the filter works in tree view, keeping only ancestors of matches', async ({ page }) => {
     await page.locator('lv-file-status .view-toggle').click();
     await expect(page.locator('lv-file-status .folder-item')).not.toHaveCount(0);

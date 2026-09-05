@@ -223,6 +223,32 @@ test.describe('Clone Dialog - from a connected account', () => {
       expect(args.token).toBe('gh-e2e-tok');
     });
 
+    test('exposes each repository as a real button whose selection is announced', async ({
+      page,
+    }) => {
+      // role="listitem" on the button used to override its implicit button
+      // role, so assistive tech announced static list text where there is a
+      // control — and the selection lived only in a background colour.
+      await openAccountSource(page, dialogs);
+      await expect(repoItems(page)).toHaveCount(2);
+
+      const list = page.getByRole('list', { name: 'Repositories' });
+      await expect(list).toBeVisible();
+
+      const rows = list.getByRole('button');
+      await expect(rows).toHaveCount(2);
+      const leviathan = rows.filter({ hasText: 'leviathan' });
+      await expect(leviathan).toHaveAttribute('aria-pressed', 'false');
+
+      await leviathan.click();
+
+      await expect(leviathan).toHaveAttribute('aria-pressed', 'true');
+      await expect(rows.filter({ hasText: 'dotfiles' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+    });
+
     test('does not list anything until the account source is chosen', async ({ page }) => {
       await startCommandCapture(page);
       await new AppPage(page).cloneButton.click();
