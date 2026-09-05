@@ -29,13 +29,37 @@ export function clampDiffContextLines(value: number): number {
   return Math.min(MAX_DIFF_CONTEXT_LINES, Math.max(MIN_DIFF_CONTEXT_LINES, Math.trunc(value)));
 }
 
-/** Labels for the whitespace modes the backend implements, in menu order. */
+/**
+ * Labels for the whitespace modes the backend implements, in menu order.
+ *
+ * Source-locale labels, for the surfaces that have not been migrated to
+ * `msg()` yet (the diff view's own toolbar). Localised surfaces call
+ * `getDiffWhitespaceModes()` instead — the two lists carry the same modes in
+ * the same order.
+ */
 export const DIFF_WHITESPACE_MODES: { value: DiffWhitespaceMode; label: string }[] = [
   { value: 'none', label: 'Show all whitespace' },
   { value: 'eol', label: 'Ignore trailing whitespace' },
   { value: 'change', label: 'Ignore whitespace changes' },
   { value: 'all', label: 'Ignore all whitespace' },
 ];
+
+/**
+ * The whitespace modes with their labels in the ACTIVE locale.
+ *
+ * A function rather than a constant for the same reason as
+ * `getGraphColorSchemes()`: `msg()` evaluated at module scope would freeze the
+ * labels at whatever locale happened to be active when the module was first
+ * imported, so switching language would leave this menu in the old one.
+ */
+export function getDiffWhitespaceModes(): { value: DiffWhitespaceMode; label: string }[] {
+  return [
+    { value: 'none', label: msg('Show all whitespace') },
+    { value: 'eol', label: msg('Ignore trailing whitespace') },
+    { value: 'change', label: msg('Ignore whitespace changes') },
+    { value: 'all', label: msg('Ignore all whitespace') },
+  ];
+}
 
 export interface SettingsState {
   // Appearance
@@ -238,6 +262,17 @@ export function migrateSettings(persisted: unknown, fromVersion: number): Settin
     // persisted blob.
     delete (state as Record<string, unknown>).defaultRemoteName;
   }
+  if (fromVersion < 8 && state.language === undefined) {
+    // v8 adds `language`, whose fresh-install default is the OS language.
+    // Every pre-v8 blob predates the key, and every one of those installs has
+    // only ever rendered in English — so letting the shallow merge fill the
+    // gap from the default would switch a French-locale machine's whole UI to
+    // French on the first launch after an upgrade, unasked and with no prompt.
+    // Detecting the system locale is what a FIRST run does; an existing
+    // install keeps the language it has always had until the user picks
+    // another in Settings.
+    state.language = 'en';
+  }
   // A persisted context-line count predates any bound being enforced, and is
   // also the one setting a user could have hand-edited in storage. Applied on
   // every migration, not just one step, so no stored value escapes the bounds.
@@ -361,7 +396,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 7,
+      version: 8,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -376,6 +411,10 @@ export const settingsStore = createStore<SettingsState>()(
       // `showAvatars` is the opposite case: it WAS read — avatars have always
       // been drawn — so a persisted value is a real user choice and the v5
       // default flip to `false` must not reach it. See `migrateSettings`.
+      //
+      // `language` is a third shape again: the key is NEW, so no persisted blob
+      // has it, and its fresh-install default (the OS language) is exactly what
+      // an upgrade must not apply — see the v8 rule in `migrateSettings`.
       migrate: migrateSettings,
       onRehydrateStorage: () => (state) => {
         if (state) {
@@ -392,6 +431,22 @@ export const settingsStore = createStore<SettingsState>()(
     }
   )
 );
+
+/**
+ * Apply the persisted language at startup.
+ *
+ * Goes through the store action rather than calling `setAppLocale()` directly:
+ * the action writes back the locale that ACTUALLY rendered, so a persisted
+ * language whose templates fail to load — or that we no longer ship — is
+ * corrected in storage instead of leaving the Settings picker naming a
+ * language the UI is not in. That is the same contract the picker itself
+ * relies on when the user changes language.
+ *
+ * Resolves with the locale that ended up active.
+ */
+export function applyPersistedLocale(): Promise<Locale> {
+  return settingsStore.getState().setLanguage(settingsStore.getState().language);
+}
 
 /**
  * Apply theme to document

@@ -554,6 +554,75 @@
 <trans-unit id="s9d8b8aa2b404c2c8">
   <source>Settings</source>
   <target>Paramètres</target></trans-unit>
+<trans-unit id="sa66f9093a496eba1">
+  <source>Failed to choose a folder to scan</source>
+  <target>Échec du choix d'un dossier à analyser</target></trans-unit>
+<trans-unit id="sf17476b6f5be1617">
+  <source>Drop a folder to open it</source>
+  <target>Déposez un dossier pour l'ouvrir</target></trans-unit>
+<trans-unit id="s3e70f60da06fa540">
+  <source>Git repositories open straight away; any other folder can be scanned or initialized.</source>
+  <target>Les dépôts Git s'ouvrent directement ; tout autre dossier peut être analysé ou initialisé.</target></trans-unit>
+<trans-unit id="se4930190902665df">
+  <source>Blocked by security settings</source>
+  <target>Bloqué par les paramètres de sécurité</target></trans-unit>
+<trans-unit id="s0c4a4d4b0cf3c4de">
+  <source><x id="0" equiv-text="${label}"/> copied to clipboard</source>
+  <target><x id="0" equiv-text="${label}"/> copié dans le presse-papiers</target></trans-unit>
+<trans-unit id="s0d8e74960f4641ff">
+  <source>Failed to copy <x id="0" equiv-text="${label}"/> to clipboard</source>
+  <target>Échec de la copie de <x id="0" equiv-text="${label}"/> dans le presse-papiers</target></trans-unit>
+<trans-unit id="s88b70c498139cab2">
+  <source>MCP access token</source>
+  <target>Jeton d'accès MCP</target></trans-unit>
+<trans-unit id="sd968a34e54a77f1c">
+  <source>MCP client configuration</source>
+  <target>Configuration du client MCP</target></trans-unit>
+<trans-unit id="s54c06c750232820c">
+  <source>MCP access token regenerated — update your MCP clients</source>
+  <target>Jeton d'accès MCP régénéré — mettez à jour vos clients MCP</target></trans-unit>
+<trans-unit id="s0f305840ead30d29">
+  <source>Failed to regenerate the MCP access token</source>
+  <target>Échec de la régénération du jeton d'accès MCP</target></trans-unit>
+<trans-unit id="sdbd27b6f6f6bfce6">
+  <source>Display author avatars in commit nodes. Avatars are fetched from Gravatar (<x id="0" equiv-text="${GRAVATAR_HOST}"/>), a third-party service: each request sends an MD5 hash of the commit author's email address and your IP address. Off by default; Offline Mode disables it.</source>
+  <target>Afficher les avatars des auteurs dans les nœuds de commit. Les avatars sont récupérés auprès de Gravatar (<x id="0" equiv-text="${GRAVATAR_HOST}"/>), un service tiers : chaque requête envoie une empreinte MD5 de l'adresse e-mail de l'auteur du commit ainsi que votre adresse IP. Désactivé par défaut ; le mode hors ligne le désactive.</target></trans-unit>
+<trans-unit id="sf6d9820dc43c4800">
+  <source>Whitespace</source>
+  <target>Espaces</target></trans-unit>
+<trans-unit id="s6df3f8ff14c9cf0b">
+  <source>How whitespace-only changes are treated when rendering a diff</source>
+  <target>Traitement des modifications ne portant que sur les espaces lors de l'affichage d'une différence</target></trans-unit>
+<trans-unit id="s73178931dcc8148f">
+  <source>Context Lines</source>
+  <target>Lignes de contexte</target></trans-unit>
+<trans-unit id="s3e17fde1aa4b60b2">
+  <source>Unchanged lines shown around each change (<x id="0" equiv-text="${MIN_DIFF_CONTEXT_LINES}"/>-<x id="1" equiv-text="${MAX_DIFF_CONTEXT_LINES}"/>, git's default is 3)</source>
+  <target>Lignes inchangées affichées autour de chaque modification (<x id="0" equiv-text="${MIN_DIFF_CONTEXT_LINES}"/>-<x id="1" equiv-text="${MAX_DIFF_CONTEXT_LINES}"/>, la valeur par défaut de git est 3)</target></trans-unit>
+<trans-unit id="s4e1daa44a0a614fe">
+  <source>Always Sign Off Commits</source>
+  <target>Toujours ajouter un Signed-off-by aux commits</target></trans-unit>
+<trans-unit id="s4e62e1ed7dc40a1a">
+  <source>Start each new commit message with Sign off enabled, adding a Signed-off-by trailer</source>
+  <target>Activer « Sign off » dans chaque nouveau message de commit, ce qui ajoute une ligne Signed-off-by</target></trans-unit>
+<trans-unit id="s14faf432e526b738">
+  <source>Show all whitespace</source>
+  <target>Afficher tous les espaces</target></trans-unit>
+<trans-unit id="s9b47d0bf224a3f2a">
+  <source>Ignore trailing whitespace</source>
+  <target>Ignorer les espaces en fin de ligne</target></trans-unit>
+<trans-unit id="s50034919585163fd">
+  <source>Ignore whitespace changes</source>
+  <target>Ignorer les modifications d'espaces</target></trans-unit>
+<trans-unit id="s58f54d18ddadd61d">
+  <source>Ignore all whitespace</source>
+  <target>Ignorer tous les espaces</target></trans-unit>
+<trans-unit id="s83a9532b5e0d6bf5">
+  <source>Unavailable while Offline Mode is on — avatars are fetched from gravatar.com.</source>
+  <target>Indisponible tant que le mode hors ligne est actif — les avatars sont récupérés depuis gravatar.com.</target></trans-unit>
+<trans-unit id="s3605f04ef070fcd3">
+  <source>Unavailable: your remote allowlist does not include <x id="0" equiv-text="${GRAVATAR_HOST}"/>.</source>
+  <target>Indisponible : votre liste des distants autorisés ne contient pas <x id="0" equiv-text="${GRAVATAR_HOST}"/>.</target></trans-unit>
 </body>
 </file>
 </xliff>

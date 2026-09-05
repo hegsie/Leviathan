@@ -5,7 +5,7 @@ import {
   settingsStore,
   getGraphColorSchemes,
   clampDiffContextLines,
-  DIFF_WHITESPACE_MODES,
+  getDiffWhitespaceModes,
   MIN_DIFF_CONTEXT_LINES,
   MAX_DIFF_CONTEXT_LINES,
   type Theme,
@@ -597,7 +597,7 @@ export class LvSettingsDialog extends LitElement {
       // it. Overwriting that with "check your API key" sent the user to fix a
       // key that was never the problem.
       this.aiError = gitService.isNetworkGateRefusal(result.error)
-        ? (result.error?.message ?? 'Blocked by security settings')
+        ? (result.error?.message ?? msg('Blocked by security settings'))
         : `${aiService.getProviderDisplayName(providerType)} is not available. Check your API key and try again.`;
     }
   }
@@ -1356,22 +1356,26 @@ export class LvSettingsDialog extends LitElement {
     this.mcpTokenRevealed = !this.mcpTokenRevealed;
   }
 
-  /** Copy a secret to the clipboard, always telling the user what happened */
+  /**
+   * Copy a secret to the clipboard, always telling the user what happened.
+   * `label` arrives already translated, so it is never case-folded here — a
+   * translated noun cannot be lowercased safely in every language.
+   */
   private async copyMcpValue(value: string, label: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(value);
-      showToast(`${label} copied to clipboard`, 'success');
+      showToast(msg(str`${label} copied to clipboard`), 'success');
     } catch {
-      showToast(`Failed to copy ${label.toLowerCase()} to clipboard`, 'error');
+      showToast(msg(str`Failed to copy ${label} to clipboard`), 'error');
     }
   }
 
   private async handleMcpTokenCopy(): Promise<void> {
-    await this.copyMcpValue(this.mcpToken, 'MCP access token');
+    await this.copyMcpValue(this.mcpToken, msg('MCP access token'));
   }
 
   private async handleMcpSnippetCopy(): Promise<void> {
-    await this.copyMcpValue(this.mcpClientConfigSnippet(true), 'MCP client configuration');
+    await this.copyMcpValue(this.mcpClientConfigSnippet(true), msg('MCP client configuration'));
   }
 
   /**
@@ -1394,9 +1398,10 @@ export class LvSettingsDialog extends LitElement {
       if (result.success && result.data) {
         this.mcpToken = result.data;
         this.mcpError = null;
-        showToast('MCP access token regenerated — update your MCP clients', 'success');
+        showToast(msg('MCP access token regenerated — update your MCP clients'), 'success');
       } else {
-        this.mcpError = result.error?.message ?? 'Failed to regenerate the MCP access token';
+        this.mcpError =
+          result.error?.message ?? msg('Failed to regenerate the MCP access token');
         showToast(this.mcpError, 'error');
       }
     } finally {
@@ -1464,18 +1469,20 @@ export class LvSettingsDialog extends LitElement {
       offlineMode: this.offlineMode,
       remoteAllowlist: this.remoteAllowlist,
     });
-    const description = `Display author avatars in commit nodes. Avatars are fetched from Gravatar (${GRAVATAR_HOST}), a third-party service: each request sends an MD5 hash of the commit author's email address and your IP address. Off by default; Offline Mode disables it.`;
+    const description = msg(
+      str`Display author avatars in commit nodes. Avatars are fetched from Gravatar (${GRAVATAR_HOST}), a third-party service: each request sends an MD5 hash of the commit author's email address and your IP address. Off by default; Offline Mode disables it.`
+    );
     return html`
       <div class="setting-row ${reason ? 'setting-unavailable' : ''}">
         <div class="setting-label">
-          <span class="setting-name">Show Avatars</span>
+          <span class="setting-name">${msg('Show Avatars')}</span>
           <span class="setting-description">${description}</span>
           ${reason
             ? html`<span class="setting-unavailable-reason" role="note">${reason}</span>`
             : nothing}
         </div>
         <lv-toggle
-          .label=${'Show Avatars'}
+          .label=${msg('Show Avatars')}
           .description=${reason ? `${description} ${reason}` : description}
           .checked=${this.showAvatars}
           ?disabled=${reason !== null}
@@ -1687,9 +1694,9 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name" id="diff-whitespace-label">Whitespace</span>
+              <span class="setting-name" id="diff-whitespace-label">${msg('Whitespace')}</span>
               <span class="setting-description">
-                How whitespace-only changes are treated when rendering a diff
+                ${msg('How whitespace-only changes are treated when rendering a diff')}
               </span>
             </div>
             <select
@@ -1698,7 +1705,7 @@ export class LvSettingsDialog extends LitElement {
               .value=${this.diffIgnoreWhitespace}
               @change=${this.handleDiffIgnoreWhitespaceChange}
             >
-              ${DIFF_WHITESPACE_MODES.map(mode => html`
+              ${getDiffWhitespaceModes().map(mode => html`
                 <option value=${mode.value} ?selected=${mode.value === this.diffIgnoreWhitespace}>
                   ${mode.label}
                 </option>
@@ -1708,10 +1715,11 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name" id="diff-context-label">Context Lines</span>
+              <span class="setting-name" id="diff-context-label">${msg('Context Lines')}</span>
               <span class="setting-description">
-                Unchanged lines shown around each change
-                (${MIN_DIFF_CONTEXT_LINES}-${MAX_DIFF_CONTEXT_LINES}, git's default is 3)
+                ${msg(
+                  str`Unchanged lines shown around each change (${MIN_DIFF_CONTEXT_LINES}-${MAX_DIFF_CONTEXT_LINES}, git's default is 3)`
+                )}
               </span>
             </div>
             <input
@@ -1899,8 +1907,8 @@ export class LvSettingsDialog extends LitElement {
           )}
 
           ${this.renderToggleRow(
-            'Always Sign Off Commits',
-            'Start each new commit message with Sign off enabled, adding a Signed-off-by trailer',
+            msg('Always Sign Off Commits'),
+            msg('Start each new commit message with Sign off enabled, adding a Signed-off-by trailer'),
             this.alwaysSignOff,
             'alwaysSignOff'
           )}

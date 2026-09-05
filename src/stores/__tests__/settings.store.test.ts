@@ -1,7 +1,10 @@
 import { expect } from '@open-wc/testing';
 import {
+  applyPersistedLocale,
   settingsStore,
   getGraphColorSchemes,
+  getDiffWhitespaceModes,
+  DIFF_WHITESPACE_MODES,
   clampDiffContextLines,
   MIN_DIFF_CONTEXT_LINES,
   MAX_DIFF_CONTEXT_LINES,
@@ -9,6 +12,7 @@ import {
   watchSystemContrast,
 } from '../settings.store.ts';
 import type { SettingsState } from '../settings.store.ts';
+import { detectSystemLocale } from '../../i18n/index.ts';
 
 describe('settings.store', () => {
   beforeEach(() => {
@@ -418,6 +422,45 @@ describe('settings.store', () => {
     });
   });
 
+  describe('getDiffWhitespaceModes', () => {
+    it('offers the same modes, in the same order, as the source-locale list', () => {
+      // Two lists exist only because the diff view's own toolbar has not been
+      // migrated to msg() yet. They must never drift apart.
+      expect(getDiffWhitespaceModes().map((m) => m.value)).to.deep.equal(
+        DIFF_WHITESPACE_MODES.map((m) => m.value)
+      );
+    });
+
+    it('labels every mode in the active locale (English by default)', () => {
+      expect(getDiffWhitespaceModes()).to.deep.equal(DIFF_WHITESPACE_MODES);
+    });
+  });
+
+  describe('applyPersistedLocale', () => {
+    afterEach(async () => {
+      await settingsStore.getState().setLanguage('en');
+    });
+
+    it('writes back the locale that actually rendered', async () => {
+      // A locale we no longer ship (or whose templates fail to load) must not
+      // survive in storage: Settings would keep naming a language the UI is
+      // not in. Written straight into state to stand in for such a blob.
+      settingsStore.setState({ language: 'de' as unknown as SettingsState['language'] });
+
+      const applied = await applyPersistedLocale();
+
+      expect(applied, 'the locale that ended up active').to.equal('en');
+      expect(settingsStore.getState().language, 'corrected in storage').to.equal('en');
+    });
+
+    it('leaves a locale we do ship alone', async () => {
+      settingsStore.setState({ language: 'en' });
+
+      expect(await applyPersistedLocale()).to.equal('en');
+      expect(settingsStore.getState().language).to.equal('en');
+    });
+  });
+
   describe('persisted-state migration', () => {
     it('v1 state carries autoStashOnCheckout forward as true', () => {
       // Changing a default only reaches installs with NO persisted state, and
@@ -582,12 +625,13 @@ describe('settings.store', () => {
       expect(migrated, 'the v7 rule still runs at v4').to.not.have.property('defaultRemoteName');
     });
 
-    it('applies every rule in order for a v1 install upgrading straight to v7', () => {
+    it('applies every rule in order for a v1 install upgrading straight to v8', () => {
       // The oldest persisted blob we support has to come out the other end with
       // every rule applied: auto-stash forced on, the never-read wordWrap
       // dropped, the graph scheme un-pinned because it was never chosen, the
-      // old avatar default filled in, the whitespace mode seeded, and the dead
-      // remote key gone.
+      // old avatar default filled in, the whitespace mode seeded, the dead
+      // remote key gone, and the UI language pinned to the English these
+      // installs have always rendered in.
       const persist = (
         settingsStore as unknown as {
           persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
@@ -612,7 +656,100 @@ describe('settings.store', () => {
       expect(migrated.showAvatars, 'v5 rule').to.equal(true);
       expect(migrated.diffIgnoreWhitespace, 'v6 rule').to.equal('none');
       expect(migrated, 'v7 rule').to.not.have.property('defaultRemoteName');
+      expect(migrated.language, 'v8 rule').to.equal('en');
       expect(migrated.theme, 'a real user choice survives all of it').to.equal('light');
+    });
+
+    /**
+     * The same upgrade path entered at EVERY version we have ever shipped.
+     *
+     * A rule must fire exactly once — for the installs that predate it — and
+     * never again: the blob a v4 install persists is a v4 blob, and re-running
+     * the v2/v3/v4 rules over it would overwrite choices the user really made.
+     * So every case below starts from the SAME blob, whose every value is the
+     * opposite of what its rule would write, and asserts that exactly the rules
+     * numbered ABOVE the entry version fired and the ones at or below it left
+     * the stored values alone. The numbering is load-bearing: a rule inserted
+     * out of order, or a version bump without a rule, shows up here.
+     */
+    describe('the full upgrade path, from every entry version', () => {
+      const migrateFrom = (fromVersion: number): Record<string, unknown> =>
+        migrateSettings(
+          {
+            autoStashOnCheckout: false,
+            wordWrap: true,
+            graphColorScheme: 'default',
+            showWhitespace: true,
+            defaultRemoteName: 'upstream',
+            theme: 'light',
+          } as unknown as Partial<SettingsState>,
+          fromVersion
+        ) as unknown as Record<string, unknown>;
+
+      for (const from of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        it(`fires exactly the rules above v${from}`, () => {
+          const migrated = migrateFrom(from);
+
+          // v2: auto-stash was never read before it, so a stored `false` is
+          // only a real choice from v2 onwards.
+          expect(migrated.autoStashOnCheckout, 'v2').to.equal(from < 2 ? true : false);
+          // v3: same story for word wrap.
+          expect(migrated.wordWrap, 'v3').to.equal(from < 3 ? false : true);
+          // v4: the scheme is un-pinned only for blobs that predate the flag.
+          expect(migrated.graphColorSchemeAuto, 'v4').to.equal(from < 4 ? true : undefined);
+          // v5: the OLD avatar default is filled in only where the key is absent
+          // AND the blob predates the flip.
+          expect(migrated.showAvatars, 'v5').to.equal(from < 5 ? true : undefined);
+          // v6: the dead flag is dropped and the mode seeded once.
+          expect(migrated.diffIgnoreWhitespace, 'v6').to.equal(from < 6 ? 'none' : undefined);
+          expect(migrated.showWhitespace, 'v6').to.equal(from < 6 ? undefined : true);
+          // v7: the dead remote key is dropped once.
+          expect(migrated.defaultRemoteName, 'v7').to.equal(from < 7 ? undefined : 'upstream');
+          // v8: the UI language is pinned to English for installs that predate
+          // the key, so an upgrade never switches language on its own.
+          expect(migrated.language, 'v8').to.equal(from < 8 ? 'en' : undefined);
+          // Nothing in the chain touches a genuine preference.
+          expect(migrated.theme, 'a real user choice survives every entry point').to.equal(
+            'light'
+          );
+        });
+      }
+
+      it('a fresh install has no persisted blob, so it follows the OS language', () => {
+        // The other half of the v8 rule: `detectSystemLocale()` is what a FIRST
+        // run does. `resetToDefaults()` re-applies exactly the fresh-install
+        // defaults, so it is the closest thing to a fresh install a test has.
+        settingsStore.getState().resetToDefaults();
+
+        expect(settingsStore.getState().language).to.equal(detectSystemLocale());
+      });
+    });
+
+    it('a pre-v8 state keeps English instead of adopting the OS language', () => {
+      // The upgrading user has been reading an English UI for as long as the
+      // app has existed. Filling the new key from the system locale would
+      // switch their whole UI to another language on first launch, unasked.
+      const migrated = migrateSettings({ theme: 'light' } as Partial<SettingsState>, 7);
+
+      expect(migrated.language).to.equal('en');
+      expect(migrated.theme, 'other settings survive').to.equal('light');
+    });
+
+    it('a persisted language is a real choice and is never overwritten', () => {
+      const migrated = migrateSettings(
+        { language: 'fr' } as unknown as Partial<SettingsState>,
+        1
+      );
+
+      expect(migrated.language).to.equal('fr');
+    });
+
+    it('a v8 state is left to the store default', () => {
+      // From v8 the key is always written, so an absent one is not a
+      // pre-existing choice and must fall through to the default.
+      const migrated = migrateSettings({ theme: 'light' } as Partial<SettingsState>, 8);
+
+      expect(migrated.language, 'left to the store default').to.equal(undefined);
     });
 
     it('a v1 install that pinned a non-default scheme keeps it through the chain', () => {
