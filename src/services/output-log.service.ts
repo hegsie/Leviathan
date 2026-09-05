@@ -17,6 +17,29 @@ export interface OutputLogEntry {
   success: boolean;
   /** Repository the command ran against (absent for repo-independent commands) */
   repoPath?: string;
+  /**
+   * The git command line for this entry: the REAL invocation for operations
+   * that shell out to git, or the equivalent line for the git2-backed ones.
+   * Absent when there is no honest line to show, in which case the panel falls
+   * back to `command` (the IPC name).
+   */
+  gitCommand?: string;
+  /**
+   * True when `gitCommand` was SYNTHESISED from a git2 operation's arguments
+   * rather than being a command line that actually executed. The panel must
+   * mark these so it never implies the CLI ran — see `git-command-format.ts`.
+   */
+  synthesized?: boolean;
+  /** Wall-clock duration of the operation in milliseconds, when measured. */
+  durationMs?: number;
+}
+
+/** Optional detail a caller can attach to a log entry. */
+export interface OutputLogDetails {
+  repoPath?: string;
+  gitCommand?: string;
+  synthesized?: boolean;
+  durationMs?: number;
 }
 
 // Singleton log entries array and listeners
@@ -42,20 +65,32 @@ export function subscribeOutputLog(listener: () => void): () => void {
 
 /**
  * Log a git command execution result.
+ *
+ * The fourth parameter accepts either a bare repository path (its original
+ * shape, still used by tests and injected setups) or a details object carrying
+ * the git command line, timing and repo path.
  */
 export function logGitCommand(
   command: string,
   output: string,
   success: boolean,
-  repoPath?: string,
+  repoPathOrDetails?: string | OutputLogDetails,
 ): void {
+  const details: OutputLogDetails =
+    typeof repoPathOrDetails === 'string'
+      ? { repoPath: repoPathOrDetails }
+      : (repoPathOrDetails ?? {});
+
   logEntries.unshift({
     id: nextEntryId++,
     timestamp: Date.now(),
     command,
     output,
     success,
-    repoPath,
+    repoPath: details.repoPath,
+    gitCommand: details.gitCommand,
+    synthesized: details.synthesized,
+    durationMs: details.durationMs,
   });
 
   // Trim to max entries

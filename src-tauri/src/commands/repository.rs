@@ -159,7 +159,7 @@ fn build_clone_command(
     filter: Option<&str>,
     single_branch: bool,
     token: Option<&str>,
-) -> std::process::Command {
+) -> crate::utils::GitCommand {
     // `create_command` is what pins `LC_ALL=C`. That is not cosmetic here:
     // `parse_cli_clone_progress` matches git's English stage names
     // ("Receiving objects", "Resolving deltas"). Under a localized git those

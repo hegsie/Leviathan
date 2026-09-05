@@ -2,14 +2,466 @@
 //!
 //! This module provides helpers to create commands that don't show
 //! console windows on Windows.
+//!
+//! Every `git` subprocess in the app goes through [`create_command`], which
+//! hands back a [`GitCommand`] rather than a bare [`Command`]. That wrapper is
+//! what lets the Output panel show the real `git` invocation together with its
+//! stdout/stderr: it times the run and reports it to the sink `lib.rs`
+//! installs. Because the wrapper owns `output()`/`status()`, a NEW shell-out is
+//! reported automatically — nothing has to be added to a hand-kept list.
 
-use std::process::Command;
+use std::ffi::OsStr;
+use std::io;
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+/// One executed `git` invocation, as the Output panel shows it.
+///
+/// `command` is the effective command line with secrets redacted — see
+/// [`redact_secrets`]. Environment variables are deliberately NOT included:
+/// the token credential helper reaches git through the ENVIRONMENT (see
+/// [`apply_token_credential_helper`]), so leaving env out of this payload is
+/// what keeps tokens out of the panel by construction rather than by filtering.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommandLog {
+    /// The effective, redacted command line (e.g. `git push --force origin main`)
+    pub command: String,
+    /// Combined stderr/stdout of the run, redacted and truncated
+    pub output: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    /// Repository the command ran in, when it can be determined
+    pub repo_path: Option<String>,
+}
+
+type LogSink = Box<dyn Fn(GitCommandLog) + Send + Sync + 'static>;
+
+static LOG_SINK: OnceLock<LogSink> = OnceLock::new();
+
+/// Install the sink executed `git` invocations are reported to.
+///
+/// Called once from `lib.rs` setup with a closure that emits the
+/// `git-command-executed` Tauri event. Installing is idempotent: a second call
+/// is ignored, so nothing can displace the real sink once the app is running.
+pub fn set_git_command_log_sink(sink: impl Fn(GitCommandLog) + Send + Sync + 'static) {
+    let _ = LOG_SINK.set(Box::new(sink));
+}
+
+/// How much of a command's output is kept. A `git fetch` on a large repo can
+/// print megabytes; the panel only needs enough to be readable, and the event
+/// crosses the IPC boundary on every command.
+const MAX_OUTPUT_CHARS: usize = 8_000;
+
+/// git subcommands whose runs are worth showing in the Output panel.
+///
+/// An ALLOWLIST rather than a denylist of reads on purpose: the app shells out
+/// to `git rev-parse`, `git for-each-ref` and friends constantly, and a
+/// denylist that misses one floods the 100-entry panel with noise the user
+/// never asked for. `config` and `credential` are deliberately absent — they
+/// are plumbing reads, and they are the two subcommands whose arguments are
+/// most likely to name a secret.
+const LOGGED_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "am",
+    "apply",
+    "archive",
+    "bisect",
+    "branch",
+    "bundle",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "clone",
+    "commit",
+    "difftool",
+    "fetch",
+    "filter-branch",
+    "gc",
+    "init",
+    "lfs",
+    "maintenance",
+    "merge",
+    "mergetool",
+    "mv",
+    "notes",
+    "prune",
+    "pull",
+    "push",
+    "rebase",
+    "reflog",
+    "remote",
+    "repack",
+    "replace",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "sparse-checkout",
+    "stash",
+    "submodule",
+    "switch",
+    "tag",
+    "update-index",
+    "update-ref",
+    "worktree",
+];
+
+/// git's own options that take a SEPARATE value argument, so the subcommand
+/// scan skips two slots rather than mistaking the value for the subcommand.
+const GLOBAL_OPTS_WITH_VALUE: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--config-env",
+];
+
+/// The subcommand of a `git` invocation — the first argument that is neither a
+/// global option nor a global option's value.
+fn git_subcommand(args: &[String]) -> Option<&str> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if GLOBAL_OPTS_WITH_VALUE.contains(&arg) {
+            i += 2;
+        } else if arg.starts_with('-') {
+            i += 1;
+        } else {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// The repository a `git` invocation targets: its working directory, or the
+/// value of a `-C <path>` global option when no working directory is set.
+fn git_repo_path(cwd: Option<&Path>, args: &[String]) -> Option<String> {
+    if let Some(dir) = cwd {
+        return Some(dir.to_string_lossy().to_string());
+    }
+    args.iter()
+        .position(|a| a == "-C")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
+/// Quote an argument so the rendered line reads as the tokens git received.
+fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if arg
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
+    {
+        format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
+}
+
+/// Render a `git` invocation the way a user would type it, with every argument
+/// passed through [`redact_secrets`].
+fn format_command_line(program: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(program.to_string());
+    for arg in args {
+        parts.push(quote_arg(&redact_secrets(arg)));
+    }
+    parts.join(" ")
+}
+
+/// Patterns for the secrets that can reach a command line or a command's
+/// output, compiled once.
+///
+/// Redaction is a SAFETY NET, not the primary defence: the app's own tokens
+/// reach git through the environment and never as arguments, and env is never
+/// logged. But a user's own remote URL can carry `user:token@host`, and git
+/// echoes remote URLs in its progress and error messages, so everything on its
+/// way to the panel is scrubbed.
+fn secret_patterns() -> &'static [(regex::Regex, &'static str)] {
+    static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            vec![
+                // Credentials embedded in a URL: https://user:token@host,
+                // ssh://user@host. The userinfo goes; the host stays so the
+                // line still says which remote it was.
+                (
+                    regex::Regex::new(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s@]+@").unwrap(),
+                    "${1}***@",
+                ),
+                // Provider tokens, by their documented prefixes.
+                (
+                    regex::Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{16,}").unwrap(),
+                    "***",
+                ),
+                (
+                    regex::Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{20,}").unwrap(),
+                    "***",
+                ),
+                (
+                    regex::Regex::new(r"\bglpat-[A-Za-z0-9_\-]{16,}").unwrap(),
+                    "***",
+                ),
+                (
+                    regex::Regex::new(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}").unwrap(),
+                    "***",
+                ),
+                (regex::Regex::new(r"\bsk-[A-Za-z0-9_\-]{16,}").unwrap(), "***"),
+                (regex::Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap(), "***"),
+                // JSON Web Tokens (three base64url segments).
+                (
+                    regex::Regex::new(
+                        r"\bey[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}",
+                    )
+                    .unwrap(),
+                    "***",
+                ),
+                // `Bearer <token>` — matched BEFORE the named-secret rule
+                // below, which would otherwise consume the word `Bearer` as
+                // `Authorization`'s value and leave the token itself standing.
+                (
+                    regex::Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{6,}").unwrap(),
+                    "Bearer ***",
+                ),
+                // Anything explicitly NAMED as a secret, whatever its shape.
+                (
+                    regex::Regex::new(
+                        r"(?i)\b(password|passwd|token|access[_\-]?token|api[_\-]?key|secret|authorization)([=:]\s*|\s+)\S+",
+                    )
+                    .unwrap(),
+                    "${1}=***",
+                ),
+            ]
+        })
+        .as_slice()
+}
+
+/// Replace anything that looks like a credential with `***`.
+///
+/// Applied to every command line and every captured output before it leaves
+/// the backend, so a credentialed remote URL or a token echoed by git can
+/// never reach the Output panel.
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = text.to_string();
+    for (pattern, replacement) in secret_patterns() {
+        out = pattern.replace_all(&out, *replacement).into_owned();
+    }
+    out
+}
+
+/// Trim captured output to something the panel can hold, keeping the head.
+fn truncate_output(text: &str) -> String {
+    if text.chars().count() <= MAX_OUTPUT_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(MAX_OUTPUT_CHARS).collect();
+    format!("{}\n… (output truncated)", kept)
+}
+
+/// A `Command` that reports its `git` runs to the Output panel.
+///
+/// Deliberately NOT a bare `Command`: the builder methods return `&mut Self`,
+/// so a chained `create_command("git").arg(..).output()` stays on this type and
+/// gets reported. `Deref`/`DerefMut` still expose everything else on `Command`
+/// (`get_args`, `get_envs`, platform extension traits) and let a
+/// `&mut GitCommand` be passed wherever a `&mut Command` is expected.
+pub struct GitCommand {
+    inner: Command,
+    /// Only `git` invocations are reported; `ssh`, `gpg`, `where`/`which` and
+    /// friends are not git commands and have no place in a panel of them.
+    is_git: bool,
+}
+
+impl GitCommand {
+    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        self.inner.arg(arg);
+        self
+    }
+
+    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.inner.args(args);
+        self
+    }
+
+    pub fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.inner.env(key, val);
+        self
+    }
+
+    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.inner.envs(vars);
+        self
+    }
+
+    pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
+        self.inner.env_remove(key);
+        self
+    }
+
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.inner.env_clear();
+        self
+    }
+
+    pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
+        self.inner.current_dir(dir);
+        self
+    }
+
+    pub fn stdin<S: Into<Stdio>>(&mut self, cfg: S) -> &mut Self {
+        self.inner.stdin(cfg);
+        self
+    }
+
+    pub fn stdout<S: Into<Stdio>>(&mut self, cfg: S) -> &mut Self {
+        self.inner.stdout(cfg);
+        self
+    }
+
+    pub fn stderr<S: Into<Stdio>>(&mut self, cfg: S) -> &mut Self {
+        self.inner.stderr(cfg);
+        self
+    }
+
+    /// The redacted command line for this invocation and the repository it
+    /// runs in, or `None` when it is not a git subcommand worth showing.
+    fn loggable_command_line(&self) -> Option<(String, Option<String>)> {
+        if !self.is_git {
+            return None;
+        }
+        let args: Vec<String> = self
+            .inner
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let subcommand = git_subcommand(&args)?;
+        if !LOGGED_SUBCOMMANDS.contains(&subcommand) {
+            return None;
+        }
+        let program = self.inner.get_program().to_string_lossy().to_string();
+        Some((
+            format_command_line(&program, &args),
+            git_repo_path(self.inner.get_current_dir(), &args),
+        ))
+    }
+
+    fn report(&self, started: Instant, output: String, success: bool) {
+        let Some(sink) = LOG_SINK.get() else {
+            return;
+        };
+        let Some((command, repo_path)) = self.loggable_command_line() else {
+            return;
+        };
+        sink(GitCommandLog {
+            command,
+            output: truncate_output(&redact_secrets(output.trim())),
+            success,
+            duration_ms: started.elapsed().as_millis() as u64,
+            repo_path,
+        });
+    }
+
+    /// Run to completion capturing output, reporting the run to the panel.
+    pub fn output(&mut self) -> io::Result<Output> {
+        let started = Instant::now();
+        let result = self.inner.output();
+        match &result {
+            Ok(out) => {
+                // stderr first: git puts progress and the failure reason there,
+                // which is what a user opening the panel is looking for.
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let combined = match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+                    (true, true) => String::new(),
+                    (true, false) => stdout.to_string(),
+                    (false, true) => stderr.to_string(),
+                    (false, false) => format!("{}\n{}", stderr.trim_end(), stdout),
+                };
+                self.report(started, combined, out.status.success());
+            }
+            Err(e) => self.report(started, e.to_string(), false),
+        }
+        result
+    }
+
+    /// Run to completion with inherited stdio. Nothing is captured, so the
+    /// panel entry carries the command and its exit status only.
+    pub fn status(&mut self) -> io::Result<ExitStatus> {
+        let started = Instant::now();
+        let result = self.inner.status();
+        match &result {
+            Ok(status) => self.report(started, String::new(), status.success()),
+            Err(e) => self.report(started, e.to_string(), false),
+        }
+        result
+    }
+
+    /// Start the process without waiting for it. The outcome is unknown here,
+    /// so nothing is reported — a caller that drives the child itself should
+    /// call [`GitCommand::report_run`] once it has the result.
+    pub fn spawn(&mut self) -> io::Result<Child> {
+        self.inner.spawn()
+    }
+
+    /// Report a run this command performed OUTSIDE `output()`/`status()`.
+    ///
+    /// `remote::run_push_command` spawns the child itself so a cancellation can
+    /// kill it mid-transfer; without this hook the operation users most want to
+    /// read in the panel — a force push and the remote's rejection of it —
+    /// would be the one that never appears.
+    pub fn report_run(&self, started: Instant, output: &Output) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = match (stderr.trim().is_empty(), stdout.trim().is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => stdout.to_string(),
+            (false, true) => stderr.to_string(),
+            (false, false) => format!("{}\n{}", stderr.trim_end(), stdout),
+        };
+        self.report(started, combined, output.status.success());
+    }
+}
+
+impl Deref for GitCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Command {
+        &self.inner
+    }
+}
+
+impl DerefMut for GitCommand {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.inner
+    }
+}
 
 /// Creates a Command with platform-specific settings to hide console windows.
 ///
 /// On Windows, this sets the CREATE_NO_WINDOW flag to prevent CMD popups.
 /// On other platforms, it returns a standard Command.
-pub fn create_command(program: &str) -> Command {
+pub fn create_command(program: &str) -> GitCommand {
     let mut cmd = Command::new(program);
 
     #[cfg(target_os = "windows")]
@@ -53,7 +505,10 @@ pub fn create_command(program: &str) -> Command {
         }
     }
 
-    cmd
+    GitCommand {
+        inner: cmd,
+        is_git: program == "git",
+    }
 }
 
 /// The host of an SSH remote, in either the `ssh://[user@]host[:port]/path`
@@ -194,6 +649,216 @@ pub fn apply_token_credential_helper(cmd: &mut Command, token: &str, remote_url:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Output panel: which invocations are reported -------------------
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The subcommand has to be found past git's own global options, or a
+    /// `git -C <path> push` would be filed under the path.
+    #[test]
+    fn test_git_subcommand_skips_global_options_and_their_values() {
+        assert_eq!(git_subcommand(&args(&["push", "origin"])).unwrap(), "push");
+        assert_eq!(
+            git_subcommand(&args(&["-C", "/repo", "commit", "-m", "x"])).unwrap(),
+            "commit"
+        );
+        assert_eq!(
+            git_subcommand(&args(&["-c", "core.pager=cat", "--no-pager", "rebase"])).unwrap(),
+            "rebase"
+        );
+        assert!(git_subcommand(&args(&["--version"])).is_none());
+        assert!(git_subcommand(&[]).is_none());
+    }
+
+    /// Reads must not reach the panel: they run constantly and would push every
+    /// real operation out of the 100-entry buffer.
+    #[test]
+    fn test_only_mutating_subcommands_are_reported() {
+        for mutating in ["push", "commit", "rebase", "difftool", "lfs", "stash"] {
+            assert!(
+                LOGGED_SUBCOMMANDS.contains(&mutating),
+                "{mutating} should be reported"
+            );
+        }
+        for read in [
+            "rev-parse",
+            "log",
+            "status",
+            "for-each-ref",
+            "config",
+            "ls-remote",
+        ] {
+            assert!(
+                !LOGGED_SUBCOMMANDS.contains(&read),
+                "{read} should not be reported"
+            );
+        }
+    }
+
+    #[test]
+    fn test_git_repo_path_prefers_the_working_directory_then_dash_c() {
+        assert_eq!(
+            git_repo_path(Some(Path::new("/work/repo")), &args(&["status"])).as_deref(),
+            Some("/work/repo")
+        );
+        assert_eq!(
+            git_repo_path(None, &args(&["-C", "/other/repo", "push"])).as_deref(),
+            Some("/other/repo")
+        );
+        assert!(git_repo_path(None, &args(&["push"])).is_none());
+    }
+
+    /// A commit message with spaces has to survive as ONE token, or the panel
+    /// line reads as a completely different command.
+    #[test]
+    fn test_format_command_line_quotes_multiword_arguments() {
+        assert_eq!(
+            format_command_line("git", &args(&["commit", "-m", "fix the thing"])),
+            "git commit -m \"fix the thing\""
+        );
+        assert_eq!(
+            format_command_line("git", &args(&["push", "--force", "origin", "main"])),
+            "git push --force origin main"
+        );
+    }
+
+    /// A real invocation, end to end: the wrapper must render exactly what it
+    /// is about to run.
+    #[test]
+    fn test_loggable_command_line_renders_the_effective_invocation() {
+        let mut cmd = create_command("git");
+        cmd.current_dir("/work/repo")
+            .arg("push")
+            .args(["--force-with-lease", "origin", "main"]);
+
+        let (line, repo) = cmd.loggable_command_line().expect("push is reported");
+        assert_eq!(line, "git push --force-with-lease origin main");
+        assert_eq!(repo.as_deref(), Some("/work/repo"));
+    }
+
+    /// Non-git programs (ssh, gpg, which) are not git invocations and must
+    /// never appear in a panel of them.
+    #[test]
+    fn test_non_git_programs_are_never_reported() {
+        let mut cmd = create_command("ssh");
+        cmd.arg("push");
+        assert!(cmd.loggable_command_line().is_none());
+    }
+
+    #[test]
+    fn test_read_only_git_invocations_are_not_reported() {
+        let mut cmd = create_command("git");
+        cmd.args(["rev-parse", "HEAD"]);
+        assert!(cmd.loggable_command_line().is_none());
+    }
+
+    // ---- Output panel: redaction ---------------------------------------
+
+    /// The single most likely leak: a user's own remote URL with the token
+    /// baked into it, which git echoes back in its progress and error output.
+    #[test]
+    fn test_redact_secrets_strips_credentials_from_remote_urls() {
+        assert_eq!(
+            redact_secrets("git push https://someone:ghp_abcdefghijklmnopqrst@github.com/o/r.git"),
+            "git push https://***@github.com/o/r.git"
+        );
+        assert_eq!(
+            redact_secrets("remote: https://x-access-token:v1.9f8e7d@github.com/o/r"),
+            "remote: https://***@github.com/o/r"
+        );
+        // The host must SURVIVE — the entry is useless if it cannot say which
+        // remote was involved.
+        assert!(
+            redact_secrets("https://u:p@gitlab.example.com/g/r.git").contains("gitlab.example.com")
+        );
+    }
+
+    /// A URL with no userinfo is not a secret and must be left readable.
+    #[test]
+    fn test_redact_secrets_leaves_plain_urls_alone() {
+        assert_eq!(
+            redact_secrets("git fetch https://github.com/owner/repo.git"),
+            "git fetch https://github.com/owner/repo.git"
+        );
+        assert_eq!(
+            redact_secrets("git commit -m \"fix login for user@example.com\""),
+            "git commit -m \"fix login for user@example.com\""
+        );
+    }
+
+    /// Bare provider tokens, wherever they turn up.
+    #[test]
+    fn test_redact_secrets_strips_bare_provider_tokens() {
+        for secret in [
+            "ghp_0123456789abcdefghij",
+            "gho_0123456789abcdefghij",
+            "github_pat_11ABCDEFG0abcdefghijklmnop",
+            "glpat-abcdefghij0123456789",
+            "xoxb-1234567890-abcdefghij",
+            "sk-abcdefghijklmnopqrstuvwx",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let redacted = redact_secrets(&format!("failed with {secret} here"));
+            assert!(
+                !redacted.contains(secret),
+                "{secret} survived redaction: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_secrets_strips_jwts_and_named_secrets() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r";
+        assert!(!redact_secrets(jwt).contains(jwt));
+
+        assert!(!redact_secrets("--password=hunter2").contains("hunter2"));
+        assert!(!redact_secrets("Authorization: Bearer abc123def").contains("abc123def"));
+        assert!(!redact_secrets("api_key=abcd1234").contains("abcd1234"));
+        assert!(!redact_secrets("token: s3cr3tvalue").contains("s3cr3tvalue"));
+    }
+
+    /// Redaction happens while the line is BUILT, so a credentialed URL cannot
+    /// reach the panel even for a command that legitimately takes one.
+    #[test]
+    fn test_command_line_redacts_a_credentialed_url_argument() {
+        let mut cmd = create_command("git");
+        cmd.args([
+            "remote",
+            "add",
+            "origin",
+            "https://user:ghp_abcdefghijklmnopqrst@github.com/o/r.git",
+        ]);
+
+        let (line, _) = cmd.loggable_command_line().expect("remote is reported");
+        assert!(!line.contains("ghp_"), "token survived: {line}");
+        assert!(!line.contains("user:"), "userinfo survived: {line}");
+        assert!(line.contains("github.com/o/r.git"));
+    }
+
+    /// Output is capped so one noisy fetch cannot ship megabytes over IPC.
+    #[test]
+    fn test_truncate_output_caps_long_output() {
+        let long = "x".repeat(MAX_OUTPUT_CHARS + 500);
+        let truncated = truncate_output(&long);
+        assert!(truncated.len() < long.len());
+        assert!(truncated.ends_with("(output truncated)"));
+        assert_eq!(truncate_output("short"), "short");
+    }
+
+    /// The wrapper must still behave like a Command: run the process and hand
+    /// back its real output.
+    #[test]
+    fn test_git_command_still_runs_and_captures_output() {
+        let out = create_command("git")
+            .args(["--version"])
+            .output()
+            .expect("git must be installed for the test suite");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
+    }
 
     #[test]
     fn test_credential_url_key_scopes_to_the_host() {

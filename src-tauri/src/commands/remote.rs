@@ -1548,12 +1548,17 @@ fn push_remote_url(path: &str, remote_name: &str) -> Option<String> {
 /// to stderr, and leaving a piped stream unread deadlocks the child once the
 /// pipe buffer fills — the same trap `clone_repository` documents.
 fn run_push_command(
-    mut cmd: std::process::Command,
+    mut cmd: crate::utils::GitCommand,
     monitor: &TransferMonitor,
 ) -> Result<std::process::Output> {
     if monitor.is_cancelled() {
         return Err(LeviathanError::OperationCancelled);
     }
+
+    // The child is driven by hand below so a cancellation can kill it, which
+    // means `GitCommand::output()` never runs and never reports the push to the
+    // Output panel. Time it here and report the result explicitly instead.
+    let started = std::time::Instant::now();
 
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -1611,11 +1616,13 @@ fn run_push_command(
         }
     };
 
-    Ok(std::process::Output {
+    let output = std::process::Output {
         status,
         stdout: stdout_reader.join().unwrap_or_default(),
         stderr: stderr_reader.join().unwrap_or_default(),
-    })
+    };
+    cmd.report_run(started, &output);
+    Ok(output)
 }
 
 /// Push via git CLI (used for --force-with-lease and --tags which git2 doesn't support)
