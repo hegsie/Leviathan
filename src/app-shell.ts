@@ -150,6 +150,12 @@ import {
 } from './utils/maintenance-confirms.ts';
 import { confirmDeleteTag, offerRemoteTagDelete } from './utils/tag-delete.ts';
 import {
+  cherryPickConfirmMessage,
+  cherryPickFailureMessage,
+  orderCommitsForApply,
+  shortCommitLabel,
+} from './utils/commit-selection.ts';
+import {
   tryAcquireRefOp,
   releaseRefOp,
   isRefOpRunning,
@@ -602,6 +608,16 @@ export class AppShell extends LitElement {
   @state() private activeRepository: OpenRepository | null = null;
   @state() private selectedCommit: Commit | null = null;
   @state() private selectedCommitRefs: RefInfo[] = [];
+  /**
+   * Every commit in the graph's current selection (Ctrl/Shift+click), primary
+   * included. The graph has always shipped this list on `commit-selected`;
+   * dropping it meant a user could select eight commits and find no action
+   * that used more than one of them. Kept whole here so the commit context
+   * menu can offer the batch actions, and re-derived from the graph's loaded
+   * commits at use time so a reload that rewrote history away cannot leave a
+   * menu offering to cherry-pick commits the repository no longer has.
+   */
+  @state() private selectedCommits: Commit[] = [];
 
   // Diff view state
   @state() private showDiff = false;
@@ -1756,6 +1772,11 @@ export class AppShell extends LitElement {
         // Clear selected commit and refs
         this.selectedCommit = null;
         this.selectedCommitRefs = [];
+        // The graph clears its own selection on a repository switch without
+        // announcing it (there is no commit to announce), so the multi-select
+        // list has to be dropped here or the next repo's commit menu would
+        // offer batch actions over the previous repo's commits.
+        this.selectedCommits = [];
 
         // Same gesture-owned teardown as handleCloseDiff: the tab switch
         // unmounts the editor along with the pane.
@@ -2627,6 +2648,189 @@ export class AppShell extends LitElement {
     this.cherryPickDialog?.open(commit);
   }
 
+  /**
+   * The batch actions the commit context menu grows when the right-clicked
+   * commit is part of a multi-selection.
+   *
+   * They sit ABOVE the single-commit items and are separated from them by a
+   * divider and a "Just <oid>" label, so it is never ambiguous which of the
+   * two scopes an entry acts on. Nothing renders for a one-commit selection,
+   * which is why the label below it only appears alongside these.
+   */
+  private renderMultiCommitActions() {
+    const commits = this.menuSelection;
+    if (commits.length < 2) return '';
+    const count = commits.length;
+    const subject = this.contextMenu.commit;
+    const subjectShort = subject ? subject.shortId || subject.oid.substring(0, 7) : '';
+    return html`
+      <div class="context-menu-submenu" data-testid="multi-commit-actions">
+        <span class="context-menu-label" data-testid="multi-commit-count"
+          >${count} commits selected</span
+        >
+        <button
+          class="context-menu-item"
+          data-testid="multi-cherry-pick"
+          ?disabled=${this.isRefOperationInFlight()}
+          @click=${this.handleCherryPickSelection}
+          title="Apply all ${count} selected commits to the current branch, oldest first"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2z" />
+            <path d="M8 5v6M5 8h6" stroke="currentColor" stroke-width="1.5" fill="none" />
+          </svg>
+          Cherry-pick ${count} commits
+        </button>
+        <button
+          class="context-menu-item"
+          data-testid="multi-create-patch"
+          @click=${this.handleCreatePatchFromSelection}
+          title="Write one .patch file per selected commit, numbered oldest first"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="12" y1="18" x2="12" y2="12"></line>
+            <line x1="9" y1="15" x2="15" y2="15"></line>
+          </svg>
+          Create patch from ${count} commits
+        </button>
+        ${count === 2
+          ? html`
+              <button
+                class="context-menu-item"
+                data-testid="multi-compare"
+                @click=${this.handleCompareSelection}
+                title="Compare the two selected commits"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="17 1 21 5 17 9"></polyline>
+                  <path d="M3 11V9a4 4 0 014-4h14"></path>
+                  <polyline points="7 23 3 19 7 15"></polyline>
+                  <path d="M21 13v2a4 4 0 01-4 4H3"></path>
+                </svg>
+                Compare these commits
+              </button>
+            `
+          : ''}
+      </div>
+      <div class="context-menu-divider"></div>
+      <span class="context-menu-label" data-testid="single-commit-scope"
+        >Just ${subjectShort}</span
+      >
+    `;
+  }
+
+  /**
+   * Cherry-pick the whole graph multi-selection, oldest first.
+   *
+   * The order is the graph's, never the click order: `git cherry-pick a b c`
+   * replays in the order it is given, and a descendant applied before its
+   * ancestor either conflicts or produces a different tree. The picks run one
+   * at a time through the SAME single-commit command the cherry-pick dialog
+   * uses, so a conflict lands in the existing conflict-resolution dialog
+   * rather than a second mechanism — and stopping there is deliberate: the
+   * commits after it are reported, not silently dropped or force-applied over
+   * a conflicted index.
+   */
+  private handleCherryPickSelection(): Promise<void> {
+    const commits = this.menuSelection;
+    const repoPath = this.activeRepository?.repository.path;
+    if (commits.length < 2 || !repoPath) return Promise.resolve();
+
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    return this.runRefExclusive(repoPath, () => this.cherryPickCommits(repoPath, commits));
+  }
+
+  private async cherryPickCommits(repoPath: string, commits: Commit[]): Promise<void> {
+    const branch = this.activeRepository?.currentBranch?.shorthand ?? 'HEAD';
+
+    // A merge commit needs an explicit mainline parent (`git cherry-pick -m`),
+    // which only the single-commit dialog can ask for. Refuse the whole batch
+    // BEFORE anything is applied rather than dying partway through it.
+    const merge = commits.find((c) => c.parentIds.length > 1);
+    if (merge) {
+      showToast(
+        `${merge.shortId || merge.oid.substring(0, 7)} is a merge commit — cherry-pick it on ` +
+          'its own to choose which parent to keep, then run the rest as a batch',
+        'warning',
+        8000,
+      );
+      return;
+    }
+
+    const confirmed = await showConfirm(
+      `Cherry-pick ${commits.length} commits`,
+      cherryPickConfirmMessage(commits, branch),
+      'warning',
+    );
+    if (!confirmed) return;
+
+    const applied: Commit[] = [];
+    for (const [index, commit] of commits.entries()) {
+      const result = await gitService.cherryPick({ path: repoPath, commitOid: commit.oid });
+      if (result.success) {
+        applied.push(commit);
+        continue;
+      }
+
+      const message = result.error?.message ?? '';
+      const isConflict =
+        result.error?.code === 'CHERRY_PICK_CONFLICT' || message.toLowerCase().includes('conflict');
+      showToast(
+        cherryPickFailureMessage(
+          applied,
+          commits.slice(index),
+          commits.length,
+          message || (isConflict ? 'it conflicts' : 'the cherry-pick failed'),
+        ),
+        'error',
+        12000,
+      );
+      if (isConflict) {
+        this.showCherryPickConflict(repoPath);
+      } else {
+        this.refreshConflictDialogRepo(repoPath);
+      }
+      return;
+    }
+
+    showToast(`Cherry-picked ${applied.length} commits onto ${branch}`, 'success');
+    this.refreshConflictDialogRepo(repoPath);
+  }
+
+  /**
+   * Write patch files for the whole multi-selection (the export dialog's Patch
+   * tab, with every selected commit pre-ticked). Writes no git state, so it is
+   * not gated on the ref lock — same as the single-commit entry beside it.
+   */
+  private handleCreatePatchFromSelection(): void {
+    const commits = this.menuSelection;
+    if (commits.length < 2) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    this.exportImportDialog?.open({
+      tab: 'patch',
+      patchMode: 'create',
+      commitOids: commits.map((c) => c.oid),
+    });
+  }
+
+  /** Compare exactly two selected commits, the ancestor as the base. */
+  private handleCompareSelection(): void {
+    const commits = this.menuSelection;
+    if (commits.length !== 2) return;
+    this.contextMenu = { ...this.contextMenu, visible: false };
+    const [base, compare] = commits;
+    this.compareBranchesDialog?.open({
+      baseRef: base.oid,
+      compareRef: compare.oid,
+      extraRefs: [
+        { ref: base.oid, label: shortCommitLabel(base) },
+        { ref: compare.oid, label: shortCommitLabel(compare) },
+      ],
+    });
+  }
+
   private handleCherryPickComplete(e: CustomEvent): void {
     const { sourceCommit, noCommit, repositoryPath } = e.detail;
     if (noCommit) {
@@ -2652,16 +2856,27 @@ export class AppShell extends LitElement {
 
   private handleCherryPickConflict(e: Event): void {
     const detail = (e as CustomEvent<{ repositoryPath?: string }>).detail;
+    this.showCherryPickConflict(detail?.repositoryPath);
+  }
+
+  /**
+   * The one "a cherry-pick stopped on conflicts" surface, shared by the
+   * cherry-pick dialog's event and the graph's batch pick. Both leave the
+   * repository in the same state, so both must reach the same dialog — a
+   * second mechanism for the batch case would have to re-implement continue,
+   * skip and abort.
+   */
+  private showCherryPickConflict(repositoryPath?: string): void {
     // Show conflict resolution dialog
     this.conflictOperationType = 'cherry-pick';
     this.resetConflictDetailState();
-    this.openConflictDialogPinned(detail?.repositoryPath);
+    this.openConflictDialogPinned(repositoryPath);
     notifyWarning(
       'Cherry-pick Conflict',
       'Conflicts detected during cherry-pick. Please resolve conflicts to continue.',
       !settingsStore.getState().showNativeNotifications
     );
-    this.refreshConflictDialogRepo(detail?.repositoryPath ?? null);
+    this.refreshConflictDialogRepo(repositoryPath ?? null);
   }
 
   private canResolveConflicts(state: string): boolean {
@@ -3766,6 +3981,36 @@ export class AppShell extends LitElement {
   private handleCommitSelected(e: CustomEvent<CommitSelectedEvent>): void {
     this.selectedCommit = e.detail.commit;
     this.selectedCommitRefs = e.detail.refs;
+    // A plain click sends a one-commit list, which IS the "selection cleared
+    // back to one" signal — the graph re-announces on every selection change,
+    // including the pruning pass after a reload, so this stays in step with
+    // what the canvas paints without a second source of truth.
+    this.selectedCommits = e.detail.commits.length > 1 ? [...e.detail.commits] : [];
+  }
+
+  /** The graph's loaded commits, newest first — the ordering authority. */
+  private loadedGraphCommits(): Commit[] {
+    return this.graphCanvas?.getLoadedCommits() ?? [];
+  }
+
+  /**
+   * The multi-selection the commit context menu is acting on, ancestor first,
+   * or `[]` when the menu is a single-commit menu.
+   *
+   * Empty unless the right-clicked commit is part of the selection: the graph
+   * collapses the selection onto any commit clicked outside it, so a menu
+   * offering batch actions over a set that no longer contains its own subject
+   * would be acting on something the user cannot see highlighted.
+   */
+  private get menuSelection(): Commit[] {
+    const subject = this.contextMenu.commit;
+    if (!subject || this.selectedCommits.length < 2) return [];
+    if (!this.selectedCommits.some((c) => c.oid === subject.oid)) return [];
+    const ordered = orderCommitsForApply(this.selectedCommits, this.loadedGraphCommits());
+    // The subject has to survive the graph's own list too, or the batch would
+    // run over a set the menu's header does not belong to.
+    if (!ordered.some((c) => c.oid === subject.oid)) return [];
+    return ordered.length > 1 ? ordered : [];
   }
 
   private handleSelectCommit(e: CustomEvent<{ oid: string }>): void {
@@ -5958,6 +6203,7 @@ export class AppShell extends LitElement {
                 <span class="context-menu-oid">${this.contextMenu.commit.oid.substring(0, 7)}</span>
                 <span class="context-menu-summary">${this.contextMenu.commit.summary}</span>
               </div>
+              ${this.renderMultiCommitActions()}
               <div class="context-menu-divider"></div>
               <button class="context-menu-item" ?disabled=${this.isRefOperationInFlight()} @click=${() => void this.handleQuickAmend()} title="Amend (edit) this commit">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
