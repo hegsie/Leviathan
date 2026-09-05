@@ -270,6 +270,21 @@ export function isNetworkGateRefusal(error?: { code?: string }): boolean {
   return error?.code === 'BLOCKED' || error?.code === 'CANCELLED';
 }
 
+/**
+ * The user pressed Cancel on the operation's progress row and the backend
+ * really stopped the transfer.
+ *
+ * Not a failure, and deliberately NOT folded into `isNetworkGateRefusal`:
+ * that one means the operation never started and has already been announced,
+ * whereas this one has to say "Fetch cancelled" so the user knows the click
+ * they made took effect. A push that could not be stopped in time still
+ * reports its real success, because the backend only returns this code when it
+ * actually aborted.
+ */
+export function isOperationCancelled(error?: { code?: string }): boolean {
+  return error?.code === 'OPERATION_CANCELLED';
+}
+
 /** Set by the most recent refusal so `blockedResult` can label it. */
 let lastNetworkBlockReason: NetworkBlockReason = 'offline';
 

@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::services::transfer_monitor::TransferMonitor;
+
 /// Service name for keychain storage
 const SERVICE_NAME: &str = "leviathan-git";
 
@@ -447,6 +449,32 @@ fn extract_host(url: &str) -> Option<String> {
     None
 }
 
+/// Why a transfer callback aborted the transfer.
+///
+/// Both flags are set at the moment the callback returns false, and are the
+/// ONLY way the error site can tell that abort apart from any other libgit2
+/// failure that merely happened to surface at the same time. Asking the
+/// condition again there instead (has the deadline passed? is the token
+/// cancelled?) relabelled auth failures, protocol errors and disk errors as
+/// "timed out" — see `get_callbacks_with_deadline`.
+#[derive(Clone, Default)]
+pub struct TransferAbort {
+    /// The in-task deadline stopped the transfer.
+    pub timed_out: Arc<AtomicBool>,
+    /// The user cancelled the operation.
+    pub cancelled: Arc<AtomicBool>,
+}
+
+impl TransferAbort {
+    pub fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::SeqCst)
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
 /// Get fetch options with credential and progress callbacks
 pub fn get_fetch_options<'a>(token: Option<String>) -> git2::FetchOptions<'a> {
     get_fetch_options_with_deadline(token, None).0
@@ -460,16 +488,57 @@ pub fn get_fetch_options_with_deadline<'a>(
     token: Option<String>,
     deadline: Option<std::time::Instant>,
 ) -> (git2::FetchOptions<'a>, Arc<AtomicBool>) {
+    let (opts, abort) =
+        get_fetch_options_with_monitor(token, deadline, TransferMonitor::disabled());
+    (opts, abort.timed_out)
+}
+
+/// Fetch options that also honour a user cancellation and report progress.
+pub fn get_fetch_options_with_monitor<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+    monitor: TransferMonitor,
+) -> (git2::FetchOptions<'a>, TransferAbort) {
     let mut fetch_opts = git2::FetchOptions::new();
-    let (callbacks, aborted) = get_callbacks_with_deadline(token, deadline);
+    let (callbacks, abort) = get_callbacks_with_monitor(token, deadline, monitor);
     fetch_opts.remote_callbacks(callbacks);
-    (fetch_opts, aborted)
+    (fetch_opts, abort)
 }
 
 /// Get push options with credential and progress callbacks
 pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
+    get_push_options_with_monitor(token, TransferMonitor::disabled()).0
+}
+
+/// Push options that honour a user cancellation and report progress.
+///
+/// The cancellation point is `push_negotiation`, which libgit2 calls once the
+/// remote's refs are known and BEFORE a single object is packed or sent —
+/// returning an error there aborts the push with nothing written to the
+/// remote. That is the only abort point available: git2's
+/// `push_transfer_progress` binding always returns 0 to libgit2, so a push
+/// already uploading its pack cannot be stopped from Rust. A cancel that
+/// arrives after that point is therefore honoured on a best-effort basis, and
+/// the push may still land — which is why the frontend reports "cancelled"
+/// only when the command actually returns `OperationCancelled`, and reports
+/// the real success otherwise.
+pub fn get_push_options_with_monitor<'a>(
+    token: Option<String>,
+    monitor: TransferMonitor,
+) -> (git2::PushOptions<'a>, TransferAbort) {
     let mut push_opts = git2::PushOptions::new();
-    let mut callbacks = get_callbacks_with_progress(token);
+    let (mut callbacks, abort) = get_callbacks_with_monitor(token, None, monitor.clone());
+
+    let negotiation_abort = abort.cancelled.clone();
+    callbacks.push_negotiation(move |_updates| {
+        if monitor.is_cancelled() {
+            // Recorded BEFORE the abort, so the error libgit2 raises for it is
+            // already attributable by the time the caller inspects it.
+            negotiation_abort.store(true, Ordering::SeqCst);
+            return Err(git2::Error::from_str("Push cancelled"));
+        }
+        Ok(())
+    });
 
     // Without this, a push the SERVER rejects reports success. libgit2's
     // git_remote_push only errors when the pack fails to unpack; per-reference
@@ -486,7 +555,7 @@ pub fn get_push_options<'a>(token: Option<String>) -> git2::PushOptions<'a> {
     });
 
     push_opts.remote_callbacks(callbacks);
-    push_opts
+    (push_opts, abort)
 }
 
 /// Get remote callbacks with both credential and progress support
@@ -512,16 +581,41 @@ pub fn get_callbacks_with_deadline<'a>(
     token: Option<String>,
     deadline: Option<std::time::Instant>,
 ) -> (RemoteCallbacks<'a>, Arc<AtomicBool>) {
+    let (callbacks, abort) =
+        get_callbacks_with_monitor(token, deadline, TransferMonitor::disabled());
+    (callbacks, abort.timed_out)
+}
+
+/// Same, and additionally honours a user cancellation and reports progress.
+///
+/// The cancellation check sits in the SAME `transfer_progress` callback as the
+/// deadline check, for the same reason: returning false from it is the only
+/// abort point libgit2 offers. The two are recorded on separate flags so the
+/// error site can say which of them stopped the transfer.
+pub fn get_callbacks_with_monitor<'a>(
+    token: Option<String>,
+    deadline: Option<std::time::Instant>,
+    monitor: TransferMonitor,
+) -> (RemoteCallbacks<'a>, TransferAbort) {
     let mut callbacks = CredentialsHelper::new_with_token(token).get_callbacks();
-    let aborted = Arc::new(AtomicBool::new(false));
-    let abort_flag = Arc::clone(&aborted);
+    let abort = TransferAbort::default();
+    let deadline_flag = Arc::clone(&abort.timed_out);
+    let cancel_flag = Arc::clone(&abort.cancelled);
+    let fetch_monitor = monitor.clone();
 
     // Add transfer progress callback
     callbacks.transfer_progress(move |stats| {
+        // Cancellation is checked BEFORE the deadline so a user who pressed
+        // Cancel on an operation that was also about to time out is told what
+        // they did, not what the clock did.
+        if fetch_monitor.is_cancelled() {
+            cancel_flag.store(true, Ordering::SeqCst);
+            return false;
+        }
         if crate::utils::deadline_passed(deadline) {
             // Recorded BEFORE the abort, so the error libgit2 raises for it is
             // already attributable by the time the caller inspects it.
-            abort_flag.store(true, Ordering::SeqCst);
+            deadline_flag.store(true, Ordering::SeqCst);
             return false;
         }
 
@@ -540,6 +634,8 @@ pub fn get_callbacks_with_deadline<'a>(
             );
         }
 
+        fetch_monitor.report(received, total, bytes);
+
         true // Continue the transfer
     });
 
@@ -554,8 +650,12 @@ pub fn get_callbacks_with_deadline<'a>(
         true
     });
 
-    // Add push transfer progress callback
-    callbacks.push_transfer_progress(|current, total, bytes| {
+    // Add push transfer progress callback.
+    //
+    // git2's binding for this one always returns 0 to libgit2, so it CANNOT
+    // abort a push — it only reports. The push cancellation point is
+    // `push_negotiation`, registered in `get_push_options_with_monitor`.
+    callbacks.push_transfer_progress(move |current, total, bytes| {
         if total > 0 {
             let percent = (current as f64 / total as f64) * 100.0;
             tracing::debug!(
@@ -566,9 +666,10 @@ pub fn get_callbacks_with_deadline<'a>(
                 bytes
             );
         }
+        monitor.report(current, total, bytes);
     });
 
-    (callbacks, aborted)
+    (callbacks, abort)
 }
 
 #[cfg(test)]

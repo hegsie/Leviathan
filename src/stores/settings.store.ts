@@ -52,6 +52,14 @@ export interface SettingsState {
   showCommitSize: boolean;
   graphRowHeight: number;
   graphColorScheme: GraphColorScheme;
+  // False once the user picks a scheme themselves. While true the scheme
+  // follows the OS: high contrast / forced colours select the high-contrast
+  // palette, and turning them off puts it back to the default palette.
+  graphColorSchemeAuto: boolean;
+  // Whether the OS currently reports forced colours or a preference for more
+  // contrast. Derived from matchMedia at startup and on every change, never a
+  // user setting.
+  systemHighContrast: boolean;
 
   // Diff settings
   diffContextLines: number;
@@ -87,6 +95,7 @@ export interface SettingsState {
   setFontFamily: (family: string) => void;
   setDensity: (density: Density) => void;
   setGraphColorScheme: (scheme: GraphColorScheme) => void;
+  applySystemContrast: (highContrast: boolean) => void;
   setDefaultBranchName: (name: string) => void;
   setDefaultRemoteName: (name: string) => void;
   setDefaultClonePath: (path: string) => void;
@@ -123,6 +132,7 @@ const defaultSettings = {
   showCommitSize: true,
   graphRowHeight: 40,
   graphColorScheme: 'default' as GraphColorScheme,
+  graphColorSchemeAuto: true,
   diffContextLines: 3,
   // Defaults OFF: until it was wired up nothing read this, and the diff view's
   // own copy — the only word wrap anyone has ever seen — defaulted to off.
@@ -166,10 +176,50 @@ function adoptLegacyDiffWordWrap(state: SettingsState): void {
   state.setWordWrap(legacy === 'true');
 }
 
+/**
+ * Persisted-state migration. Exported so the version-to-version rules can be
+ * tested directly instead of through localStorage.
+ */
+export function migrateSettings(persisted: unknown, fromVersion: number): SettingsState {
+  const state = { ...((persisted ?? {}) as Partial<SettingsState>) };
+  if (fromVersion < 2) {
+    state.autoStashOnCheckout = true;
+  }
+  if (fromVersion < 3) {
+    state.wordWrap = false;
+  }
+  if (fromVersion < 4) {
+    // The whole settings object is persisted the moment anything at all
+    // changes, so the presence of `graphColorScheme` says nothing about whether
+    // the user chose it. A value other than the default is the only evidence of
+    // a deliberate choice: pin those, and leave everyone else — including every
+    // user who never touched the setting — on the new automatic behaviour.
+    state.graphColorSchemeAuto = (state.graphColorScheme ?? 'default') === 'default';
+  }
+  if (fromVersion < 5) {
+    // `showWhitespace` had the same story again: persisted, never read, so its
+    // stored value was never a user choice. It is replaced by the four-mode
+    // `diffIgnoreWhitespace`, which starts at the behaviour every diff has
+    // always had.
+    delete (state as Record<string, unknown>).showWhitespace;
+    state.diffIgnoreWhitespace = 'none';
+  }
+  // A persisted context-line count predates any bound being enforced, and is
+  // also the one setting a user could have hand-edited in storage. Applied on
+  // every migration, not just one step, so no stored value escapes the bounds.
+  if (state.diffContextLines !== undefined) {
+    state.diffContextLines = clampDiffContextLines(Number(state.diffContextLines));
+  }
+  return state as SettingsState;
+}
+
 export const settingsStore = createStore<SettingsState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       ...defaultSettings,
+      // Re-derived from matchMedia on every startup, so whatever was persisted
+      // for it is irrelevant.
+      systemHighContrast: false,
 
       setTheme: (theme) => {
         set({ theme });
@@ -188,9 +238,26 @@ export const settingsStore = createStore<SettingsState>()(
         applyDensity(density);
       },
 
+      // Choosing a scheme in Settings pins it: the OS high-contrast watcher
+      // must never overwrite a deliberate choice.
       setGraphColorScheme: (graphColorScheme) => {
-        set({ graphColorScheme });
+        set({ graphColorScheme, graphColorSchemeAuto: false });
         applyGraphColorScheme(graphColorScheme);
+      },
+
+      applySystemContrast: (systemHighContrast) => {
+        set({ systemHighContrast });
+        const state = get();
+        if (!state.graphColorSchemeAuto) return;
+        const next: GraphColorScheme = systemHighContrast
+          ? 'high-contrast'
+          : defaultSettings.graphColorScheme;
+        if (next !== state.graphColorScheme) {
+          set({ graphColorScheme: next });
+        }
+        // Applied even when the scheme is unchanged: this also runs at startup,
+        // where the palette variables have not been written to the document yet.
+        applyGraphColorScheme(next);
       },
 
       setDefaultBranchName: (defaultBranchName) => set({ defaultBranchName }),
@@ -238,16 +305,20 @@ export const settingsStore = createStore<SettingsState>()(
       setShowNativeNotifications: (showNativeNotifications) => set({ showNativeNotifications }),
 
       resetToDefaults: () => {
-        set(defaultSettings);
+        // The OS contrast reading is not a preference, so a reset re-reads it
+        // rather than clearing it — and re-applies the auto scheme from it.
+        const { systemHighContrast } = get();
+        set({ ...defaultSettings, systemHighContrast });
         applyTheme(defaultSettings.theme);
         applyFontSize(defaultSettings.fontSize);
         applyDensity(defaultSettings.density);
         applyGraphColorScheme(defaultSettings.graphColorScheme);
+        get().applySystemContrast(systemHighContrast);
       },
     }),
     {
       name: 'leviathan-settings',
-      version: 4,
+      version: 5,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -258,29 +329,7 @@ export const settingsStore = createStore<SettingsState>()(
       // has only ever experienced auto-stashing. `wordWrap` has exactly the same
       // story: it was persisted but never read, so a persisted value is not a
       // user choice either and is dropped in favour of the diff view's own key.
-      migrate: (persisted: unknown, fromVersion: number) => {
-        const state = { ...((persisted ?? {}) as Partial<SettingsState>) };
-        if (fromVersion < 2) {
-          state.autoStashOnCheckout = true;
-        }
-        if (fromVersion < 3) {
-          state.wordWrap = false;
-        }
-        if (fromVersion < 4) {
-          // `showWhitespace` had the same story again: persisted, never read,
-          // so its stored value was never a user choice. It is replaced by the
-          // four-mode `diffIgnoreWhitespace`, which starts at the behaviour
-          // every diff has always had.
-          delete (state as Record<string, unknown>).showWhitespace;
-          state.diffIgnoreWhitespace = 'none';
-        }
-        // A persisted context-line count predates any bound being enforced, and
-        // is also the one setting a user could have hand-edited in storage.
-        if (state.diffContextLines !== undefined) {
-          state.diffContextLines = clampDiffContextLines(Number(state.diffContextLines));
-        }
-        return state as SettingsState;
-      },
+      migrate: migrateSettings,
       onRehydrateStorage: () => (state) => {
         if (state) {
           applyTheme(state.theme);
@@ -405,6 +454,34 @@ export function getGraphColorSchemes(): { id: GraphColorScheme; name: string; co
   ];
 }
 
+/**
+ * The queries that mean "this user needs maximum contrast". Forced colours is
+ * Windows High Contrast Mode; prefers-contrast covers the equivalent settings
+ * on macOS/Linux and browser-level increased-contrast preferences.
+ */
+const HIGH_CONTRAST_QUERIES = ['(forced-colors: active)', '(prefers-contrast: more)'];
+
+/**
+ * Follow the OS contrast setting for the graph colour scheme.
+ *
+ * The commit graph is painted into a <canvas>, so forced-colors can't recolour
+ * it the way it recolours DOM — the app has to pick a high-contrast palette
+ * itself. Only applies while the scheme is on "auto"; the moment the user picks
+ * a scheme in Settings this becomes a no-op for the palette (it still tracks
+ * `systemHighContrast` so the UI can explain itself).
+ *
+ * Returns a disposer that removes the listeners.
+ */
+export function watchSystemContrast(): () => void {
+  const queries = HIGH_CONTRAST_QUERIES.map((q) => window.matchMedia(q));
+  const update = (): void => {
+    settingsStore.getState().applySystemContrast(queries.some((q) => q.matches));
+  };
+  queries.forEach((q) => q.addEventListener('change', update));
+  update();
+  return () => queries.forEach((q) => q.removeEventListener('change', update));
+}
+
 // Listen for system theme changes
 if (typeof window !== 'undefined') {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -413,4 +490,7 @@ if (typeof window !== 'undefined') {
       applyTheme('system');
     }
   });
+
+  // Listen for system contrast changes (Windows High Contrast Mode et al.)
+  watchSystemContrast();
 }

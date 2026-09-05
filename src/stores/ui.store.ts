@@ -1,7 +1,6 @@
 import { createStore } from 'zustand/vanilla';
 
 export type PanelId = 'left' | 'right' | 'bottom';
-export type ViewMode = 'graph' | 'list' | 'tree';
 
 export interface PanelState {
   isVisible: boolean;
@@ -13,11 +12,6 @@ export interface UIState {
   // Panels
   panels: Record<PanelId, PanelState>;
 
-  // View settings
-  viewMode: ViewMode;
-  splitDiffMode: boolean;
-  showLineNumbers: boolean;
-
   // Global loading
   globalLoading: boolean;
 
@@ -28,9 +22,6 @@ export interface UIState {
   togglePanel: (panel: PanelId) => void;
   setPanelWidth: (panel: PanelId, width: number) => void;
   setPanelCollapsed: (panel: PanelId, collapsed: boolean) => void;
-  setViewMode: (mode: ViewMode) => void;
-  setSplitDiffMode: (split: boolean) => void;
-  setShowLineNumbers: (show: boolean) => void;
   setGlobalLoading: (loading: boolean) => void;
   addToast: (toast: Omit<Toast, 'id'>) => void;
   removeToast: (id: string) => void;
@@ -57,9 +48,6 @@ const defaultPanelState: Record<PanelId, PanelState> = {
 
 export const uiStore = createStore<UIState>((set) => ({
   panels: defaultPanelState,
-  viewMode: 'graph',
-  splitDiffMode: true,
-  showLineNumbers: true,
   globalLoading: false,
   toasts: [],
 
@@ -89,12 +77,6 @@ export const uiStore = createStore<UIState>((set) => ({
         [panel]: { ...state.panels[panel], isCollapsed },
       },
     })),
-
-  setViewMode: (viewMode) => set({ viewMode }),
-
-  setSplitDiffMode: (splitDiffMode) => set({ splitDiffMode }),
-
-  setShowLineNumbers: (showLineNumbers) => set({ showLineNumbers }),
 
   setGlobalLoading: (globalLoading) => set({ globalLoading }),
 

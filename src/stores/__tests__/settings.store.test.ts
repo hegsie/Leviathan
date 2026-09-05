@@ -5,7 +5,10 @@ import {
   clampDiffContextLines,
   MIN_DIFF_CONTEXT_LINES,
   MAX_DIFF_CONTEXT_LINES,
+  migrateSettings,
+  watchSystemContrast,
 } from '../settings.store.ts';
+import type { SettingsState } from '../settings.store.ts';
 
 describe('settings.store', () => {
   beforeEach(() => {
@@ -511,6 +514,259 @@ describe('settings.store', () => {
       rehydrate();
 
       expect(settingsStore.getState().wordWrap, 'a real setting is not clobbered').to.be.true;
+    });
+  });
+
+  describe('system high contrast (forced colors)', () => {
+    afterEach(() => {
+      // Leave the store the way the real environment reports it.
+      settingsStore.getState().resetToDefaults();
+      settingsStore.getState().applySystemContrast(false);
+    });
+
+    it('auto-selects the high-contrast palette when the OS asks for it', () => {
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+      expect(settingsStore.getState().systemHighContrast).to.be.true;
+      expect(settingsStore.getState().graphColorSchemeAuto, 'still automatic').to.be.true;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('high-contrast');
+    });
+
+    it('reverts to the default palette when the OS setting turns off again', () => {
+      settingsStore.getState().applySystemContrast(true);
+      settingsStore.getState().applySystemContrast(false);
+
+      expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      expect(settingsStore.getState().systemHighContrast).to.be.false;
+      expect(document.documentElement.getAttribute('data-graph-scheme')).to.equal('default');
+    });
+
+    it('a scheme picked by the user pins it and survives a contrast change', () => {
+      settingsStore.getState().setGraphColorScheme('vibrant');
+      expect(settingsStore.getState().graphColorSchemeAuto, 'picking pins the choice').to.be.false;
+
+      settingsStore.getState().applySystemContrast(true);
+
+      expect(settingsStore.getState().graphColorScheme, 'the choice wins').to.equal('vibrant');
+      expect(settingsStore.getState().systemHighContrast, 'but the OS state is tracked').to.be.true;
+
+      settingsStore.getState().applySystemContrast(false);
+      expect(settingsStore.getState().graphColorScheme).to.equal('vibrant');
+    });
+
+    it('keeps following the OS again after a reset to defaults', () => {
+      settingsStore.getState().setGraphColorScheme('pastel');
+      settingsStore.getState().applySystemContrast(true);
+      expect(settingsStore.getState().graphColorScheme).to.equal('pastel');
+
+      settingsStore.getState().resetToDefaults();
+
+      expect(settingsStore.getState().graphColorSchemeAuto).to.be.true;
+      expect(settingsStore.getState().graphColorScheme, 'reset re-reads the OS').to.equal(
+        'high-contrast'
+      );
+    });
+
+    describe('watchSystemContrast', () => {
+      interface FakeQuery {
+        media: string;
+        matches: boolean;
+        listeners: Set<() => void>;
+        addEventListener: (type: string, fn: () => void) => void;
+        removeEventListener: (type: string, fn: () => void) => void;
+      }
+
+      let originalMatchMedia: typeof window.matchMedia;
+      let queries: Map<string, FakeQuery>;
+
+      const makeQuery = (media: string): FakeQuery => ({
+        media,
+        matches: false,
+        listeners: new Set<() => void>(),
+        addEventListener(_type, fn) {
+          this.listeners.add(fn);
+        },
+        removeEventListener(_type, fn) {
+          this.listeners.delete(fn);
+        },
+      });
+
+      const fire = (media: string, matches: boolean): void => {
+        const q = queries.get(media);
+        if (!q) throw new Error(`no query registered for ${media}`);
+        q.matches = matches;
+        q.listeners.forEach((fn) => fn());
+      };
+
+      beforeEach(() => {
+        originalMatchMedia = window.matchMedia;
+        queries = new Map();
+        window.matchMedia = ((media: string) => {
+          let q = queries.get(media);
+          if (!q) {
+            q = makeQuery(media);
+            queries.set(media, q);
+          }
+          return q as unknown as MediaQueryList;
+        }) as typeof window.matchMedia;
+      });
+
+      afterEach(() => {
+        window.matchMedia = originalMatchMedia;
+      });
+
+      it('watches both forced-colors and prefers-contrast', () => {
+        const stop = watchSystemContrast();
+
+        expect([...queries.keys()]).to.have.members([
+          '(forced-colors: active)',
+          '(prefers-contrast: more)',
+        ]);
+
+        stop();
+      });
+
+      it('applies the palette on either query matching, and on later changes', () => {
+        const stop = watchSystemContrast();
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(prefers-contrast: more)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        fire('(prefers-contrast: more)', false);
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+
+        fire('(forced-colors: active)', true);
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+
+        stop();
+      });
+
+      it('applies immediately when the OS is already in high contrast at startup', () => {
+        queries.set('(forced-colors: active)', {
+          ...makeQuery('(forced-colors: active)'),
+          matches: true,
+        });
+
+        const stop = watchSystemContrast();
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('high-contrast');
+        stop();
+      });
+
+      it('stops listening once disposed', () => {
+        const stop = watchSystemContrast();
+        stop();
+
+        fire('(forced-colors: active)', true);
+
+        expect(settingsStore.getState().graphColorScheme).to.equal('default');
+      });
+    });
+  });
+
+  describe('migrateSettings', () => {
+    it('leaves existing users who never picked a scheme on automatic', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', theme: 'light' } as Partial<SettingsState>,
+        3
+      );
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+      expect(migrated.theme, 'unrelated settings are untouched').to.equal('light');
+    });
+
+    it('treats a stored non-default scheme as a deliberate choice and pins it', () => {
+      const migrated = migrateSettings({ graphColorScheme: 'pastel' } as Partial<SettingsState>, 3);
+
+      expect(migrated.graphColorSchemeAuto).to.be.false;
+      expect(migrated.graphColorScheme).to.equal('pastel');
+    });
+
+    it('treats a state with no stored scheme at all as automatic', () => {
+      const migrated = migrateSettings({}, 1);
+
+      expect(migrated.graphColorSchemeAuto).to.be.true;
+    });
+
+    it('does not re-run the rule for state already at the current version', () => {
+      const migrated = migrateSettings(
+        { graphColorScheme: 'default', graphColorSchemeAuto: false } as Partial<SettingsState>,
+        4
+      );
+
+      expect(migrated.graphColorSchemeAuto, 'a pinned default stays pinned').to.be.false;
+    });
+
+    it('replaces the dead showWhitespace flag with the whitespace mode', () => {
+      const migrated = migrateSettings({ showWhitespace: true } as Partial<SettingsState>, 4);
+
+      expect(migrated.diffIgnoreWhitespace).to.equal('none');
+      expect(
+        (migrated as unknown as Record<string, unknown>).showWhitespace,
+        'the dead flag is dropped, not carried over'
+      ).to.equal(undefined);
+    });
+
+    it('leaves an already-current whitespace mode alone', () => {
+      const migrated = migrateSettings(
+        { diffIgnoreWhitespace: 'all' } as Partial<SettingsState>,
+        5
+      );
+
+      expect(migrated.diffIgnoreWhitespace).to.equal('all');
+    });
+
+    it('clamps a stored context-line count into range', () => {
+      expect(migrateSettings({ diffContextLines: 999 } as Partial<SettingsState>, 4).diffContextLines).to.equal(
+        MAX_DIFF_CONTEXT_LINES
+      );
+      expect(migrateSettings({ diffContextLines: -8 } as Partial<SettingsState>, 4).diffContextLines).to.equal(
+        MIN_DIFF_CONTEXT_LINES
+      );
+      expect(
+        migrateSettings({ diffContextLines: 7 } as Partial<SettingsState>, 4).diffContextLines,
+        'an in-range value is untouched'
+      ).to.equal(7);
+    });
+
+    it('applies every step for a v3 install upgrading to the current version', () => {
+      // One existing user's whole persisted blob, as v3 wrote it: a deliberate
+      // non-default palette, the dead whitespace flag, and an out-of-range
+      // context count. Both the colour-scheme rule and the whitespace
+      // replacement must land in the same upgrade.
+      const migrated = migrateSettings(
+        {
+          graphColorScheme: 'vibrant',
+          showWhitespace: true,
+          diffContextLines: 99,
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          theme: 'light',
+        } as Partial<SettingsState>,
+        3
+      );
+
+      expect(migrated.graphColorSchemeAuto, 'v4: a chosen palette stays pinned').to.be.false;
+      expect(migrated.graphColorScheme).to.equal('vibrant');
+      expect(migrated.diffIgnoreWhitespace, 'v5: the whitespace mode is seeded').to.equal('none');
+      expect((migrated as unknown as Record<string, unknown>).showWhitespace).to.equal(undefined);
+      expect(migrated.diffContextLines).to.equal(MAX_DIFF_CONTEXT_LINES);
+      expect(migrated.wordWrap, 'already at v3, so the v3 rule does not re-run').to.be.true;
+      expect(migrated.theme, 'unrelated settings survive').to.equal('light');
+    });
+
+    it('applies every step for a pre-v2 install upgrading to the current version', () => {
+      const migrated = migrateSettings(
+        { showWhitespace: false, wordWrap: true } as Partial<SettingsState>,
+        1
+      );
+
+      expect(migrated.autoStashOnCheckout, 'v2').to.be.true;
+      expect(migrated.wordWrap, 'v3 drops the never-read flag').to.be.false;
+      expect(migrated.graphColorSchemeAuto, 'v4').to.be.true;
+      expect(migrated.diffIgnoreWhitespace, 'v5').to.equal('none');
     });
   });
 });
