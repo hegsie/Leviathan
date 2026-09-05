@@ -956,6 +956,11 @@ export class LvCommitPanel extends LitElement {
   // profile that rewrote user.name/user.email in the repo's git config), so the
   // {{author}} template placeholder reflects the new identity.
   private boundHandleRepositoryRefresh = () => this.loadAuthorName();
+  // The Git Configuration dialog — which this panel's "Configure identity" hint
+  // opens — announces a saved identity. Reload it straight away so the sign-off
+  // control the user came to fix stops saying there is no identity, instead of
+  // waiting for the next unrelated refresh, commit or tab switch.
+  private boundHandleIdentityChanged = () => this.loadAuthorName();
   private unsubscribeStore?: () => void;
   private aiRetryTimer?: ReturnType<typeof setTimeout>;
   private modelCompleteUnlisten?: UnlistenFn;
@@ -992,6 +997,9 @@ export class LvCommitPanel extends LitElement {
     // Reload author identity after a repository refresh (e.g. profile applied).
     window.addEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
 
+    // Reload it immediately when the config dialog saves a new identity.
+    window.addEventListener('git-identity-changed', this.boundHandleIdentityChanged);
+
     // Also listen for Tauri backend event when a model download completes and auto-loads
     listen<{ modelId: string; loaded?: boolean }>('model-download-complete', (event) => {
       if (event.payload.loaded) {
@@ -1012,6 +1020,7 @@ export class LvCommitPanel extends LitElement {
     window.removeEventListener('trigger-amend', this.boundHandleTriggerAmend);
     window.removeEventListener('ai-settings-changed', this.boundHandleAiSettingsChanged);
     window.removeEventListener('repository-refresh', this.boundHandleRepositoryRefresh);
+    window.removeEventListener('git-identity-changed', this.boundHandleIdentityChanged);
     this.modelCompleteUnlisten?.();
     if (this.aiRetryTimer) clearTimeout(this.aiRetryTimer);
     this.unsubscribeStore?.();

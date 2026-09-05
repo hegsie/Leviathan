@@ -953,4 +953,70 @@ test.describe('Commit Panel - Trailers', () => {
     await hint.locator('button').click();
     await expect(page.locator('lv-config-dialog lv-modal[open]')).toBeVisible();
   });
+
+  test('configuring an identity from the hint re-enables Sign off', async ({ page }) => {
+    rightPanel = new RightPanelPage(page);
+    await setupOpenRepository(page, withStagedFiles(stagedFile));
+
+    // The backend starts with no identity and remembers what the dialog saves,
+    // so the round trip is the real one: hint → dialog → save → recovery.
+    await page.evaluate(() => {
+      const internals = (
+        window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+        }
+      ).__TAURI_INTERNALS__;
+      const original = internals.invoke;
+      let identity: { name: string | null; email: string | null } = { name: null, email: null };
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command === 'get_user_identity') {
+          return { ...identity, nameIsGlobal: false, emailIsGlobal: false };
+        }
+        if (command === 'set_user_identity') {
+          const a = args as { name?: string; email?: string };
+          identity = { name: a.name ?? null, email: a.email ?? null };
+          return null;
+        }
+        return original(command, args);
+      };
+    });
+
+    // Reload the identity the way applying a profile would.
+    await page.locator('lv-commit-panel').evaluate(async (el) => {
+      const panel = el as HTMLElement & {
+        loadAuthorName: () => Promise<void>;
+        updateComplete: Promise<unknown>;
+      };
+      await panel.loadAuthorName();
+      await panel.updateComplete;
+    });
+
+    const hint = page.locator('lv-commit-panel .trailer-hint');
+    await expect(hint).toBeVisible();
+    await expect(page.locator('lv-commit-panel .signoff-toggle input')).toBeDisabled();
+
+    await hint.locator('button').click();
+    await expect(page.locator('lv-config-dialog lv-modal[open]')).toBeVisible();
+
+    const fields = page.locator('lv-config-dialog .form-group input');
+    await fields.nth(0).fill('Ada Lovelace');
+    await fields.nth(1).fill('ada@example.com');
+    await page.locator('lv-config-dialog .btn-primary').click();
+
+    // The panel the user came from recovers straight away — no commit, fetch
+    // or tab switch needed to clear the dead end.
+    await expect(page.locator('lv-commit-panel .trailer-hint')).toHaveCount(0);
+    await expect(page.locator('lv-commit-panel .signoff-toggle input')).toBeEnabled();
+
+    // ...and it is still gone once the dialog is closed.
+    await page.locator('lv-config-dialog lv-modal').getByRole('button', { name: 'Close' }).click();
+    await expect(page.locator('lv-config-dialog lv-modal[open]')).toHaveCount(0);
+    await expect(page.locator('lv-commit-panel .trailer-hint')).toHaveCount(0);
+
+    // Sign off now works: it writes the identity that was just configured.
+    await page.locator('lv-commit-panel .signoff-toggle input').check();
+    await expect(page.locator('lv-commit-panel .trailers-preview')).toContainText(
+      'Signed-off-by: Ada Lovelace <ada@example.com>',
+    );
+  });
 });

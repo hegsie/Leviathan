@@ -611,6 +611,68 @@ describe('lv-account-repo-picker', () => {
     });
   });
 
+  describe('accessibility of the list', () => {
+    it('exposes each repository as a button inside a list row', async () => {
+      // role="listitem" ON the button would override its implicit button role,
+      // leaving a screen reader announcing static list text where there is a
+      // control the user has to activate.
+      unifiedProfileStore.getState().setAccounts([githubAccount]);
+      withStoredToken((command) =>
+        command === 'list_github_repositories'
+          ? { repositories: [repo('alpha'), repo('beta')], nextPage: null }
+          : null,
+      );
+
+      const el = await mount();
+      await waitForRepoItems(el, 2);
+
+      const list = el.shadowRoot!.querySelector('.repo-list')!;
+      expect(list.tagName).to.equal('UL');
+      expect(list.getAttribute('role')).to.equal('list');
+      expect(list.getAttribute('aria-label')).to.equal('Repositories');
+
+      const rows = Array.from(el.shadowRoot!.querySelectorAll('.repo-item'));
+      expect(rows.length).to.equal(2);
+      for (const row of rows) {
+        expect(row.tagName).to.equal('BUTTON');
+        // No explicit role: the implicit button role is what has to survive.
+        expect(row.getAttribute('role')).to.equal(null);
+        expect(row.parentElement!.tagName).to.equal('LI');
+        expect(row.parentElement!.getAttribute('role')).to.equal('listitem');
+      }
+    });
+
+    it('states the selection with aria-pressed, not just a background colour', async () => {
+      unifiedProfileStore.getState().setAccounts([githubAccount]);
+      withStoredToken((command) =>
+        command === 'list_github_repositories'
+          ? { repositories: [repo('alpha'), repo('beta')], nextPage: null }
+          : null,
+      );
+
+      const el = await mount();
+      await waitForRepoItems(el, 2);
+
+      let rows = Array.from(
+        el.shadowRoot!.querySelectorAll('.repo-item'),
+      ) as HTMLButtonElement[];
+      expect(rows.map((r) => r.getAttribute('aria-pressed'))).to.deep.equal([
+        'false',
+        'false',
+      ]);
+
+      rows[1].click();
+      await el.updateComplete;
+
+      rows = Array.from(el.shadowRoot!.querySelectorAll('.repo-item')) as HTMLButtonElement[];
+      expect(rows.map((r) => r.getAttribute('aria-pressed'))).to.deep.equal([
+        'false',
+        'true',
+      ]);
+      expect(rows[1].classList.contains('selected')).to.be.true;
+    });
+  });
+
   describe('account switching', () => {
     it('lists the newly chosen provider account', async () => {
       unifiedProfileStore.getState().setAccounts([githubAccount, gitlabAccount]);
