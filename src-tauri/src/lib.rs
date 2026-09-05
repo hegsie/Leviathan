@@ -303,6 +303,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::repository::open_repository,
+            commands::repo_scan::classify_repository_path,
+            commands::repo_scan::scan_for_repositories,
+            commands::repo_scan::cancel_repository_scan,
             commands::repository::clone_repository,
             commands::repository::cancel_clone,
             commands::repository::init_repository,

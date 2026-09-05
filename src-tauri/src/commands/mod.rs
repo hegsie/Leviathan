@@ -51,6 +51,7 @@ pub mod profiles;
 pub mod reflog;
 pub mod refs;
 pub mod remote;
+pub mod repo_scan;
 pub mod repository;
 pub mod rewrite;
 pub mod search;
