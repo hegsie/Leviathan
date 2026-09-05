@@ -3,6 +3,14 @@ import { customElement, state, query } from 'lit/decorators.js';
 import { sharedStyles } from './styles/shared-styles.ts';
 import { repositoryStore, uiStore, type OpenRepository } from './stores/index.ts';
 import { registerDefaultShortcuts, keyboardService } from './services/keyboard.service.ts';
+import {
+  MENU_ACTION_EVENT,
+  resolveMenuAction,
+  shouldSuppressMenuAction,
+  startAcceleratorWatch,
+  syncAppMenu,
+  type MenuShellHandlers,
+} from './services/app-menu.service.ts';
 import { loggers } from './utils/logger.ts';
 import { sweepRepoScopedDialogs } from './utils/repo-scoped-dialogs.ts';
 import { rebasedOntoMessage } from './utils/rebase-messages.ts';
@@ -139,7 +147,7 @@ import {
   openRepositoryInFileManager,
   openRepositoryInEditor,
 } from './services/open-location.service.ts';
-import { showConfirm, showPrompt } from './services/dialog.service.ts';
+import { showConfirm, showMessage, showPrompt } from './services/dialog.service.ts';
 import {
   confirmGarbageCollection,
   confirmPrune,
@@ -1044,6 +1052,12 @@ export class AppShell extends LitElement {
   private lastRemoteAllowlistKey = '';
   private refsChangedDebounceTimer?: ReturnType<typeof setTimeout>;
   private updateUnlisteners: UnlistenFn[] = [];
+  /** Teardown for the native menu's key-press watcher. */
+  private appMenuWatchDispose?: () => void;
+  /** Last repository-open state pushed to the native menu, to skip no-op IPC. */
+  private appMenuHasRepository?: boolean;
+  /** Teardown for the keyboard-settings subscription that refreshes the menu. */
+  private appMenuShortcutUnsubscribe?: () => void;
   private shownIntegrationSuggestions: Set<string> = new Set();
   private isRestoringRepositories = false;
   private autoFetchUnsubscribe?: () => void;
@@ -1593,6 +1607,10 @@ export class AppShell extends LitElement {
       const repoChanged = this.activeRepository?.repository.path !== newActiveRepo?.repository.path;
       this.activeRepository = newActiveRepo;
 
+      // Repository-scoped menu items must be greyed out the moment the last
+      // tab closes, and live again the moment one opens.
+      this.syncAppMenuState(state.openRepositories.length > 0);
+
       // Every repo-scoped dialog flag must die with the last repository.
       //
       // These dialogs render inside the `${this.activeRepository ? ...}` block,
@@ -2017,6 +2035,10 @@ export class AppShell extends LitElement {
       selectTab: (index) => repositoryStore.getState().setActiveIndex(index),
     });
 
+    // Wire the native application menu. AFTER registerDefaultShortcuts, so the
+    // accelerators pushed to the menu are the bindings that actually exist.
+    void this.setupAppMenu();
+
     // Subscribe to progress updates
     this.progressUnsubscribe = progressService.subscribe((operations) => {
       this.progressOperations = operations;
@@ -2083,6 +2105,13 @@ export class AppShell extends LitElement {
     this.updateUnlisteners = [];
     // Unsubscribe from progress service
     this.progressUnsubscribe?.();
+    // Tear down the native menu wiring (its Tauri listener rides in
+    // updateUnlisteners, torn down just above)
+    this.appMenuWatchDispose?.();
+    this.appMenuWatchDispose = undefined;
+    this.appMenuShortcutUnsubscribe?.();
+    this.appMenuShortcutUnsubscribe = undefined;
+    this.appMenuHasRepository = undefined;
   }
 
   private async checkUnifiedProfilesMigration(): Promise<void> {
@@ -4660,6 +4689,130 @@ export class AppShell extends LitElement {
       }
       action();
     };
+  }
+
+  /**
+   * Wire the native application menu bar (built in `src-tauri/src/menu.rs`).
+   *
+   * The menu never implements an action of its own: an item's id arrives here
+   * and is resolved - through `app-menu.service` - to the very function its
+   * command-palette twin runs.
+   */
+  private async setupAppMenu(): Promise<void> {
+    // Watch key presses so a menu action triggered by its own accelerator is
+    // not run twice on platforms where the webview sees the key press too.
+    this.appMenuWatchDispose = startAcceleratorWatch();
+
+    // Rebinding a shortcut in Settings must re-print it on the menu.
+    this.appMenuShortcutUnsubscribe = keyboardService.addSettingsChangeListener(() => {
+      this.syncAppMenuState(this.hasOpenRepository(), true);
+    });
+
+    try {
+      const unlisten = await listenToEvent<string>(MENU_ACTION_EVENT, (id) => {
+        this.handleAppMenuAction(id);
+      });
+      this.updateUnlisteners.push(unlisten);
+    } catch (error) {
+      // No Tauri host (unit tests, a browser preview): there is no native menu
+      // to drive, and every action stays reachable from the palette.
+      log.warn('Application menu events are unavailable:', error);
+      return;
+    }
+
+    this.syncAppMenuState(this.hasOpenRepository(), true);
+  }
+
+  private hasOpenRepository(): boolean {
+    return repositoryStore.getState().openRepositories.length > 0;
+  }
+
+  /**
+   * Push the enabled state and current accelerators to the native menu.
+   *
+   * Repository-scoped items are disabled with no repository open, so they can
+   * never fire into nothing - the palette's "open a repository first" guard
+   * still backs them up for the keyboard route.
+   */
+  private syncAppMenuState(hasRepository: boolean, force = false): void {
+    if (!force && this.appMenuHasRepository === hasRepository) return;
+    this.appMenuHasRepository = hasRepository;
+    void syncAppMenu(hasRepository).then((result) => {
+      if (!result.success) {
+        // A stale menu is not worth interrupting the user for, but it must not
+        // disappear silently either.
+        log.warn('Failed to update the application menu:', result.error?.message);
+      }
+    });
+  }
+
+  /** Run the action a native menu item stands for. */
+  private handleAppMenuAction(id: string): void {
+    if (shouldSuppressMenuAction(id)) return;
+
+    const action = resolveMenuAction(id, this.getPaletteCommands(), this.appMenuShellHandlers());
+    if (!action) {
+      log.warn(`No handler for application menu item "${id}"`);
+      showToast('That menu action is not available', 'error');
+      return;
+    }
+    action();
+  }
+
+  /**
+   * The handful of menu actions with no command-palette entry. Each one calls
+   * the code that already owns the action - the toolbar's own handlers for
+   * open/clone/init, the repository store for closing a tab.
+   */
+  private appMenuShellHandlers(): MenuShellHandlers {
+    return {
+      openRepository: () => this.dispatchToToolbar('open-repository', 'Open Repository'),
+      cloneRepository: () => this.dispatchToToolbar('clone-repository', 'Clone Repository'),
+      initRepository: () => this.dispatchToToolbar('init-repository', 'New Repository'),
+      closeRepositoryTab: this.requiresRepository(() => {
+        repositoryStore.getState().removeRepository(this.activeRepository!.repository.path);
+      }),
+      // The palette lists every branch with its checkout action; opening it is
+      // the branch switcher, rather than a second one built for the menu.
+      switchBranch: this.requiresRepository(() => {
+        void this.openCommandPalette();
+      }),
+      commandPalette: () => {
+        void this.openCommandPalette();
+      },
+      keyboardShortcuts: () => {
+        this.showShortcuts = true;
+      },
+      about: () => {
+        void this.showAboutDialog();
+      },
+    };
+  }
+
+  /**
+   * Hand a menu action to the toolbar, which owns the Open/Clone/Init flows and
+   * their dialogs - the same route handleToggleSearch already uses.
+   */
+  private dispatchToToolbar(eventName: string, label: string): void {
+    const toolbar = this.shadowRoot?.querySelector('lv-toolbar');
+    if (!toolbar) {
+      showToast(`${label} is not available right now`, 'error');
+      return;
+    }
+    toolbar.dispatchEvent(new CustomEvent(eventName));
+  }
+
+  private async showAboutDialog(): Promise<void> {
+    try {
+      const version = await updateService.getAppVersion();
+      await showMessage(
+        'About Leviathan',
+        `Leviathan ${version}\n\nA fully-featured, open-source, cross-platform Git GUI client.`
+      );
+    } catch (error) {
+      log.warn('Failed to show the About dialog:', error);
+      showToast('Could not show application information', 'error');
+    }
   }
 
   private getPaletteCommands(): PaletteCommand[] {

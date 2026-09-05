@@ -483,12 +483,34 @@ export class LvToolbar extends LitElement {
         this.searchBar?.focus();
       });
     });
+
+    // The native menu bar's File items are routed here by app-shell rather
+    // than reimplemented: these are the same handlers the toolbar buttons run,
+    // dialogs and error toasts included.
+    this.addEventListener('open-repository', this.handleMenuOpenRepo);
+    this.addEventListener('clone-repository', this.handleMenuCloneRepo);
+    this.addEventListener('init-repository', this.handleMenuInitRepo);
   }
+
+  private handleMenuOpenRepo = (): void => {
+    void this.handleOpenRepo();
+  };
+
+  private handleMenuCloneRepo = (): void => {
+    this.handleCloneRepo();
+  };
+
+  private handleMenuInitRepo = (): void => {
+    this.handleInitRepo();
+  };
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.unsubscribe?.();
     this._resizeObserver?.disconnect();
+    this.removeEventListener('open-repository', this.handleMenuOpenRepo);
+    this.removeEventListener('clone-repository', this.handleMenuCloneRepo);
+    this.removeEventListener('init-repository', this.handleMenuInitRepo);
     if (this.menuEscapeListenerAttached) {
       document.removeEventListener('keydown', this.handleMenuEscape, { capture: true });
       this.menuEscapeListenerAttached = false;
