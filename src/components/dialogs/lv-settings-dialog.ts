@@ -1,6 +1,8 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { localized, msg, str } from '@lit/localize';
 import { settingsStore, getGraphColorSchemes, type Theme, type FontSize, type Density, type GraphColorScheme } from '../../stores/settings.store.ts';
+import { supportedLocales, resolveLocale, type Locale } from '../../i18n/index.ts';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { getAppVersion, checkForUpdate } from '../../services/update.service.ts';
 import { openCloneDestinationDialog, showConfirm } from '../../services/dialog.service.ts';
@@ -18,6 +20,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import '../common/lv-toggle.ts';
 
 @customElement('lv-settings-dialog')
+@localized()
 export class LvSettingsDialog extends LitElement {
   static styles = [
     sharedStyles,
@@ -330,6 +333,7 @@ export class LvSettingsDialog extends LitElement {
     `,
   ];
 
+  @state() private language: Locale = 'en';
   @state() private theme: Theme = 'dark';
   @state() private appVersion = '';
   @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
@@ -460,6 +464,9 @@ export class LvSettingsDialog extends LitElement {
     // update, and the automatic high-contrast scheme is a value that is only
     // ever set before the options exist.
     this.syncSelectValue('#graph-scheme-select', this.graphColorScheme);
+    // Same hazard again: the language select and its options render in the same
+    // update, so a non-default locale would fall back to the first option.
+    this.syncSelectValue('#language-select', this.language);
   }
 
   private syncSelectValue(selector: string, value: string | null): void {
@@ -558,6 +565,7 @@ export class LvSettingsDialog extends LitElement {
 
   private loadSettings(): void {
     const settings = settingsStore.getState();
+    this.language = settings.language;
     this.theme = settings.theme;
     this.fontSize = settings.fontSize;
     this.density = settings.density;
@@ -580,6 +588,25 @@ export class LvSettingsDialog extends LitElement {
     this.fetchOnFocus = settings.fetchOnFocus;
     this.minimizeToTray = settings.minimizeToTray;
     this.showNativeNotifications = settings.showNativeNotifications;
+  }
+
+  /**
+   * Switching the language reloads the active locale's templates. Every
+   * migrated component re-renders itself off lit-localize's status event, so
+   * nothing needs a restart — but the load can fail, and a picker that silently
+   * keeps showing a language the app never switched to would be a lie.
+   */
+  private async handleLanguageChange(e: Event): Promise<void> {
+    const select = e.target as HTMLSelectElement;
+    const requested = resolveLocale(select.value);
+    const applied = await settingsStore.getState().setLanguage(requested);
+    this.language = applied;
+    if (applied !== requested) {
+      select.value = applied;
+      showToast(msg('Could not load that language. Keeping the current one.'), 'error');
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('settings-changed'));
   }
 
   private handleThemeChange(e: Event): void {
@@ -1353,78 +1380,95 @@ export class LvSettingsDialog extends LitElement {
     return html`
       <div class="settings-content">
         <div class="settings-section">
-          <div class="section-title">Appearance</div>
+          <div class="section-title">${msg('Appearance')}</div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Theme</span>
-              <span class="setting-description">Choose your preferred color scheme</span>
+              <span class="setting-name">${msg('Language')}</span>
+              <span class="setting-description">${msg('Language used across the app. Applies immediately — no restart needed.')}</span>
+            </div>
+            <select
+              id="language-select"
+              aria-label=${msg('Language')}
+              .value=${this.language}
+              @change=${this.handleLanguageChange}
+            >
+              ${supportedLocales.map(
+                (locale) => html`<option value=${locale.code}>${locale.name}</option>`
+              )}
+            </select>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-label">
+              <span class="setting-name">${msg('Theme')}</span>
+              <span class="setting-description">${msg('Choose your preferred color scheme')}</span>
             </div>
             <select .value=${this.theme} @change=${this.handleThemeChange}>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-              <option value="system">System</option>
+              <option value="dark">${msg('Dark')}</option>
+              <option value="light">${msg('Light')}</option>
+              <option value="system">${msg('System')}</option>
             </select>
           </div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Font Size</span>
-              <span class="setting-description">Adjust the base font size</span>
+              <span class="setting-name">${msg('Font Size')}</span>
+              <span class="setting-description">${msg('Adjust the base font size')}</span>
             </div>
             <select .value=${this.fontSize} @change=${this.handleFontSizeChange}>
-              <option value="small">Small</option>
-              <option value="medium">Medium</option>
-              <option value="large">Large</option>
+              <option value="small">${msg('Small')}</option>
+              <option value="medium">${msg('Medium')}</option>
+              <option value="large">${msg('Large')}</option>
             </select>
           </div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">UI Density</span>
-              <span class="setting-description">Adjust spacing and row heights</span>
+              <span class="setting-name">${msg('UI Density')}</span>
+              <span class="setting-description">${msg('Adjust spacing and row heights')}</span>
             </div>
             <select .value=${this.density} @change=${this.handleDensityChange}>
-              <option value="compact">Compact</option>
-              <option value="comfortable">Comfortable</option>
-              <option value="spacious">Spacious</option>
+              <option value="compact">${msg('Compact')}</option>
+              <option value="comfortable">${msg('Comfortable')}</option>
+              <option value="spacious">${msg('Spacious')}</option>
             </select>
           </div>
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Graph</div>
+          <div class="section-title">${msg('Graph')}</div>
 
           ${this.renderToggleRow(
-            'Show Avatars',
-            'Display author avatars in commit nodes',
+            msg('Show Avatars'),
+            msg('Display author avatars in commit nodes'),
             this.showAvatars,
             'showAvatars'
           )}
 
           ${this.renderToggleRow(
-            'Show Commit Size',
-            'Scale node size based on changes',
+            msg('Show Commit Size'),
+            msg('Scale node size based on changes'),
             this.showCommitSize,
             'showCommitSize'
           )}
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Graph Color Scheme</span>
+              <span class="setting-name">${msg('Graph Color Scheme')}</span>
               <span class="setting-description">
                 ${this.graphColorSchemeAuto && this.systemHighContrast
-                  ? 'Following your system high contrast setting — the graph is drawn on a canvas, so it cannot be recolored by the OS. Choose a scheme to override.'
-                  : 'Color palette for branch lanes'}
+                  ? msg('Following your system high contrast setting — the graph is drawn on a canvas, so it cannot be recolored by the OS. Choose a scheme to override.')
+                  : msg('Color palette for branch lanes')}
               </span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
               ${this.graphColorSchemeAuto && this.systemHighContrast
-                ? html`<span class="auto-scheme-note" data-testid="graph-scheme-auto-note">Auto (high contrast)</span>`
+                ? html`<span class="auto-scheme-note" data-testid="graph-scheme-auto-note">${msg('Auto (high contrast)')}</span>`
                 : ''}
               <select
                 id="graph-scheme-select"
-                aria-label="Graph color scheme"
+                aria-label=${msg('Graph color scheme')}
                 .value=${this.graphColorScheme}
                 @change=${this.handleGraphColorSchemeChange}
               >
@@ -1442,32 +1486,31 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Profiles &amp; Accounts</div>
+          <div class="section-title">${msg('Profiles & Accounts')}</div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Manage profiles and accounts</span>
+              <span class="setting-name">${msg('Manage profiles and accounts')}</span>
               <span class="setting-description">
-                Profiles set your git identity per repository. Accounts are shared
-                logins (GitHub, GitLab, Bitbucket, Azure DevOps, OIDC) you assign to profiles.
+                ${msg('Profiles set your git identity per repository. Accounts are shared logins (GitHub, GitLab, Bitbucket, Azure DevOps, OIDC) you assign to profiles.')}
               </span>
             </div>
             <button
               class="primary"
               @click=${this.handleOpenProfileManager}
             >
-              Open Profiles &amp; Accounts
+              ${msg('Open Profiles & Accounts')}
             </button>
           </div>
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Git Defaults</div>
+          <div class="section-title">${msg('Git Defaults')}</div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Default Branch Name</span>
-              <span class="setting-description">Used when initializing new repositories</span>
+              <span class="setting-name">${msg('Default Branch Name')}</span>
+              <span class="setting-description">${msg('Used when initializing new repositories')}</span>
             </div>
             <input
               type="text"
@@ -1478,13 +1521,13 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Default Clone Folder</span>
-              <span class="setting-description">Prefilled as the destination when cloning a repository</span>
+              <span class="setting-name">${msg('Default Clone Folder')}</span>
+              <span class="setting-description">${msg('Prefilled as the destination when cloning a repository')}</span>
             </div>
             <div class="path-input-group">
               <input
                 type="text"
-                placeholder="No default set"
+                placeholder=${msg('No default set')}
                 .value=${this.defaultClonePath}
                 @change=${this.handleDefaultClonePathChange}
               />
@@ -1492,32 +1535,32 @@ export class LvSettingsDialog extends LitElement {
                 class="browse-button"
                 @click=${this.handleBrowseDefaultClonePath}
               >
-                Browse...
+                ${msg('Browse...')}
               </button>
             </div>
           </div>
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Editor</div>
+          <div class="section-title">${msg('Editor')}</div>
 
           ${this.renderToggleRow(
-            'Word Wrap',
-            'Wrap long lines in diff view',
+            msg('Word Wrap'),
+            msg('Wrap long lines in diff view'),
             this.wordWrap,
             'wordWrap'
           )}
         </div>
 
         <div class="settings-section">
-          <div class="section-title">External Tools</div>
+          <div class="section-title">${msg('External Tools')}</div>
 
           ${repositoryStore.getState().getActiveRepository()
             ? html`
               <div class="setting-row">
                 <div class="setting-label">
-                  <span class="setting-name">Merge Tool</span>
-                  <span class="setting-description">External tool for resolving merge conflicts</span>
+                  <span class="setting-name">${msg('Merge Tool')}</span>
+                  <span class="setting-description">${msg('External tool for resolving merge conflicts')}</span>
                 </div>
                 <select
                   id="merge-tool-select"
@@ -1525,33 +1568,33 @@ export class LvSettingsDialog extends LitElement {
                   @change=${this.handleMergeToolChange}
                   ?disabled=${this.loadingTools}
                 >
-                  <option value="">None</option>
+                  <option value="">${msg('None')}</option>
                   ${this.availableMergeTools.map(tool => html`
-                    <option value=${tool.name}>${tool.displayName}${tool.available ? ' (available)' : ''}</option>
+                    <option value=${tool.name}>${tool.displayName}${tool.available ? msg(' (available)') : ''}</option>
                   `)}
-                  <option value="__custom__">Custom...</option>
+                  <option value="__custom__">${msg('Custom...')}</option>
                 </select>
               </div>
 
               ${this.mergeToolName === '__custom__' ? html`
                 <div class="setting-row">
                   <div class="setting-label">
-                    <span class="setting-name">Merge Tool Command</span>
-                    <span class="setting-description">Custom command to launch merge tool</span>
+                    <span class="setting-name">${msg('Merge Tool Command')}</span>
+                    <span class="setting-description">${msg('Custom command to launch merge tool')}</span>
                   </div>
                   <input
                     type="text"
                     .value=${this.mergeToolCmd ?? ''}
                     @change=${this.handleMergeToolCmdChange}
-                    placeholder="e.g., /usr/bin/meld $LOCAL $REMOTE $MERGED"
+                    placeholder=${msg('e.g., /usr/bin/meld $LOCAL $REMOTE $MERGED')}
                   />
                 </div>
               ` : nothing}
 
               <div class="setting-row">
                 <div class="setting-label">
-                  <span class="setting-name">Diff Tool</span>
-                  <span class="setting-description">External tool for viewing diffs</span>
+                  <span class="setting-name">${msg('Diff Tool')}</span>
+                  <span class="setting-description">${msg('External tool for viewing diffs')}</span>
                 </div>
                 <select
                   id="diff-tool-select"
@@ -1559,27 +1602,27 @@ export class LvSettingsDialog extends LitElement {
                   @change=${this.handleDiffToolChange}
                   ?disabled=${this.loadingTools}
                 >
-                  <option value="">None</option>
+                  <option value="">${msg('None')}</option>
                   ${this.availableDiffTools.map(tool => html`
                     <option value=${tool.name}>
-                      ${tool.name}${tool.available ? ' (available)' : ''}
+                      ${tool.name}${tool.available ? msg(' (available)') : ''}
                     </option>
                   `)}
-                  <option value="__custom__">Custom...</option>
+                  <option value="__custom__">${msg('Custom...')}</option>
                 </select>
               </div>
 
               ${this.diffToolName === '__custom__' ? html`
                 <div class="setting-row">
                   <div class="setting-label">
-                    <span class="setting-name">Diff Tool Command</span>
-                    <span class="setting-description">Custom command to launch diff tool</span>
+                    <span class="setting-name">${msg('Diff Tool Command')}</span>
+                    <span class="setting-description">${msg('Custom command to launch diff tool')}</span>
                   </div>
                   <input
                     type="text"
                     .value=${this.diffToolCmd ?? ''}
                     @change=${this.handleDiffToolCmdChange}
-                    placeholder="e.g., /usr/bin/meld $LOCAL $REMOTE"
+                    placeholder=${msg('e.g., /usr/bin/meld $LOCAL $REMOTE')}
                   />
                 </div>
               ` : nothing}
@@ -1587,7 +1630,7 @@ export class LvSettingsDialog extends LitElement {
             : html`
               <div class="setting-row">
                 <div class="setting-label">
-                  <span class="setting-description">Open a repository to configure external tools</span>
+                  <span class="setting-description">${msg('Open a repository to configure external tools')}</span>
                 </div>
               </div>
             `
@@ -1595,12 +1638,12 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Network & Sync</div>
+          <div class="section-title">${msg('Network & Sync')}</div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Auto-Fetch Interval</span>
-              <span class="setting-description">Minutes between automatic fetches (0 to disable)</span>
+              <span class="setting-name">${msg('Auto-Fetch Interval')}</span>
+              <span class="setting-description">${msg('Minutes between automatic fetches (0 to disable)')}</span>
             </div>
             <input
               type="number"
@@ -1612,34 +1655,34 @@ export class LvSettingsDialog extends LitElement {
           </div>
 
           ${this.renderToggleRow(
-            'Fetch on Window Focus',
-            'Automatically fetch when the app window regains focus',
+            msg('Fetch on Window Focus'),
+            msg('Automatically fetch when the app window regains focus'),
             this.fetchOnFocus,
             'fetchOnFocus'
           )}
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Security</div>
+          <div class="section-title">${msg('Security')}</div>
 
           ${this.renderToggleRow(
-            'Offline Mode',
-            'Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)',
+            msg('Offline Mode'),
+            msg('Block every operation that leaves this machine — fetch, pull, push, clone, tag push, remote prune, LFS, submodules, auto-fetch, and provider APIs (pull requests, issues, releases, CI)'),
             this.offlineMode,
             'offlineMode'
           )}
 
           ${this.renderToggleRow(
-            'Confirm Network Operations',
-            'Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.',
+            msg('Confirm Network Operations'),
+            msg('Ask before each git operation that contacts a remote. Background provider lookups are blocked or allowed silently — they are never prompted.'),
             this.confirmNetworkOps,
             'confirmNetworkOps'
           )}
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Remote Allowlist</span>
-              <span class="setting-description">Comma-separated domains. When set, remotes outside the list are blocked. Leave empty to allow all.</span>
+              <span class="setting-name">${msg('Remote Allowlist')}</span>
+              <span class="setting-description">${msg('Comma-separated domains. When set, remotes outside the list are blocked. Leave empty to allow all.')}</span>
             </div>
             <input
               type="text"
@@ -1652,26 +1695,26 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Behavior</div>
+          <div class="section-title">${msg('Behavior')}</div>
 
           ${this.renderToggleRow(
-            'Confirm Before Discard',
-            'Ask for confirmation when discarding changes. Deleting untracked files always asks.',
+            msg('Confirm Before Discard'),
+            msg('Ask for confirmation when discarding changes. Deleting untracked files always asks.'),
             this.confirmBeforeDiscard,
             'confirmBeforeDiscard'
           )}
 
           ${this.renderToggleRow(
-            'Auto-Stash on Checkout',
-            'Automatically stash and re-apply changes when switching branches',
+            msg('Auto-Stash on Checkout'),
+            msg('Automatically stash and re-apply changes when switching branches'),
             this.autoStashOnCheckout,
             'autoStashOnCheckout'
           )}
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Stale Branch Threshold</span>
-              <span class="setting-description">Days without commits before a branch is marked stale (0 to disable)</span>
+              <span class="setting-name">${msg('Stale Branch Threshold')}</span>
+              <span class="setting-description">${msg('Days without commits before a branch is marked stale (0 to disable)')}</span>
             </div>
             <input
               type="number"
@@ -1684,8 +1727,8 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Network Operation Timeout</span>
-              <span class="setting-description">Seconds before fetch/pull/push operations time out (0 to disable)</span>
+              <span class="setting-name">${msg('Network Operation Timeout')}</span>
+              <span class="setting-description">${msg('Seconds before fetch/pull/push operations time out (0 to disable)')}</span>
             </div>
             <input
               type="number"
@@ -1697,28 +1740,28 @@ export class LvSettingsDialog extends LitElement {
           </div>
 
           ${this.renderToggleRow(
-            'Minimize to Tray',
-            'Minimize to system tray instead of closing',
+            msg('Minimize to Tray'),
+            msg('Minimize to system tray instead of closing'),
             this.minimizeToTray,
             'minimizeToTray'
           )}
 
           ${this.renderToggleRow(
-            'Native Notifications',
-            'Show system notifications for background events',
+            msg('Native Notifications'),
+            msg('Show system notifications for background events'),
             this.showNativeNotifications,
             'showNativeNotifications'
           )}
         </div>
 
         <div class="settings-section">
-          <div class="section-title">AI Features</div>
+          <div class="section-title">${msg('AI Features')}</div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">AI Provider</span>
+              <span class="setting-name">${msg('AI Provider')}</span>
               <span class="setting-description">
-                Select an AI provider for commit message generation
+                ${msg('Select an AI provider for commit message generation')}
               </span>
             </div>
             <select
@@ -1728,11 +1771,11 @@ export class LvSettingsDialog extends LitElement {
                 if (value) this.handleProviderSelect(value as AiProviderType);
               }}
             >
-              <option value="">Select provider...</option>
+              <option value="">${msg('Select provider...')}</option>
               ${this.aiProviders.map(
                 (p) => html`
                   <option value=${p.providerType} ?selected=${this.activeProvider === p.providerType}>
-                    ${p.name} ${p.available ? '(Available)' : p.requiresApiKey && !p.hasApiKey ? '(API key required)' : '(Unavailable)'}
+                    ${p.name} ${p.available ? msg('(Available)') : p.requiresApiKey && !p.hasApiKey ? msg('(API key required)') : msg('(Unavailable)')}
                   </option>
                 `
               )}
@@ -1751,26 +1794,26 @@ export class LvSettingsDialog extends LitElement {
             return html`
               <div class="setting-row">
                 <div class="setting-label">
-                  <span class="setting-name">${provider.name} API Key</span>
+                  <span class="setting-name">${msg(str`${provider.name} API Key`)}</span>
                   <div class="provider-status-row">
                     ${provider.hasApiKey ? html`
                       <span class="status-indicator configured">
                         <span class="status-dot"></span>
-                        Configured
+                        ${msg('Configured')}
                       </span>
                     ` : html`
                       <span class="status-indicator not-configured">
                         <span class="status-dot"></span>
-                        Not configured
+                        ${msg('Not configured')}
                       </span>
                     `}
                     ${testStatus === 'success' ? html`
                       <span class="status-indicator configured">
-                        ✓ Working
+                        ${msg('✓ Working')}
                       </span>
                     ` : testStatus === 'failed' ? html`
                       <span class="status-indicator" style="color: var(--error-color); background: rgba(239, 68, 68, 0.1);">
-                        ✗ Failed
+                        ${msg('✗ Failed')}
                       </span>
                     ` : nothing}
                   </div>
@@ -1778,7 +1821,7 @@ export class LvSettingsDialog extends LitElement {
                 <div style="display: flex; gap: 8px; align-items: center;">
                   <input
                     type="password"
-                    placeholder=${provider.hasApiKey ? '••••••••' : 'Enter API key...'}
+                    placeholder=${provider.hasApiKey ? '••••••••' : msg('Enter API key...')}
                     .value=${this.apiKeyInputs[provider.providerType] || ''}
                     @input=${(e: Event) =>
                       this.handleApiKeyChange(
@@ -1791,13 +1834,13 @@ export class LvSettingsDialog extends LitElement {
                     @click=${() => this.handleSaveApiKey(provider.providerType)}
                     ?disabled=${!this.apiKeyInputs[provider.providerType]}
                   >
-                    Save
+                    ${msg('Save')}
                   </button>
                   <button
                     @click=${() => this.handleTestProvider(provider.providerType)}
                     ?disabled=${isTesting || !provider.hasApiKey}
                   >
-                    ${isTesting ? 'Testing...' : 'Test'}
+                    ${isTesting ? msg('Testing...') : msg('Test')}
                   </button>
                 </div>
               </div>
@@ -1806,32 +1849,32 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Local Providers</span>
+              <span class="setting-name">${msg('Local Providers')}</span>
               <span class="setting-description">
-                Ollama and LM Studio are auto-detected when running locally
+                ${msg('Ollama and LM Studio are auto-detected when running locally')}
               </span>
             </div>
             <button
               @click=${() => this.loadAiProviders()}
             >
-              Refresh
+              ${msg('Refresh')}
             </button>
           </div>
         </div>
 
         <div class="settings-section">
-          <div class="section-title">Local AI Engine</div>
+          <div class="section-title">${msg('Local AI Engine')}</div>
 
           ${this.systemCapabilities ? html`
             <div class="setting-row">
               <div class="setting-label">
-                <span class="setting-name">System</span>
+                <span class="setting-name">${msg('System')}</span>
                 <span class="setting-description">
-                  RAM: ${localAiService.formatBytes(this.systemCapabilities.totalRamBytes)}
+                  ${msg(str`RAM: ${localAiService.formatBytes(this.systemCapabilities.totalRamBytes)}`)}
                   ${this.systemCapabilities.gpuInfo
-                    ? html` | GPU: ${this.systemCapabilities.gpuInfo.name}`
-                    : html` | No dedicated GPU detected`}
-                  | ${this.systemCapabilities.gpuAccelerationAvailable ? 'GPU Accelerated' : 'CPU Only'}
+                    ? msg(str` | GPU: ${this.systemCapabilities.gpuInfo.name}`)
+                    : msg(' | No dedicated GPU detected')}
+                  | ${this.systemCapabilities.gpuAccelerationAvailable ? msg('GPU Accelerated') : msg('CPU Only')}
                 </span>
               </div>
               <span class="status-indicator ${this.systemCapabilities.recommendedTier !== 'none' ? 'configured' : 'not-configured'}">
@@ -1841,38 +1884,38 @@ export class LvSettingsDialog extends LitElement {
             </div>
           ` : html`
             <div class="setting-row">
-              <span class="setting-description">Detecting system capabilities...</span>
+              <span class="setting-description">${msg('Detecting system capabilities...')}</span>
             </div>
           `}
 
           ${this.localModelStatus === 'ready' ? html`
             <div class="setting-row">
               <div class="setting-label">
-                <span class="setting-name">Engine Status</span>
+                <span class="setting-name">${msg('Engine Status')}</span>
                 ${this.loadedModelName ? html`
                   <span class="setting-description">${this.loadedModelName}</span>
                 ` : nothing}
               </div>
               <span class="status-indicator configured">
                 <span class="status-dot"></span>
-                Model Loaded
+                ${msg('Model Loaded')}
               </span>
             </div>
           ` : this.localModelStatus === 'loading' ? html`
             <div class="setting-row">
               <div class="setting-label">
-                <span class="setting-name">Engine Status</span>
+                <span class="setting-name">${msg('Engine Status')}</span>
               </div>
-              <span class="status-indicator testing">Loading model...</span>
+              <span class="status-indicator testing">${msg('Loading model...')}</span>
             </div>
           ` : nothing}
 
           ${this.recommendedModel && !this.isModelDownloaded(this.recommendedModel.id) ? html`
             <div class="setting-row">
               <div class="setting-label">
-                <span class="setting-name">Recommended: ${this.recommendedModel.displayName}</span>
+                <span class="setting-name">${msg(str`Recommended: ${this.recommendedModel.displayName}`)}</span>
                 <span class="setting-description">
-                  ${localAiService.formatBytes(this.recommendedModel.sizeBytes)} download
+                  ${msg(str`${localAiService.formatBytes(this.recommendedModel.sizeBytes)} download`)}
                 </span>
               </div>
               <button
@@ -1880,7 +1923,7 @@ export class LvSettingsDialog extends LitElement {
                 @click=${() => this.handleDownloadModel(this.recommendedModel!.id)}
                 ?disabled=${this.isModelDownloading(this.recommendedModel.id)}
               >
-                ${this.isModelDownloading(this.recommendedModel.id) ? 'Downloading...' : 'Download'}
+                ${this.isModelDownloading(this.recommendedModel.id) ? msg('Downloading...') : msg('Download')}
               </button>
             </div>
           ` : nothing}
@@ -1903,22 +1946,22 @@ export class LvSettingsDialog extends LitElement {
                   <div style="display: flex; gap: 4px;">
                     ${downloaded ? html`
                       ${this.localModelStatus === 'ready' && this.loadedModelName === model.displayName ? html`
-                        <span class="status-indicator configured">Loaded</span>
-                        <button @click=${() => this.handleUnloadModel()}>Unload</button>
+                        <span class="status-indicator configured">${msg('Loaded')}</span>
+                        <button @click=${() => this.handleUnloadModel()}>${msg('Unload')}</button>
                       ` : this.loadingModelId === model.id ? html`
-                        <span class="status-indicator">Loading...</span>
+                        <span class="status-indicator">${msg('Loading...')}</span>
                       ` : html`
-                        <span class="status-indicator">Downloaded</span>
+                        <span class="status-indicator">${msg('Downloaded')}</span>
                         <button
                           @click=${() => this.handleLoadModel(model.id)}
                           ?disabled=${this.localModelStatus === 'loading'}
-                        >Load</button>
+                        >${msg('Load')}</button>
                       `}
-                      <button class="danger" @click=${() => this.handleDeleteModel(model.id)}>Delete</button>
+                      <button class="danger" @click=${() => this.handleDeleteModel(model.id)}>${msg('Delete')}</button>
                     ` : downloading ? html`
-                      <button @click=${() => this.handleCancelDownload(model.id)}>Cancel</button>
+                      <button @click=${() => this.handleCancelDownload(model.id)}>${msg('Cancel')}</button>
                     ` : html`
-                      <button @click=${() => this.handleDownloadModel(model.id)}>Download</button>
+                      <button @click=${() => this.handleDownloadModel(model.id)}>${msg('Download')}</button>
                     `}
                   </div>
                 </div>
@@ -1937,19 +1980,18 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">MCP Server</div>
+          <div class="section-title">${msg('MCP Server')}</div>
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Context Proxy</span>
+              <span class="setting-name">${msg('Context Proxy')}</span>
               <span class="setting-description">
-                Allow external tools (Cursor, VS Code) to query Git context via MCP.
-                Restarts automatically on launch while enabled.
+                ${msg('Allow external tools (Cursor, VS Code) to query Git context via MCP. Restarts automatically on launch while enabled.')}
               </span>
             </div>
             <div style="display: flex; gap: 8px; align-items: center;">
               <span class="status-indicator ${this.mcpStatus.running ? 'configured' : 'not-configured'}">
                 <span class="status-dot"></span>
-                ${this.mcpStatus.running ? 'Running' : this.mcpEnabled ? 'Stopped' : 'Disabled'}
+                ${this.mcpStatus.running ? msg('Running') : this.mcpEnabled ? msg('Stopped') : msg('Disabled')}
               </span>
               ${!this.mcpStatus.running && this.mcpEnabled ? html`
                 <button
@@ -1957,7 +1999,7 @@ export class LvSettingsDialog extends LitElement {
                   @click=${this.handleMcpDisable}
                   ?disabled=${this.mcpToggling}
                 >
-                  Disable
+                  ${msg('Disable')}
                 </button>
               ` : nothing}
               <button
@@ -1968,10 +2010,10 @@ export class LvSettingsDialog extends LitElement {
                 ${this.mcpToggling
                   ? '...'
                   : this.mcpStatus.running
-                    ? 'Stop'
+                    ? msg('Stop')
                     : this.mcpEnabled
-                      ? 'Retry'
-                      : 'Start'}
+                      ? msg('Retry')
+                      : msg('Start')}
               </button>
             </div>
           </div>
@@ -1989,9 +2031,9 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Port</span>
+              <span class="setting-name">${msg('Port')}</span>
               <span class="setting-description">
-                Localhost port for the MCP server
+                ${msg('Localhost port for the MCP server')}
               </span>
             </div>
             <input
@@ -2008,7 +2050,7 @@ export class LvSettingsDialog extends LitElement {
           ${this.mcpStatus.running && this.mcpStatus.url ? html`
             <div class="setting-row">
               <div class="setting-label">
-                <span class="setting-name">Connection URL</span>
+                <span class="setting-name">${msg('Connection URL')}</span>
                 <span class="setting-description" style="font-family: monospace;">
                   ${this.mcpStatus.url}
                 </span>
@@ -2018,10 +2060,9 @@ export class LvSettingsDialog extends LitElement {
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">Access Token</span>
+              <span class="setting-name">${msg('Access Token')}</span>
               <span class="setting-description">
-                Every MCP request must send this token. Keep it secret: anyone who has it can
-                read the history and contents of your open repositories.
+                ${msg('Every MCP request must send this token. Keep it secret: anyone who has it can read the history and contents of your open repositories.')}
               </span>
             </div>
             <div class="mcp-token-controls">
@@ -2030,38 +2071,37 @@ export class LvSettingsDialog extends LitElement {
                   ? this.mcpTokenRevealed
                     ? this.mcpToken
                     : this.maskedMcpToken()
-                  : 'Not generated yet'}
+                  : msg('Not generated yet')}
               </code>
               <button
                 class="mcp-token-reveal"
                 @click=${this.handleMcpTokenReveal}
                 ?disabled=${!this.mcpToken}
               >
-                ${this.mcpTokenRevealed ? 'Hide' : 'Reveal'}
+                ${this.mcpTokenRevealed ? msg('Hide') : msg('Reveal')}
               </button>
               <button
                 class="mcp-token-copy"
                 @click=${this.handleMcpTokenCopy}
                 ?disabled=${!this.mcpToken}
               >
-                Copy
+                ${msg('Copy')}
               </button>
               <button
                 class="mcp-token-regenerate"
                 @click=${this.handleMcpRegenerateToken}
                 ?disabled=${this.mcpRegenerating}
               >
-                ${this.mcpRegenerating ? '...' : 'Regenerate'}
+                ${this.mcpRegenerating ? '...' : msg('Regenerate')}
               </button>
             </div>
           </div>
 
           <div class="setting-row">
             <div class="setting-label">
-              <span class="setting-name">MCP Client Configuration</span>
+              <span class="setting-name">${msg('MCP Client Configuration')}</span>
               <span class="setting-description">
-                Paste this into your MCP client. A client set up before Leviathan required a token
-                must add the Authorization header, or its requests are refused with 401.
+                ${msg('Paste this into your MCP client. A client set up before Leviathan required a token must add the Authorization header, or its requests are refused with 401.')}
               </span>
             </div>
             <button
@@ -2069,7 +2109,7 @@ export class LvSettingsDialog extends LitElement {
               @click=${this.handleMcpSnippetCopy}
               ?disabled=${!this.mcpToken}
             >
-              Copy
+              ${msg('Copy')}
             </button>
           </div>
           <pre class="mcp-client-config"><code>${this.mcpClientConfigSnippet(
@@ -2078,19 +2118,19 @@ export class LvSettingsDialog extends LitElement {
         </div>
 
         <div class="settings-section">
-          <div class="section-title">About</div>
+          <div class="section-title">${msg('About')}</div>
 
           <div class="setting-row">
             <div class="version-info">
               <span class="version-text">
-                Version: <span class="version-number">${this.appVersion || 'Loading...'}</span>
+                ${msg('Version:')} <span class="version-number">${this.appVersion || msg('Loading...')}</span>
               </span>
               ${this.updateStatus === 'checking' ? html`
-                <span class="update-status">Checking for updates...</span>
+                <span class="update-status">${msg('Checking for updates...')}</span>
               ` : this.updateStatus === 'available' ? html`
-                <span class="update-status available">Update available: v${this.latestVersion}</span>
+                <span class="update-status available">${msg(str`Update available: v${this.latestVersion}`)}</span>
               ` : this.updateStatus === 'up-to-date' ? html`
-                <span class="update-status">You're up to date!</span>
+                <span class="update-status">${msg("You're up to date!")}</span>
               ` : ''}
             </div>
             <button
@@ -2098,15 +2138,15 @@ export class LvSettingsDialog extends LitElement {
               @click=${this.handleCheckForUpdate}
               ?disabled=${this.updateStatus === 'checking'}
             >
-              ${this.updateStatus === 'checking' ? 'Checking...' : 'Check for Updates'}
+              ${this.updateStatus === 'checking' ? msg('Checking...') : msg('Check for Updates')}
             </button>
           </div>
         </div>
       </div>
 
       <div class="footer">
-        <button class="danger" @click=${this.handleReset} ?disabled=${this.resetting}>Reset to Defaults</button>
-        <button class="primary" @click=${this.handleClose}>Done</button>
+        <button class="danger" @click=${this.handleReset} ?disabled=${this.resetting}>${msg('Reset to Defaults')}</button>
+        <button class="primary" @click=${this.handleClose}>${msg('Done')}</button>
       </div>
     `;
   }

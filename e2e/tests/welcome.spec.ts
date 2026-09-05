@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { setupTauriMocks, emptyRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
@@ -724,5 +724,108 @@ test.describe('Welcome Screen - recent repository rows', () => {
     await expect(app.recentItems).toHaveCount(1);
     await expect(app.recentItems.first()).toContainText('repo2');
     expect(await findCommand(page, 'open_repository')).toHaveLength(0);
+  });
+});
+
+/**
+ * Language setting.
+ *
+ * @lit/localize runs in runtime mode, so picking a language has to re-render
+ * the app in place — the dialog the user is looking at and the welcome screen
+ * behind it — with no restart and no reload.
+ */
+test.describe('Language setting', () => {
+  let app: AppPage;
+
+  test.beforeEach(async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    app = new AppPage(page);
+    await app.goto();
+  });
+
+  /** Open Settings with the keyboard shortcut — it works without a repository */
+  async function openSettings(page: Page): Promise<void> {
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator('lv-settings-dialog')).toBeVisible();
+  }
+
+  function languageSelect(page: Page) {
+    return page.locator('lv-settings-dialog #language-select');
+  }
+
+  test('offers every locale the app ships', async ({ page }) => {
+    await openSettings(page);
+    const options = languageSelect(page).locator('option');
+    await expect(options).toHaveCount(2);
+    await expect(options.nth(0)).toHaveText('English');
+    await expect(options.nth(1)).toHaveText('Français');
+    await expect(languageSelect(page)).toHaveValue('en');
+  });
+
+  test('switching language re-renders the app without a reload', async ({ page }) => {
+    // A sentinel that only survives if the document is never reloaded.
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__NO_RELOAD__ = true;
+    });
+
+    await openSettings(page);
+    await languageSelect(page).selectOption('fr');
+
+    // The dialog the user is looking at...
+    await expect(page.locator('lv-settings-dialog .section-title').first()).toHaveText('Apparence');
+    // ...and the welcome screen behind it, both in the new language.
+    await expect(app.welcomeTagline).toHaveText('Un client Git puissant et open source');
+    // The Open/Clone/Init actions, in order — the page object finds them by
+    // their English text, which is exactly what has just changed.
+    await expect(app.welcomeScreen.locator('.action-btn').first()).toContainText('Ouvrir');
+
+    const survived = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__NO_RELOAD__ === true
+    );
+    expect(survived, 'the page was never reloaded').toBe(true);
+  });
+
+  test('switching back to English restores the English UI', async ({ page }) => {
+    await openSettings(page);
+    await languageSelect(page).selectOption('fr');
+    await expect(app.welcomeTagline).toHaveText('Un client Git puissant et open source');
+
+    await languageSelect(page).selectOption('en');
+    await expect(page.locator('lv-settings-dialog .section-title').first()).toHaveText('Appearance');
+    await expect(app.welcomeTagline).toHaveText('A powerful, open-source Git client');
+  });
+
+  test('the chosen language is remembered on the next launch', async ({ page }) => {
+    await openSettings(page);
+    await languageSelect(page).selectOption('fr');
+    await expect(app.welcomeTagline).toHaveText('Un client Git puissant et open source');
+
+    await page.reload();
+    await app.waitForReady();
+
+    await expect(app.welcomeTagline).toHaveText('Un client Git puissant et open source');
+    await openSettings(page);
+    await expect(languageSelect(page)).toHaveValue('fr');
+  });
+});
+
+test.describe('Language setting with an unsupported persisted locale', () => {
+  test('falls back to English instead of failing to render', async ({ page }) => {
+    await setupTauriMocks(page, emptyRepository());
+    // A locale the app no longer ships — persisted by an older build, or by a
+    // language that was dropped.
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'leviathan-settings',
+        JSON.stringify({ state: { language: 'xx-YY' }, version: 4 })
+      );
+    });
+
+    const app = new AppPage(page);
+    await app.goto();
+
+    await expect(app.welcomeTagline).toHaveText('A powerful, open-source Git client');
+    await page.keyboard.press('Meta+,');
+    await expect(page.locator('lv-settings-dialog #language-select')).toHaveValue('en');
   });
 });
