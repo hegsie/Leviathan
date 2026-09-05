@@ -133,6 +133,7 @@ import * as workspaceService from './services/workspace.service.ts';
 import { listenToEvent } from './services/tauri-api.ts';
 import { showToast, notifyWarning } from './services/notification.service.ts';
 import { showErrorWithSuggestion } from './services/error-suggestion.service.ts';
+import { runFetch, runPull, runPush } from './services/remote-operations.service.ts';
 import {
   openRepositoryInTerminal,
   openRepositoryInFileManager,
@@ -1048,6 +1049,25 @@ export class AppShell extends LitElement {
     }
   };
 
+  /**
+   * A fetch, pull or push landed — refresh the repository it ran ON.
+   *
+   * Raised by remote-operations.service, the one runner behind BOTH surfaces
+   * (the shortcuts and palette here, the context dashboard's three buttons),
+   * so the two cannot drift apart again. It is a private request rather than
+   * the `repository-refresh` broadcast for a reason: every panel listens to
+   * that one, and `handleRefresh` emits it itself, so raising it from the
+   * runner would refresh the branch list, the analytics panel and the
+   * dashboard twice for one fetch.
+   *
+   * Pinned to the repo in the detail, never the active tab: these are slow
+   * network operations and the user can switch tabs while one runs.
+   */
+  private handleRemoteOperationRefresh = (e: Event): void => {
+    const detail = (e as CustomEvent).detail as { repoPath?: string } | undefined;
+    this.refreshConflictDialogRepo(detail?.repoPath ?? null);
+  };
+
   // Cycle the active repository tab by offset (wraps around both ends)
   /**
    * Open the branch-cleanup dialog from the command palette.
@@ -1836,6 +1856,7 @@ export class AppShell extends LitElement {
     document.addEventListener('click', this.handleDocumentClick);
     document.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('repository-refresh', this.handleWindowRefresh);
+    window.addEventListener('remote-operation-refresh', this.handleRemoteOperationRefresh);
     window.addEventListener('trigger-pull', this.handleTriggerPull);
     window.addEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.addEventListener('open-settings', this.handleOpenSettings);
@@ -1996,6 +2017,7 @@ export class AppShell extends LitElement {
     document.removeEventListener('click', this.handleDocumentClick);
     document.removeEventListener('contextmenu', this.handleContextMenu);
     window.removeEventListener('repository-refresh', this.handleWindowRefresh);
+    window.removeEventListener('remote-operation-refresh', this.handleRemoteOperationRefresh);
     window.removeEventListener('trigger-pull', this.handleTriggerPull);
     window.removeEventListener('force-delete-branch', this.handleForceDeleteBranch as EventListener);
     window.removeEventListener('open-settings', this.handleOpenSettings);
@@ -5356,56 +5378,23 @@ export class AppShell extends LitElement {
     }
   }
 
-  private async handleFetch(): Promise<void> {
-    if (!this.activeRepository) return;
-    // Coalesced like its pull and push siblings. keyboardService has no
-    // e.repeat guard, so HOLDING Ctrl+Shift+F fires many times a second and
-    // every repeat launched a fully concurrent fetch — each with its own
-    // progress row, and a stacked toast per repeat from the backend's
-    // remote-operation-completed. Fetch must NOT take the working-tree lock
-    // (it touches no working tree), so it gets its own key.
-    const fetchRepo = this.activeRepository.repository.path;
-    const fetchKey = `fetch:${fetchRepo}`;
-    if (!tryAcquirePush(fetchKey)) return;
-    try {
-      await this.fetchRepository();
-    } finally {
-      releasePush(fetchKey);
-    }
-  }
-
-  private async fetchRepository(): Promise<void> {
-    if (!this.activeRepository) return;
-    const opId = progressService.startOperation('fetch', 'Fetching from remote...', {
-      cancellable: true,
-    });
-    // gitService.fetch returns a CommandResult (invokeCommand never throws), so we
-    // must inspect result.success — a catch-only path always reported success and
-    // the backend emits remote-operation-completed only on success, so failures
-    // were fully silent.
-    // Pinned: fetch is a slow network op; if the user switches tabs while it
-    // runs, the refresh must target the repo that fetched, not the active tab.
-    const repoPath = this.activeRepository.repository.path;
-    // silent: this handler owns the messaging (and the backend's
-    // remote-operation-completed event toasts the success). Without it every
-    // toolbar fetch stacked two toasts, and every failure two errors.
-    const result = await gitService.fetch({ path: repoPath, silent: true, operationId: opId });
-    if (result.success) {
-      progressService.completeOperation(opId);
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      progressService.failOperation(opId);
-      // A cancel the user asked for is not a failure — say it took effect
-      // rather than showing them a red error for their own click.
-      if (gitService.isOperationCancelled(result.error)) {
-        showToast('Fetch cancelled', 'info');
-      } else if (!gitService.isNetworkGateRefusal(result.error)) {
-        // A security-gate refusal already announced itself, and a declined
-        // confirm is the user's own decision — reporting either as a red error
-        // tells them their own click failed.
-        showToast(result.error?.message ?? 'Fetch failed', 'error');
-      }
-    }
+  private handleFetch(): Promise<void> {
+    // Pinned before the runner's awaits: a fetch is a slow network op, so if
+    // the user switches tabs while it runs the refresh and any error must name
+    // the repo the fetch ran ON, not whichever tab is active when it returns.
+    const repoPath = this.activeRepository?.repository.path;
+    if (!repoPath) return Promise.resolve();
+    // The lock, the cancellable progress row, the failure reporting and the
+    // refresh all live in remote-operations.service, shared with the context
+    // dashboard's Fetch/Pull/Push buttons — the only mouse-reachable route to
+    // these three operations, which used to run its own divergent copy of all
+    // of it. The runner starts the row with `{cancellable: true}` and hands its
+    // id to the backend, so the row's Cancel button really aborts the transfer
+    // whichever surface started it. The coalescing that matters here is still
+    // in force: keyboardService has no e.repeat guard, so HOLDING Ctrl+Shift+F
+    // fires many times a second, and every repeat used to launch a fully
+    // concurrent fetch.
+    return runFetch(repoPath);
   }
 
   private handlePull(pinnedRepoPath?: string): Promise<void> {
@@ -5413,116 +5402,22 @@ export class AppShell extends LitElement {
     // the repo whose push failed even if the user has since switched tabs.
     const repoPath = pinnedRepoPath ?? this.activeRepository?.repository.path;
     if (!repoPath) return Promise.resolve();
-    // Three surfaces reach this — Ctrl+Shift+P, the palette, and the Pull Now
-    // toast action — and none guarded against a second call. ensure_pullable
-    // in the backend only refuses when a merge is ALREADY unresolved; two pulls
-    // that both start clean both pass it, and the second calls repo.merge() on
-    // top of the first, which deletes MERGE_HEAD and leaves a conflicted index
-    // that abort_merge then refuses to clean up. Keyboard auto-repeat alone
-    // fires this ~30x a second.
-    //
-    // Held on the SHARED working-tree lock, not a private key: a pull's
-    // fast-forward runs checkout_tree and moves the branch ref, and its merge
-    // and rebase paths rewrite the tree outright. Keying it separately
-    // serialized pull against pull but left every sidebar checkout, discard
-    // and reset fully enabled beside it — the exact split ref-lock.ts exists
-    // to close. Claimed before the network-permission confirm so that round
-    // trip is covered too.
-    return this.runRefExclusive(repoPath, () => this.pullRepository(repoPath));
-  }
-
-  private async pullRepository(repoPath: string): Promise<void> {
-    // Cancellable, but only up to the point the merge starts: the backend's
-    // pull aborts during its fetch phase and refuses to begin a merge it
-    // cannot safely stop halfway. See commands/remote.rs::pull_branch.
-    const opId = progressService.startOperation('pull', 'Pulling from remote...', {
-      cancellable: true,
-    });
-    // gitService.pull returns a CommandResult (invokeCommand never throws), so we
-    // must inspect result.success — the old catch-only path always reported success.
-    const result = await gitService.pull({ path: repoPath, silent: true, operationId: opId });
-    if (result.success) {
-      progressService.completeOperation(opId);
-      // Pinned: a ref-only pull emits no working-tree watcher event, so a
-      // pull that completed on a now-backgrounded repo must be refreshed
-      // (or marked stale) by path, not via the active tab.
-      this.refreshConflictDialogRepo(repoPath);
-    } else if (result.error?.code === 'MERGE_CONFLICT') {
-      progressService.failOperation(opId);
-      // Not a failure from the user's side — the pull landed and now needs
-      // resolving. A red "Pull failed" here reads as "nothing happened".
-      showToast('Pull produced conflicts — resolve them to finish the merge', 'warning');
-      this.conflictOperationType = 'merge';
-      this.resetConflictDetailState();
-      this.openConflictDialogPinned(repoPath);
-      this.refreshConflictDialogRepo(repoPath);
-    } else if (result.error?.code === 'REBASE_CONFLICT') {
-      progressService.failOperation(opId);
-      showToast('Pull produced conflicts — resolve them to finish the rebase', 'warning');
-      this.conflictOperationType = 'rebase';
-      this.resetConflictDetailState();
-      this.openConflictDialogPinned(repoPath);
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      progressService.failOperation(opId);
-      if (gitService.isOperationCancelled(result.error)) {
-        // Stopped during the fetch, so nothing was merged — the repository is
-        // exactly where a plain Fetch would have left it.
-        showToast('Pull cancelled', 'info');
-      } else if (!gitService.isNetworkGateRefusal(result.error)) {
-        // A security-gate refusal already announced itself, and a declined
-        // confirm is the user's own decision — reporting either as a red error
-        // tells them their own click failed.
-        showToast(result.error?.message ?? 'Pull failed', 'error');
-      }
-    }
+    // Claims the SHARED working-tree lock inside the runner, not a private
+    // key: a pull's fast-forward runs checkout_tree and its merge and rebase
+    // paths rewrite the tree outright, so it must exclude every sidebar
+    // checkout, discard and reset — not just other pulls. The runner also owns
+    // the cancellable progress row and the MERGE_CONFLICT/REBASE_CONFLICT
+    // routing into the resolution dialog.
+    return runPull(repoPath);
   }
 
   private handlePush(): Promise<void> {
     const repoPath = this.activeRepository?.repository.path;
     if (!repoPath) return Promise.resolve();
-    // Keyed like the force-push sibling, which was hardened against exactly
-    // this: the shortcut has no e.repeat guard, so holding Ctrl+Shift+U fires
-    // it many times a second and every repeat launched a fully concurrent
-    // push. Sharing the key also makes Push and Force Push mutually exclusive
-    // on one repo.
-    return this.runPushExclusive(repoPath, () => this.pushRepository());
-  }
-
-  private async pushRepository(): Promise<void> {
-    if (!this.activeRepository) return;
-    const opId = progressService.startOperation('push', 'Pushing to remote...', {
-      cancellable: true,
-    });
-    // gitService.push returns a CommandResult (invokeCommand never throws), so we
-    // must inspect result.success — a catch-only path always reported success and
-    // the backend emits remote-operation-completed only on success, so failures
-    // were fully silent.
-    // Pinned: push is a slow network op; if the user switches tabs while it
-    // runs, the refresh must target the repo that pushed, not the active tab.
-    const repoPath = this.activeRepository.repository.path;
-    const result = await gitService.push({ path: repoPath, silent: true, operationId: opId });
-    if (result.success) {
-      progressService.completeOperation(opId);
-      this.refreshConflictDialogRepo(repoPath);
-    } else {
-      progressService.failOperation(opId);
-      if (gitService.isOperationCancelled(result.error)) {
-        showToast('Push cancelled', 'info');
-      } else if (!gitService.isNetworkGateRefusal(result.error)) {
-        // A security-gate refusal already announced itself, and a declined
-        // confirm is the user's own decision — reporting either as a red error
-        // tells them their own click failed.
-        //
-        // Through the suggestion service so a non-fast-forward rejection offers
-        // the Pull Now action the app already implements — a plain toast made
-        // that recovery unreachable from the only push surface there is.
-        showErrorWithSuggestion(result.error?.message ?? '', 'Push failed', {
-          operation: 'push',
-          repoPath,
-        });
-      }
-    }
+    // The runner claims the same push slot handleForcePush holds across its
+    // confirm, which is what keeps Push and Force Push mutually exclusive on
+    // one repository.
+    return runPush(repoPath);
   }
 
   private handleCancelOperation(e: CustomEvent<{ id: string }>): void {
