@@ -124,6 +124,11 @@ import type { LvProfileManagerDialog } from './components/dialogs/lv-profile-man
 import type { LvReflogDialog } from './components/dialogs/lv-reflog-dialog.ts';
 import type { LvDescribeDialog } from './components/dialogs/lv-describe-dialog.ts';
 import type { LvCompareBranchesDialog } from './components/dialogs/lv-compare-branches-dialog.ts';
+import type { LvGitHubDialog } from './components/dialogs/lv-github-dialog.ts';
+import type { LvGitLabDialog } from './components/dialogs/lv-gitlab-dialog.ts';
+import type { LvBitbucketDialog } from './components/dialogs/lv-bitbucket-dialog.ts';
+import type { LvAzureDevOpsDialog } from './components/dialogs/lv-azure-devops-dialog.ts';
+import type { PullRequestProviderId } from './services/pull-request.service.ts';
 import type { SearchDialogMode } from './components/dialogs/lv-search-dialog.ts';
 import type { LvCleanDialog } from './components/dialogs/lv-clean-dialog.ts';
 import type { LvExportImportDialog } from './components/dialogs/lv-export-import-dialog.ts';
@@ -909,6 +914,10 @@ export class AppShell extends LitElement {
   @query('lv-remote-dialog') private remoteDialog?: LvRemoteDialog;
   @query('lv-repository-health-dialog') private repositoryHealthDialog?: LvRepositoryHealthDialog;
   @query('lv-changelog-dialog') private changelogDialog?: LvChangelogDialog;
+  @query('lv-github-dialog') private githubDialog?: LvGitHubDialog;
+  @query('lv-gitlab-dialog') private gitlabDialog?: LvGitLabDialog;
+  @query('lv-bitbucket-dialog') private bitbucketDialog?: LvBitbucketDialog;
+  @query('lv-azure-devops-dialog') private azureDevOpsDialog?: LvAzureDevOpsDialog;
 
   private unsubscribe?: () => void;
   private unsubscribeUi?: () => void;
@@ -3538,6 +3547,68 @@ export class AppShell extends LitElement {
   private get integrationAttachName(): string {
     return this.integrationContext?.attach ? this.integrationContext.profileName : '';
   }
+
+  /**
+   * "Create pull request..." on a branch in the sidebar.
+   *
+   * Routed to the provider dialog that ALREADY owns the create flow rather
+   * than reimplemented: the dialog holds the form, the account selection, the
+   * create call and its own success/error feedback. All this does is open the
+   * right one on its create tab with the branch prefilled as the source.
+   */
+  private handleCreatePullRequest = async (
+    e: CustomEvent<{
+      provider?: PullRequestProviderId;
+      sourceBranch?: string;
+      baseBranch?: string;
+    }>,
+  ): Promise<void> => {
+    const provider = e.detail?.provider;
+    const sourceBranch = e.detail?.sourceBranch;
+    if (!provider || !sourceBranch) return;
+
+    this.openIntegrationStandalone(provider);
+    // The dialogs are always rendered (only their `open` flag changes), but the
+    // very first open still needs this render to land before the element and
+    // its own update cycle are reachable.
+    await this.updateComplete;
+
+    switch (provider) {
+      case 'github': {
+        const dialog = this.githubDialog;
+        if (!dialog) break;
+        await dialog.updateComplete;
+        dialog.startCreatePullRequest(sourceBranch, e.detail?.baseBranch);
+        return;
+      }
+      case 'gitlab': {
+        const dialog = this.gitlabDialog;
+        if (!dialog) break;
+        await dialog.updateComplete;
+        dialog.startCreateMergeRequest(sourceBranch, e.detail?.baseBranch);
+        return;
+      }
+      case 'bitbucket': {
+        const dialog = this.bitbucketDialog;
+        if (!dialog) break;
+        await dialog.updateComplete;
+        dialog.startCreatePullRequest(sourceBranch, e.detail?.baseBranch);
+        return;
+      }
+      case 'azure-devops': {
+        const dialog = this.azureDevOpsDialog;
+        if (!dialog) break;
+        await dialog.updateComplete;
+        dialog.startCreatePullRequest(sourceBranch, e.detail?.baseBranch);
+        return;
+      }
+    }
+
+    // The dialog is open but could not be reached, so the create form was never
+    // prefilled. Say so rather than leaving the user staring at a blank form
+    // wondering which branch it is about.
+    showToast('Could not open the create form. Fill in the branch manually.', 'error');
+  };
 
   private setIntegrationDialogOpen(type: IntegrationType, open: boolean): void {
     switch (type) {
@@ -6225,6 +6296,11 @@ export class AppShell extends LitElement {
                 }}
                 @compare-branch=${(e: CustomEvent<{ compareRef?: string }>) =>
                   this.compareBranchesDialog?.open(e.detail?.compareRef)}
+                @create-pull-request=${this.handleCreatePullRequest}
+                @open-provider-connection=${(e: CustomEvent<{ provider?: PullRequestProviderId }>) => {
+                  const provider = e.detail?.provider;
+                  if (provider) this.openIntegrationStandalone(provider);
+                }}
               >
                 <lv-left-panel></lv-left-panel>
               </aside>
