@@ -57,6 +57,7 @@ import { expect } from '@open-wc/testing';
 import * as gitService from '../git.service.ts';
 import * as credentialService from '../credential.service.ts';
 import * as localAiService from '../local-ai.service.ts';
+import * as updateService from '../update.service.ts';
 import { embeddingIndexService } from '../embedding-index.service.ts';
 import { settingsStore } from '../../stores/settings.store.ts';
 
@@ -100,6 +101,9 @@ const NETWORK_COMMANDS = new Set([
   'configure_github_app', 'list_github_app_installations',
   // model weights, fetched from huggingface.co
   'download_model', 'download_embedding_model',
+  // the auto-updater: `check_for_update` fetches latest.json from the release
+  // host and `download_and_install_update` pulls a binary and runs it.
+  'check_for_update', 'download_and_install_update',
 ]);
 
 /**
@@ -131,6 +135,15 @@ const LOCAL_COMMANDS = new Set([
   'detect_gitlab_repo',
   'detect_bitbucket_repo',
   'detect_ado_repo',
+  // update.service: reading the running version, and the three commands that
+  // only start/stop/inspect the periodic timer. The timer is deliberately NOT
+  // gated here — every tick of it runs the backend gate itself, so turning
+  // offline mode back off resumes updates without a restart. Gating the
+  // scheduling call would break exactly that.
+  'get_app_version',
+  'start_auto_update_check',
+  'stop_auto_update_check',
+  'is_auto_update_running',
 ]);
 
 /**
@@ -148,6 +161,14 @@ const SKIP = new Set([
   'listenForModelDownloadFailures',
   // embedding-index.service: same, for the index progress events.
   'onProgress',
+  // update.service: app-lifetime Tauri event listeners for the updater's
+  // progress and result events. None of them invoke a command.
+  'onUpdateAvailable',
+  'onUpdateChecked',
+  'onUpdateDownloading',
+  'onDownloadProgress',
+  'onUpdateReady',
+  'onUpdateError',
 ]);
 
 /**
@@ -163,6 +184,10 @@ const SWEPT_MODULES: Array<{ label: string; entries: Array<[string, unknown]> }>
   { label: 'git.service', entries: Object.entries(gitService) },
   { label: 'credential.service', entries: Object.entries(credentialService) },
   { label: 'local-ai.service', entries: Object.entries(localAiService) },
+  // The auto-updater was the last outbound path with no frontend gate and no
+  // entry in this sweep — and the only one that runs unattended and installs a
+  // binary. It is swept whole now, like everything else here.
+  { label: 'update.service', entries: Object.entries(updateService) },
   {
     label: 'embedding-index.service',
     // A class instance: its methods live on the prototype, so Object.entries
@@ -363,6 +388,19 @@ describe('network gate coverage', () => {
       listError = (err as Error).message;
     }
     expect(listError).to.contain('api.github.com');
+
+    // The Settings "Check for Updates" button renders this message inline, so
+    // pressing it offline says why instead of silently doing nothing — which
+    // is what it did while the updater had no gate at all.
+    const update = await updateService.checkForUpdate();
+    expect(update.success).to.equal(false);
+    expect(update.error?.code, 'the code every other refusal uses').to.equal('BLOCKED');
+    expect(update.error?.message).to.contain('offline mode');
+    expect(update.error?.message).to.contain('Settings > Security');
+
+    const install = await updateService.downloadAndInstallUpdate();
+    expect(install.success, 'installing a binary is the same request').to.equal(false);
+    expect(install.error?.code).to.equal('BLOCKED');
   });
 
   it('an allowlist refusal names the host that is missing from it', async () => {
@@ -383,6 +421,23 @@ describe('network gate coverage', () => {
       /* the mocked command returns null, which the caller rejects — fine */
     }
     expect(invoked.includes('list_github_app_installations')).to.equal(true);
+
+    // github.com IS on this list, so the updater is allowed through — an
+    // allowlist that refused either way would just be offline mode by another
+    // name.
+    invoked.length = 0;
+    const allowedUpdate = await updateService.checkForUpdate();
+    expect(allowedUpdate.success, 'a github.com allowlist permits the updater').to.not.equal(false);
+    expect(invoked.includes('check_for_update')).to.equal(true);
+
+    // A list that does not name it refuses, and says which host is missing.
+    settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: ['gitlab.com'] });
+    invoked.length = 0;
+    const refusedUpdate = await updateService.checkForUpdate();
+    expect(refusedUpdate.success).to.equal(false);
+    expect(refusedUpdate.error?.message).to.contain('github.com');
+    expect(refusedUpdate.error?.message).to.contain('allowlist');
+    expect(invoked.includes('check_for_update')).to.equal(false);
   });
 
   it('the same sweep does reach those commands when offline mode is off', async () => {
@@ -410,6 +465,8 @@ describe('network gate coverage', () => {
       'download_embedding_model',
       'configure_github_app',
       'list_github_app_installations',
+      'check_for_update',
+      'download_and_install_update',
     ]) {
       expect(reached.has(command), `the sweep reaches ${command} when nothing blocks it`).to.equal(
         true,

@@ -244,6 +244,13 @@ export class LvSettingsDialog extends LitElement {
         margin-top: 4px;
       }
 
+      /* The About row lays its status out inline next to the version, so the
+         shared .error-text top margin would drop it off the baseline. */
+      .error-text.update-error {
+        margin-top: 0;
+        font-size: 12px;
+      }
+
       .mcp-token-controls {
         display: flex;
         align-items: center;
@@ -380,7 +387,15 @@ export class LvSettingsDialog extends LitElement {
   @state() private language: Locale = 'en';
   @state() private theme: Theme = 'dark';
   @state() private appVersion = '';
-  @state() private updateStatus: 'idle' | 'checking' | 'available' | 'up-to-date' = 'idle';
+  @state() private updateStatus:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'up-to-date'
+    | 'failed' = 'idle';
+  /** Why the last check did not produce an answer — a security-gate refusal
+   * naming the setting that refused it, or the backend's error. */
+  @state() private updateError: string | null = null;
   @state() private resetting = false;
   @state() private latestVersion = '';
   @state() private fontSize: FontSize = 'medium';
@@ -604,17 +619,23 @@ export class LvSettingsDialog extends LitElement {
 
   private async handleCheckForUpdate(): Promise<void> {
     this.updateStatus = 'checking';
+    this.updateError = null;
     const result = await checkForUpdate();
-    if (result) {
-      if (result.updateAvailable) {
+    if (result.success && result.data) {
+      if (result.data.updateAvailable) {
         this.updateStatus = 'available';
-        this.latestVersion = result.latestVersion ?? '';
+        this.latestVersion = result.data.latestVersion ?? '';
       } else {
         this.updateStatus = 'up-to-date';
       }
-    } else {
-      this.updateStatus = 'idle';
+      return;
     }
+    // A refusal from the security gate names the setting that refused it and
+    // how to undo it; anything else is a failed check. Both used to collapse
+    // into `idle`, which showed the user nothing at all.
+    this.updateStatus = 'failed';
+    this.updateError =
+      result.error?.message ?? msg('Could not check for updates. Try again later.');
   }
 
   private loadSettings(): void {
@@ -2333,6 +2354,8 @@ export class LvSettingsDialog extends LitElement {
                 <span class="update-status available">${msg(str`Update available: v${this.latestVersion}`)}</span>
               ` : this.updateStatus === 'up-to-date' ? html`
                 <span class="update-status">${msg("You're up to date!")}</span>
+              ` : this.updateStatus === 'failed' ? html`
+                <span class="error-text update-error">${this.updateError}</span>
               ` : ''}
             </div>
             <button

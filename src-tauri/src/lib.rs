@@ -337,7 +337,12 @@ pub fn run() {
                 });
             }
 
-            // Start auto-update checking (every 24 hours)
+            // Start auto-update checking (every 24 hours).
+            //
+            // Started unconditionally: each tick runs the offline-mode /
+            // allowlist gate itself and simply skips while a policy forbids it
+            // (see services/update_service.rs), so the schedule survives the
+            // setting being turned on and off without a restart.
             let update_state = app.state::<services::UpdateState>().inner().clone();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
