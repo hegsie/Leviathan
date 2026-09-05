@@ -73,33 +73,48 @@ pub struct SecurityState {
 
 impl SecurityState {
     /// The settings as they stand right now.
+    ///
+    /// A poisoned lock is recovered with `into_inner()` rather than swallowed:
+    /// falling back to `SecuritySettings::default()` would fail OPEN — offline
+    /// mode off and an empty allowlist is the most permissive state there is,
+    /// which is exactly the wrong direction for the module whose job is to
+    /// refuse. The critical sections here are a clone and an assignment, so the
+    /// settings behind a poisoned lock are still the last ones stored. Same
+    /// recovery as `remote_ops.rs` and `mcp/server.rs`.
     pub fn snapshot(&self) -> SecuritySettings {
         self.inner
             .read()
-            .map(|inner| inner.settings.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|e| e.into_inner())
+            .settings
+            .clone()
     }
 
     /// Point the state at the app config directory and adopt whatever was
     /// persisted there by the previous run.
     pub fn init(&self, config_dir: PathBuf) {
         let loaded = load_from_disk(&config_dir);
-        if let Ok(mut inner) = self.inner.write() {
-            inner.config_dir = Some(config_dir);
-            if let Some(settings) = loaded {
-                inner.settings = settings;
-            }
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        inner.config_dir = Some(config_dir);
+        if let Some(settings) = loaded {
+            inner.settings = settings;
         }
     }
 
     /// Replace the settings and mirror them to disk.
+    ///
+    /// A push that changes nothing returns without touching the file. The
+    /// frontend re-emits the WHOLE settings object on every settings write —
+    /// a theme change, a slider drag, each keystroke in a text field — and all
+    /// of those arrive here carrying the security settings unchanged; without
+    /// this check each one rewrites `security_settings.json`.
     pub fn set(&self, settings: SecuritySettings) {
-        let config_dir = match self.inner.write() {
-            Ok(mut inner) => {
-                inner.settings = settings.clone();
-                inner.config_dir.clone()
+        let config_dir = {
+            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            if inner.settings == settings {
+                return;
             }
-            Err(_) => None,
+            inner.settings = settings.clone();
+            inner.config_dir.clone()
         };
         if let Some(dir) = config_dir {
             save_to_disk(&dir, &settings);
@@ -653,6 +668,71 @@ mod tests {
             second.snapshot().remote_allowlist,
             vec!["example.test".to_string()]
         );
+    }
+
+    #[test]
+    fn a_push_that_changes_nothing_is_not_written_to_disk() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = SecurityState::default();
+        state.init(dir.path().to_path_buf());
+        state.set(settings(true, &["github.com"]));
+
+        let path = dir.path().join(SECURITY_FILE);
+        assert!(path.exists(), "the first push is mirrored to disk");
+        // Removing the mirror makes a rewrite unmistakable: if the identical
+        // push below saves again, the file comes back.
+        std::fs::remove_file(&path).unwrap();
+
+        // The frontend re-emits the whole settings object on EVERY settings
+        // write, so this is what a theme change or a keystroke elsewhere in
+        // Settings looks like from here.
+        state.set(settings(true, &["github.com"]));
+        assert!(
+            !path.exists(),
+            "an identical push must not rewrite the mirror"
+        );
+
+        // A real change still is written.
+        state.set(settings(false, &["github.com"]));
+        assert!(path.exists(), "a changed setting is still mirrored");
+        assert_eq!(state.snapshot(), settings(false, &["github.com"]));
+    }
+
+    #[test]
+    fn a_poisoned_lock_does_not_fail_open() {
+        let state = SecurityState::default();
+        state.set(settings(true, &["github.com"]));
+
+        // Poison the lock the way a panic inside a critical section would.
+        // The hook is silenced only for the duration of that deliberate panic
+        // so a passing run does not print a backtrace that looks like a failure.
+        let poisoner = state.clone();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.inner.write().unwrap();
+            panic!("poison the security lock");
+        })
+        .join();
+        std::panic::set_hook(previous_hook);
+        assert!(state.inner.read().is_err(), "the lock really is poisoned");
+
+        // Failing open here would hand back the permissive default.
+        let snapshot = state.snapshot();
+        assert!(
+            snapshot.offline_mode,
+            "offline mode survives a poisoned lock"
+        );
+        assert_eq!(snapshot.remote_allowlist, vec!["github.com".to_string()]);
+        assert_eq!(
+            blocked(check(&snapshot, Some("https://github.com/o/r.git"))),
+            "Offline mode is enabled. Disable in Settings > Security.",
+            "the guard still refuses"
+        );
+
+        // And a write through the poisoned lock still lands.
+        state.set(settings(false, &["example.test"]));
+        assert_eq!(state.snapshot(), settings(false, &["example.test"]));
     }
 
     // ---- the guarded commands actually refuse ----
