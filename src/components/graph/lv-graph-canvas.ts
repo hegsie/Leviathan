@@ -752,6 +752,8 @@ export class LvGraphCanvas extends LitElement {
   private relativeTimeTimer: ReturnType<typeof setInterval> | null = null;
   private lastLoadedRepoPath: string | null = null; // Track the last repo that completed loading
   private inFlightLoadPath: string | null = null; // Repo whose loadCommits is currently in flight
+  // Coalesces graph-commits-changed dispatches to one per microtask
+  private loadedCommitsNotifyQueued = false;
   // A refresh arrived while a load was in flight; that load's snapshot may
   // predate the mutation the refresh was for, so one follow-up load runs
   // when it finishes
@@ -991,6 +993,7 @@ export class LvGraphCanvas extends LitElement {
       this.hoveredNode = null;
       this.realCommits.clear();
       this.refsByCommit = {};
+      this.notifyLoadedCommitsChanged();
       // A catch-up load in flight for the previous repo must not block the
       // new repo's pagination (its own version guard discards its results)
       this.isLoadingMore = false;
@@ -1259,6 +1262,7 @@ export class LvGraphCanvas extends LitElement {
       this.realCommits.set(commit.oid, commit);
     }
     this.refsByCommit = cached.refsByCommit;
+    this.notifyLoadedCommitsChanged();
     this.commits = cached.commits.map(commitToGraphCommit);
     this.totalLoadedCommits = cached.commits.length;
     this.hasMoreCommits = cached.hasMore;
@@ -1346,6 +1350,7 @@ export class LvGraphCanvas extends LitElement {
 
       // Store refs
       this.refsByCommit = refsResult.success && refsResult.data ? refsResult.data : {};
+      this.notifyLoadedCommitsChanged();
 
       // If search is active, also fetch matching commits for highlighting
       this.matchedCommitOids.clear();
@@ -1639,6 +1644,7 @@ export class LvGraphCanvas extends LitElement {
       for (const commit of result.data) {
         this.realCommits.set(commit.oid, commit);
       }
+      this.notifyLoadedCommitsChanged();
       const newGraphCommits = result.data.map(commitToGraphCommit);
       this.commits = [...this.commits, ...newGraphCommits];
       this.totalLoadedCommits += result.data.length;
@@ -2856,6 +2862,30 @@ export class LvGraphCanvas extends LitElement {
    */
   public getLoadedCommits(): Commit[] {
     return Array.from(this.realCommits.values());
+  }
+
+  /**
+   * Announce that the loaded commit set and/or the loaded refs changed.
+   *
+   * app-shell used to call getLoadedCommits()/getTagTips() straight from its
+   * render(), which copied up to a full page of commits and walked the whole
+   * ref map on EVERY re-render — and handed the palette a new array identity
+   * each time, so it rebuilt its list even while closed. It now mirrors both
+   * into state and refreshes that mirror from this event instead.
+   *
+   * Coalesced into a single dispatch per microtask: a repository switch
+   * clears the maps and then applies the cached page synchronously in the
+   * same update, and a listener only ever wants the settled result.
+   */
+  private notifyLoadedCommitsChanged(): void {
+    if (this.loadedCommitsNotifyQueued) return;
+    this.loadedCommitsNotifyQueued = true;
+    queueMicrotask(() => {
+      this.loadedCommitsNotifyQueued = false;
+      this.dispatchEvent(
+        new CustomEvent('graph-commits-changed', { bubbles: true, composed: true })
+      );
+    });
   }
 
   /**
