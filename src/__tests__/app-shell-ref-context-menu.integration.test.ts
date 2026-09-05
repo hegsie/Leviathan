@@ -32,6 +32,7 @@ import { repositoryStore } from '../stores/repository.store.ts';
 
 // Import the real component
 import '../app-shell.ts';
+import { dialogs } from '../stores/dialog.store.ts';
 
 // ── Test data ──────────────────────────────────────────────────────────────
 const REPO_PATH = '/test/repo';
@@ -152,6 +153,14 @@ function setRefContextMenu(
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+// Which dialogs are open is module state, and several tests here drive a shell
+// that is never connected to the document (so its connectedCallback reset never
+// runs). Clear it per test to keep the isolation each instance used to get for
+// free from its own `@state()` flags.
+beforeEach(() => {
+  dialogs.reset();
+});
+
 describe('app-shell ref context menu handlers (integration)', () => {
   beforeEach(() => {
     clearHistory();
@@ -356,8 +365,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handleRefMerge();
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((el as any).showConflictDialog).to.be.true;
+      expect(dialogs.isOpen('conflict')).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('merge');
     });
@@ -453,8 +461,7 @@ describe('app-shell ref context menu handlers (integration)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (el as any).handleRefRebase();
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((el as any).showConflictDialog).to.be.true;
+      expect(dialogs.isOpen('conflict')).to.be.true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((el as any).conflictOperationType).to.equal('rebase');
     });

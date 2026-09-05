@@ -25,6 +25,7 @@ import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { repositoryStore, uiStore } from '../stores/index.ts';
+import { dialogs, type DialogId } from '../stores/dialog.store.ts';
 import {
   APP_MENU_ACTIONS,
   noteAcceleratorKeydown,
@@ -108,37 +109,40 @@ describe('app-shell application menu routing', () => {
   });
 
   it('runs the same handler as the palette twin for repository dialogs', () => {
-    const cases: Array<[string, string]> = [
-      ['clean', 'showClean'],
-      ['bisect', 'showBisect'],
-      ['worktrees', 'showWorktrees'],
-      ['submodules', 'showSubmodules'],
-      ['lfs', 'showLfs'],
-      ['hooks', 'showHooksDialog'],
-      ['config', 'showConfig'],
-      ['gitignore', 'showGitignoreDialog'],
-      ['repository-health', 'showRepositoryHealth'],
+    const cases: Array<[string, DialogId]> = [
+      ['clean', 'clean'],
+      ['bisect', 'bisect'],
+      ['worktrees', 'worktrees'],
+      ['submodules', 'submodules'],
+      ['lfs', 'lfs'],
+      ['hooks', 'hooks'],
+      ['config', 'config'],
+      ['gitignore', 'gitignore'],
+      ['repository-health', 'repositoryHealth'],
     ];
 
-    for (const [id, flag] of cases) {
+    for (const [id, dialogId] of cases) {
       // What the palette does…
       const viaPalette = shell();
+      dialogs.reset();
       paletteCommands(viaPalette).find((c) => c.id === id)!.action();
-      expect((viaPalette as any)[flag], `palette "${id}" sets ${flag}`).to.be.true;
+      expect(dialogs.isOpen(dialogId), `palette "${id}" opens ${dialogId}`).to.be.true;
 
       // …the menu must do too.
       const viaMenu = shell();
+      dialogs.reset();
       runMenuAction(viaMenu, id);
-      expect((viaMenu as any)[flag], `menu "${id}" sets ${flag}`).to.be.true;
+      expect(dialogs.isOpen(dialogId), `menu "${id}" opens ${dialogId}`).to.be.true;
     }
   });
 
   it('keeps the repository guard when no repository is open', () => {
     const el = shell(null);
+    dialogs.reset();
 
     runMenuAction(el, 'clean');
 
-    expect((el as any).showClean, 'no dialog without a repository').to.not.be.true;
+    expect(dialogs.isOpen('clean'), 'no dialog without a repository').to.be.false;
     const warnings = toasts('warning');
     expect(warnings, 'the user must be told why nothing happened').to.have.lengthOf(1);
     expect(warnings[0].message).to.contain('open a repository');
@@ -146,8 +150,9 @@ describe('app-shell application menu routing', () => {
 
   it('opens the keyboard shortcuts dialog from Help', () => {
     const el = shell(null);
+    dialogs.reset();
     runMenuAction(el, 'keyboard-shortcuts');
-    expect((el as any).showShortcuts).to.be.true;
+    expect(dialogs.isOpen('shortcuts')).to.be.true;
   });
 
   it('closes the active repository tab from File', () => {

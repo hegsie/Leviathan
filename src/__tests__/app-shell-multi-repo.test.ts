@@ -26,6 +26,7 @@ let cbId = 0;
 import { expect, waitUntil } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
+import { dialogs, type DialogId } from '../stores/dialog.store.ts';
 import { uiStore, repositoryStore, settingsStore } from '../stores/index.ts';
 import { searchIndexService } from '../services/search-index.service.ts';
 import type { Repository } from '../types/git.types.ts';
@@ -116,6 +117,14 @@ function stubPinnedDialog(
   return { closed: () => closed };
 }
 
+
+// Which dialogs are open is module state, and several tests here drive a shell
+// that is never connected to the document (so its connectedCallback reset never
+// runs). Clear it per test to keep the isolation each instance used to get for
+// free from its own `@state()` flags.
+beforeEach(() => {
+  dialogs.reset();
+});
 
 describe('app-shell multi-repo behavior', () => {
   beforeEach(() => {
@@ -1377,7 +1386,7 @@ describe('app-shell multi-repo behavior', () => {
         );
         await el.updateComplete;
 
-        expect((el as any).showConflictDialog).to.be.false;
+        expect(dialogs.isOpen('conflict')).to.be.false;
         expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
         const toasts = uiStore.getState().toasts;
         expect(toasts.some((t) => t.type === 'warning' && t.message.includes('tab was closed')))
@@ -1398,14 +1407,14 @@ describe('app-shell multi-repo behavior', () => {
 
         (el as any).openConflictDialogFromState();
         await el.updateComplete;
-        expect((el as any).showConflictDialog).to.be.true;
+        expect(dialogs.isOpen('conflict')).to.be.true;
 
         // The user clicks the × on repo A's tab with the dialog up. The
         // dialog must not stay floating over whatever renders next.
         repositoryStore.getState().removeRepository('/repo/a');
         await el.updateComplete;
 
-        expect((el as any).showConflictDialog).to.be.false;
+        expect(dialogs.isOpen('conflict')).to.be.false;
         expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
         const toasts = uiStore.getState().toasts;
         expect(
@@ -1430,7 +1439,7 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().removeRepository('/repo/b');
         await el.updateComplete;
 
-        expect((el as any).showConflictDialog).to.be.true;
+        expect(dialogs.isOpen('conflict')).to.be.true;
       } finally {
         el.remove();
       }
@@ -1517,7 +1526,7 @@ describe('app-shell multi-repo behavior', () => {
         // A is backgrounded — it must be marked stale (refreshed when
         // re-activated) so its tab doesn't keep showing merge state.
         expect((el as any).staleRepoPaths.has('/repo/a')).to.be.true;
-        expect((el as any).showConflictDialog).to.be.false;
+        expect(dialogs.isOpen('conflict')).to.be.false;
       } finally {
         el.remove();
       }
@@ -1735,7 +1744,7 @@ describe('app-shell multi-repo behavior', () => {
     it('does NOT dismiss — or claim to cancel — a clean that is mid-delete', async () => {
       // The repro: select thousands of untracked files, Delete, confirm, then
       // close the tab while clean_files runs. The sweep used to set
-      // `showClean = false` directly, bypassing the dialog's own `cleaning`
+      // the clean dialog's flag directly, bypassing its own `cleaning`
       // guard, and toast "clean cancelled" — seconds before "Deleted 4,913
       // items" landed. Untracked files have no trash and no recovery path.
       const el = createAppShell();
@@ -1746,7 +1755,7 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().setActiveByPath('/repo/b');
         await el.updateComplete;
 
-        (el as any).showClean = true;
+        dialogs.open('clean');
         await el.updateComplete;
         const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
         uiStore.setState({ toasts: [] });
@@ -1756,7 +1765,7 @@ describe('app-shell multi-repo behavior', () => {
 
         expect(clean.closed(), 'an in-flight clean is not force-dismissed').to.be.false;
         expect(
-          (el as any).showClean,
+          dialogs.isOpen('clean'),
           'the host flag stays set — clearing it unmounts the dialog and orphans the delete',
         ).to.be.true;
         const messages = uiStore.getState().toasts.map((t) => t.message);
@@ -1784,7 +1793,7 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().setActiveByPath('/repo/b');
         await el.updateComplete;
 
-        (el as any).showClean = true;
+        dialogs.open('clean');
         await el.updateComplete;
         const clean = stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', false);
         uiStore.setState({ toasts: [] });
@@ -1793,7 +1802,7 @@ describe('app-shell multi-repo behavior', () => {
         await el.updateComplete;
 
         expect(clean.closed(), 'an idle clean dialog is dismissed').to.be.true;
-        expect((el as any).showClean, 'and its host flag cleared').to.be.false;
+        expect(dialogs.isOpen('clean'), 'and its host flag cleared').to.be.false;
         const messages = uiStore.getState().toasts.map((t) => t.message);
         expect(
           messages.some((m) => /clean cancelled/i.test(m)),
@@ -1843,11 +1852,11 @@ describe('app-shell multi-repo behavior', () => {
       // the host flag unconditionally: worktree remove --force, submodule
       // deinit -f, git lfs prune, and the reflog hard reset all kept running
       // behind a toast saying they had been closed.
-      const cases: Array<[string, string, string]> = [
-        ['lv-worktree-dialog', 'showWorktrees', 'worktree removal'],
-        ['lv-submodule-dialog', 'showSubmodules', 'submodule removal'],
-        ['lv-lfs-dialog', 'showLfs', 'LFS prune'],
-        ['lv-reflog-dialog', 'showReflog', 'reset'],
+      const cases: Array<[string, DialogId, string]> = [
+        ['lv-worktree-dialog', 'worktrees', 'worktree removal'],
+        ['lv-submodule-dialog', 'submodules', 'submodule removal'],
+        ['lv-lfs-dialog', 'lfs', 'LFS prune'],
+        ['lv-reflog-dialog', 'reflog', 'reset'],
       ];
       for (const [tag, flag, running] of cases) {
         const el = createAppShell();
@@ -1859,7 +1868,7 @@ describe('app-shell multi-repo behavior', () => {
           repositoryStore.getState().setActiveByPath('/repo/b');
           await el.updateComplete;
 
-          (el as any)[flag] = true;
+          dialogs.open(flag);
           await el.updateComplete;
           stubPinnedDialog(el, tag, '/repo/a', true);
           uiStore.setState({ toasts: [] });
@@ -1867,7 +1876,7 @@ describe('app-shell multi-repo behavior', () => {
           repositoryStore.getState().removeRepository('/repo/a');
           await el.updateComplete;
 
-          expect((el as any)[flag], `${tag}: host flag survives an in-flight operation`).to.be.true;
+          expect(dialogs.isOpen(flag), `${tag}: host flag survives an in-flight operation`).to.be.true;
           const messages = uiStore.getState().toasts.map((t) => t.message);
           expect(
             messages.some((m) => m.includes(`the ${running} is still running`)),
@@ -1889,7 +1898,7 @@ describe('app-shell multi-repo behavior', () => {
         repositoryStore.getState().addRepository(mockRepo('/repo/a', 'a'), { activate: true });
         await el.updateComplete;
 
-        (el as any).showClean = true;
+        dialogs.open('clean');
         await el.updateComplete;
         stubPinnedDialog(el, 'lv-clean-dialog', '/repo/a', true);
         uiStore.setState({ toasts: [] });
@@ -2200,7 +2209,7 @@ describe('app-shell multi-repo behavior', () => {
           (el as any).openConflictDialogFromState();
           await el.updateComplete;
 
-          expect((el as any).showConflictDialog).to.be.false;
+          expect(dialogs.isOpen('conflict')).to.be.false;
           expect(el.shadowRoot!.querySelector('lv-conflict-resolution-dialog')).to.be.null;
           const toasts = uiStore.getState().toasts;
           expect(toasts.some((t) => t.type === 'warning' && t.message.includes(state))).to.be
@@ -2219,7 +2228,7 @@ describe('app-shell multi-repo behavior', () => {
         await el.updateComplete;
         (el as any).openConflictDialogFromState();
         await el.updateComplete;
-        expect((el as any).showConflictDialog).to.be.true;
+        expect(dialogs.isOpen('conflict')).to.be.true;
         expect((el as any).conflictOperationType).to.equal('stash');
       } finally {
         el.remove();
@@ -2249,21 +2258,20 @@ describe('closing the last repository closes its dialogs', () => {
     });
     await el.updateComplete;
 
-    const internal = el as unknown as Record<string, unknown>;
-    internal.showBisect = true;
-    internal.showWorktrees = true;
-    internal.showLfs = true;
+    dialogs.open('bisect');
+    dialogs.open('worktrees');
+    dialogs.open('lfs');
     // Not repo-scoped — must survive.
-    internal.showSettings = true;
+    dialogs.open('settings');
     await el.updateComplete;
 
     repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
     await el.updateComplete;
 
-    expect(internal.showBisect, 'bisect must not outlive its repository').to.be.false;
-    expect(internal.showWorktrees, 'worktrees must not outlive its repository').to.be.false;
-    expect(internal.showLfs, 'LFS must not outlive its repository').to.be.false;
-    expect(internal.showSettings, 'settings is not repo-scoped').to.be.true;
+    expect(dialogs.isOpen('bisect'), 'bisect must not outlive its repository').to.be.false;
+    expect(dialogs.isOpen('worktrees'), 'worktrees must not outlive its repository').to.be.false;
+    expect(dialogs.isOpen('lfs'), 'LFS must not outlive its repository').to.be.false;
+    expect(dialogs.isOpen('settings'), 'settings is not repo-scoped').to.be.true;
 
     el.remove();
   });
@@ -2287,30 +2295,29 @@ describe('closing the last repository closes its dialogs', () => {
     });
     await el.updateComplete;
 
-    const repoIndependent = [
-      'showSsh',
-      'showProfileManager',
-      'showMigrationDialog',
-      'showGitHub',
-      'showGitLab',
-      'showBitbucket',
-      'showAzureDevOps',
-      'showOidc',
+    const repoIndependent: DialogId[] = [
+      'ssh',
+      'profileManager',
+      'migration',
+      'gitHub',
+      'gitLab',
+      'bitbucket',
+      'azureDevOps',
+      'oidc',
     ];
-    const internal = el as unknown as Record<string, unknown>;
-    for (const key of repoIndependent) internal[key] = true;
+    for (const key of repoIndependent) dialogs.open(key);
     // Control: GPG renders inside the activeRepository block, so it must still
     // be swept — proof the exclusion did not simply disable the sweep.
-    internal.showGpg = true;
+    dialogs.open('gpg');
     await el.updateComplete;
 
     repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
     await el.updateComplete;
 
     for (const key of repoIndependent) {
-      expect(internal[key], `${key} is not repo-scoped`).to.be.true;
+      expect(dialogs.isOpen(key), `${key} is not repo-scoped`).to.be.true;
     }
-    expect(internal.showGpg, 'GPG must not outlive its repository').to.be.false;
+    expect(dialogs.isOpen('gpg'), 'GPG must not outlive its repository').to.be.false;
 
     el.remove();
   });
@@ -2329,7 +2336,7 @@ describe('closing the last repository closes its dialogs', () => {
     await el.updateComplete;
 
     const internal = el as unknown as Record<string, unknown>;
-    internal.showProfileManager = true;
+    dialogs.open('profileManager');
     await el.updateComplete;
 
     // Drive the REAL handler: the manager stacks a provider dialog on itself to
@@ -2348,7 +2355,7 @@ describe('closing the last repository closes its dialogs', () => {
     );
     await el.updateComplete;
 
-    expect(internal.showGitHub, 'the connect flow opened the provider dialog').to.be.true;
+    expect(dialogs.isOpen('gitHub'), 'the connect flow opened the provider dialog').to.be.true;
     expect(internal.integrationContext, 'the connect flow recorded its return context').to.not.be
       .null;
 
@@ -2385,36 +2392,35 @@ describe('closing the last repository closes its dialogs', () => {
     });
     await el.updateComplete;
 
-    const repoScoped = [
-      'showRemotes',
-      'showClean',
-      'showBisect',
-      'showSubmodules',
-      'showWorktrees',
-      'showLfs',
-      'showGpg',
-      'showConfig',
-      'showCredentials',
-      'showHooksDialog',
-      'showRepositoryHealth',
-      'showReflog',
+    const repoScoped: DialogId[] = [
+      'remotes',
+      'clean',
+      'bisect',
+      'submodules',
+      'worktrees',
+      'lfs',
+      'gpg',
+      'config',
+      'credentials',
+      'hooks',
+      'repositoryHealth',
+      'reflog',
     ];
-    const internal = el as unknown as Record<string, unknown>;
-    for (const key of repoScoped) internal[key] = true;
+    for (const key of repoScoped) dialogs.open(key);
     await el.updateComplete;
 
     repositoryStore.setState({ openRepositories: [] as never, activeIndex: -1 });
     await el.updateComplete;
 
     for (const key of repoScoped) {
-      expect(internal[key], `${key} must not outlive its repository`).to.be.false;
+      expect(dialogs.isOpen(key), `${key} must not outlive its repository`).to.be.false;
     }
 
     el.remove();
   });
 });
 describe('the toolbar command-palette button loads the active repo', () => {
-  // Setting showCommandPalette directly skipped openCommandPalette(), the only
+  // Opening the palette dialog directly skipped openCommandPalette(), the only
   // place branches and files are loaded. Cold start: a palette with no branch
   // entries at all. After a tab switch: the PREVIOUS repo's branches, offering
   // "Switch to <current branch>" and running a checkout against the wrong repo.
@@ -2433,7 +2439,6 @@ describe('the toolbar command-palette button loads the active repo', () => {
 
     const internal = el as unknown as {
       paletteBranches: unknown[];
-      showCommandPalette: boolean;
     };
     internal.paletteBranches = [];
     invokeCallArgs.length = 0;
@@ -2446,7 +2451,7 @@ describe('the toolbar command-palette button loads the active repo', () => {
     await el.updateComplete;
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(internal.showCommandPalette, 'the palette opens').to.be.true;
+    expect(dialogs.isOpen('commandPalette'), 'the palette opens').to.be.true;
     expect(
       // list_tracked_files is loaded ONLY by openCommandPalette, so it is the
       // unambiguous signal that the loader ran (get_branches is also issued by
@@ -2485,7 +2490,6 @@ describe('the toolbar command-palette button loads the active repo', () => {
     const internal = el as unknown as {
       paletteBranches: Array<{ name: string }>;
       paletteTrackedFiles: string[];
-      showCommandPalette: boolean;
       openCommandPalette: () => Promise<void>;
     };
     const pendingOpen = internal.openCommandPalette();
@@ -2498,7 +2502,7 @@ describe('the toolbar command-palette button loads the active repo', () => {
     await pendingOpen;
     await el.updateComplete;
 
-    expect(internal.showCommandPalette, 'the stale request must not reopen the overlay').to.be.false;
+    expect(dialogs.isOpen('commandPalette'), 'the stale request must not reopen the overlay').to.be.false;
     expect(internal.paletteBranches.some((branch) => branch.name === 'only-in-a')).to.be.false;
     expect(internal.paletteTrackedFiles).not.to.include('only-in-a.txt');
 
@@ -2558,12 +2562,11 @@ describe('the toolbar command-palette button loads the active repo', () => {
     await el.updateComplete;
 
     const internal = el as unknown as {
-      showCommandPalette: boolean;
       openCommandPalette: () => Promise<void>;
     };
     await internal.openCommandPalette();
     await el.updateComplete;
-    expect(internal.showCommandPalette, 'the palette is up to begin with').to.be.true;
+    expect(dialogs.isOpen('commandPalette'), 'the palette is up to begin with').to.be.true;
 
     deferLoads = true;
     const pendingOpen = internal.openCommandPalette();
@@ -2574,14 +2577,14 @@ describe('the toolbar command-palette button loads the active repo', () => {
     expect(palette, 'the palette must be rendered').to.not.be.null;
     (palette as unknown as { close: () => void }).close();
     await el.updateComplete;
-    expect(internal.showCommandPalette, 'the dismissal takes effect').to.be.false;
+    expect(dialogs.isOpen('commandPalette'), 'the dismissal takes effect').to.be.false;
 
     branchResolvers.forEach((resolve) => resolve([]));
     fileResolvers.forEach((resolve) => resolve([]));
     await pendingOpen;
     await el.updateComplete;
 
-    expect(internal.showCommandPalette, 'the superseded load must not reopen it').to.be.false;
+    expect(dialogs.isOpen('commandPalette'), 'the superseded load must not reopen it').to.be.false;
     expect(
       (palette as unknown as { open: boolean }).open,
       'and the overlay itself stays down'
@@ -2606,17 +2609,16 @@ describe('the toolbar command-palette button loads the active repo', () => {
     await el.updateComplete;
 
     const internal = el as unknown as {
-      showCommandPalette: boolean;
       openCommandPalette: () => Promise<void>;
     };
     await internal.openCommandPalette();
     await el.updateComplete;
-    expect(internal.showCommandPalette).to.be.true;
+    expect(dialogs.isOpen('commandPalette')).to.be.true;
 
     repositoryStore.setState({ activeIndex: 1 });
     await el.updateComplete;
 
-    expect(internal.showCommandPalette).to.be.false;
+    expect(dialogs.isOpen('commandPalette')).to.be.false;
     el.remove();
   });
 
@@ -2689,7 +2691,6 @@ describe('the toolbar command-palette button loads the active repo', () => {
     const internal = el as unknown as {
       paletteBranches: unknown[];
       paletteTrackedFiles: string[];
-      showCommandPalette: boolean;
       openCommandPalette: () => Promise<void>;
     };
     uiStore.setState({ toasts: [] });
@@ -2698,7 +2699,7 @@ describe('the toolbar command-palette button loads the active repo', () => {
 
     expect(internal.paletteBranches).to.deep.equal([]);
     expect(internal.paletteTrackedFiles).to.deep.equal([]);
-    expect(internal.showCommandPalette).to.be.true;
+    expect(dialogs.isOpen('commandPalette')).to.be.true;
     expect(uiStore.getState().toasts).to.deep.equal([]);
   });
 });

@@ -44,6 +44,7 @@ import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { uiStore, repositoryStore } from '../stores/index.ts';
+import { dialogs } from '../stores/dialog.store.ts';
 import type { Commit, Repository } from '../types/git.types.ts';
 import { resetRefOpLocks, tryAcquireRefOp } from '../utils/ref-lock.ts';
 
@@ -394,9 +395,7 @@ describe('app-shell graph multi-selection', () => {
         await (el as any).handleCherryPickSelection();
 
         expect((el as any).conflictOperationType).to.equal('cherry-pick');
-        expect((el as any).showConflictDialog, 'the conflict dialog is the shared one').to.equal(
-          true,
-        );
+        expect(dialogs.isOpen('conflict'), 'the conflict dialog is the shared one').to.equal(true);
         expect(
           uiStore.getState().toasts.some((t) => t.type === 'error'),
           'the partial report is shown alongside the dialog',

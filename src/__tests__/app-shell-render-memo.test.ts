@@ -26,6 +26,7 @@ import { expect } from '@open-wc/testing';
 import type { AppShell } from '../app-shell.ts';
 import '../app-shell.ts';
 import { repositoryStore } from '../stores/index.ts';
+import { dialogs } from '../stores/dialog.store.ts';
 import type { Commit, Repository } from '../types/git.types.ts';
 import type { PaletteCommand } from '../components/dialogs/lv-command-palette.ts';
 
@@ -127,7 +128,7 @@ describe('app-shell render-path memoisation', () => {
 
       // A representative spread of the ~90 reactive fields that change while
       // the app is simply being used.
-      (el as any).showOutputPanel = true;
+      dialogs.open('outputPanel');
       (el as any).refOpsVersion = 7;
       (el as any).leftPanelWidth = 300;
       (el as any).selectedCommit = makeCommit('a'.repeat(40), 'Some commit');
@@ -157,13 +158,13 @@ describe('app-shell render-path memoisation', () => {
 
       // The cached closures must read state at INVOCATION time, not at build
       // time — otherwise memoising would freeze the palette's behaviour.
-      (el as any).showOutputPanel = false;
+      dialogs.close('outputPanel');
       toggleOutput!.action();
-      expect((el as any).showOutputPanel).to.equal(true);
+      expect(dialogs.isOpen('outputPanel')).to.equal(true);
 
       const settings = commands.find((c) => c.id === 'settings');
       settings!.action();
-      expect((el as any).showSettings).to.equal(true);
+      expect(dialogs.isOpen('settings')).to.equal(true);
     });
 
     it('guards a repository-only command with the live repository state', () => {
@@ -172,14 +173,15 @@ describe('app-shell render-path memoisation', () => {
       const clean = commands.find((c) => c.id === 'clean');
 
       // No repository: refused (and the cached closure said so).
+      dialogs.reset();
       (el as any).activeRepository = null;
       clean!.action();
-      expect((el as any).showClean).to.equal(false);
+      expect(dialogs.isOpen('clean')).to.equal(false);
 
       // Same cached closure, repository now open: allowed.
       (el as any).activeRepository = { repository: mockRepo('/repo/one', 'one') };
       clean!.action();
-      expect((el as any).showClean).to.equal(true);
+      expect(dialogs.isOpen('clean')).to.equal(true);
     });
   });
 
@@ -286,7 +288,7 @@ describe('app-shell render-path memoisation', () => {
       (el as any).activeRepository = null;
       await (el as any).openCommandPalette();
 
-      expect((el as any).showCommandPalette).to.equal(true);
+      expect(dialogs.isOpen('commandPalette')).to.equal(true);
       expect((el as any).graphPaletteCommits).to.deep.equal(commits);
       expect((el as any).graphPaletteTags).to.have.length(1);
     });
