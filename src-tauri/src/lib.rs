@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod error;
+pub mod menu;
 pub mod models;
 pub mod services;
 pub mod utils;
@@ -199,6 +200,14 @@ pub fn run() {
                 } else {
                     tracing::warn!("Main window not found, skipping devtools");
                 }
+            }
+
+            // Install the native application menu bar. A failure here must not
+            // stop the app from starting — the command palette and the toolbar
+            // still reach every action — so it is logged and startup continues
+            // with no menu (the frontend's sync then reports it and moves on).
+            if let Err(e) = menu::init_app_menu(app.handle()) {
+                tracing::error!("Failed to build the application menu: {}", e);
             }
 
             // Set up system tray
@@ -480,6 +489,8 @@ pub fn run() {
             commands::maintenance::run_prune,
             commands::maintenance::get_repository_stats,
             commands::maintenance::get_pack_info,
+            // Application menu bar
+            commands::menu::sync_app_menu,
             commands::gpg::get_gpg_config,
             commands::gpg::get_gpg_keys,
             commands::gpg::set_signing_key,

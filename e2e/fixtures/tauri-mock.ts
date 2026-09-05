@@ -1314,6 +1314,13 @@ export async function setupTauriMocks(
             );
             return null;
           }
+          // === Application menu bar ===
+          // The frontend pushes enabled state and accelerators on startup and
+          // whenever a repository opens or closes; there is no native menu in
+          // the browser, so the call just succeeds.
+          case 'sync_app_menu':
+            return null;
+
           // === Git Flow ===
           case 'get_gitflow_config':
             return state.gitflowConfig;

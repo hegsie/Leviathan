@@ -517,3 +517,66 @@ describe('lv-toolbar repository tabs', () => {
     });
   });
 });
+
+describe('lv-toolbar menu bar routed actions', () => {
+  // The native menu bar's File items are forwarded here by app-shell instead of
+  // being reimplemented, so each one must land on the toolbar's own handler.
+  beforeEach(() => {
+    repositoryStore.getState().reset();
+    mockInvoke = () => Promise.resolve(null);
+  });
+
+  it('opens the clone dialog for the Clone Repository menu item', async () => {
+    const el = await createToolbar();
+    const dialog = el.shadowRoot!.querySelector('lv-clone-dialog')!;
+    let opened = 0;
+    (dialog as unknown as { open: () => void }).open = () => {
+      opened++;
+    };
+
+    el.dispatchEvent(new CustomEvent('clone-repository'));
+
+    expect(opened).to.equal(1);
+  });
+
+  it('opens the init dialog for the New Repository menu item', async () => {
+    const el = await createToolbar();
+    const dialog = el.shadowRoot!.querySelector('lv-init-dialog')!;
+    let opened = 0;
+    (dialog as unknown as { open: () => void }).open = () => {
+      opened++;
+    };
+
+    el.dispatchEvent(new CustomEvent('init-repository'));
+
+    expect(opened).to.equal(1);
+  });
+
+  it('runs the same folder picker for the Open Repository menu item', async () => {
+    const calls: string[] = [];
+    mockInvoke = (command: string) => {
+      calls.push(command);
+      return Promise.resolve(null);
+    };
+    const el = await createToolbar();
+
+    el.dispatchEvent(new CustomEvent('open-repository'));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls.some((c) => c.startsWith('plugin:dialog|open'))).to.be.true;
+  });
+
+  it('stops listening once the toolbar is disconnected', async () => {
+    const el = await createToolbar();
+    const dialog = el.shadowRoot!.querySelector('lv-clone-dialog')!;
+    let opened = 0;
+    (dialog as unknown as { open: () => void }).open = () => {
+      opened++;
+    };
+
+    el.remove();
+    el.dispatchEvent(new CustomEvent('clone-repository'));
+
+    expect(opened).to.equal(0);
+  });
+});
