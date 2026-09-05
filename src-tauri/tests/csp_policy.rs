@@ -52,9 +52,9 @@
 //!   not be narrowed to an allowlist: avatar URLs are supplied by the provider
 //!   APIs at runtime and the app supports self-hosted instances, so the host is
 //!   not knowable at build time. Evidence:
-//!   - `src/components/common/lv-avatar.ts` and `src/graph/canvas-renderer.ts`
-//!     load `https://www.gravatar.com/avatar/...` (opt-in; when the Gravatar
-//!     setting is off no network request is made at all).
+//!   - `src/graph/canvas-renderer.ts` loads `https://www.gravatar.com/avatar/...`
+//!     for commit-author avatars (opt-in; when the Gravatar setting is off no
+//!     network request is made at all).
 //!   - `src/components/dialogs/lv-github-dialog.ts` renders
 //!     `<img src="${user.avatarUrl}">` from the GitHub API — `avatars.
 //!     githubusercontent.com` for github.com, but an arbitrary host for GitHub

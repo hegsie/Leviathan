@@ -230,7 +230,10 @@ pub fn scan_directory_for_repositories(
 
     let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
 
-    while let Some((dir, depth)) = stack.pop() {
+    // Labelled so the result-cap exit inside the inner loop can leave the walk
+    // with a `break` instead of a `return`: every exit has to fall through to
+    // the sort at the end of this function.
+    'walk: while let Some((dir, depth)) = stack.pop() {
         if cancelled.load(Ordering::SeqCst) {
             result.cancelled = true;
             break;
@@ -272,7 +275,12 @@ pub fn scan_directory_for_repositories(
             if let Some(repo) = as_repository(&child) {
                 if result.repositories.len() >= options.max_results {
                     result.truncated = true;
-                    return result;
+                    // `break 'walk`, never `return`: an early return here would
+                    // hand back the repositories in `read_dir` order (inode
+                    // order on ext4/APFS), so a scan large enough to hit the cap
+                    // would list scrambled and differently on every run, while a
+                    // smaller one listed alphabetically.
+                    break 'walk;
                 }
                 result.repositories.push(repo);
                 // Do not descend into a repository: its submodules and vendored
@@ -302,8 +310,11 @@ pub async fn classify_repository_path(path: String) -> Result<PathClassification
     let candidate = std::path::PathBuf::from(&path);
     let name = display_name(&candidate);
 
-    // symlink_metadata first so a dangling symlink reports as "gone" rather
-    // than erroring out.
+    // `fs::metadata` FOLLOWS symlinks, deliberately: a dangling symlink then
+    // reports `exists: false`, so the drop handler tells the user the path is
+    // gone. `fs::symlink_metadata` would report the link itself as an existing
+    // non-directory, and `window-drop.service.ts` would answer a broken link
+    // with "… is a file — drop a folder", which is not what happened.
     let metadata = std::fs::metadata(&candidate).ok();
     let exists = metadata.is_some();
     let is_directory = metadata.as_ref().is_some_and(|m| m.is_dir());
@@ -506,6 +517,24 @@ mod tests {
         assert_eq!(paths(&result), vec![repo.display().to_string()]);
     }
 
+    /// A tree whose discovery order is deliberately NOT its sorted order: the
+    /// root-level `zzz-repo` is found while the root is read, and the two under
+    /// `aaa/` only afterwards, so anything that skips the final sort hands back
+    /// `zzz-repo` first. Returns the paths in the order they must be reported.
+    fn tree_found_out_of_order(root: &Path) -> Vec<String> {
+        let zzz = make_repo(root, "zzz-repo");
+        let nested = make_repo(root, "aaa/repo");
+        make_repo(root, "aaa/deeper/repo");
+        vec![nested.display().to_string(), zzz.display().to_string()]
+    }
+
+    fn assert_sorted(result: &RepositoryScanResult) {
+        let listed = paths(result);
+        let mut expected = listed.clone();
+        expected.sort();
+        assert_eq!(listed, expected, "results are always sorted by path");
+    }
+
     #[test]
     fn caps_the_number_of_results() {
         let tmp = TempDir::new().unwrap();
@@ -523,6 +552,28 @@ mod tests {
 
         assert_eq!(result.repositories.len(), 3);
         assert!(result.truncated, "hitting the cap is reported as truncated");
+    }
+
+    #[test]
+    fn a_result_capped_scan_is_still_sorted() {
+        let tmp = TempDir::new().unwrap();
+        let expected = tree_found_out_of_order(tmp.path());
+
+        // Two repositories fit; the third trips the cap.
+        let result = scan(
+            tmp.path(),
+            ScanOptions {
+                max_results: 2,
+                ..ScanOptions::default()
+            },
+        );
+
+        assert!(result.truncated, "hitting the cap is reported as truncated");
+        assert_eq!(
+            paths(&result),
+            expected,
+            "a truncated scan is sorted like any other, not left in read_dir order"
+        );
     }
 
     #[test]
@@ -545,6 +596,24 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_capped_scan_is_still_sorted() {
+        let tmp = TempDir::new().unwrap();
+        let expected = tree_found_out_of_order(tmp.path());
+
+        // The root and `aaa` are visited; `aaa/deeper` trips the cap.
+        let result = scan(
+            tmp.path(),
+            ScanOptions {
+                max_visited_directories: 2,
+                ..ScanOptions::default()
+            },
+        );
+
+        assert!(result.truncated);
+        assert_eq!(paths(&result), expected);
+    }
+
+    #[test]
     fn stops_when_cancelled() {
         let tmp = TempDir::new().unwrap();
         make_repo(tmp.path(), "a/b");
@@ -555,6 +624,30 @@ mod tests {
 
         assert!(result.cancelled);
         assert!(result.repositories.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_scan_is_still_sorted() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..6 {
+            make_repo(tmp.path(), &format!("repo{}", i));
+        }
+        // Enough plain directories that a progress update fires, which is the
+        // only hook a test has for cancelling mid-walk. Every repository is
+        // already found by then: they all sit in the root, which is read first.
+        for i in 0..PROGRESS_EVERY + 5 {
+            fs::create_dir_all(tmp.path().join(format!("plain{}", i))).unwrap();
+        }
+
+        let flag = AtomicBool::new(false);
+        let result =
+            scan_directory_for_repositories(tmp.path(), ScanOptions::default(), &flag, |_| {
+                flag.store(true, Ordering::SeqCst)
+            });
+
+        assert!(result.cancelled);
+        assert_eq!(result.repositories.len(), 6);
+        assert_sorted(&result);
     }
 
     #[test]
