@@ -721,6 +721,37 @@ export class AppShell extends LitElement {
   private commandPaletteRepositoryPath: string | null = null;
   private commandPaletteRequestId = 0;
 
+  /**
+   * Mirror of the graph canvas's loaded commits / tag tips, for the command
+   * palette and the export-import dialog.
+   *
+   * These used to be pulled straight from the canvas inside render()
+   * (`.commits=${this.graphCanvas?.getLoadedCommits() ?? []}`), which copied
+   * up to a full page of commits and walked the whole ref map on EVERY
+   * re-render of this component — and produced a fresh array identity each
+   * time, so both consumers rebuilt their lists even while closed. The canvas
+   * now announces changes with `graph-commits-changed` and this mirror is
+   * refreshed from that (plus once more when the palette opens, so the
+   * palette can never show a stale list).
+   *
+   * `graphPaletteRepositoryPath` is captured in the SAME update as the two
+   * lists: the export dialog compares it against its own repositoryPath to
+   * decide whether the lists belong to the repo it is showing, so the three
+   * must never be sampled at different moments.
+   */
+  @state() private graphPaletteCommits: Commit[] = [];
+  @state() private graphPaletteTags: Array<{ name: string; oid: string }> = [];
+  @state() private graphPaletteRepositoryPath = '';
+
+  /**
+   * Memoised palette command list. Every entry's action closes over `this`
+   * and reads live state when INVOKED (requiresRepository() checks
+   * activeRepository at click time), so the only input that changes what the
+   * list renders is the modifier-key label — which is the cache key.
+   */
+  private paletteCommandsCache: PaletteCommand[] | null = null;
+  private paletteCommandsCacheKey: string | null = null;
+
   // File history
   @state() private showFileHistory = false;
   @state() private fileHistoryPath: string | null = null;
@@ -829,6 +860,12 @@ export class AppShell extends LitElement {
   private resizing: 'left' | 'right' | null = null;
   private resizeStartPos = 0;
   private resizeStartValue = 0;
+  // Latest un-applied pointer position while dragging a panel divider, and
+  // the frame callback that will apply it. mousemove fires far faster than
+  // the display refreshes, and each width assignment re-renders this whole
+  // component, so the moves are coalesced into one update per frame.
+  private resizePendingClientX: number | null = null;
+  private resizeRafId: number | null = null;
 
   @query('lv-graph-canvas') private graphCanvas?: LvGraphCanvas;
   @query('lv-diff-view') private diffView?: LvDiffView;
@@ -2011,6 +2048,8 @@ export class AppShell extends LitElement {
     }
     this.watchedRepoPaths.clear();
     this.staleRepoPaths.clear();
+    this.cancelPendingResizeFrame();
+    this.resizePendingClientX = null;
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
     document.removeEventListener('keydown', this.boundHandleKeyDown);
@@ -3985,7 +4024,25 @@ export class AppShell extends LitElement {
   private handleResizeMove(e: MouseEvent): void {
     if (!this.resizing) return;
 
-    const delta = e.clientX - this.resizeStartPos;
+    // Only remember where the pointer is; the width is assigned once per
+    // frame below. Writing it here re-rendered the whole shell at
+    // pointer-event rate (well above the display refresh rate) for a value
+    // the user can only ever see once per frame.
+    this.resizePendingClientX = e.clientX;
+    if (this.resizeRafId !== null) return;
+    this.resizeRafId = requestAnimationFrame(() => {
+      this.resizeRafId = null;
+      this.applyPendingResize();
+    });
+  }
+
+  /** Apply the most recent coalesced pointer position to the panel width. */
+  private applyPendingResize(): void {
+    const clientX = this.resizePendingClientX;
+    if (clientX === null || !this.resizing) return;
+    this.resizePendingClientX = null;
+
+    const delta = clientX - this.resizeStartPos;
     if (this.resizing === 'left') {
       const newWidth = Math.max(150, Math.min(400, this.resizeStartValue + delta));
       this.leftPanelWidth = newWidth;
@@ -3996,10 +4053,23 @@ export class AppShell extends LitElement {
   }
 
   private handleResizeEnd(): void {
+    // Flush the last coalesced move BEFORE clearing `resizing` (which
+    // applyPendingResize checks): mouseup usually lands in the same frame as
+    // the final mousemove, and dropping that frame would leave the divider
+    // a few pixels away from where the user released it.
+    this.cancelPendingResizeFrame();
+    this.applyPendingResize();
     this.resizing = null;
     this.classList.remove('resizing', 'resizing-h');
     document.removeEventListener('mousemove', this.boundHandleMouseMove);
     document.removeEventListener('mouseup', this.boundHandleMouseUp);
+  }
+
+  private cancelPendingResizeFrame(): void {
+    if (this.resizeRafId !== null) {
+      cancelAnimationFrame(this.resizeRafId);
+      this.resizeRafId = null;
+    }
   }
 
   private handleCommitSelected(e: CustomEvent<CommitSelectedEvent>): void {
@@ -4096,6 +4166,29 @@ export class AppShell extends LitElement {
     const shortOid = commitOid.substring(0, 7);
     const verb = action === 'added' ? 'added to' : action === 'updated' ? 'updated on' : 'removed from';
     showToast(`Note ${verb} ${shortOid}`, 'success');
+  }
+
+  /**
+   * The graph canvas loaded, cleared or extended its commit set (or its
+   * refs). Re-take the palette/export mirror so those consumers see the new
+   * data without render() having to ask the canvas for it every update.
+   */
+  private handleGraphCommitsChanged(): void {
+    this.syncGraphPaletteData();
+  }
+
+  /**
+   * Copy the graph canvas's loaded commits and tag tips into state.
+   *
+   * All three fields are sampled together so the repository path always
+   * describes the two lists beside it — lv-export-import-dialog uses exactly
+   * that comparison to decide whether the lists belong to the repo it shows.
+   */
+  private syncGraphPaletteData(): void {
+    const canvas = this.graphCanvas;
+    this.graphPaletteCommits = canvas?.getLoadedCommits() ?? [];
+    this.graphPaletteTags = canvas?.getTagTips() ?? [];
+    this.graphPaletteRepositoryPath = canvas?.repositoryPath ?? '';
   }
 
   private handleGraphNotice(e: CustomEvent<{ message: string; type?: 'info' | 'success' | 'error' }>): void {
@@ -4534,6 +4627,11 @@ export class AppShell extends LitElement {
       this.commandPaletteRepositoryPath = null;
     }
     if (requestId !== this.commandPaletteRequestId) return;
+    // Belt and braces on top of the graph-commits-changed subscription: the
+    // mirror is re-taken here so the palette can never open on a list the
+    // canvas has since moved past (a missed event, or a canvas that was
+    // mounted after the last one fired).
+    this.syncGraphPaletteData();
     this.showCommandPalette = true;
   }
 
@@ -4567,6 +4665,19 @@ export class AppShell extends LitElement {
   private getPaletteCommands(): PaletteCommand[] {
     const isMac = navigator.platform.includes('Mac');
     const mod = isMac ? '⌘' : 'Ctrl';
+
+    // render() calls this on every update of a component with ~90 reactive
+    // fields, and it allocated ~50 command objects (each with a fresh
+    // closure) every time — which also handed lv-command-palette a new array
+    // identity, making it rebuild and re-filter its whole list while closed.
+    // Nothing in the list VARIES with repository or dialog state: the labels
+    // are constant, the shortcuts depend only on the modifier label, and each
+    // action reads live state when it runs (requiresRepository() checks
+    // activeRepository at click time, the patch entry reads selectedCommit at
+    // click time). So `mod` is the entire cache key.
+    if (this.paletteCommandsCache && this.paletteCommandsCacheKey === mod) {
+      return this.paletteCommandsCache;
+    }
 
     const commands: PaletteCommand[] = [
       {
@@ -5077,6 +5188,8 @@ export class AppShell extends LitElement {
       },
     ];
 
+    this.paletteCommandsCacheKey = mod;
+    this.paletteCommandsCache = commands;
     return commands;
   }
 
@@ -5953,6 +6066,7 @@ export class AppShell extends LitElement {
                     @checkout-branch=${this.handleCheckoutBranchFromGraph}
                     @copy-sha=${this.handleCopySha}
                     @graph-notice=${this.handleGraphNotice}
+                    @graph-commits-changed=${this.handleGraphCommitsChanged}
                   ></lv-graph-canvas>
                 </div>
 
@@ -6362,8 +6476,8 @@ export class AppShell extends LitElement {
         .commands=${this.getPaletteCommands()}
         .branches=${this.paletteBranches}
         .files=${this.paletteTrackedFiles}
-        .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
-        .tags=${this.graphCanvas?.getTagTips() ?? []}
+        .commits=${this.graphPaletteCommits}
+        .tags=${this.graphPaletteTags}
         @close=${() => { this.handleCommandPaletteClose(); }}
         @checkout-branch=${this.handleCheckoutBranch}
         @open-file=${this.handleOpenFileFromPalette}
@@ -6639,10 +6753,10 @@ export class AppShell extends LitElement {
         ></lv-compare-branches-dialog>
         <lv-export-import-dialog
           .repositoryPath=${this.activeRepository.repository.path}
-          .graphRepositoryPath=${this.graphCanvas?.repositoryPath ?? ''}
+          .graphRepositoryPath=${this.graphPaletteRepositoryPath}
           .branches=${this.activeRepository?.branches ?? []}
-          .tags=${this.graphCanvas?.getTagTips() ?? []}
-          .commits=${this.graphCanvas?.getLoadedCommits() ?? []}
+          .tags=${this.graphPaletteTags}
+          .commits=${this.graphPaletteCommits}
           @patch-applied=${(e: CustomEvent<{ repositoryPath?: string }>) =>
             this.refreshConflictDialogRepo(e.detail?.repositoryPath ?? null)}
           @bundle-imported=${(e: CustomEvent<{ repositoryPath?: string }>) =>
