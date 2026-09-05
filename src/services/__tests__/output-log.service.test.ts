@@ -307,6 +307,47 @@ describe('output-log.service', () => {
       expect(entries[0].synthesized).to.be.true;
     });
 
+    it('a CLI-backed signed amend logs ONE row, and it carries -S', async () => {
+      // `amend_commit` picks its path with should_sign_commit(&path, sign_amend):
+      // with no explicit signAmend it falls back to the repository's
+      // commit.gpgsign, and amend_commit_with_git_cli then runs
+      // `git commit --amend -S …`. The synthesised line reads signAmend from the
+      // IPC arguments, which is undefined here, so it renders no -S.
+      shellsOut('amend_commit', {
+        command: 'git commit --amend -S -m "reworded"',
+        output: '[main abc1234] reworded',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('amend_commit', { path: '/repo', message: 'reworded' });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git commit --amend -S -m "reworded"');
+      expect(entries[0].synthesized).to.be.false;
+    });
+
+    it('a CLI-backed signed merge commit logs ONE row, and it carries -S', async () => {
+      // commit_merge shells out through commit_merge_signed (`git commit -S -m`)
+      // when signing is on. Its builder has no signing branch at all, so the
+      // synthesised twin would always claim the merge commit was unsigned.
+      shellsOut('commit_merge', {
+        command: 'git commit -S -m "Merge branch feature"',
+        output: '[main def5678] Merge branch feature',
+        repoPath: '/repo',
+      });
+
+      await invokeCommand('commit_merge', {
+        path: '/repo',
+        message: 'Merge branch feature',
+      });
+
+      const entries = getLogEntries();
+      expect(entries.length).to.equal(1);
+      expect(entries[0].gitCommand).to.equal('git commit -S -m "Merge branch feature"');
+      expect(entries[0].synthesized).to.be.false;
+    });
+
     it('a CLI-backed force push logs ONE row carrying --force-with-lease', async () => {
       // The backend push shells out with `-C <path>`, so the subcommand is not
       // the first token of the line.
