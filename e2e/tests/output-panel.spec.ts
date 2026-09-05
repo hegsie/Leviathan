@@ -430,6 +430,67 @@ test.describe('Output Panel - In-app integration', () => {
     await expect(appPanel.locator('.entry-duration').first()).toHaveText(/\d/);
   });
 
+
+  test('an operation that shells out shows ONE row — the real invocation', async ({
+    page,
+  }) => {
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    // Model a CLI-backed operation: the backend reports the REAL `git` run on
+    // `git-command-executed` while the IPC command is still in flight. The
+    // real line carries a flag the synthesised one cannot know about, exactly
+    // as a commit signed because of `commit.gpgsign` carries `-S`.
+    await page.evaluate((repoPath) => {
+      const internals = (
+        window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<unknown> };
+        }
+      ).__TAURI_INTERNALS__;
+      const originalInvoke = internals.invoke;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command === 'create_stash') {
+          (
+            window as unknown as {
+              __EMIT_TAURI_EVENT__: (event: string, payload: unknown) => void;
+            }
+          ).__EMIT_TAURI_EVENT__('git-command-executed', {
+            command:
+              'git stash push --include-untracked --keep-index -m "cli probe"',
+            output: 'Saved working directory and index state',
+            success: true,
+            durationMs: 120,
+            repoPath,
+          });
+        }
+        return originalInvoke(command, args);
+      };
+    }, '/tmp/test-repo');
+
+    await app.executeCommand('Toggle Output Panel');
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toBeVisible();
+    await clearEntries(page);
+
+    await app.executeCommand('Create stash');
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('cli probe');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    // ONE row for one operation — not the real line plus a weaker synthesised
+    // twin that omits `--keep-index`.
+    const stashRows = appPanel.locator('.entry-command', { hasText: 'git stash push' });
+    await expect(stashRows).toHaveCount(1);
+    await expect(stashRows.first()).toHaveText(
+      'git stash push --include-untracked --keep-index -m "cli probe"'
+    );
+
+    // The surviving row is the executed one, so nothing marks it an equivalent.
+    await expect(appPanel.locator('.synth-mark')).toHaveCount(0);
+    await expect(appPanel.locator('.legend')).toHaveCount(0);
+  });
+
   test('a failing operation shows its git line and its error output', async ({ page }) => {
     const { injectCommandError } = await import('../fixtures/test-helpers');
     const { AppPage } = await import('../pages/app.page');

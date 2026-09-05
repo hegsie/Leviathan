@@ -319,18 +319,31 @@ const BUILDERS: Record<
     const name = str(a, 'name');
     return name ? ['tag', '-d', name] : undefined;
   },
+  // With no explicit remote the BACKEND resolves one (the branch's push
+  // config, then its upstream, then the sole remote, and only then `origin` —
+  // see `resolve_push_remote` in remote.rs). Naming `origin` here would put a
+  // remote in the panel that the push never used, on exactly the repositories
+  // where that matters (`git clone -o upstream`, a renamed remote). Omitting it
+  // is both honest and valid git: `git push refs/tags/v1` pushes to the
+  // default remote, which is what the backend resolves.
   push_tag: (a) => {
     const name = str(a, 'name');
     if (!name) return undefined;
     const argv = ['push'];
     if (bool(a, 'force')) argv.push('--force');
-    argv.push(str(a, 'remote') ?? 'origin', `refs/tags/${name}`);
+    const remote = str(a, 'remote');
+    if (remote) argv.push(remote);
+    argv.push(`refs/tags/${name}`);
     return argv;
   },
   delete_remote_tag: (a) => {
     const name = str(a, 'name');
     if (!name) return undefined;
-    return ['push', str(a, 'remote') ?? 'origin', '--delete', `refs/tags/${name}`];
+    const argv = ['push'];
+    const remote = str(a, 'remote');
+    if (remote) argv.push(remote);
+    argv.push('--delete', `refs/tags/${name}`);
+    return argv;
   },
 };
 
@@ -361,3 +374,51 @@ export function synthesizeGitCommand(
 
 /** The operations `synthesizeGitCommand` covers — exported for tests. */
 export const SYNTHESIZED_COMMANDS: ReadonlyArray<string> = Object.keys(BUILDERS);
+
+/**
+ * git's own options that take a SEPARATE value argument, so the subcommand
+ * scan skips two slots rather than mistaking the value for the subcommand.
+ *
+ * Mirrors `GLOBAL_OPTS_WITH_VALUE` in `src-tauri/src/utils/command.rs`: the
+ * backend renders lines like `git -C /repo push --force-with-lease origin main`
+ * (push shells out with `-C` rather than a working directory), so a naive
+ * "first token after git" would read `-C` as the subcommand.
+ */
+const GLOBAL_OPTS_WITH_VALUE = new Set([
+  '-C',
+  '-c',
+  '--git-dir',
+  '--work-tree',
+  '--namespace',
+  '--exec-path',
+  '--config-env',
+]);
+
+/**
+ * The git subcommand a rendered command line runs (`commit`, `push`, …), or
+ * `undefined` when the line is absent or names none.
+ *
+ * Used to tell the panel's two feeds apart: a real `git commit` reported by the
+ * backend must not be mistaken for the in-flight `git fetch` an auto-fetch
+ * started in the same repository. Parsing an already-rendered line is a
+ * best-effort read — a line it cannot classify simply yields `undefined`, which
+ * only ever makes the caller MORE conservative.
+ */
+export function gitSubcommand(line: string | undefined): string | undefined {
+  if (!line) return undefined;
+  const tokens = line.trim().split(/\s+/).filter((t) => t.length > 0);
+  let i = 0;
+  // Drop the program itself (`git`, or a fully qualified path to it).
+  if (i < tokens.length && /(^|[/\\])git(\.exe)?$/i.test(tokens[i])) i++;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (GLOBAL_OPTS_WITH_VALUE.has(token)) {
+      i += 2;
+    } else if (token.startsWith('-')) {
+      i += 1;
+    } else {
+      return token;
+    }
+  }
+  return undefined;
+}

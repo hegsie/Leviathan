@@ -7,14 +7,20 @@
  * `src-tauri/src/utils/command.rs` reports each of them on the
  * `git-command-executed` event. This service carries them into the Output
  * panel's log, where they appear as executed commands (never marked
- * synthesised) alongside the git2 equivalents.
+ * synthesised) alongside the git2 equivalents of the operations that did NOT
+ * shell out. When a run belongs to an IPC operation the panel is already about
+ * to describe, it claims that operation so only this — the real — line is
+ * shown; see the two-feed reconciliation in `output-log.service.ts`.
  *
  * Redaction happens in the backend, on the command line and on the captured
  * output, before the event is emitted — see `redact_secrets` there.
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { logGitCommand } from './output-log.service.ts';
+import {
+  claimGitOperationForEntry,
+  logGitCommand,
+} from './output-log.service.ts';
 
 /** Payload of the backend's `git-command-executed` event. */
 export interface GitCommandExecutedEvent {
@@ -35,7 +41,7 @@ export interface GitCommandExecutedEvent {
  */
 export function recordGitCommandEvent(payload: GitCommandExecutedEvent): void {
   const { command, output, success, durationMs, repoPath } = payload;
-  logGitCommand(command, output ?? '', success, {
+  const entryId = logGitCommand(command, output ?? '', success, {
     repoPath: repoPath ?? undefined,
     gitCommand: command,
     // This command really ran. Never marked synthesised — that flag is what
@@ -44,6 +50,11 @@ export function recordGitCommandEvent(payload: GitCommandExecutedEvent): void {
     synthesized: false,
     durationMs,
   });
+  // This IS the invocation the IPC layer would otherwise describe from its
+  // arguments. Claim that operation so it writes no second, weaker row — the
+  // synthesised line cannot know about flags the backend added (`-S` for a
+  // commit signed because of `commit.gpgsign`), so the two could disagree.
+  claimGitOperationForEntry(entryId, repoPath ?? undefined, command);
 }
 
 let unlisten: UnlistenFn | undefined;
