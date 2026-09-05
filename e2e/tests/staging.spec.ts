@@ -1108,6 +1108,20 @@ test.describe('Changes filter', () => {
     expect(await findCommand(page, 'stage_files')).toHaveLength(0);
   });
 
+  test('a filter that matches nothing makes the palette entry say so too', async ({ page }) => {
+    await filterInput(page).fill('does-not-exist');
+    await expect(page.locator('lv-file-status .no-match-state')).toBeVisible();
+
+    await startCommandCapture(page);
+    await openViaCommandPalette(page, 'Stage all changes');
+
+    // "Stage all changes" must not look like it worked when it staged nothing.
+    await expect(
+      page.locator('lv-toast-container .toast', { hasText: 'Nothing to stage' }),
+    ).toBeVisible();
+    expect(await findCommand(page, 'stage_files')).toHaveLength(0);
+  });
+
   test('the filter works in tree view, keeping only ancestors of matches', async ({ page }) => {
     await page.locator('lv-file-status .view-toggle').click();
     await expect(page.locator('lv-file-status .folder-item')).not.toHaveCount(0);
