@@ -88,6 +88,27 @@ describe('output-log.service', () => {
       unsubscribe();
     });
 
+    it('accepts a details object as well as a bare repo path', () => {
+      logGitCommand('push', 'ok', true, {
+        repoPath: '/repoA',
+        gitCommand: 'git push origin main',
+        synthesized: false,
+        durationMs: 1234,
+      });
+      logGitCommand('merge', '', true, '/repoB');
+
+      // Newest first.
+      const [mergeEntry, pushEntry] = getLogEntries();
+      expect(pushEntry.repoPath).to.equal('/repoA');
+      expect(pushEntry.gitCommand).to.equal('git push origin main');
+      expect(pushEntry.synthesized).to.be.false;
+      expect(pushEntry.durationMs).to.equal(1234);
+
+      // The original 4th-parameter shape still works.
+      expect(mergeEntry.repoPath).to.equal('/repoB');
+      expect(mergeEntry.gitCommand).to.equal(undefined);
+    });
+
     it('zero-arg clear still empties everything (e2e/injected usage)', () => {
       logGitCommand('checkout', '', true, '/repoA');
       logGitCommand('merge', '', true, '/repoB');
@@ -125,10 +146,59 @@ describe('output-log.service', () => {
       expect(entries.length).to.equal(1);
       expect(entries[0].command).to.equal('checkout');
       expect(entries[0].success).to.be.true;
-      // Args may carry credentials and must never appear in the log
+      // Args are still never dumped wholesale into the output field
       expect(entries[0].output).to.equal('');
       // The repository path IS recorded so multi-repo sessions can scope entries
       expect(entries[0].repoPath).to.equal('/repo');
+    });
+
+    it('records the equivalent git command line, marked as synthesised', async () => {
+      await invokeCommand('checkout', { path: '/repo', refName: 'feature/x' });
+
+      const entry = getLogEntries()[0];
+      expect(entry.gitCommand).to.equal('git checkout feature/x');
+      // git2 did the work — the panel must not imply the CLI ran
+      expect(entry.synthesized).to.be.true;
+      expect(entry.durationMs).to.be.a('number');
+      expect(entry.durationMs).to.be.at.least(0);
+    });
+
+    it('records no git line for a command with no honest synthesis', async () => {
+      await invokeCommand('start_auto_fetch', { path: '/repo' });
+
+      const entry = getLogEntries()[0];
+      expect(entry.command).to.equal('start_auto_fetch');
+      expect(entry.gitCommand).to.equal(undefined);
+      expect(entry.synthesized).to.be.false;
+    });
+
+    it('never puts a token into the synthesised line', async () => {
+      await invokeCommand('push', {
+        path: '/repo',
+        remote: 'origin',
+        branch: 'main',
+        token: 'ghp_0123456789abcdefghij',
+      });
+
+      const entry = getLogEntries()[0];
+      expect(entry.gitCommand).to.equal('git push origin main');
+      expect(JSON.stringify(entry)).to.not.contain('ghp_');
+    });
+
+    it('redacts a credentialed URL echoed back in a backend error', async () => {
+      mockInvoke = () =>
+        Promise.reject({
+          code: 'AUTH',
+          message:
+            'failed to push to https://user:ghp_0123456789abcdefghij@github.com/o/r.git',
+        });
+
+      await invokeCommand('push', { path: '/repo', remote: 'origin', branch: 'main' });
+
+      const entry = getLogEntries()[0];
+      expect(entry.success).to.be.false;
+      expect(entry.output).to.not.contain('ghp_');
+      expect(entry.output).to.contain('***@github.com/o/r.git');
     });
 
     it('scopes commands that pass the repo path as repoPath (e.g. stage_hunk)', async () => {

@@ -286,7 +286,7 @@ fn prune_command(
     remote_url: Option<&str>,
     token: Option<&str>,
     dry_run: bool,
-) -> std::process::Command {
+) -> crate::utils::GitCommand {
     let mut cmd = create_command("git");
     cmd.current_dir(path);
     if dry_run {

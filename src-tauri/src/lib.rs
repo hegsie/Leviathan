@@ -144,6 +144,18 @@ pub fn run() {
         .manage(RemoteOpRegistry::default())
         .manage(SharedCommitIndex::default())
         .setup(|app| {
+            // Report every `git` subprocess the app runs to the Output panel.
+            // Installed before anything else in setup so a command run during
+            // startup is not silently dropped. The payload is built (and
+            // redacted) in utils::command; this only carries it to the
+            // frontend, which `src/services/git-output.service.ts` listens for.
+            {
+                let emitter = app.handle().clone();
+                crate::utils::set_git_command_log_sink(move |entry| {
+                    let _ = emitter.emit("git-command-executed", entry);
+                });
+            }
+
             // Initialize AI state with config directory
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             app.manage(create_ai_state(config_dir.clone()));

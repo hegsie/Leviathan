@@ -334,21 +334,33 @@ test.describe('Output Panel - Error Entry Display', () => {
     await expect(page.locator('lv-output-panel .entry-command.failure')).toHaveCount(2);
   });
 
-  test('failed entry with empty output should expand but show nothing', async ({ page }) => {
+  test('failed entry with empty output should explain the empty row', async ({ page }) => {
     await addFailedEntry(page, 'git checkout nonexistent', '');
     await expect(page.locator('lv-output-panel .entry')).toHaveCount(1);
 
-    // Expand the entry - with empty output, no .entry-output div should render
     await page.locator('lv-output-panel .entry-header').click();
 
-    // The component renders entry-output only when entry.output is truthy
-    // An empty string is falsy, so no output div appears
-    await expect(page.locator('lv-output-panel .entry-output')).toHaveCount(0);
+    // An expanded row is never an unexplained empty box: with nothing captured
+    // the panel says so rather than rendering blank.
+    await expect(page.locator('lv-output-panel .entry-output.empty-output')).toContainText(
+      'Failed with no output'
+    );
 
-    // But the expand icon should still toggle
+    // And the expand icon still toggles
     await expect(
       page.locator('lv-output-panel .entry').first().locator('.expand-icon.expanded')
     ).toBeVisible();
+  });
+
+  test('failed output is styled distinctly from a successful one', async ({ page }) => {
+    await addFailedEntry(page, 'git push origin main', 'error: failed to push some refs');
+    await expect(page.locator('lv-output-panel .entry')).toHaveCount(1);
+
+    await page.locator('lv-output-panel .entry-header').click();
+
+    await expect(page.locator('lv-output-panel .entry-output.failure')).toContainText(
+      'error: failed to push some refs'
+    );
   });
 });
 
@@ -380,12 +392,109 @@ test.describe('Output Panel - In-app integration', () => {
     await expect(promptInput).toBeVisible();
     await promptInput.fill('panel probe');
     await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    // The panel shows a READABLE GIT COMMAND, not the IPC name.
     await expect(
-      appPanel.locator('.entry-command', { hasText: 'create_stash' }).first()
-    ).toBeVisible();
+      appPanel.locator('.entry-command', { hasText: 'git stash push' }).first()
+    ).toContainText('git stash push --include-untracked -m "panel probe"');
+    // The IPC name is still there, as secondary detail.
+    await expect(appPanel.locator('.entry-ipc').first()).toHaveText('create_stash');
 
     // Close button hides the panel again
     await appPanel.locator('.close-btn').click();
     await expect(appPanel).toHaveCount(0);
+  });
+
+  test('a libgit2-backed operation is marked as an equivalent, with a legend', async ({
+    page,
+  }) => {
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    await app.executeCommand('Toggle Output Panel');
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toBeVisible();
+
+    await app.executeCommand('Create stash');
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('equivalence probe');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    // git2 did the work — the panel must not imply the CLI ran.
+    await expect(appPanel.locator('.synth-mark').first()).toBeVisible();
+    await expect(appPanel.locator('.entry-command.synthesized').first()).toBeVisible();
+    await expect(appPanel.locator('.legend')).toContainText('libgit2');
+
+    // Timing is shown so a slow operation is visible as one.
+    await expect(appPanel.locator('.entry-duration').first()).toHaveText(/\d/);
+  });
+
+  test('a failing operation shows its git line and its error output', async ({ page }) => {
+    const { injectCommandError } = await import('../fixtures/test-helpers');
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    await injectCommandError(
+      page,
+      'create_stash',
+      'error: cannot stash: your index contains uncommitted changes',
+      'STASH_FAILED'
+    );
+
+    await app.executeCommand('Toggle Output Panel');
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toBeVisible();
+
+    await app.executeCommand('Create stash');
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('doomed');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    // The failure is marked, and the git line is still readable
+    const failedEntry = appPanel.locator('.entry').filter({ has: page.locator('.status-dot.failure') }).first();
+    await expect(failedEntry.locator('.entry-command.failure')).toContainText(
+      'git stash push --include-untracked -m doomed'
+    );
+
+    // Expanding it shows the backend's error output, styled as an error
+    await failedEntry.locator('.entry-header').click();
+    await expect(failedEntry.locator('.entry-output.failure')).toContainText(
+      'your index contains uncommitted changes'
+    );
+  });
+
+  test('a credentialed URL in an error is redacted before it reaches the panel', async ({
+    page,
+  }) => {
+    const { injectCommandError } = await import('../fixtures/test-helpers');
+    const { AppPage } = await import('../pages/app.page');
+    const app = new AppPage(page);
+
+    await injectCommandError(
+      page,
+      'create_stash',
+      'failed talking to https://someone:ghp_0123456789abcdefghij@github.com/o/r.git',
+      'AUTH'
+    );
+
+    await app.executeCommand('Toggle Output Panel');
+    const appPanel = page.locator('lv-app-shell lv-output-panel');
+    await expect(appPanel).toBeVisible();
+
+    await app.executeCommand('Create stash');
+    const promptInput = page.locator('lv-prompt-dialog .prompt-input');
+    await expect(promptInput).toBeVisible();
+    await promptInput.fill('leak probe');
+    await page.locator('lv-prompt-dialog .btn-primary').click();
+
+    const failedEntry = appPanel.locator('.entry').filter({ has: page.locator('.status-dot.failure') }).first();
+    await failedEntry.locator('.entry-header').click();
+
+    const output = failedEntry.locator('.entry-output');
+    // The token is gone; the host survives so the entry still says where.
+    await expect(output).toContainText('***@github.com/o/r.git');
+    await expect(output).not.toContainText('ghp_');
   });
 });

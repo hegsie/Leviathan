@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { CommandResult } from '../types/api.types.ts';
 import { logGitCommand, shouldLogToOutput } from './output-log.service.ts';
+import { redactSecrets, synthesizeGitCommand } from './git-command-format.ts';
 
 /**
  * Invoke a Tauri command with type safety
@@ -27,11 +28,26 @@ export async function invokeCommand<T, A = unknown>(
         ? (argsRecord.repoPath as string)
         : undefined;
 
+  // The equivalent `git` command line for the operations that run through
+  // libgit2, so the Output panel shows a git invocation rather than an IPC
+  // name. Args are STILL never logged wholesale — they can carry credentials.
+  // `synthesizeGitCommand` reads an explicit per-command allowlist of fields
+  // (never `token`) and redacts what it renders; anything it does not cover
+  // falls back to the command name, exactly as before.
+  const gitCommand = shouldLogToOutput(command)
+    ? synthesizeGitCommand(command, args)
+    : undefined;
+  const startedAt = Date.now();
+
   try {
     const data = await invoke<T>(command, args as Record<string, unknown>);
-    // Args are intentionally never logged — they can carry credentials
     if (shouldLogToOutput(command)) {
-      logGitCommand(command, '', true, repoPath);
+      logGitCommand(command, '', true, {
+        repoPath,
+        gitCommand,
+        synthesized: gitCommand !== undefined,
+        durationMs: Date.now() - startedAt,
+      });
     }
     return { success: true, data };
   } catch (error) {
@@ -51,7 +67,14 @@ export async function invokeCommand<T, A = unknown>(
     }
 
     if (shouldLogToOutput(command)) {
-      logGitCommand(command, message, false, repoPath);
+      // Backend error messages routinely quote a remote URL, which can carry
+      // `user:token@host` — scrub before it reaches the panel.
+      logGitCommand(command, redactSecrets(message), false, {
+        repoPath,
+        gitCommand,
+        synthesized: gitCommand !== undefined,
+        durationMs: Date.now() - startedAt,
+      });
     }
 
     return {
