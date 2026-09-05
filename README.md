@@ -6,7 +6,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/hegsie/gitnado)](https://github.com/hegsie/gitnado/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](https://github.com/hegsie/gitnado/releases)
 
-A modern, cross-platform Git GUI client built with Tauri, Lit, and Rust.
+A modern, cross-platform Git GUI client built with Tauri, Lit, and Rust. **Website: [gitnado.dev](https://gitnado.dev)**
 
 > **Formerly Leviathan.** The project was renamed to Gitnado in 0.9.0. Existing installs keep their settings, credentials and repository rules — see [Upgrading from Leviathan](docs/upgrading-from-leviathan.md).
 
