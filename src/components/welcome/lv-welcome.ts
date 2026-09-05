@@ -5,6 +5,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, state, query } from 'lit/decorators.js';
+import { localized, msg, str } from '@lit/localize';
 import { sharedStyles } from '../../styles/shared-styles.ts';
 import { repositoryStore, type RecentRepository } from '../../stores/index.ts';
 import { workspaceStore } from '../../stores/workspace.store.ts';
@@ -24,6 +25,7 @@ import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import mascotImage from '../../assets/mascot/leviathan-tower-400.png';
 
 @customElement('lv-welcome')
+@localized()
 export class LvWelcome extends LitElement {
   static styles = [
     sharedStyles,
@@ -367,7 +369,10 @@ export class LvWelcome extends LitElement {
       await this.openRepoByPath(path);
     } catch (error) {
       log.error('Error in handleOpen:', error);
-      showToast(error instanceof Error ? error.message : 'Failed to open repository', 'error');
+      showToast(
+        error instanceof Error ? error.message : msg('Failed to open repository'),
+        'error',
+      );
     }
   }
 
@@ -382,13 +387,13 @@ export class LvWelcome extends LitElement {
         // Build search index in background (non-blocking)
         searchIndexService.buildIndex(path);
       } else {
-        const message = result.error?.message ?? 'Failed to open repository';
+        const message = result.error?.message ?? msg('Failed to open repository');
         store.setError(message);
         // repositoryStore.error has no render sink, so surface it directly.
         showToast(message, 'error');
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
+      const message = err instanceof Error ? err.message : msg('Unknown error');
       store.setError(message);
       showToast(message, 'error');
     } finally {
@@ -467,14 +472,19 @@ export class LvWelcome extends LitElement {
     // A repo that failed to open (moved, deleted) must not hide behind a
     // green success toast
     if (failedCount === 0) {
-      showToast(`Opened workspace: ${workspace.name}`, 'success');
+      showToast(msg(str`Opened workspace: ${workspace.name}`), 'success');
     } else if (lastOpenedPath) {
       showToast(
-        `Opened workspace: ${workspace.name} (${failedCount} of ${workspace.repositories.length} repositories failed to open)`,
+        msg(
+          str`Opened workspace: ${workspace.name} (${failedCount} of ${workspace.repositories.length} repositories failed to open)`,
+        ),
         'warning',
       );
     } else {
-      showToast(`Could not open workspace: ${workspace.name} — no repository could be opened`, 'error');
+      showToast(
+        msg(str`Could not open workspace: ${workspace.name} — no repository could be opened`),
+        'error',
+      );
     }
   }
 
@@ -498,9 +508,9 @@ export class LvWelcome extends LitElement {
       <lv-init-dialog></lv-init-dialog>
 
       <div class="welcome-content">
-        <img class="mascot" src="${mascotImage}" alt="Leviathan - Dragon wrapped around a tower" />
+        <img class="mascot" src="${mascotImage}" alt=${msg('Leviathan - Dragon wrapped around a tower')} />
         <div class="logo">Leviathan</div>
-        <p class="tagline">A powerful, open-source Git client</p>
+        <p class="tagline">${msg('A powerful, open-source Git client')}</p>
 
         <div class="actions">
           <button
@@ -511,7 +521,7 @@ export class LvWelcome extends LitElement {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
             </svg>
-            <span>Open</span>
+            <span>${msg('Open')}</span>
           </button>
 
           <button
@@ -524,7 +534,7 @@ export class LvWelcome extends LitElement {
               <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
               <polyline points="10 9 13 12 10 15"></polyline>
             </svg>
-            <span>Clone</span>
+            <span>${msg('Clone')}</span>
           </button>
 
           <button
@@ -536,7 +546,7 @@ export class LvWelcome extends LitElement {
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
-            <span>Init</span>
+            <span>${msg('Init')}</span>
           </button>
 
           <button
@@ -548,7 +558,7 @@ export class LvWelcome extends LitElement {
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
               <circle cx="12" cy="7" r="4"></circle>
             </svg>
-            <span>Profiles &amp; Accounts</span>
+            <span>${msg('Profiles & Accounts')}</span>
           </button>
         </div>
 
@@ -556,9 +566,9 @@ export class LvWelcome extends LitElement {
           ? html`
               <div class="workspace-section">
                 <div class="workspace-header">
-                  <span class="workspace-title">Workspaces</span>
+                  <span class="workspace-title">${msg('Workspaces')}</span>
                   <button class="manage-btn" @click=${this.handleManageWorkspaces}>
-                    Manage
+                    ${msg('Manage')}
                   </button>
                 </div>
                 <div class="workspace-list">
@@ -575,7 +585,9 @@ export class LvWelcome extends LitElement {
                         ></span>
                         <div class="workspace-info">
                           <div class="workspace-name">${ws.name}</div>
-                          <div class="workspace-repo-count">${ws.repositories.length} ${ws.repositories.length === 1 ? 'repository' : 'repositories'}</div>
+                          <div class="workspace-repo-count">${ws.repositories.length === 1
+                            ? msg('1 repository')
+                            : msg(str`${ws.repositories.length} repositories`)}</div>
                         </div>
                       </button>
                     `,
@@ -589,9 +601,9 @@ export class LvWelcome extends LitElement {
           ? html`
               <div class="recent-section">
                 <div class="recent-header">
-                  <span class="recent-title">Recent Repositories</span>
+                  <span class="recent-title">${msg('Recent Repositories')}</span>
                   <button class="clear-btn" @click=${this.handleClearRecent}>
-                    Clear
+                    ${msg('Clear')}
                   </button>
                 </div>
                 <div class="recent-list">
@@ -601,7 +613,7 @@ export class LvWelcome extends LitElement {
                         class="recent-item"
                         role="button"
                         tabindex="0"
-                        aria-label="Open ${repo.name}"
+                        aria-label=${msg(str`Open ${repo.name}`)}
                         @click=${() => this.handleRecentClick(repo.path)}
                         @keydown=${(e: KeyboardEvent) => this.handleRecentKeydown(e, repo.path)}
                       >
@@ -614,8 +626,8 @@ export class LvWelcome extends LitElement {
                         </div>
                         <button
                           class="recent-remove"
-                          title="Remove from recent repositories"
-                          aria-label="Remove ${repo.name} from recent repositories"
+                          title=${msg('Remove from recent repositories')}
+                          aria-label=${msg(str`Remove ${repo.name} from recent repositories`)}
                           @click=${(e: Event) => this.handleRecentRemove(e, repo.path)}
                           @keydown=${(e: KeyboardEvent) => this.handleRecentRemoveKeydown(e, repo.path)}
                         >
@@ -633,10 +645,10 @@ export class LvWelcome extends LitElement {
           : html`
               <div class="recent-section">
                 <div class="recent-header">
-                  <span class="recent-title">Recent Repositories</span>
+                  <span class="recent-title">${msg('Recent Repositories')}</span>
                 </div>
                 <div class="empty-recent">
-                  No recent repositories
+                  ${msg('No recent repositories')}
                 </div>
               </div>
             `}

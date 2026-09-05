@@ -5,6 +5,8 @@
 
 import { createStore } from 'zustand/vanilla';
 import { persist } from 'zustand/middleware';
+import { msg } from '@lit/localize';
+import { detectSystemLocale, resolveLocale, setAppLocale, type Locale } from '../i18n/index.ts';
 
 export type Theme = 'dark' | 'light' | 'system';
 export type FontSize = 'small' | 'medium' | 'large';
@@ -13,6 +15,7 @@ export type GraphColorScheme = 'default' | 'pastel' | 'vibrant' | 'monochrome' |
 
 export interface SettingsState {
   // Appearance
+  language: Locale;
   theme: Theme;
   fontSize: FontSize;
   fontFamily: string;
@@ -65,6 +68,12 @@ export interface SettingsState {
   showNativeNotifications: boolean;
 
   // Actions
+  /**
+   * Switch the UI language. Async because the locale's templates are fetched on
+   * demand; resolves with the locale that actually ended up rendering, which is
+   * the previous one when the templates could not be loaded.
+   */
+  setLanguage: (locale: string) => Promise<Locale>;
   setTheme: (theme: Theme) => void;
   setFontSize: (size: FontSize) => void;
   setFontFamily: (family: string) => void;
@@ -96,6 +105,8 @@ export interface SettingsState {
 }
 
 const defaultSettings = {
+  // The system language when we ship it, English otherwise.
+  language: detectSystemLocale(),
   theme: 'dark' as Theme,
   fontSize: 'medium' as FontSize,
   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
@@ -181,6 +192,14 @@ export const settingsStore = createStore<SettingsState>()(
       // for it is irrelevant.
       systemHighContrast: false,
 
+      setLanguage: async (locale) => {
+        // Persist only what actually rendered: a locale whose templates failed
+        // to load must not come back on the next launch.
+        const applied = await setAppLocale(resolveLocale(locale));
+        set({ language: applied });
+        return applied;
+      },
+
       setTheme: (theme) => {
         set({ theme });
         applyTheme(theme);
@@ -265,6 +284,7 @@ export const settingsStore = createStore<SettingsState>()(
         // rather than clearing it — and re-applies the auto scheme from it.
         const { systemHighContrast } = get();
         set({ ...defaultSettings, systemHighContrast });
+        void setAppLocale(defaultSettings.language);
         applyTheme(defaultSettings.theme);
         applyFontSize(defaultSettings.fontSize);
         applyDensity(defaultSettings.density);
@@ -288,6 +308,9 @@ export const settingsStore = createStore<SettingsState>()(
       migrate: migrateSettings,
       onRehydrateStorage: () => (state) => {
         if (state) {
+          // Goes through the action so a persisted locale we no longer ship is
+          // sanitised back to English instead of throwing on every render.
+          void state.setLanguage(state.language);
           applyTheme(state.theme);
           applyFontSize(state.fontSize);
           applyDensity(state.density);
@@ -402,11 +425,11 @@ function applyGraphColorScheme(scheme: GraphColorScheme): void {
  */
 export function getGraphColorSchemes(): { id: GraphColorScheme; name: string; colors: string[] }[] {
   return [
-    { id: 'default', name: 'Default', colors: graphColorSchemes.default },
-    { id: 'pastel', name: 'Pastel', colors: graphColorSchemes.pastel },
-    { id: 'vibrant', name: 'Vibrant', colors: graphColorSchemes.vibrant },
-    { id: 'monochrome', name: 'Monochrome', colors: graphColorSchemes.monochrome },
-    { id: 'high-contrast', name: 'High Contrast', colors: graphColorSchemes['high-contrast'] },
+    { id: 'default', name: msg('Default'), colors: graphColorSchemes.default },
+    { id: 'pastel', name: msg('Pastel'), colors: graphColorSchemes.pastel },
+    { id: 'vibrant', name: msg('Vibrant'), colors: graphColorSchemes.vibrant },
+    { id: 'monochrome', name: msg('Monochrome'), colors: graphColorSchemes.monochrome },
+    { id: 'high-contrast', name: msg('High Contrast'), colors: graphColorSchemes['high-contrast'] },
   ];
 }
 
