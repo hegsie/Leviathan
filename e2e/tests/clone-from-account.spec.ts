@@ -73,6 +73,70 @@ async function openAccountSource(page: Page, dialogs: DialogsPage): Promise<void
 
 const repoItems = (page: Page) => page.locator('lv-account-repo-picker .repo-item');
 
+/**
+ * Serve `list_github_repositories` one page at a time, optionally failing one
+ * page the first time it is asked for.
+ *
+ * Installed as an invoke wrapper rather than through injectCommandMock because
+ * the answer has to depend on the requested page — which is the whole point of
+ * the pagination tests below. Install command capture AFTER this so the
+ * capture stays the outermost wrapper and still records every call.
+ */
+async function installPagedRepositories(
+  page: Page,
+  options: { failPage?: number; failMessage?: string } = {},
+): Promise<void> {
+  await page.evaluate(
+    ({ failPage, failMessage }) => {
+      const internals = (
+        window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (cmd: string, args?: unknown) => Promise<unknown> };
+        }
+      ).__TAURI_INTERNALS__;
+      const original = internals.invoke;
+      const namesByPage: Record<number, string> = { 1: 'alpha', 2: 'beta', 3: 'gamma' };
+      let failed = false;
+      internals.invoke = async (command: string, args?: unknown) => {
+        if (command === 'get_keyring_token') return 'gh-e2e-tok';
+        if (command === 'list_github_repositories') {
+          const requested = (args as { page?: number }).page ?? 1;
+          if (failPage !== undefined && requested === failPage && !failed) {
+            failed = true;
+            throw { code: 'OPERATION_FAILED', message: failMessage };
+          }
+          const name = namesByPage[requested] ?? `page-${requested}`;
+          return {
+            repositories: [
+              {
+                id: name,
+                name,
+                owner: 'octocat',
+                fullName: `octocat/${name}`,
+                description: null,
+                isPrivate: false,
+                cloneUrl: `https://github.com/octocat/${name}.git`,
+                webUrl: null,
+                defaultBranch: 'main',
+                lastPushedAt: null,
+              },
+            ],
+            nextPage: requested < 3 ? requested + 1 : null,
+          };
+        }
+        return original(command, args);
+      };
+    },
+    { failPage: options.failPage, failMessage: options.failMessage ?? 'Request failed' },
+  );
+}
+
+/** The pages `list_github_repositories` was actually asked for, in order. */
+async function requestedPages(page: Page): Promise<number[]> {
+  const calls = await findCommand(page, 'list_github_repositories');
+  return calls.map((c) => ((c.args as { page?: number }).page ?? 1));
+}
+
+
 test.describe('Clone Dialog - from a connected account', () => {
   let dialogs: DialogsPage;
 
@@ -239,6 +303,113 @@ test.describe('Clone Dialog - from a connected account', () => {
     await expect(repoItems(page)).toHaveCount(2);
     await expect(repoItems(page).nth(1)).toContainText('second');
     await expect(page.locator('[data-action="load-more"]')).toHaveCount(0);
+  });
+
+  test('a failed "Load more" keeps the loaded pages and resumes at that page', async ({
+    page,
+  }) => {
+    await initializeUnifiedProfileStore(page, {
+      profiles: [defaultProfile],
+      accounts: [githubAccount],
+      connectedAccounts: ['gh-acc-1'],
+    });
+    await installPagedRepositories(page, {
+      failPage: 3,
+      failMessage: 'GitHub API error 502: bad gateway',
+    });
+    await startCommandCapture(page);
+
+    await openAccountSource(page, dialogs);
+    await expect(repoItems(page)).toHaveCount(1);
+
+    await page.locator('[data-action="load-more"]').click();
+    await expect(repoItems(page)).toHaveCount(2);
+
+    // Pick the second repository so the highlight is observable.
+    await repoItems(page).nth(1).click();
+    await expect(page.locator('lv-account-repo-picker .repo-item.selected')).toContainText(
+      'beta',
+    );
+
+    // Lose page 3.
+    await page.locator('[data-action="load-more"]').click();
+
+    const failure = page.locator('[data-state="load-more-error"]');
+    await expect(failure).toBeVisible();
+    await expect(failure).toContainText('GitHub API error 502');
+    // The two pages already paid for are still on screen, under the error
+    // rather than replaced by it — and so is the selection.
+    await expect(page.locator('lv-account-repo-picker .repo-list')).toBeVisible();
+    await expect(repoItems(page)).toHaveCount(2);
+    await expect(repoItems(page).nth(0)).toContainText('alpha');
+    await expect(repoItems(page).nth(1)).toContainText('beta');
+    await expect(page.locator('lv-account-repo-picker .repo-item.selected')).toContainText(
+      'beta',
+    );
+    // The clone dialog still holds what was selected before the failure.
+    await expect(dialogs.clone.urlInput).toHaveValue(
+      'https://github.com/octocat/beta.git',
+    );
+
+    // Retry resumes at page 3 instead of restarting the account.
+    await failure.getByRole('button', { name: 'Retry' }).click();
+
+    await expect(repoItems(page)).toHaveCount(3);
+    await expect(repoItems(page).nth(2)).toContainText('gamma');
+    await expect(page.locator('[data-state="load-more-error"]')).toHaveCount(0);
+    await expect(page.locator('lv-account-repo-picker .repo-item.selected')).toContainText(
+      'beta',
+    );
+    expect(await requestedPages(page)).toEqual([1, 2, 3, 3]);
+  });
+
+  test('a mid-pagination allowlist block explains itself and is not a dead end', async ({
+    page,
+  }) => {
+    await initializeUnifiedProfileStore(page, {
+      profiles: [defaultProfile],
+      accounts: [githubAccount],
+      connectedAccounts: ['gh-acc-1'],
+    });
+    await installPagedRepositories(page);
+    await startCommandCapture(page);
+
+    await openAccountSource(page, dialogs);
+    await expect(repoItems(page)).toHaveCount(1);
+
+    // An allowlist without api.github.com refuses the next page before it is
+    // ever requested.
+    const setAllowlist = async (entries: string[]): Promise<void> => {
+      await page.evaluate((list) => {
+        const stores = (window as unknown as Record<string, unknown>)
+          .__LEVIATHAN_STORES__ as {
+          settingsStore: { setState: (state: Record<string, unknown>) => void };
+        };
+        stores.settingsStore.setState({ remoteAllowlist: list });
+      }, entries);
+    };
+    await setAllowlist(['example.invalid']);
+
+    await page.locator('[data-action="load-more"]').click();
+
+    const blocked = page.locator('[data-state="blocked"]');
+    await expect(blocked).toBeVisible();
+    await expect(blocked).toContainText('remote allowlist');
+    await expect(blocked).toContainText('Settings > Security');
+    // The page already loaded survives, and the refusal never reached git.
+    await expect(repoItems(page)).toHaveCount(1);
+    expect(await requestedPages(page)).toEqual([1]);
+
+    // Widening the allowlist and using the notice's own Retry continues the
+    // pagination — a block partway through a listing must not strand the user
+    // with no way back to "Load more".
+    await setAllowlist([]);
+    await blocked.getByRole('button', { name: 'Retry' }).click();
+
+    await expect(repoItems(page)).toHaveCount(2);
+    await expect(repoItems(page).nth(1)).toContainText('beta');
+    await expect(page.locator('[data-state="blocked"]')).toHaveCount(0);
+    expect(await requestedPages(page)).toEqual([1, 2]);
   });
 
   test('with no accounts connected, offers to connect one', async ({ page }) => {
