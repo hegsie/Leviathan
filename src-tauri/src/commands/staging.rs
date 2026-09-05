@@ -1349,8 +1349,15 @@ mod tests {
         let repo = TestRepo::with_initial_commit();
         repo.create_file("README.md", "# Test Repo");
 
-        let result =
-            get_file_diff(repo.path_str(), "README.md".to_string(), Some(false), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
 
         // Either Ok (file has no real changes, returned as empty diff via
         // fallback) or Err (the explicit "not found in diff" path). Must

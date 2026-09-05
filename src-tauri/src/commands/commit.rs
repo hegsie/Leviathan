@@ -1993,6 +1993,8 @@ mod tests {
             entry.commit.oid.clone(),
             entry.path_at_commit.clone(),
             None,
+            None,
+            None,
         )
         .await
         .expect("the path the entry reports must be diffable at that commit");
@@ -2002,6 +2004,8 @@ mod tests {
             repo.path_str(),
             entry.commit.oid.clone(),
             "new-name.txt".to_string(),
+            None,
+            None,
             None,
         )
         .await

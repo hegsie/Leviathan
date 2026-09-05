@@ -2,6 +2,9 @@ import { expect } from '@open-wc/testing';
 import {
   settingsStore,
   getGraphColorSchemes,
+  clampDiffContextLines,
+  MIN_DIFF_CONTEXT_LINES,
+  MAX_DIFF_CONTEXT_LINES,
   migrateSettings,
   watchSystemContrast,
 } from '../settings.store.ts';
@@ -10,6 +13,24 @@ import type { SettingsState } from '../settings.store.ts';
 describe('settings.store', () => {
   beforeEach(() => {
     settingsStore.getState().resetToDefaults();
+  });
+
+  describe('clampDiffContextLines', () => {
+    it('keeps in-range integers untouched', () => {
+      expect(clampDiffContextLines(0)).to.equal(MIN_DIFF_CONTEXT_LINES);
+      expect(clampDiffContextLines(3)).to.equal(3);
+      expect(clampDiffContextLines(20)).to.equal(MAX_DIFF_CONTEXT_LINES);
+    });
+
+    it('clamps out-of-range values to the bounds', () => {
+      expect(clampDiffContextLines(-1)).to.equal(MIN_DIFF_CONTEXT_LINES);
+      expect(clampDiffContextLines(21)).to.equal(MAX_DIFF_CONTEXT_LINES);
+    });
+
+    it('falls back to git’s default for a non-numeric value', () => {
+      expect(clampDiffContextLines(Number.NaN)).to.equal(3);
+      expect(clampDiffContextLines(Number.POSITIVE_INFINITY)).to.equal(3);
+    });
   });
 
   describe('initial state / defaults', () => {
@@ -55,8 +76,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().wordWrap).to.be.false;
     });
 
-    it('should not show whitespace by default', () => {
-      expect(settingsStore.getState().showWhitespace).to.be.false;
+    it('should not ignore any whitespace by default', () => {
+      // 'none' is what every diff has always rendered, so it must stay the
+      // default when the setting became live.
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('none');
     });
 
     it('should have auto fetch disabled by default', () => {
@@ -200,14 +223,32 @@ describe('settings.store', () => {
       expect(settingsStore.getState().diffContextLines).to.equal(5);
     });
 
+    it('should clamp diff context lines into range', () => {
+      settingsStore.getState().setDiffContextLines(999);
+      expect(settingsStore.getState().diffContextLines).to.equal(MAX_DIFF_CONTEXT_LINES);
+
+      settingsStore.getState().setDiffContextLines(-4);
+      expect(settingsStore.getState().diffContextLines).to.equal(MIN_DIFF_CONTEXT_LINES);
+
+      // A cleared number input yields NaN; fall back to git's default.
+      settingsStore.getState().setDiffContextLines(Number.NaN);
+      expect(settingsStore.getState().diffContextLines).to.equal(3);
+
+      settingsStore.getState().setDiffContextLines(4.7);
+      expect(settingsStore.getState().diffContextLines).to.equal(4);
+    });
+
     it('should set word wrap', () => {
       settingsStore.getState().setWordWrap(false);
       expect(settingsStore.getState().wordWrap).to.be.false;
     });
 
-    it('should set show whitespace', () => {
-      settingsStore.getState().setShowWhitespace(true);
-      expect(settingsStore.getState().showWhitespace).to.be.true;
+    it('should set the diff whitespace mode', () => {
+      settingsStore.getState().setDiffIgnoreWhitespace('all');
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('all');
+
+      settingsStore.getState().setDiffIgnoreWhitespace('none');
+      expect(settingsStore.getState().diffIgnoreWhitespace).to.equal('none');
     });
 
     it('should set auto fetch interval', () => {
@@ -656,6 +697,76 @@ describe('settings.store', () => {
       );
 
       expect(migrated.graphColorSchemeAuto, 'a pinned default stays pinned').to.be.false;
+    });
+
+    it('replaces the dead showWhitespace flag with the whitespace mode', () => {
+      const migrated = migrateSettings({ showWhitespace: true } as Partial<SettingsState>, 4);
+
+      expect(migrated.diffIgnoreWhitespace).to.equal('none');
+      expect(
+        (migrated as unknown as Record<string, unknown>).showWhitespace,
+        'the dead flag is dropped, not carried over'
+      ).to.equal(undefined);
+    });
+
+    it('leaves an already-current whitespace mode alone', () => {
+      const migrated = migrateSettings(
+        { diffIgnoreWhitespace: 'all' } as Partial<SettingsState>,
+        5
+      );
+
+      expect(migrated.diffIgnoreWhitespace).to.equal('all');
+    });
+
+    it('clamps a stored context-line count into range', () => {
+      expect(migrateSettings({ diffContextLines: 999 } as Partial<SettingsState>, 4).diffContextLines).to.equal(
+        MAX_DIFF_CONTEXT_LINES
+      );
+      expect(migrateSettings({ diffContextLines: -8 } as Partial<SettingsState>, 4).diffContextLines).to.equal(
+        MIN_DIFF_CONTEXT_LINES
+      );
+      expect(
+        migrateSettings({ diffContextLines: 7 } as Partial<SettingsState>, 4).diffContextLines,
+        'an in-range value is untouched'
+      ).to.equal(7);
+    });
+
+    it('applies every step for a v3 install upgrading to the current version', () => {
+      // One existing user's whole persisted blob, as v3 wrote it: a deliberate
+      // non-default palette, the dead whitespace flag, and an out-of-range
+      // context count. Both the colour-scheme rule and the whitespace
+      // replacement must land in the same upgrade.
+      const migrated = migrateSettings(
+        {
+          graphColorScheme: 'vibrant',
+          showWhitespace: true,
+          diffContextLines: 99,
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          theme: 'light',
+        } as Partial<SettingsState>,
+        3
+      );
+
+      expect(migrated.graphColorSchemeAuto, 'v4: a chosen palette stays pinned').to.be.false;
+      expect(migrated.graphColorScheme).to.equal('vibrant');
+      expect(migrated.diffIgnoreWhitespace, 'v5: the whitespace mode is seeded').to.equal('none');
+      expect((migrated as unknown as Record<string, unknown>).showWhitespace).to.equal(undefined);
+      expect(migrated.diffContextLines).to.equal(MAX_DIFF_CONTEXT_LINES);
+      expect(migrated.wordWrap, 'already at v3, so the v3 rule does not re-run').to.be.true;
+      expect(migrated.theme, 'unrelated settings survive').to.equal('light');
+    });
+
+    it('applies every step for a pre-v2 install upgrading to the current version', () => {
+      const migrated = migrateSettings(
+        { showWhitespace: false, wordWrap: true } as Partial<SettingsState>,
+        1
+      );
+
+      expect(migrated.autoStashOnCheckout, 'v2').to.be.true;
+      expect(migrated.wordWrap, 'v3 drops the never-read flag').to.be.false;
+      expect(migrated.graphColorSchemeAuto, 'v4').to.be.true;
+      expect(migrated.diffIgnoreWhitespace, 'v5').to.equal('none');
     });
   });
 });
