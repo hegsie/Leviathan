@@ -523,17 +523,13 @@ test.describe('Dialogs - Error Scenarios', () => {
     await page.keyboard.press('Meta+,');
     await expect(dialogs.settings.dialog).toBeVisible();
 
-    // Find and change the font size select (second select in the dialog)
-    const selects = page.locator('lv-settings-dialog select');
-    const count = await selects.count();
-    expect(count).toBeGreaterThan(0);
-
-    // Change the first available select to its second option
-    const firstSelect = selects.first();
-    const options = await firstSelect.locator('option').allTextContents();
-    if (options.length > 1) {
-      await firstSelect.selectOption({ index: 1 });
-    }
+    // Addressed by id, not by position: the Appearance section has gained
+    // selects over time (a language picker now renders above these), and a
+    // positional locator quietly starts driving a different setting.
+    const fontSizeSelect = page.locator('lv-settings-dialog #font-size-select');
+    await expect(fontSizeSelect).toBeVisible();
+    await fontSizeSelect.selectOption('large');
+    await expect(fontSizeSelect).toHaveValue('large');
 
     // Dialog should still be visible (no crash)
     await expect(dialogs.settings.dialog).toBeVisible();

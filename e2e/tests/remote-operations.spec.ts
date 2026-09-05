@@ -853,9 +853,13 @@ test.describe('Remote Operations - UI Outcome Verification', () => {
  * operation is running its progress row adds a "Cancel fetch" button, which a
  * bare `name: /Fetch/i` matches too — and a strict-mode violation is not the
  * failure these tests are looking for.
+ *
+ * Scoped to the dashboard as well: the toolbar now carries its own
+ * `.remote-btn` trio with the same titles, so an unscoped `.remote-btn`
+ * matches two elements. The toolbar copies are covered in toolbar.spec.ts.
  */
 function remoteButton(page: Page, label: 'Fetch' | 'Pull' | 'Push') {
-  return page.locator(`.remote-btn[title^="${label}"]`);
+  return page.locator('lv-context-dashboard').locator(`.remote-btn[title^="${label}"]`);
 }
 
 test.describe('Shared remote-operation runner', () => {

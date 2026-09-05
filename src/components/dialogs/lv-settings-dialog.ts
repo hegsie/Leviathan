@@ -1543,7 +1543,7 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-name">${msg('Theme')}</span>
               <span class="setting-description">${msg('Choose your preferred color scheme')}</span>
             </div>
-            <select .value=${this.theme} @change=${this.handleThemeChange}>
+            <select id="theme-select" .value=${this.theme} @change=${this.handleThemeChange}>
               <option value="dark">${msg('Dark')}</option>
               <option value="light">${msg('Light')}</option>
               <option value="system">${msg('System')}</option>
@@ -1555,7 +1555,7 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-name">${msg('Font Size')}</span>
               <span class="setting-description">${msg('Adjust the base font size')}</span>
             </div>
-            <select .value=${this.fontSize} @change=${this.handleFontSizeChange}>
+            <select id="font-size-select" .value=${this.fontSize} @change=${this.handleFontSizeChange}>
               <option value="small">${msg('Small')}</option>
               <option value="medium">${msg('Medium')}</option>
               <option value="large">${msg('Large')}</option>
@@ -1567,7 +1567,7 @@ export class LvSettingsDialog extends LitElement {
               <span class="setting-name">${msg('UI Density')}</span>
               <span class="setting-description">${msg('Adjust spacing and row heights')}</span>
             </div>
-            <select .value=${this.density} @change=${this.handleDensityChange}>
+            <select id="density-select" .value=${this.density} @change=${this.handleDensityChange}>
               <option value="compact">${msg('Compact')}</option>
               <option value="comfortable">${msg('Comfortable')}</option>
               <option value="spacious">${msg('Spacious')}</option>

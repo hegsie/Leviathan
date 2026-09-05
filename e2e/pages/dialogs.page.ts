@@ -191,7 +191,7 @@ export class SettingsDialogPage extends BaseDialog {
     // Use locator for modal dialog (lv-modal with Settings title)
     this.dialog = page.locator('lv-modal:has(lv-settings-dialog)');
     // Theme select - the select element inside settings-dialog
-    this.themeSelect = page.locator('lv-settings-dialog select').first();
+    this.themeSelect = page.locator('lv-settings-dialog #theme-select');
     // Toggle switches for boolean settings (showAvatars, showCommitSize, wordWrap, confirmBeforeDiscard)
     // Note: vim mode toggle is in keyboard shortcuts dialog, not settings
     this.vimModeToggle = page.locator('lv-settings-dialog lv-toggle').first();
