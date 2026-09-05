@@ -553,7 +553,20 @@ pub async fn clone_repository(
                     .filter(|secs| *secs > 0)
                     .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
 
+                // The reap comes FIRST, before the cancel flag and the
+                // deadline: this poll sleeps 100ms between iterations, so a
+                // clone that finished during a sleep would otherwise be
+                // reported as cancelled (or timed out) on the next iteration
+                // and — worse — have its finished checkout deleted by the
+                // abnormal-outcome arm below. A cancellation may only stop a
+                // child that is genuinely still running.
                 let outcome = loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break CloneOutcome::Finished(status),
+                        Ok(None) => {}
+                        Err(e) => break CloneOutcome::WaitFailed(e.to_string()),
+                    }
+
                     if CLONE_CANCELLED.load(Ordering::Relaxed) {
                         break CloneOutcome::Cancelled;
                     }
@@ -562,11 +575,7 @@ pub async fn clone_repository(
                         break CloneOutcome::TimedOut;
                     }
 
-                    match child.try_wait() {
-                        Ok(Some(status)) => break CloneOutcome::Finished(status),
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                        Err(e) => break CloneOutcome::WaitFailed(e.to_string()),
-                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 };
 
                 // Single exit path for every abnormal outcome: kill the child,
