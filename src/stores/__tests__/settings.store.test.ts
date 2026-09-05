@@ -37,8 +37,10 @@ describe('settings.store', () => {
       expect(settingsStore.getState().defaultClonePath).to.equal('');
     });
 
-    it('should show avatars by default', () => {
-      expect(settingsStore.getState().showAvatars).to.be.true;
+    it('should NOT show avatars by default', () => {
+      // Avatars are images fetched from gravatar.com, which hands a third
+      // party an MD5 of every commit author's email. Opt-in, not opt-out.
+      expect(settingsStore.getState().showAvatars).to.be.false;
     });
 
     it('should show commit size by default', () => {
@@ -181,6 +183,8 @@ describe('settings.store', () => {
     });
 
     it('should set show avatars', () => {
+      settingsStore.getState().setShowAvatars(true);
+      expect(settingsStore.getState().showAvatars).to.be.true;
       settingsStore.getState().setShowAvatars(false);
       expect(settingsStore.getState().showAvatars).to.be.false;
     });
@@ -422,6 +426,73 @@ describe('settings.store', () => {
       expect(migrated.autoStashOnCheckout, 'a v2 false is a real user choice').to.equal(false);
     });
 
+    it('a pre-v5 state keeps a persisted showAvatars choice', () => {
+      // The v5 default flip (true -> false) must not reach anyone who already
+      // has settings: avatars were always drawn, so a persisted value IS a
+      // real user choice. zustand's shallow merge preserves it and the
+      // migration must not overwrite it.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      expect((migrate({ showAvatars: true }, 3) as { showAvatars: boolean }).showAvatars).to.equal(
+        true
+      );
+      expect((migrate({ showAvatars: false }, 3) as { showAvatars: boolean }).showAvatars).to.equal(
+        false
+      );
+    });
+
+    it('a pre-v5 state with no showAvatars key gets the OLD default', () => {
+      // Such a state predates the key and was rendered with the old default
+      // of `true`; keep showing what those users saw rather than silently
+      // switching avatars off under them.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 3) as {
+        showAvatars: boolean;
+        theme: string;
+      };
+      expect(migrated.showAvatars).to.equal(true);
+      expect(migrated.theme, 'other settings survive').to.equal('light');
+    });
+
+    it('a v4 state with no showAvatars key still gets the OLD default', () => {
+      // v4 was the last version whose default was `true`, so an absent key
+      // there means what it meant at v3: that user saw avatars.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 4) as { showAvatars?: boolean };
+      expect(migrated.showAvatars).to.equal(true);
+    });
+
+    it('a v5 state is left to the store default', () => {
+      // v5 onwards the key is always written with the new default, so an
+      // absent one is not a pre-existing choice and must fall through.
+      const persist = (
+        settingsStore as unknown as {
+          persist: { getOptions: () => { migrate?: (s: unknown, v: number) => unknown } };
+        }
+      ).persist;
+      const migrate = persist.getOptions().migrate!;
+
+      const migrated = migrate({ theme: 'light' }, 5) as { showAvatars?: boolean };
+      expect(migrated.showAvatars, 'left to the store default').to.equal(undefined);
+    });
+
     it('leaves a v3 wordWrap alone', () => {
       const persist = (
         settingsStore as unknown as {
@@ -649,13 +720,62 @@ describe('settings.store', () => {
       expect(migrated.graphColorSchemeAuto).to.be.true;
     });
 
-    it('does not re-run the rule for state already at the current version', () => {
+    it('does not re-run the colour-scheme rule for state already at v4', () => {
       const migrated = migrateSettings(
         { graphColorScheme: 'default', graphColorSchemeAuto: false } as Partial<SettingsState>,
         4
       );
 
       expect(migrated.graphColorSchemeAuto, 'a pinned default stays pinned').to.be.false;
+    });
+
+    // The rules stack: a user who has not opened the app for several releases
+    // arrives with an old version number and must pick up EVERY step, not just
+    // the newest one.
+    it('applies every rule for a user upgrading all the way from v1', () => {
+      const migrated = migrateSettings(
+        {
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          graphColorScheme: 'default',
+          theme: 'light',
+        } as Partial<SettingsState>,
+        1
+      );
+
+      expect(migrated.autoStashOnCheckout, 'v2 rule').to.be.true;
+      expect(migrated.wordWrap, 'v3 rule').to.be.false;
+      expect(migrated.graphColorSchemeAuto, 'v4 rule').to.be.true;
+      expect(migrated.showAvatars, 'v5 rule').to.equal(true);
+      expect(migrated.theme, 'unrelated settings are untouched').to.equal('light');
+    });
+
+    it('applies only the v5 rule to a state already at v4', () => {
+      const migrated = migrateSettings(
+        {
+          autoStashOnCheckout: false,
+          wordWrap: true,
+          graphColorScheme: 'pastel',
+          graphColorSchemeAuto: false,
+        } as Partial<SettingsState>,
+        4
+      );
+
+      expect(migrated.autoStashOnCheckout, 'a post-v2 choice stands').to.be.false;
+      expect(migrated.wordWrap, 'a post-v3 choice stands').to.be.true;
+      expect(migrated.graphColorSchemeAuto, 'the v4 pin stands').to.be.false;
+      expect(migrated.showAvatars, 'v5 fills in the old default').to.equal(true);
+    });
+
+    it('never overwrites a showAvatars the user actually chose', () => {
+      expect(migrateSettings({ showAvatars: false } as Partial<SettingsState>, 1).showAvatars).to.be
+        .false;
+      expect(migrateSettings({ showAvatars: true } as Partial<SettingsState>, 1).showAvatars).to.be
+        .true;
+    });
+
+    it('does not re-run the avatar rule for state already at the current version', () => {
+      expect(migrateSettings({}, 5).showAvatars, 'left to the store default').to.equal(undefined);
     });
   });
 });
