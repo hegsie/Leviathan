@@ -33,49 +33,52 @@ pub struct CloneFilterInfo {
 /// Open an existing repository
 #[command]
 pub async fn open_repository(path: String) -> Result<Repository> {
-    let path = Path::new(&path);
+    crate::utils::blocking_git(move || {
+        let path = Path::new(&path);
 
-    if !path.exists() {
-        return Err(LeviathanError::RepositoryNotFound(
-            path.display().to_string(),
-        ));
-    }
+        if !path.exists() {
+            return Err(LeviathanError::RepositoryNotFound(
+                path.display().to_string(),
+            ));
+        }
 
-    let repo = git2::Repository::open(path)?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
+        let repo = git2::Repository::open(path)?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
 
-    let head = repo.head().ok();
-    let head_ref = head.as_ref().map(|h| {
-        h.shorthand()
-            .ok()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                h.target()
-                    .map(|t| t.to_string()[..7].to_string())
-                    .unwrap_or_default()
-            })
-    });
-    let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
+        let head = repo.head().ok();
+        let head_ref = head.as_ref().map(|h| {
+            h.shorthand()
+                .ok()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    h.target()
+                        .map(|t| t.to_string()[..7].to_string())
+                        .unwrap_or_default()
+                })
+        });
+        let detached_head_oid = detached_head_oid(&repo, head.as_ref())?;
 
-    // Detect shallow and partial clone status
-    let is_shallow = repo.is_shallow();
-    let (is_partial_clone, clone_filter) = detect_partial_clone_status(&repo);
+        // Detect shallow and partial clone status
+        let is_shallow = repo.is_shallow();
+        let (is_partial_clone, clone_filter) = detect_partial_clone_status(&repo);
 
-    Ok(Repository {
-        path: path.display().to_string(),
-        name,
-        is_valid: true,
-        is_bare: repo.is_bare(),
-        head_ref,
-        detached_head_oid,
-        state: RepositoryState::from(repo.state()),
-        is_shallow,
-        is_partial_clone,
-        clone_filter,
+        Ok(Repository {
+            path: path.display().to_string(),
+            name,
+            is_valid: true,
+            is_bare: repo.is_bare(),
+            head_ref,
+            detached_head_oid,
+            state: RepositoryState::from(repo.state()),
+            is_shallow,
+            is_partial_clone,
+            clone_filter,
+        })
     })
+    .await
 }
 
 /// Validate a clone URL: reject values that could be parsed as a CLI flag, and
@@ -848,7 +851,7 @@ pub async fn clone_repository(
 #[command]
 pub async fn get_clone_filter_info(path: String) -> Result<CloneFilterInfo> {
     let path_clone = path.clone();
-    tokio::task::spawn_blocking(move || {
+    crate::utils::blocking_git(move || {
         let repo = git2::Repository::open(&path_clone).map_err(|e| {
             LeviathanError::RepositoryNotFound(format!("Failed to open repository: {}", e))
         })?;
@@ -896,14 +899,13 @@ pub async fn get_clone_filter_info(path: String) -> Result<CloneFilterInfo> {
         })
     })
     .await
-    .map_err(|e| LeviathanError::Custom(format!("Task failed: {}", e)))?
 }
 
 /// List all tracked files in the repository
 #[command]
 pub async fn list_tracked_files(path: String) -> Result<Vec<String>> {
     let path_clone = path.clone();
-    tokio::task::spawn_blocking(move || {
+    crate::utils::blocking_git(move || {
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(&path_clone)
@@ -928,7 +930,6 @@ pub async fn list_tracked_files(path: String) -> Result<Vec<String>> {
         Ok(files)
     })
     .await
-    .map_err(|e| LeviathanError::Custom(format!("Task failed: {}", e)))?
 }
 
 /// Initialize a new repository
@@ -938,61 +939,64 @@ pub async fn init_repository(
     bare: Option<bool>,
     initial_branch: Option<String>,
 ) -> Result<Repository> {
-    let path = Path::new(&path);
+    crate::utils::blocking_git(move || {
+        let path = Path::new(&path);
 
-    let mut opts = git2::RepositoryInitOptions::new();
-    opts.bare(bare.unwrap_or(false));
+        let mut opts = git2::RepositoryInitOptions::new();
+        opts.bare(bare.unwrap_or(false));
 
-    // libgit2 writes the initial_head into HEAD verbatim and validates nothing,
-    // so a bad name here would produce a repository git itself cannot use.
-    // Reject it before anything is created on disk. An absent or blank value
-    // leaves initial_head unset so libgit2 keeps honouring the user's
-    // `init.defaultBranch` git config.
-    if let Some(branch) = initial_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty())
-    {
-        // libgit2 only prefixes `refs/heads/` when the name does NOT already
-        // start with `refs/` — otherwise it uses it verbatim. Validating
-        // `refs/heads/{branch}` unconditionally would therefore check a
-        // different ref than the one written: `refs/tags/v1` would pass and
-        // then point HEAD outside the branch namespace. Build the exact ref
-        // libgit2 will use, require it to be a branch, and pass that.
-        let full_ref = if branch.starts_with("refs/") {
-            branch.to_string()
-        } else {
-            format!("refs/heads/{}", branch)
-        };
-        if !full_ref.starts_with("refs/heads/") || !git2::Reference::is_valid_name(&full_ref) {
-            return Err(LeviathanError::Custom(format!(
-                "Invalid initial branch name: {}",
-                branch
-            )));
+        // libgit2 writes the initial_head into HEAD verbatim and validates nothing,
+        // so a bad name here would produce a repository git itself cannot use.
+        // Reject it before anything is created on disk. An absent or blank value
+        // leaves initial_head unset so libgit2 keeps honouring the user's
+        // `init.defaultBranch` git config.
+        if let Some(branch) = initial_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            // libgit2 only prefixes `refs/heads/` when the name does NOT already
+            // start with `refs/` — otherwise it uses it verbatim. Validating
+            // `refs/heads/{branch}` unconditionally would therefore check a
+            // different ref than the one written: `refs/tags/v1` would pass and
+            // then point HEAD outside the branch namespace. Build the exact ref
+            // libgit2 will use, require it to be a branch, and pass that.
+            let full_ref = if branch.starts_with("refs/") {
+                branch.to_string()
+            } else {
+                format!("refs/heads/{}", branch)
+            };
+            if !full_ref.starts_with("refs/heads/") || !git2::Reference::is_valid_name(&full_ref) {
+                return Err(LeviathanError::Custom(format!(
+                    "Invalid initial branch name: {}",
+                    branch
+                )));
+            }
+            opts.initial_head(&full_ref);
         }
-        opts.initial_head(&full_ref);
-    }
 
-    let repo = git2::Repository::init_opts(path, &opts)?;
+        let repo = git2::Repository::init_opts(path, &opts)?;
 
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
 
-    Ok(Repository {
-        path: path.display().to_string(),
-        name,
-        is_valid: true,
-        is_bare: repo.is_bare(),
-        head_ref: None,
-        // A fresh repository's HEAD is unborn, which is not detached.
-        detached_head_oid: None,
-        state: RepositoryState::Clean,
-        is_shallow: false,
-        is_partial_clone: false,
-        clone_filter: None,
+        Ok(Repository {
+            path: path.display().to_string(),
+            name,
+            is_valid: true,
+            is_bare: repo.is_bare(),
+            head_ref: None,
+            // A fresh repository's HEAD is unborn, which is not detached.
+            detached_head_oid: None,
+            state: RepositoryState::Clean,
+            is_shallow: false,
+            is_partial_clone: false,
+            clone_filter: None,
+        })
     })
+    .await
 }
 
 /// Get information about the current repository
