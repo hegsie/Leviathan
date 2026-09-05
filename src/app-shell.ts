@@ -139,6 +139,7 @@ import {
   openRepositoryInEditor,
 } from './services/open-location.service.ts';
 import { showConfirm, showPrompt } from './services/dialog.service.ts';
+import { mergePreviewSummary } from './utils/merge-preview.ts';
 import {
   confirmGarbageCollection,
   confirmPrune,
@@ -2386,9 +2387,13 @@ export class AppShell extends LitElement {
     // is an IPC round trip, so a claim taken after it does not serialize two
     // dispatches that both got past the check.
     if (!this.claimRefOperation(repoPath)) return;
+    // Predicted before the confirm and inside the claim — see the sidebar's
+    // handleMergeBranch. Falls back to an unpredicted confirm when the preview
+    // cannot be computed; it must never be the reason a merge is unavailable.
+    const prediction = await mergePreviewSummary(repoPath, refName);
     if (!await showConfirm(
       'Merge Branch',
-      `Merge "${refName}" into the current branch?`,
+      `Merge "${refName}" into the current branch?${prediction}`,
       'info',
     )) {
       this.releaseRefOperation(repoPath);
