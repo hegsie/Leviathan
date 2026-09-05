@@ -451,6 +451,86 @@ fn drain_clone_stderr<R: std::io::Read>(
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// How polling a spawned `git clone` ended.
+enum CloneOutcome {
+    Finished(std::process::ExitStatus),
+    Cancelled,
+    TimedOut,
+    WaitFailed(String),
+}
+
+/// Poll a spawned `git clone` to completion, honouring a cancellation or a
+/// deadline only for as long as the child is genuinely still running.
+///
+/// The reap comes FIRST, before the cancel flag and before the deadline, and
+/// the sleep comes last. This poll sleeps 100ms between iterations, so a clone
+/// that exited during a sleep — followed by a Cancel click, or a deadline that
+/// lapsed, before the loop woke — was reported as cancelled or timed out on
+/// the next iteration even though it had finished: `kill` was a no-op on the
+/// exited child, the real exit status was thrown away, and
+/// [`finish_clone_poll`] then DELETED the completed checkout as if it were a
+/// partial one. `remote::poll_push_child` polls the same way.
+///
+/// `cancelled` is `CLONE_CANCELLED` in production; it is a parameter so the
+/// ordering can be tested without touching global state.
+fn poll_clone_child(
+    child: &mut std::process::Child,
+    cancelled: &AtomicBool,
+    deadline: Option<std::time::Instant>,
+) -> CloneOutcome {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return CloneOutcome::Finished(status),
+            Ok(None) => {}
+            Err(e) => return CloneOutcome::WaitFailed(e.to_string()),
+        }
+
+        if cancelled.load(Ordering::Relaxed) {
+            return CloneOutcome::Cancelled;
+        }
+
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return CloneOutcome::TimedOut;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// The exit status to carry on with, or the error for an abnormal outcome.
+///
+/// Single exit path for every abnormal outcome: kill and reap the child, then
+/// clear the PARTIAL destination — returning early without killing would leave
+/// an orphaned git process still writing into that directory. A finished clone
+/// keeps its checkout: that directory is the user's clone, and deleting it is
+/// the harm the old poll ordering caused when a clone that had already
+/// succeeded was misreported as cancelled or timed out.
+fn finish_clone_poll(
+    child: &mut std::process::Child,
+    dest_path: &Path,
+    outcome: CloneOutcome,
+) -> Result<std::process::ExitStatus> {
+    let abnormal = match outcome {
+        CloneOutcome::Finished(status) => return Ok(status),
+        abnormal => abnormal,
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(dest_path);
+
+    Err(match abnormal {
+        CloneOutcome::Cancelled => LeviathanError::Custom("Clone cancelled".to_string()),
+        CloneOutcome::TimedOut => {
+            LeviathanError::OperationTimeout("Clone operation timed out".to_string())
+        }
+        CloneOutcome::WaitFailed(e) => {
+            LeviathanError::Custom(format!("Failed to wait for git: {}", e))
+        }
+        CloneOutcome::Finished(_) => unreachable!("handled above"),
+    })
+}
+
 /// Clone a repository with progress reporting
 #[allow(clippy::too_many_arguments)]
 #[command]
@@ -538,13 +618,6 @@ pub async fn clone_repository(
                     }
                 });
 
-                enum CloneOutcome {
-                    Finished(std::process::ExitStatus),
-                    Cancelled,
-                    TimedOut,
-                    WaitFailed(String),
-                }
-
                 // The timeout is enforced HERE as well as by the outer
                 // tokio::time::timeout. That one only drops the future — this
                 // blocking task, and the git process it spawned, would keep
@@ -553,55 +626,16 @@ pub async fn clone_repository(
                     .filter(|secs| *secs > 0)
                     .map(|secs| std::time::Instant::now() + std::time::Duration::from_secs(secs));
 
-                // The reap comes FIRST, before the cancel flag and the
-                // deadline: this poll sleeps 100ms between iterations, so a
-                // clone that finished during a sleep would otherwise be
-                // reported as cancelled (or timed out) on the next iteration
-                // and — worse — have its finished checkout deleted by the
-                // abnormal-outcome arm below. A cancellation may only stop a
-                // child that is genuinely still running.
-                let outcome = loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break CloneOutcome::Finished(status),
-                        Ok(None) => {}
-                        Err(e) => break CloneOutcome::WaitFailed(e.to_string()),
-                    }
+                let outcome = poll_clone_child(&mut child, &CLONE_CANCELLED, deadline);
 
-                    if CLONE_CANCELLED.load(Ordering::Relaxed) {
-                        break CloneOutcome::Cancelled;
-                    }
-
-                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                        break CloneOutcome::TimedOut;
-                    }
-
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                };
-
-                // Single exit path for every abnormal outcome: kill the child,
-                // join the drain thread, and clear the partial destination.
-                // Returning early from any of these without killing would leave
-                // an orphaned git process still writing into that directory.
-                let status = match outcome {
-                    CloneOutcome::Finished(status) => status,
-                    abnormal => {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                // The drain thread is joined on BOTH paths: `finish_clone_poll`
+                // has already killed and reaped the child on an abnormal one,
+                // so the pipe is at EOF and this returns straight away.
+                let status = match finish_clone_poll(&mut child, &dest_path, outcome) {
+                    Ok(status) => status,
+                    Err(e) => {
                         let _ = stderr_reader.join();
-                        let _ = std::fs::remove_dir_all(&dest_path);
-
-                        return Err(match abnormal {
-                            CloneOutcome::Cancelled => {
-                                LeviathanError::Custom("Clone cancelled".to_string())
-                            }
-                            CloneOutcome::TimedOut => LeviathanError::OperationTimeout(
-                                "Clone operation timed out".to_string(),
-                            ),
-                            CloneOutcome::WaitFailed(e) => {
-                                LeviathanError::Custom(format!("Failed to wait for git: {}", e))
-                            }
-                            CloneOutcome::Finished(_) => unreachable!("handled above"),
-                        });
+                        return Err(e);
                     }
                 };
 
@@ -1051,6 +1085,188 @@ mod tests {
         let mut events = Vec::new();
         let text = drain_clone_stderr(reader, |p| events.push(p));
         (text, events)
+    }
+
+    // ---- the clone poll: reap first, abort only what is still running ----
+    //
+    // The CLI clone drives its `git clone` child by hand so a Cancel or a
+    // deadline can kill it. Which of the three things the loop looks at first
+    // — the exit status, the cancel flag or the clock — decides whether a
+    // clone that already finished is reported as the success it was, and
+    // whether the finished checkout survives.
+
+    /// A child that has already exited, with the status it exited with.
+    fn already_exited_child(repo: &TestRepo) -> (std::process::Child, std::process::ExitStatus) {
+        // Exits 128 without touching the network or the working tree.
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path_str())
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("refs/heads/leviathan-no-such-branch")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("git must be on PATH");
+        let status = child.wait().expect("the child must exit");
+        (child, status)
+    }
+
+    /// A child that is still running, and stays running until it is killed.
+    fn still_running_child() -> std::process::Child {
+        // Reads stdin until EOF; the pipe is held open here, so EOF never
+        // comes and the child is reliably alive when the abort lands.
+        std::process::Command::new("git")
+            .arg("hash-object")
+            .arg("--stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("git must be on PATH")
+    }
+
+    /// A deadline that has already lapsed by the time the poll reads it.
+    fn expired_deadline() -> Option<std::time::Instant> {
+        Some(std::time::Instant::now())
+    }
+
+    /// The regression. The poll sleeps 100ms between iterations, so a clone
+    /// can finish during a sleep and the user can click Cancel before the loop
+    /// wakes. Reading the flag first turned that into "Clone cancelled" for a
+    /// clone that had completed — and cost the user the checkout.
+    #[test]
+    fn a_clone_that_already_exited_is_reported_with_its_real_status() {
+        let repo = TestRepo::with_initial_commit();
+        let (mut child, real) = already_exited_child(&repo);
+        let cancelled = AtomicBool::new(true);
+
+        match poll_clone_child(&mut child, &cancelled, None) {
+            CloneOutcome::Finished(status) => assert_eq!(
+                status.code(),
+                real.code(),
+                "the status the clone really exited with must survive"
+            ),
+            CloneOutcome::Cancelled => {
+                panic!("a clone that had already finished was reported as cancelled")
+            }
+            CloneOutcome::TimedOut => panic!("unexpected timeout"),
+            CloneOutcome::WaitFailed(e) => panic!("unexpected wait failure: {}", e),
+        }
+    }
+
+    /// The same failure mode via the clock rather than the user: the deadline
+    /// was also read before the reap, so a clone that finished just before it
+    /// lapsed was reported as a timeout.
+    #[test]
+    fn a_clone_that_already_exited_past_its_deadline_keeps_its_real_status() {
+        let repo = TestRepo::with_initial_commit();
+        let (mut child, real) = already_exited_child(&repo);
+        let cancelled = AtomicBool::new(false);
+
+        match poll_clone_child(&mut child, &cancelled, expired_deadline()) {
+            CloneOutcome::Finished(status) => {
+                assert_eq!(status.code(), real.code());
+            }
+            CloneOutcome::TimedOut => {
+                panic!("a clone that had already finished was reported as timed out")
+            }
+            CloneOutcome::Cancelled => panic!("nothing cancelled this clone"),
+            CloneOutcome::WaitFailed(e) => panic!("unexpected wait failure: {}", e),
+        }
+    }
+
+    /// The other direction, which the fix must not break: a Cancel that
+    /// arrives while the clone is genuinely still running still stops it.
+    #[test]
+    fn a_clone_still_running_when_the_cancel_arrives_is_cancelled() {
+        let mut child = still_running_child();
+        let cancelled = AtomicBool::new(true);
+
+        let outcome = poll_clone_child(&mut child, &cancelled, None);
+
+        // Clean up before asserting, so a failure does not leak the child.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            matches!(outcome, CloneOutcome::Cancelled),
+            "a clone still in flight must be stoppable"
+        );
+    }
+
+    /// And the deadline still fires on a clone that really is still running.
+    #[test]
+    fn a_clone_still_running_past_its_deadline_times_out() {
+        let mut child = still_running_child();
+        let cancelled = AtomicBool::new(false);
+
+        let outcome = poll_clone_child(&mut child, &cancelled, expired_deadline());
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            matches!(outcome, CloneOutcome::TimedOut),
+            "a clone still in flight past its deadline must time out"
+        );
+    }
+
+    /// The consequence that made the clone instance worse than the push one,
+    /// pinned end to end through both halves the command runs: a clone that
+    /// finished during a poll sleep, with a Cancel already in the flag, must
+    /// keep its checkout. Reading the flag before the reap made the poll say
+    /// "cancelled", and the abnormal-outcome path then deleted the completed
+    /// destination as if it were a partial clone — the working copy the user
+    /// had just cloned, gone.
+    #[test]
+    fn a_finished_clone_keeps_its_checkout_even_if_cancel_arrives_late() {
+        let repo = TestRepo::with_initial_commit();
+        let (mut child, real) = already_exited_child(&repo);
+        let cancelled = AtomicBool::new(true);
+
+        let dest = TempDir::new().expect("temp dir");
+        let checkout = dest.path().join("clone");
+        std::fs::create_dir_all(&checkout).expect("create checkout");
+        let marker = checkout.join("cloned.txt");
+        std::fs::write(&marker, "the user's clone").expect("write marker");
+
+        let outcome = poll_clone_child(&mut child, &cancelled, None);
+        let status = finish_clone_poll(&mut child, &checkout, outcome)
+            .expect("a finished clone must not be reported as an error");
+
+        assert_eq!(status.code(), real.code());
+        assert!(
+            marker.exists(),
+            "a finished clone's checkout must never be deleted"
+        );
+    }
+
+    /// The balancing half: a genuinely aborted clone still has its PARTIAL
+    /// destination cleared, so a retry does not hit "destination already
+    /// exists".
+    #[test]
+    fn an_aborted_clone_clears_its_partial_checkout() {
+        let mut child = still_running_child();
+
+        let dest = TempDir::new().expect("temp dir");
+        let partial = dest.path().join("partial");
+        std::fs::create_dir_all(&partial).expect("create partial checkout");
+
+        let err = finish_clone_poll(&mut child, &partial, CloneOutcome::Cancelled)
+            .expect_err("a cancelled clone must be an error");
+
+        assert!(
+            matches!(&err, LeviathanError::Custom(m) if m == "Clone cancelled"),
+            "unexpected error: {:?}",
+            err
+        );
+        assert!(
+            !partial.exists(),
+            "the partial checkout must be cleared for a retry"
+        );
+
+        let _ = child.wait();
     }
 
     /// Regression: the CLI clone path only reports progress if git is asked
