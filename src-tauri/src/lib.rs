@@ -369,6 +369,7 @@ pub fn run() {
             commands::remote::deepen_repository,
             commands::remote::unshallow_repository,
             commands::merge::merge,
+            commands::merge::preview_merge,
             commands::merge::abort_merge,
             commands::merge::commit_merge,
             commands::merge::rebase,

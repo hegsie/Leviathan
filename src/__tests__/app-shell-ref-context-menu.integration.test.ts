@@ -274,6 +274,62 @@ describe('app-shell ref context menu handlers (integration)', () => {
       });
     });
 
+    it('predicts the conflict in the confirm BEFORE the merge runs', async () => {
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'preview_merge') {
+          return Promise.resolve({
+            outcome: 'normal',
+            conflictCount: 2,
+            conflictingFiles: ['src/a.ts', 'src/b.ts'],
+            unrelatedHistories: false,
+            operationInProgress: null,
+          });
+        }
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefMerge();
+
+      const confirms = findCommands('plugin:dialog|message');
+      expect(confirms.length).to.be.greaterThan(0);
+      const message = (confirms[0].args as { message?: string }).message ?? '';
+      expect(message).to.contain('2 files would conflict:');
+      expect(message).to.contain('src/a.ts');
+
+      // Useless unless it lands before the merge does.
+      expect(commandIndex('preview_merge')).to.be.greaterThan(-1);
+      expect(commandIndex('plugin:dialog|message')).to.be.greaterThan(
+        commandIndex('preview_merge'),
+      );
+      expect(commandIndex('merge')).to.be.greaterThan(commandIndex('plugin:dialog|message'));
+    });
+
+    it('still confirms and merges when the preview fails', async () => {
+      const previous = mockInvoke;
+      mockInvoke = (command: string, args?: unknown) => {
+        if (command === 'preview_merge') return Promise.reject(new Error('no preview'));
+        return previous(command, args);
+      };
+
+      const el = createAppShell();
+      setRefContextMenu(el, 'feature-branch');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (el as any).handleRefMerge();
+
+      const confirms = findCommands('plugin:dialog|message');
+      expect(confirms.length, 'the confirm is still shown').to.be.greaterThan(0);
+      const message = (confirms[0].args as { message?: string }).message ?? '';
+      expect(message).to.contain('Merge "feature-branch" into the current branch?');
+      expect(message).to.not.contain('would conflict');
+      expect(findCommands('merge').length, 'the merge still runs').to.equal(1);
+    });
+
     it('calls open_repository after successful merge', async () => {
       const el = createAppShell();
       setRefContextMenu(el, 'feature-branch');

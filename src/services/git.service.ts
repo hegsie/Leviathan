@@ -1842,6 +1842,42 @@ export async function merge(args: MergeCommand): Promise<CommandResult<void>> {
   return invokeCommand<void>("merge", args);
 }
 
+export interface MergePreview {
+  /**
+   * What the merge would do. `unborn` means the branch being merged INTO has
+   * no commits yet, which `merge` cannot fast-forward.
+   */
+  outcome: "upToDate" | "fastForward" | "normal" | "unborn";
+  /** Exact number of paths that would conflict. */
+  conflictCount: number;
+  /** The conflicting paths, sorted — capped, so it can be shorter than the count. */
+  conflictingFiles: string[];
+  /** The two sides share no common ancestor. */
+  unrelatedHistories: boolean;
+  /** Repository state blocking the merge (e.g. "Merge"), or null when clean. */
+  operationInProgress: string | null;
+}
+
+/**
+ * Predict a merge without performing it.
+ *
+ * Purely in-memory in the backend (libgit2 merges the two trees into an index
+ * that is never checked out), so it touches neither the working tree nor the
+ * index and leaves nothing to clean up. `intoRef` names the branch the merge
+ * will land on; omit it for HEAD.
+ */
+export async function previewMerge(
+  path: string,
+  sourceRef: string,
+  intoRef?: string,
+): Promise<CommandResult<MergePreview>> {
+  return invokeCommand<MergePreview>("preview_merge", {
+    path,
+    sourceRef,
+    intoRef,
+  });
+}
+
 export async function abortMerge(
   args: AbortMergeCommand,
 ): Promise<CommandResult<void>> {
