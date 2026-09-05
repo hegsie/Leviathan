@@ -50,6 +50,30 @@ fn apply_diff_options(
     }
 }
 
+/// True when `ignore_whitespace` names a mode that can suppress hunks.
+///
+/// libgit2 does not report an empty patch for a change the mode swallows — it
+/// drops the delta from the diff entirely, so a whitespace-only change looks
+/// exactly like a file with no changes at all. The single-file commands use
+/// this to tell the two apart before reporting "not found".
+fn whitespace_is_ignored(ignore_whitespace: &Option<String>) -> bool {
+    matches!(
+        ignore_whitespace.as_deref(),
+        Some("all") | Some("change") | Some("eol")
+    )
+}
+
+/// Strip the hunks from a diff entry, leaving the header-only result git prints
+/// when the active whitespace mode swallows every change in the file.
+fn empty_diff_for(mut file: DiffFile) -> DiffFile {
+    file.hunks.clear();
+    file.additions = 0;
+    file.deletions = 0;
+    file.truncated = None;
+    file.total_lines = None;
+    file
+}
+
 /// Resolve the HEAD tree, tolerating an unborn HEAD (a repository with no
 /// commits yet). Returns `None` when HEAD is unborn/missing so callers can diff
 /// against the empty tree, exactly as `git diff --cached` does before the first
@@ -206,12 +230,21 @@ pub async fn get_diff_with_options(
 }
 
 /// Get diff for a specific file
+///
+/// `ignore_whitespace` accepts the same modes as [`get_diff_with_options`]
+/// ("all", "change", "eol", or "none"/absent) and `context_lines` overrides
+/// git's default of 3 lines of context. Both are applied to every diff this
+/// function builds — including the case-insensitive fallback below — so the
+/// fallback can never render the file with different options than the primary
+/// attempt would have.
 #[command]
 pub async fn get_file_diff(
     path: String,
     file_path: String,
     staged: Option<bool>,
     max_lines: Option<u32>,
+    context_lines: Option<u32>,
+    ignore_whitespace: Option<String>,
 ) -> Result<DiffFile> {
     let repo = git2::Repository::open(Path::new(&path))?;
 
@@ -220,6 +253,7 @@ pub async fn get_file_diff(
 
     let mut opts = git2::DiffOptions::new();
     opts.pathspec(&normalized_file_path);
+    apply_diff_options(&mut opts, &ignore_whitespace, context_lines, None, None);
     // Include untracked files so we can show diff for new files
     opts.include_untracked(true);
     opts.recurse_untracked_dirs(true);
@@ -250,6 +284,13 @@ pub async fn get_file_diff(
     // Fallback: pathspec may have failed due to case sensitivity on Windows
     // Try getting full diff and finding the file with case-insensitive match
     let mut fallback_opts = git2::DiffOptions::new();
+    apply_diff_options(
+        &mut fallback_opts,
+        &ignore_whitespace,
+        context_lines,
+        None,
+        None,
+    );
     fallback_opts.include_untracked(true);
     fallback_opts.recurse_untracked_dirs(true);
     fallback_opts.show_untracked_content(true);
@@ -323,6 +364,34 @@ pub async fn get_file_diff(
                     }
                 }
             }
+        }
+    }
+
+    // The active whitespace mode may have swallowed every change in the file.
+    // libgit2 then drops the delta instead of reporting an empty patch, so the
+    // searches above found nothing — but the file has not vanished and failing
+    // here would replace the user's diff with an error the moment they turned
+    // "ignore whitespace" on. Re-run the same diff without the whitespace
+    // option: if the file is there, report the header-only result `git diff -w`
+    // prints for it.
+    if whitespace_is_ignored(&ignore_whitespace) {
+        let mut plain_opts = git2::DiffOptions::new();
+        plain_opts.pathspec(&normalized_file_path);
+        apply_diff_options(&mut plain_opts, &None, context_lines, None, None);
+        plain_opts.include_untracked(true);
+        plain_opts.recurse_untracked_dirs(true);
+        plain_opts.show_untracked_content(true);
+
+        let mut plain_diff = if is_staged {
+            let head_tree = head_tree_opt(&repo)?;
+            repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut plain_opts))?
+        } else {
+            repo.diff_index_to_workdir(None, Some(&mut plain_opts))?
+        };
+        detect_renames(&mut plain_diff)?;
+
+        if let Some(file) = parse_diff(&plain_diff)?.into_iter().next() {
+            return Ok(empty_diff_for(file));
         }
     }
 
@@ -727,12 +796,18 @@ pub async fn get_commits_stats(path: String, commit_oids: Vec<String>) -> Result
 }
 
 /// Get diff for a specific file in a commit
+///
+/// `ignore_whitespace` and `context_lines` behave exactly as in
+/// [`get_file_diff`], and are applied to the rename-pair re-diff below too so a
+/// renamed file is rendered with the same options as any other file.
 #[command]
 pub async fn get_commit_file_diff(
     path: String,
     commit_oid: String,
     file_path: String,
     max_lines: Option<u32>,
+    context_lines: Option<u32>,
+    ignore_whitespace: Option<String>,
 ) -> Result<DiffFile> {
     let repo = git2::Repository::open(Path::new(&path))?;
     let commit = repo.find_commit(git2::Oid::from_str(&commit_oid)?)?;
@@ -746,6 +821,7 @@ pub async fn get_commit_file_diff(
 
     let mut opts = git2::DiffOptions::new();
     opts.pathspec(&normalized_file_path);
+    apply_diff_options(&mut opts, &ignore_whitespace, context_lines, None, None);
 
     let mut diff =
         repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
@@ -822,6 +898,13 @@ pub async fn get_commit_file_diff(
             let mut pair_opts = git2::DiffOptions::new();
             pair_opts.pathspec(&old_path);
             pair_opts.pathspec(&new_path);
+            apply_diff_options(
+                &mut pair_opts,
+                &ignore_whitespace,
+                context_lines,
+                None,
+                None,
+            );
             let mut pair_diff = repo.diff_tree_to_tree(
                 parent_tree.as_ref(),
                 Some(&commit_tree),
@@ -837,6 +920,25 @@ pub async fn get_commit_file_diff(
             if let Some(found) = matched {
                 return Ok(maybe_truncate_diff(found, max_lines));
             }
+        }
+    }
+
+    // As in `get_file_diff`: an active whitespace mode makes libgit2 drop a
+    // whitespace-only delta entirely, which is indistinguishable here from a
+    // path that is not in the commit. Re-diff without the option so the file is
+    // reported as an empty diff rather than as missing.
+    if filtered.is_none() && whitespace_is_ignored(&ignore_whitespace) {
+        let mut plain_opts = git2::DiffOptions::new();
+        plain_opts.pathspec(&normalized_file_path);
+        apply_diff_options(&mut plain_opts, &None, context_lines, None, None);
+        let mut plain_diff = repo.diff_tree_to_tree(
+            parent_tree.as_ref(),
+            Some(&commit_tree),
+            Some(&mut plain_opts),
+        )?;
+        detect_renames(&mut plain_diff)?;
+        if let Some(file) = parse_diff(&plain_diff)?.into_iter().next() {
+            return Ok(empty_diff_for(file));
         }
     }
 
@@ -1276,8 +1378,15 @@ mod tests {
         // Modify the README
         repo.create_file("README.md", "Modified README content\nWith multiple lines");
 
-        let result =
-            get_file_diff(repo.path_str(), "README.md".to_string(), Some(false), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "README.md".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1294,8 +1403,15 @@ mod tests {
         repo.create_file("staged.txt", "Staged content\nLine 2\nLine 3");
         repo.stage_file("staged.txt");
 
-        let result =
-            get_file_diff(repo.path_str(), "staged.txt".to_string(), Some(true), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "staged.txt".to_string(),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1312,7 +1428,15 @@ mod tests {
         // Modify the README with additions and deletions
         repo.create_file("README.md", "# Modified Repo\nNew line added");
 
-        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None, None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "README.md".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1378,6 +1502,8 @@ mod tests {
             commit_oid.to_string(),
             "specific.txt".to_string(),
             None,
+            None,
+            None,
         )
         .await;
 
@@ -1397,6 +1523,8 @@ mod tests {
             repo.path_str(),
             commit_oid.to_string(),
             "nonexistent.txt".to_string(),
+            None,
+            None,
             None,
         )
         .await;
@@ -1675,8 +1803,15 @@ mod tests {
         repo.create_file("config.json", r#"{"key": "value"}"#);
         repo.stage_file("config.json");
 
-        let result =
-            get_file_diff(repo.path_str(), "config.json".to_string(), Some(true), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "config.json".to_string(),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -1709,7 +1844,15 @@ mod tests {
         // Create a modification with clear additions
         repo.create_file("README.md", "New line 1\nNew line 2\nNew line 3");
 
-        let result = get_file_diff(repo.path_str(), "README.md".to_string(), None, None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "README.md".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let diff_file = result.unwrap();
@@ -2294,6 +2437,8 @@ mod tests {
             oid.to_string(),
             "new_name.txt".to_string(),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2314,9 +2459,16 @@ mod tests {
         repo.create_commit("add", &[("a.txt", content)]);
         let oid = commit_rename(&repo, "a.txt", "b.txt", content);
 
-        let f = get_commit_file_diff(repo.path_str(), oid.to_string(), "b.txt".to_string(), None)
-            .await
-            .unwrap();
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "b.txt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(f.status, FileStatus::Renamed);
         assert_eq!(f.old_path.as_deref(), Some("a.txt"));
@@ -2338,6 +2490,8 @@ mod tests {
             repo.path_str(),
             oid.to_string(),
             "src/old.txt".to_string(),
+            None,
+            None,
             None,
         )
         .await
@@ -2363,6 +2517,8 @@ mod tests {
             repo.path_str(),
             oid.to_string(),
             "fresh.txt".to_string(),
+            None,
+            None,
             None,
         )
         .await
@@ -2466,6 +2622,8 @@ mod tests {
             oid.to_string(),
             "new_name.txt".to_string(),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2509,9 +2667,16 @@ mod tests {
             &[("a.txt", "one\ntwo\nthree\n"), ("b.txt", "other\n")],
         );
 
-        let f = get_commit_file_diff(repo.path_str(), oid.to_string(), "a.txt".to_string(), None)
-            .await
-            .unwrap();
+        let f = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "a.txt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(f.status, FileStatus::New);
         assert_eq!(f.path, "a.txt");
@@ -2553,8 +2718,15 @@ mod tests {
         repo.create_file("first.txt", "hello\nworld\n");
         repo.stage_file("first.txt");
 
-        let result =
-            get_file_diff(repo.path_str(), "first.txt".to_string(), Some(true), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "first.txt".to_string(),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "staged diff on unborn HEAD should succeed: {:?}",
@@ -2614,9 +2786,16 @@ mod tests {
         // Modify the working copy.
         std::fs::write(repo.path.join("data.json"), to_utf16le("{\"a\":3}")).unwrap();
 
-        let result = get_file_diff(repo.path_str(), "data.json".to_string(), Some(false), None)
-            .await
-            .unwrap();
+        let result = get_file_diff(
+            repo.path_str(),
+            "data.json".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             result.is_binary,
             "UTF-16 file must be reported as binary, not an empty text diff"
@@ -2636,8 +2815,15 @@ mod tests {
         repo.create_file("vendor/foo.c", "a\nb\nMODIFIED\n");
 
         // Requesting the unchanged src/foo.c must NOT return vendor/foo.c's diff.
-        let result =
-            get_file_diff(repo.path_str(), "src/foo.c".to_string(), Some(false), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "src/foo.c".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(
             result.is_err(),
             "unchanged src/foo.c must not resolve to vendor/foo.c's diff"
@@ -2654,10 +2840,216 @@ mod tests {
         repo.create_file("f.txt", "staged change\n");
         repo.stage_file("f.txt");
 
-        let result = get_file_diff(repo.path_str(), "f.txt".to_string(), Some(false), None).await;
+        let result = get_file_diff(
+            repo.path_str(),
+            "f.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(
             result.is_err(),
             "unstaged diff of a fully-staged file must not surface the staged hunks"
+        );
+    }
+
+    /// Ten numbered lines, so a single edit in the middle has more surrounding
+    /// context than any bound we ask for.
+    const CONTEXT_BASE: &str = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    const CONTEXT_EDITED: &str = "1\n2\n3\n4\nFIVE\n6\n7\n8\n9\n10\n";
+
+    /// Count the real patch lines, skipping the hunk-header pseudo-line that
+    /// `parse_diff` records alongside them.
+    fn hunk_line_count(file: &DiffFile) -> usize {
+        file.hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .filter(|l| {
+                matches!(
+                    l.origin,
+                    DiffLineOrigin::Context | DiffLineOrigin::Addition | DiffLineOrigin::Deletion
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_get_file_diff_context_lines_narrow_the_hunk() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("ctx.txt", CONTEXT_BASE)]);
+        repo.create_file("ctx.txt", CONTEXT_EDITED);
+
+        let default_ctx = get_file_diff(
+            repo.path_str(),
+            "ctx.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // -1 +1 plus three context lines either side.
+        assert_eq!(hunk_line_count(&default_ctx), 8);
+
+        let one_ctx = get_file_diff(
+            repo.path_str(),
+            "ctx.txt".to_string(),
+            Some(false),
+            None,
+            Some(1),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hunk_line_count(&one_ctx), 4);
+
+        let zero_ctx = get_file_diff(
+            repo.path_str(),
+            "ctx.txt".to_string(),
+            Some(false),
+            None,
+            Some(0),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hunk_line_count(&zero_ctx), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_diff_ignore_whitespace_drops_indent_only_change() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("ws.txt", "alpha\nbeta\ngamma\n")]);
+        // Only leading whitespace changes.
+        repo.create_file("ws.txt", "alpha\n    beta\ngamma\n");
+
+        let shown = get_file_diff(
+            repo.path_str(),
+            "ws.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            Some("none".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !shown.hunks.is_empty(),
+            "with whitespace shown the indent change must appear"
+        );
+
+        let ignored = get_file_diff(
+            repo.path_str(),
+            "ws.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            Some("all".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            ignored.hunks.is_empty(),
+            "ignoring all whitespace must leave no hunks for an indent-only change"
+        );
+        assert_eq!(ignored.additions, 0);
+        assert_eq!(ignored.deletions, 0);
+    }
+
+    /// The empty-diff fallback above must not turn a genuinely unchanged (or
+    /// absent) path into a silent empty diff — only a change the whitespace
+    /// mode swallowed.
+    #[tokio::test]
+    async fn test_get_file_diff_ignore_whitespace_still_errors_for_unchanged_file() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("ws.txt", "alpha\nbeta\n")]);
+
+        let result = get_file_diff(
+            repo.path_str(),
+            "ws.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            Some("all".to_string()),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unchanged file must still report not-found, not an empty diff"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_file_diff_ignore_whitespace_eol_keeps_real_change() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("ws.txt", "alpha\nbeta\n")]);
+        // A trailing-space-only edit plus a genuine content edit.
+        repo.create_file("ws.txt", "alpha   \nBETA\n");
+
+        let eol = get_file_diff(
+            repo.path_str(),
+            "ws.txt".to_string(),
+            Some(false),
+            None,
+            None,
+            Some("eol".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(eol.additions, 1, "only the real edit survives --ignore-eol");
+        assert_eq!(eol.deletions, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_commit_file_diff_honours_context_and_whitespace() {
+        let repo = TestRepo::with_initial_commit();
+        repo.create_commit("base", &[("ctx.txt", CONTEXT_BASE)]);
+        let oid = repo.create_commit("edit", &[("ctx.txt", CONTEXT_EDITED)]);
+
+        let default_ctx = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "ctx.txt".to_string(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hunk_line_count(&default_ctx), 8);
+
+        let one_ctx = get_commit_file_diff(
+            repo.path_str(),
+            oid.to_string(),
+            "ctx.txt".to_string(),
+            None,
+            Some(1),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hunk_line_count(&one_ctx), 4);
+
+        let ws_repo = TestRepo::with_initial_commit();
+        ws_repo.create_commit("base", &[("ws.txt", "alpha\nbeta\n")]);
+        let ws_oid = ws_repo.create_commit("indent", &[("ws.txt", "alpha\n    beta\n")]);
+
+        let ignored = get_commit_file_diff(
+            ws_repo.path_str(),
+            ws_oid.to_string(),
+            "ws.txt".to_string(),
+            None,
+            None,
+            Some("all".to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            ignored.hunks.is_empty(),
+            "ignoring whitespace must apply to commit diffs too"
         );
     }
 }
