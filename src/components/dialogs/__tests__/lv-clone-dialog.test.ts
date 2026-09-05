@@ -510,6 +510,185 @@ describe('lv-clone-dialog', () => {
     });
   });
 
+  // ── Cloning from a connected account ───────────────────────────────────
+  describe('account source', () => {
+    const pickedRepository = {
+      id: '1',
+      name: 'my-repo',
+      owner: 'octocat',
+      fullName: 'octocat/my-repo',
+      description: null,
+      isPrivate: true,
+      cloneUrl: 'https://github.com/octocat/my-repo.git',
+      webUrl: 'https://github.com/octocat/my-repo',
+      defaultBranch: 'main',
+      lastPushedAt: null,
+    };
+
+    function selectSource(source: 'url' | 'account'): void {
+      const tab = el.shadowRoot!.querySelector(
+        `#source-${source}`,
+      ) as HTMLButtonElement;
+      tab.click();
+    }
+
+    function picker(): HTMLElement | null {
+      return el.shadowRoot!.querySelector('lv-account-repo-picker');
+    }
+
+    it('offers both sources and starts on the URL one', async () => {
+      expect(el.shadowRoot!.querySelector('#source-url')!.getAttribute('aria-selected')).to.equal(
+        'true',
+      );
+      expect(
+        el.shadowRoot!.querySelector('#source-account')!.getAttribute('aria-selected'),
+      ).to.equal('false');
+      // The picker is not even mounted, so opening the dialog cannot call a
+      // provider API.
+      expect(picker()).to.equal(null);
+    });
+
+    it('shows the account picker once the account source is chosen', async () => {
+      selectSource('account');
+      await el.updateComplete;
+
+      expect(picker()).to.exist;
+      expect(
+        el.shadowRoot!.querySelector('#source-account')!.getAttribute('aria-selected'),
+      ).to.equal('true');
+    });
+
+    it('fills the URL and destination from the selected repository', async () => {
+      settingsStore.getState().setDefaultClonePath('/home/user/projects');
+      selectSource('account');
+      await el.updateComplete;
+
+      picker()!.dispatchEvent(
+        new CustomEvent('repository-selected', {
+          detail: { repository: pickedRepository },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await el.updateComplete;
+
+      const urlInput = el.shadowRoot!.querySelector('#url') as HTMLInputElement;
+      const destInput = el.shadowRoot!.querySelector('#destination') as HTMLInputElement;
+      expect(urlInput.value).to.equal('https://github.com/octocat/my-repo.git');
+      expect(destInput.value).to.equal('/home/user/projects');
+
+      const previews = Array.from(
+        el.shadowRoot!.querySelectorAll('.repo-name-preview'),
+      ).map((n) => n.textContent);
+      expect(previews.join(' ')).to.contain('octocat/my-repo');
+      expect(previews.join(' ')).to.contain('/home/user/projects/my-repo');
+
+      const cloneBtn = el.shadowRoot!.querySelector('.btn-primary') as HTMLButtonElement;
+      expect(cloneBtn.disabled, 'Clone is ready once a repository is picked').to.be.false;
+    });
+
+    it('hands the picked repository to the unchanged clone flow', async () => {
+      settingsStore.getState().setDefaultClonePath('/home/user/projects');
+      const calls: { command: string; args?: unknown }[] = [];
+      mockInvoke = (command: string, args?: unknown) => {
+        calls.push({ command, args });
+        if (command === 'clone_repository') {
+          return Promise.resolve({ path: '/home/user/projects/my-repo', name: 'my-repo' });
+        }
+        return Promise.resolve(null);
+      };
+
+      selectSource('account');
+      await el.updateComplete;
+      picker()!.dispatchEvent(
+        new CustomEvent('repository-selected', {
+          detail: { repository: pickedRepository },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await el.updateComplete;
+
+      await (el as unknown as { handleClone: () => Promise<void> }).handleClone();
+      await el.updateComplete;
+
+      const clone = calls.find((c) => c.command === 'clone_repository');
+      expect(clone, 'the existing clone command runs').to.exist;
+      const args = clone!.args as { url: string; path: string };
+      expect(args.url).to.equal('https://github.com/octocat/my-repo.git');
+      expect(args.path).to.equal('/home/user/projects/my-repo');
+    });
+
+    it('drops the selected-repository label once the URL is edited by hand', async () => {
+      selectSource('account');
+      await el.updateComplete;
+      picker()!.dispatchEvent(
+        new CustomEvent('repository-selected', {
+          detail: { repository: pickedRepository },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await el.updateComplete;
+
+      const urlInput = el.shadowRoot!.querySelector('#url') as HTMLInputElement;
+      urlInput.value = 'https://example.test/other.git';
+      urlInput.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+
+      const previews = Array.from(
+        el.shadowRoot!.querySelectorAll('.repo-name-preview'),
+      ).map((n) => n.textContent);
+      expect(previews.join(' ')).to.not.contain('octocat/my-repo');
+    });
+
+    it('closes so the accounts manager is not stacked under this dialog', async () => {
+      selectSource('account');
+      await el.updateComplete;
+
+      const modal = el.shadowRoot!.querySelector('lv-modal') as HTMLElement & {
+        open: boolean;
+      };
+      modal.open = true;
+
+      let reachedHost = false;
+      el.addEventListener('manage-accounts', () => {
+        reachedHost = true;
+      });
+      picker()!.dispatchEvent(
+        new CustomEvent('manage-accounts', {
+          detail: { integrationType: 'github' },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await el.updateComplete;
+
+      expect(modal.open, 'the clone dialog closes').to.be.false;
+      expect(reachedHost, 'the host still hears the request').to.be.true;
+    });
+
+    it('locks the source tabs while a clone is running', async () => {
+      const internal = el as unknown as { isCloning: boolean };
+      internal.isCloning = true;
+      await el.updateComplete;
+
+      const tabs = el.shadowRoot!.querySelectorAll('.source-tab');
+      expect(Array.from(tabs).every((t) => (t as HTMLButtonElement).disabled)).to.be.true;
+    });
+
+    it('returns to the URL source on reset', async () => {
+      selectSource('account');
+      await el.updateComplete;
+      expect(picker()).to.exist;
+
+      (el as unknown as { reset: () => void }).reset();
+      await el.updateComplete;
+
+      expect(picker()).to.equal(null);
+    });
+  });
+
   describe('security-gate refusals are not shown as clone errors', () => {
     it('a declined network confirm leaves no error in the dialog', async () => {
       const { settingsStore } = await import('../../../stores/settings.store.ts');
