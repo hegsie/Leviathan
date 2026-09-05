@@ -334,6 +334,10 @@
 <trans-unit id="s7defd554673d207d">
   <source>(Available)</source>
   <target>(Disponible)</target></trans-unit>
+<trans-unit id="s39fdffd6b100cfe8">
+  <source>(Not checked - offline)</source>
+  <target>(Non vérifié - hors ligne)</target>
+</trans-unit>
 <trans-unit id="s60fbea7b0e9e042e">
   <source>(API key required)</source>
   <target>(Clé d'API requise)</target></trans-unit>

@@ -122,6 +122,15 @@ pub struct AiProviderInfo {
     pub provider_type: AiProviderType,
     pub name: String,
     pub available: bool,
+    /// Whether `available` is an answer or a guess.
+    ///
+    /// Listing the providers must not itself be a network request: for an
+    /// OpenAI-compatible cloud provider the reachability probe is an outbound
+    /// models-list call, and Settings has to be able to enumerate providers in
+    /// order to turn the cloud one OFF. So with offline mode on (or the host
+    /// outside the allowlist) the probe is skipped and this is `false`,
+    /// meaning "not probed" rather than "unavailable".
+    pub probed: bool,
     pub requires_api_key: bool,
     pub has_api_key: bool,
     pub endpoint: String,
@@ -615,6 +624,29 @@ impl AiService {
         &self.config
     }
 
+    /// The endpoint a provider would be contacted on.
+    pub fn endpoint_for(&self, provider_type: AiProviderType) -> String {
+        self.config
+            .providers
+            .get(&provider_type)
+            .and_then(|s| s.endpoint.clone())
+            .unwrap_or_else(|| provider_type.default_endpoint().to_string())
+    }
+
+    /// Whether a request to `provider_type` is permitted by the security
+    /// settings. A provider on loopback (Ollama, LM Studio) or with no endpoint
+    /// at all (the embedded model) never leaves the machine and stays usable
+    /// with offline mode on — that is the whole point of running one.
+    pub fn provider_network_allowed(&self, provider_type: AiProviderType) -> bool {
+        crate::services::security::endpoint_allowed(&self.endpoint_for(provider_type))
+    }
+
+    /// The endpoint of the provider chosen in Settings, or `None` when nothing
+    /// is chosen and a request would fall back to whatever is reachable.
+    pub fn active_provider_endpoint(&self) -> Option<String> {
+        self.config.active_provider.map(|pt| self.endpoint_for(pt))
+    }
+
     /// Get information about all providers
     pub async fn get_providers_info(&self) -> Vec<AiProviderInfo> {
         let mut infos = Vec::new();
@@ -622,13 +654,26 @@ impl AiService {
         for provider_type in AiProviderType::all() {
             if let Some(provider) = self.providers.get(&provider_type) {
                 let settings = self.config.providers.get(&provider_type);
-                let available = provider.is_available().await;
-                let models = provider.list_models().await.unwrap_or_default();
+                // Probing is itself a network request for a cloud provider, and
+                // this list is what Settings renders — including the switch the
+                // user needs in order to turn that provider off. So when the
+                // security settings forbid reaching it, report it unprobed
+                // instead of reaching out or hiding it.
+                let probed = self.provider_network_allowed(provider_type);
+                let (available, models) = if probed {
+                    (
+                        provider.is_available().await,
+                        provider.list_models().await.unwrap_or_default(),
+                    )
+                } else {
+                    (false, Vec::new())
+                };
 
                 infos.push(AiProviderInfo {
                     provider_type,
                     name: provider.name().to_string(),
                     available,
+                    probed,
                     requires_api_key: provider_type.requires_api_key(),
                     has_api_key: settings.and_then(|s| s.api_key.as_ref()).is_some(),
                     endpoint: settings
@@ -827,10 +872,22 @@ impl AiService {
                 }
             }
 
-            if let Some(provider) = self.providers.get(&pt) {
-                if provider.is_available().await {
-                    return Ok((provider.as_ref(), pt));
+            // A provider the security settings forbid reaching is not probed
+            // and not used, whatever its state.
+            if self.provider_network_allowed(pt) {
+                if let Some(provider) = self.providers.get(&pt) {
+                    if provider.is_available().await {
+                        return Ok((provider.as_ref(), pt));
+                    }
                 }
+            } else {
+                return Err(format!(
+                    "{} is at {}, which your security settings do not allow reaching. \
+                     Turn off offline mode or allowlist its host in Settings > Security, \
+                     or select a local provider.",
+                    pt.display_name(),
+                    self.endpoint_for(pt)
+                ));
             }
 
             let hint = match pt {
@@ -863,6 +920,12 @@ impl AiService {
         for pt in AiProviderType::all() {
             if pt == AiProviderType::LocalInference {
                 continue; // Already checked above
+            }
+            // Skipped rather than probed: the scan runs on every availability
+            // check, so probing a forbidden host here would leak a request per
+            // check even with offline mode on.
+            if !self.provider_network_allowed(pt) {
+                continue;
             }
             if let Some(provider) = self.providers.get(&pt) {
                 if provider.is_available().await {
@@ -1004,6 +1067,11 @@ impl AiService {
         let mut available = Vec::new();
 
         for provider_type in [AiProviderType::Ollama, AiProviderType::LmStudio] {
+            // Normally loopback and therefore always probeable, but either can
+            // be pointed at a remote host in Settings.
+            if !self.provider_network_allowed(provider_type) {
+                continue;
+            }
             if let Some(provider) = self.providers.get(&provider_type) {
                 if provider.is_available().await {
                     available.push(provider_type);

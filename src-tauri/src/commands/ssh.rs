@@ -400,6 +400,11 @@ pub async fn test_ssh_connection(host: String) -> Result<SshTestResult> {
         expected_pattern,
     } = resolve_ssh_target(&host);
 
+    // Offline mode / remote allowlist. `ssh -T git@github.com` is an outbound
+    // connection, and the frontend gate already checks this command against the
+    // bare host it was given.
+    crate::services::security::guard_url(&host)?;
+
     // Run ssh -T to test connection
     let mut command = create_command("ssh");
     command.args([

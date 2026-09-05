@@ -66,6 +66,7 @@
 's373baac6ee6e85c0': `Langue utilisée dans toute l'application. Appliquée immédiatement — aucun redémarrage nécessaire.`,
 's376755b96082d7b3': ` (disponible)`,
 's3961e1b722d24184': `Choisir un fournisseur...`,
+'s39fdffd6b100cfe8': `(Non vérifié - hors ligne)`,
 's3a28f5d7ecab6d1c': `Configuration du client MCP`,
 's3b0ab4b52326316f': `Clair`,
 's3d2cc8d952adebec': `Petite`,

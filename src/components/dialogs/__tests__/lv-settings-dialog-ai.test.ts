@@ -58,6 +58,8 @@ const mockInvoke: MockInvoke = async (command: string) => {
 // Import AFTER setting up the mock
 import '../lv-settings-dialog.ts';
 import type { LvSettingsDialog } from '../lv-settings-dialog.ts';
+import { providerStatusLabel } from '../lv-settings-dialog.ts';
+import type { AiProviderInfo } from '../../../services/ai.service.ts';
 
 describe('lv-settings-dialog AI events', () => {
   it('dispatches ai-settings-changed on model change', async () => {
@@ -139,5 +141,55 @@ describe('lv-settings-dialog provider test feedback', () => {
     expect((el as any).aiError).to.be.null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((el as any).providerTestStatus['open_ai']).to.equal('success');
+  });
+});
+
+/**
+ * With offline mode on, the backend deliberately does NOT probe a cloud
+ * provider — listing providers is what Settings renders in order to offer the
+ * switch that turns that provider off, and probing it would be an outbound
+ * request from the very screen the user opened to stop them. `probed: false`
+ * says "not checked", which must not read as "your provider is broken".
+ */
+describe('lv-settings-dialog provider status label', () => {
+  function provider(overrides: Partial<AiProviderInfo>): AiProviderInfo {
+    return {
+      providerType: 'open_ai',
+      name: 'OpenAI',
+      available: false,
+      probed: true,
+      requiresApiKey: true,
+      hasApiKey: true,
+      endpoint: 'https://api.openai.com/v1',
+      models: [],
+      selectedModel: null,
+      ...overrides,
+    };
+  }
+
+  it('says a provider was not checked rather than calling it unavailable', () => {
+    expect(providerStatusLabel(provider({ probed: false }))).to.equal(
+      '(Not checked - offline)',
+    );
+  });
+
+  it('still reports a probed provider as unavailable', () => {
+    expect(providerStatusLabel(provider({ probed: true }))).to.equal('(Unavailable)');
+  });
+
+  it('reads as unavailable when the payload has no probed field at all', () => {
+    const legacy = provider({}) as Partial<AiProviderInfo>;
+    delete legacy.probed;
+    expect(providerStatusLabel(legacy as AiProviderInfo)).to.equal('(Unavailable)');
+  });
+
+  it('reports an available provider as available', () => {
+    expect(providerStatusLabel(provider({ available: true }))).to.equal('(Available)');
+  });
+
+  it('still asks for a missing API key before anything else', () => {
+    expect(
+      providerStatusLabel(provider({ hasApiKey: false, probed: false })),
+    ).to.equal('(API key required)');
   });
 });

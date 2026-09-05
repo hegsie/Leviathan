@@ -32,6 +32,26 @@ import type { McpStatus } from '../../services/mcp.service.ts';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import '../common/lv-toggle.ts';
 
+/**
+ * How a provider's state reads in the picker.
+ *
+ * "Not probed" is its own answer, distinct from "Unavailable": with offline
+ * mode on (or the provider's host outside the allowlist) the backend
+ * deliberately does not reach out to find out, so the list still renders —
+ * which is what lets the user get to the switch that turns the cloud provider
+ * off — without a request leaving the machine. Calling that "Unavailable"
+ * would be telling the user their provider is broken.
+ */
+export function providerStatusLabel(provider: AiProviderInfo): string {
+  if (provider.available) return msg('(Available)');
+  if (provider.requiresApiKey && !provider.hasApiKey) return msg('(API key required)');
+  // Compared against `false` rather than truthiness so a payload without the
+  // field (an older backend) keeps reading "(Unavailable)" instead of claiming
+  // nothing was checked.
+  if (provider.probed === false) return msg('(Not checked - offline)');
+  return msg('(Unavailable)');
+}
+
 @customElement('lv-settings-dialog')
 @localized()
 export class LvSettingsDialog extends LitElement {
@@ -1949,7 +1969,7 @@ export class LvSettingsDialog extends LitElement {
               ${this.aiProviders.map(
                 (p) => html`
                   <option value=${p.providerType} ?selected=${this.activeProvider === p.providerType}>
-                    ${p.name} ${p.available ? msg('(Available)') : p.requiresApiKey && !p.hasApiKey ? msg('(API key required)') : msg('(Unavailable)')}
+                    ${p.name} ${providerStatusLabel(p)}
                   </option>
                 `
               )}

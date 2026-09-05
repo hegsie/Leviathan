@@ -117,6 +117,18 @@ pub enum LeviathanError {
     #[error("Operation cancelled")]
     OperationCancelled,
 
+    /// A network operation was refused by the user's own security settings —
+    /// offline mode, or a remote allowlist that does not cover the host.
+    ///
+    /// Serialized with the code `BLOCKED`, which is the code the frontend's own
+    /// gate already returns for a refusal (`isNetworkGateRefusal` in
+    /// `src/services/git.service.ts`). Reusing it means a call site that was
+    /// already written to stay quiet about its own refusal stays quiet about
+    /// this one too, instead of growing a second error message for the same
+    /// event.
+    #[error("{0}")]
+    NetworkBlocked(String),
+
     /// A fetch/pull/push is already running against this repository.
     ///
     /// Distinct from OperationFailed so the UI can present it as "wait and
@@ -170,6 +182,7 @@ impl From<LeviathanError> for ErrorResponse {
             // like any other. The distinction is internal to await_remote_task.
             LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
             LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+            LeviathanError::NetworkBlocked(_) => "BLOCKED",
             LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
         };
 
@@ -218,6 +231,7 @@ impl serde::Serialize for LeviathanError {
                 LeviathanError::OperationTimeout(_) => "OPERATION_TIMEOUT",
                 LeviathanError::OperationTimeoutAfterChange(_) => "OPERATION_TIMEOUT",
                 LeviathanError::OperationCancelled => "OPERATION_CANCELLED",
+                LeviathanError::NetworkBlocked(_) => "BLOCKED",
                 LeviathanError::RemoteOperationInFlight(_) => "REMOTE_OPERATION_IN_FLIGHT",
             }
             .to_string(),
