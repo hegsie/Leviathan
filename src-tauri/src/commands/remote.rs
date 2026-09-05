@@ -1572,6 +1572,44 @@ fn push_remote_url(path: &str, remote_name: &str) -> Option<String> {
         .map(|u| u.to_string())
 }
 
+/// How polling a spawned `git push` ended.
+enum PushOutcome {
+    Finished(std::process::ExitStatus),
+    Cancelled,
+    WaitFailed(String),
+}
+
+/// Poll a spawned `git push` to completion, honouring a cancellation only for
+/// as long as the child is genuinely still running.
+///
+/// The reap comes FIRST and the sleep last, deliberately. Reading the cancel
+/// flag before `try_wait` reported pushes that had already landed as
+/// cancelled: the poll sleeps 100ms between iterations, so a push that exited
+/// during a sleep, followed by a Cancel click before the loop woke, took the
+/// cancel branch on the next iteration — `kill` was a no-op on the exited
+/// child, the real exit status was thrown away, and the user was told "Push
+/// cancelled" for a `--force-with-lease` that had already overwritten the
+/// remote branch (no Output panel entry, no sidebar refresh). Reaping first
+/// keeps the invariant the frontend is documented on in
+/// `services/git.service.ts`: OPERATION_CANCELLED is only ever returned for a
+/// push that really was aborted. `commands::repository`'s CLI clone polls the
+/// same way.
+fn poll_push_child(child: &mut std::process::Child, monitor: &TransferMonitor) -> PushOutcome {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return PushOutcome::Finished(status),
+            Ok(None) => {}
+            Err(e) => return PushOutcome::WaitFailed(e.to_string()),
+        }
+
+        if monitor.is_cancelled() {
+            return PushOutcome::Cancelled;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Run a prepared `git push` to completion, killing it if the user cancels.
 ///
 /// `Command::output()` blocks until the child exits, which is why the force
@@ -1622,29 +1660,25 @@ fn run_push_command(
             .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
     );
 
-    let status = loop {
-        if monitor.is_cancelled() {
+    // Single exit path for every abnormal outcome, the shape the CLI clone in
+    // `commands::repository` uses: kill the child and join the drain threads
+    // once, instead of repeating that in each early return.
+    let status = match poll_push_child(&mut child, monitor) {
+        PushOutcome::Finished(status) => status,
+        abnormal => {
             // Killed and reaped before returning: an orphaned `git push` would
             // keep talking to the remote after the user was told it stopped.
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            return Err(LeviathanError::OperationCancelled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(LeviathanError::OperationFailed(format!(
-                    "Failed to wait for git push: {}",
-                    e
-                )));
-            }
+            return Err(match abnormal {
+                PushOutcome::Cancelled => LeviathanError::OperationCancelled,
+                PushOutcome::WaitFailed(e) => {
+                    LeviathanError::OperationFailed(format!("Failed to wait for git push: {}", e))
+                }
+                PushOutcome::Finished(_) => unreachable!("handled above"),
+            });
         }
     };
 
@@ -4916,6 +4950,117 @@ mod tests {
         .expect_err("a cancelled force push must not succeed");
 
         assert!(matches!(err, LeviathanError::OperationCancelled));
+    }
+
+    // ---- the push poll: reap first, cancel only what is still running ----
+    //
+    // `run_push_command` drives the `git push` child by hand so a Cancel can
+    // kill it. Which of the two things it looks at first — the exit status or
+    // the cancel flag — decides whether a push that already landed on the
+    // remote is reported as the success it was.
+
+    /// A child that has already exited, along with the status it exited with.
+    fn already_exited_child(repo: &TestRepo) -> (std::process::Child, i32) {
+        // Exits 128 without touching the network or the working tree.
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path_str())
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("refs/heads/leviathan-no-such-branch")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("git must be on PATH");
+        let status = child.wait().expect("the child must exit");
+        (child, status.code().expect("a normal exit"))
+    }
+
+    /// A child that is still running, and stays running until it is killed.
+    fn still_running_child() -> std::process::Child {
+        // Reads stdin until EOF; the pipe is held open here, so EOF never
+        // comes and the child is reliably alive when the cancel lands.
+        std::process::Command::new("git")
+            .arg("hash-object")
+            .arg("--stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("git must be on PATH")
+    }
+
+    /// The regression. The poll sleeps 100ms between iterations, so a push can
+    /// finish during a sleep and the user can click Cancel before the loop
+    /// wakes. Reading the flag first turned that into `OperationCancelled` for
+    /// a `--force-with-lease` that HAD already overwritten the remote branch:
+    /// "Push cancelled" in the toast, no Output panel entry, no refresh, and a
+    /// user who believes nothing reached the remote. The real exit status must
+    /// win over a cancel that arrived too late.
+    #[test]
+    fn a_push_that_already_exited_is_reported_with_its_real_status() {
+        let repo = TestRepo::with_initial_commit();
+        let (mut child, real_code) = already_exited_child(&repo);
+
+        let (monitor, token, _events) = cancellable_monitor("op-late-cancel");
+        token.cancel();
+
+        match poll_push_child(&mut child, &monitor) {
+            PushOutcome::Finished(status) => assert_eq!(
+                status.code(),
+                Some(real_code),
+                "the status the push really exited with must survive"
+            ),
+            PushOutcome::Cancelled => panic!(
+                "a push that had already finished was reported as cancelled — \
+                 the remote has been written, the user is told it was not"
+            ),
+            PushOutcome::WaitFailed(e) => panic!("unexpected wait failure: {}", e),
+        }
+    }
+
+    /// The other direction, which the fix above must not break: a Cancel that
+    /// arrives while the push is genuinely still running still stops it.
+    #[test]
+    fn a_push_still_running_when_the_cancel_arrives_is_cancelled() {
+        let mut child = still_running_child();
+
+        let (monitor, token, _events) = cancellable_monitor("op-live-cancel");
+        token.cancel();
+
+        let outcome = poll_push_child(&mut child, &monitor);
+
+        // Clean up before asserting, so a failure does not leak the child.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            matches!(outcome, PushOutcome::Cancelled),
+            "a push still in flight must be stoppable"
+        );
+    }
+
+    /// An uncancelled run reaches the end of `run_push_command`: the output is
+    /// collected from the drain threads and the run is reported to the Output
+    /// panel (`report_run`), which is exactly what the late-cancel bug skipped.
+    #[test]
+    fn a_finished_push_command_returns_its_captured_output() {
+        let repo = TestRepo::with_initial_commit();
+        let mut cmd = create_command("git");
+        cmd.arg("-C")
+            .arg(repo.path_str())
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("refs/heads/leviathan-no-such-branch");
+
+        let output = run_push_command(cmd, &TransferMonitor::disabled())
+            .expect("a completed command must be returned, not an error");
+
+        assert_eq!(output.status.code(), Some(128));
+        assert!(
+            !output.stderr.is_empty(),
+            "stderr must be drained and carried into the reported output"
+        );
     }
 
     /// A cancelled pull must leave the working tree exactly where it was —
