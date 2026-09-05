@@ -55,6 +55,15 @@ const ABORTABLE_STATES: readonly RepositoryState[] = [
 const SKIPPABLE_STATES: readonly RepositoryState[] = ['cherrypick', 'revert'];
 
 /**
+ * The palette query that turns the command palette into a branch switcher.
+ *
+ * Matches the label lv-command-palette gives every branch entry
+ * ("Switch to <branch>"), so a prefix match puts them all above every other
+ * command. Kept as a constant so the two cannot drift silently.
+ */
+const SWITCH_BRANCH_PALETTE_QUERY = 'Switch to ';
+
+/**
  * How a repository state reads in user-facing prose.
  *
  * The stored state is git's own token, so the raw value produces "Skipped
@@ -267,6 +276,49 @@ export class AppShell extends LitElement {
         0% { transform: translateX(-100%); }
         50% { transform: translateX(150%); }
         100% { transform: translateX(350%); }
+      }
+
+      /* Drop affordance for the REPOSITORY-OPEN window.
+         The OS drop is accepted in both states — dropping a folder with a repo
+         open opens it in a new tab — but only lv-welcome had an overlay, so the
+         same drag looked accepted on one screen and ignored on the other. Same
+         wording and same dashed frame as lv-welcome's copy; it cannot be shared
+         as one element because that one lives inside the welcome component's
+         shadow root. Fixed rather than absolute: the shell is a flex column and
+         the overlay must cover the whole window, toolbar included. */
+      .window-drop-overlay {
+        position: fixed;
+        inset: var(--spacing-md);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-sm);
+        border: 2px dashed var(--color-primary);
+        border-radius: var(--radius-lg);
+        background: var(--color-bg-primary);
+        color: var(--color-text-primary);
+        z-index: 9998;
+        /* The OS owns the drag; the overlay must never swallow a pointer. */
+        pointer-events: none;
+      }
+
+      .window-drop-overlay svg {
+        width: 48px;
+        height: 48px;
+        color: var(--color-primary);
+      }
+
+      .window-drop-overlay-title {
+        font-size: var(--font-size-lg);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .window-drop-overlay-hint {
+        font-size: var(--font-size-sm);
+        color: var(--color-text-secondary);
+        max-width: 380px;
+        text-align: center;
       }
 
       /* The shared reduced-motion rules clamp every animation to one 0.01ms
@@ -729,6 +781,12 @@ export class AppShell extends LitElement {
   @state() private paletteTrackedFiles: string[] = [];
   private commandPaletteRepositoryPath: string | null = null;
   private commandPaletteRequestId = 0;
+  /**
+   * Text the palette's search box opens with. Empty for every entry point but
+   * the native menu's "Switch Branch…", which opens the palette already
+   * filtered to the branch entries rather than the full command list.
+   */
+  @state() private commandPaletteQuery = '';
 
   /**
    * Mirror of the graph canvas's loaded commits / tag tips, for the command
@@ -778,8 +836,9 @@ export class AppShell extends LitElement {
   /** Folder the scan dialog was opened for, and which of its two modes. */
   @state() private repositoryScanPath = '';
   @state() private repositoryScanMode: 'scan' | 'offer' = 'scan';
-  /** True while an OS drag is over the window, so the welcome screen can
-   *  show its drop affordance. */
+  /** True while an OS drag is over the window, so whichever screen is up —
+   *  the welcome screen or an open repository — can show its drop
+   *  affordance. The drop is accepted in both states. */
   @state() private fileDragActive = false;
 
   // Right panel tab tracking
@@ -1771,6 +1830,7 @@ export class AppShell extends LitElement {
         this.commandPaletteRequestId++;
         dialogs.close('commandPalette');
         this.commandPaletteRepositoryPath = null;
+        this.commandPaletteQuery = '';
         this.paletteBranches = [];
         this.paletteTrackedFiles = [];
         // Clear selected commit and refs
@@ -4682,7 +4742,15 @@ export class AppShell extends LitElement {
     this.searchFilter = e.detail.filter;
   }
 
-  private async openCommandPalette(): Promise<void> {
+  /**
+   * Open the command palette, optionally with the search box pre-filled.
+   *
+   * `initialQuery` is what makes the palette usable as a targeted picker: the
+   * branch entries are labelled "Switch to <branch>", so "Switch to " scores
+   * them 80 (prefix match) and every other command below them. Nothing is
+   * hidden — the user can still clear the box and reach the whole list.
+   */
+  private async openCommandPalette(initialQuery = ''): Promise<void> {
     const requestId = ++this.commandPaletteRequestId;
     // Fetch branches and tracked files for quick switching
     if (this.activeRepository) {
@@ -4728,6 +4796,7 @@ export class AppShell extends LitElement {
     // canvas has since moved past (a missed event, or a canvas that was
     // mounted after the last one fired).
     this.syncGraphPaletteData();
+    this.commandPaletteQuery = initialQuery;
     dialogs.open('commandPalette');  }
 
   /**
@@ -4839,9 +4908,12 @@ export class AppShell extends LitElement {
         repositoryStore.getState().removeRepository(this.activeRepository!.repository.path);
       }),
       // The palette lists every branch with its checkout action; opening it is
-      // the branch switcher, rather than a second one built for the menu.
+      // the branch switcher, rather than a second one built for the menu. It
+      // opens PRE-FILTERED to those entries — a menu item named "Switch Branch…"
+      // that lands on the full command list and leaves the user to type is a
+      // dead end, not a switcher.
       switchBranch: this.requiresRepository(() => {
-        void this.openCommandPalette();
+        void this.openCommandPalette(SWITCH_BRANCH_PALETTE_QUERY);
       }),
       commandPalette: () => {
         void this.openCommandPalette();
@@ -5626,6 +5698,32 @@ export class AppShell extends LitElement {
     `;
   }
 
+  /**
+   * The drag-over affordance for a window that already has a repository open.
+   *
+   * lv-welcome renders its own copy (via `.dragActive`), so this one is only
+   * for the other state — otherwise a drag over the welcome screen would show
+   * two dashed frames. Without it the window silently accepted a drop it gave
+   * no sign of accepting: `startRepositoryDropListener` is bound for the whole
+   * window, and dropping a folder with a repo open really does open it in a
+   * new tab.
+   */
+  private renderWindowDropOverlay() {
+    if (!this.fileDragActive || !this.activeRepository) return nothing;
+    return html`
+      <div class="window-drop-overlay" role="status">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        </svg>
+        <div class="window-drop-overlay-title">Drop a folder to open it</div>
+        <div class="window-drop-overlay-hint">
+          It opens in a new tab. Git repositories open straight away; any other folder can be
+          scanned or initialized.
+        </div>
+      </div>
+    `;
+  }
+
   render() {
     return html`
       <a class="skip-link" href="#main-content" @click=${(e: Event) => {
@@ -5635,6 +5733,8 @@ export class AppShell extends LitElement {
       }}>Skip to main content</a>
 
       ${this.globalLoading ? html`<div class="global-loading-bar"></div>` : ''}
+
+      ${this.renderWindowDropOverlay()}
 
       <lv-toolbar
         @open-settings=${() => { dialogs.open('settings'); }}
@@ -6201,6 +6301,7 @@ export class AppShell extends LitElement {
       <lv-command-palette
         ?open=${dialogs.isOpen('commandPalette')}
         .repositoryPath=${this.commandPaletteRepositoryPath ?? ''}
+        .initialQuery=${this.commandPaletteQuery}
         .commands=${this.getPaletteCommands()}
         .branches=${this.paletteBranches}
         .files=${this.paletteTrackedFiles}

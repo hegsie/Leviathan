@@ -148,6 +148,34 @@ describe('app-shell application menu routing', () => {
     expect(warnings[0].message).to.contain('open a repository');
   });
 
+  it('opens the palette as a branch switcher, not the bare command list', async () => {
+    // "Switch Branch…" used to resolve to a plain openCommandPalette(), so the
+    // user landed on every command the app has and had to type the branch
+    // filter themselves — a menu item that names one job and then does not do
+    // it. The palette IS the switcher; it just has to open on the branches.
+    const el = shell('/repo/active');
+    dialogs.reset();
+
+    runMenuAction(el, 'switch-branch');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(dialogs.isOpen('commandPalette'), 'the palette opens').to.be.true;
+    // Matches the "Switch to <branch>" label lv-command-palette gives every
+    // branch entry, which is what pre-filters it to the branches.
+    expect((el as any).commandPaletteQuery).to.equal('Switch to ');
+  });
+
+  it('leaves the palette unfiltered for the plain Command Palette item', async () => {
+    const el = shell('/repo/active');
+    dialogs.reset();
+
+    runMenuAction(el, 'command-palette');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(dialogs.isOpen('commandPalette')).to.be.true;
+    expect((el as any).commandPaletteQuery, 'every other entry point is unchanged').to.equal('');
+  });
+
   it('opens the keyboard shortcuts dialog from Help', () => {
     const el = shell(null);
     dialogs.reset();

@@ -29,6 +29,7 @@ import type { LvInitDialog } from '../dialogs/lv-init-dialog.ts';
 import type { LvSearchBar, SearchFilter } from './lv-search-bar.ts';
 import { isTopOverlay } from '../../utils/overlay-stack.ts';
 import { RefLockController, isPushRunning } from '../../utils/ref-lock.ts';
+import { runningRemoteOperation } from '../../services/remote-operations.service.ts';
 
 /** The three remote operations the toolbar exposes. */
 type RemoteOp = 'fetch' | 'pull' | 'push';
@@ -36,7 +37,9 @@ type RemoteOp = 'fetch' | 'pull' | 'push';
 /**
  * The shortcut key registered for each operation in keyboard.service.ts
  * (Ctrl+Shift+F/P/U). Kept next to the buttons so the tooltip and the
- * aria-keyshortcuts value can never drift apart.
+ * aria-keyshortcuts value can never drift apart: both are built from THIS
+ * table and the same `isMacPlatform` test, so a screen reader is never told
+ * Control while the tooltip shows ⌘.
  */
 const REMOTE_SHORTCUT_KEYS: Record<RemoteOp, string> = {
   fetch: 'F',
@@ -717,13 +720,38 @@ export class LvToolbar extends LitElement {
   private lock = new RefLockController(this, () => this.activeRepo?.repository.path);
 
   /**
+   * macOS, tested exactly the way keyboard.service.ts tests it.
+   *
+   * Case-insensitive on purpose: `navigator.platform` reports "MacIntel" and
+   * "MacPPC" but also "iPad"/"iPhone" for a WKWebView, and the old
+   * `includes('Mac')` here disagreed with keyboard.service's
+   * `toLowerCase().includes('mac')` — the two must answer the same question
+   * the same way or the tooltip teaches a shortcut the service never bound.
+   */
+  private get isMacPlatform(): boolean {
+    return navigator.platform.toLowerCase().includes('mac');
+  }
+
+  /**
    * The keyboard shortcut for each remote operation, formatted the way
    * keyboard.service.ts formats it, so the tooltip teaches the shortcut.
    */
   private remoteShortcut(op: RemoteOp): string {
-    const isMac = navigator.platform.includes('Mac');
     const key = REMOTE_SHORTCUT_KEYS[op];
-    return isMac ? `⌘⇧${key}` : `Ctrl+Shift+${key}`;
+    return this.isMacPlatform ? `⌘⇧${key}` : `Ctrl+Shift+${key}`;
+  }
+
+  /**
+   * The same shortcut, in the modifier tokens `aria-keyshortcuts` defines.
+   *
+   * Platform-aware for the same reason the tooltip is: on macOS the combo the
+   * tooltip shows is ⌘⇧, which is Meta+Shift — and keyboard.service really does
+   * accept it, because getShortcutKey() hashes ctrl and meta to the same
+   * "mod". A hard-coded Control+Shift+… announced a chord the visible tooltip
+   * contradicted, which is the one thing a screen-reader user cannot check.
+   */
+  private remoteAriaShortcut(op: RemoteOp): string {
+    return `${this.isMacPlatform ? 'Meta' : 'Control'}+Shift+${REMOTE_SHORTCUT_KEYS[op]}`;
   }
 
   /**
@@ -734,11 +762,20 @@ export class LvToolbar extends LitElement {
    * so the toolbar never asks the backend for them twice and the two can
    * never disagree.
    *
-   * The in-flight flags read the shared slots app-shell claims for these very
-   * operations: the working-tree lock for pull, the push slot for push, and
-   * the `fetch:<repo>` push-slot key app-shell's handleFetch uses. Reading the
-   * same locks is what keeps the buttons from staying lit through an operation
-   * started from the dashboard, the palette or a keyboard shortcut.
+   * The in-flight flags read the SAME source the context dashboard's copies of
+   * these buttons read (`runningRemoteOperation`, lv-context-dashboard.ts):
+   * fetch, pull and push share ONE per-repository slot inside
+   * remote-operations.service, because they are not independent — a pull moves
+   * HEAD under a push, and a pruning fetch rewrites the refs a pull just
+   * resolved. Reading that one slot is what keeps the two mouse surfaces from
+   * disagreeing about what the app is doing, and stops a click landing on a
+   * button the runner will only refuse.
+   *
+   * The two extra locks are the ones the runner also takes and other features
+   * hold on their own: the working-tree lock a pull needs (any sidebar
+   * checkout, reset or discard holds it too) and the per-repo push slot that
+   * makes Push and Force Push mutually exclusive across the force-push
+   * confirm.
    */
   private remoteButtonState(op: RemoteOp): {
     disabled: boolean;
@@ -763,20 +800,23 @@ export class LvToolbar extends LitElement {
       };
     }
 
+    const running = runningRemoteOperation(path);
     const inFlight =
-      op === 'fetch'
-        ? isPushRunning(`fetch:${path}`)
-        : op === 'pull'
-          ? this.lock.busy
-          : isPushRunning(path);
+      running !== undefined ||
+      (op === 'pull' && this.lock.busy) ||
+      (op === 'push' && isPushRunning(path));
     if (inFlight) {
-      // Pull rides the working-tree lock, which ANY ref operation in this repo
-      // can hold (a checkout, a reset, a discard) — so its busy tooltip must
-      // not claim a pull specifically.
+      // Name the operation that is actually holding the repository. All three
+      // buttons go down together on the shared slot, so "Push already in
+      // progress…" on the Push button during a fetch would be a lie; and the
+      // working-tree and push slots can be held by a checkout or a force push,
+      // which this surface cannot name at all.
       const reason =
-        op === 'pull'
-          ? 'Pull — an operation is already running in this repository'
-          : `${name} already in progress…`;
+        running === op
+          ? `${name} already in progress…`
+          : running !== undefined
+            ? `${name} — a ${running} is already running in this repository`
+            : `${name} — an operation is already running in this repository`;
       return { disabled: true, idle: false, count: 0, label: reason };
     }
 
@@ -825,11 +865,12 @@ export class LvToolbar extends LitElement {
   /**
    * Run a remote operation through the path that already owns it.
    *
-   * These three operations are implemented once, in app-shell
-   * (handleFetch/handlePull/handlePush): they claim the shared locks, drive
-   * the progress service, route failures through the suggestion service, and
-   * end in handleRefresh(). The toolbar must not grow a second copy of any of
-   * that — it dispatches, app-shell runs it.
+   * These three operations are implemented once, in
+   * remote-operations.service, which app-shell's handleFetch/handlePull/
+   * handlePush hand off to: it claims the shared locks, drives the progress
+   * row, routes failures through the suggestion service and asks for the
+   * refresh. The toolbar must not grow a second copy of any of that — it
+   * dispatches, app-shell runs it.
    */
   private handleRemoteAction(op: RemoteOp): void {
     const repo = this.activeRepo;
@@ -1066,7 +1107,7 @@ export class LvToolbar extends LitElement {
         class="menu-btn remote-btn ${op} ${idle ? 'idle' : ''}"
         title="${label}"
         aria-label="${label}"
-        aria-keyshortcuts="Control+Shift+${REMOTE_SHORTCUT_KEYS[op]}"
+        aria-keyshortcuts=${this.remoteAriaShortcut(op)}
         ?disabled=${disabled}
         @click=${() => this.handleRemoteAction(op)}
       >

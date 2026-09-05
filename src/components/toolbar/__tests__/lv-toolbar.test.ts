@@ -29,6 +29,57 @@ import {
   releaseRefOp,
   releasePush,
 } from '../../../utils/ref-lock.ts';
+import { settingsStore } from '../../../stores/settings.store.ts';
+import { runFetch, runPush } from '../../../services/remote-operations.service.ts';
+
+/**
+ * Commands parked until the test releases them, so a real operation can be
+ * held open across an assertion.
+ *
+ * The in-flight states below are driven by starting the SHARED runner, not by
+ * poking a lock key by hand: fetch, pull and push claim one per-repository
+ * slot inside remote-operations.service and register which of the three holds
+ * it, and only a claim made that way is visible to `runningRemoteOperation` —
+ * which is what both this toolbar and the context dashboard read. A test that
+ * claimed a key directly would pass against a toolbar reading a key nothing
+ * claims.
+ */
+let parkedCommands = new Map<string, Array<(value: unknown) => void>>();
+
+/** Hold `command` open until `releaseCommand` lets it finish. */
+function parkCommand(command: string): void {
+  parkedCommands.set(command, []);
+}
+
+function releaseCommand(command: string): void {
+  for (const resolve of parkedCommands.get(command) ?? []) resolve(null);
+  parkedCommands.delete(command);
+}
+
+/** An invoke that resolves everything with null, except parked commands. */
+function parkingInvoke(command: string): Promise<unknown> {
+  const waiting = parkedCommands.get(command);
+  if (waiting) {
+    return new Promise((resolve) => {
+      waiting.push(resolve);
+    });
+  }
+  return Promise.resolve(null);
+}
+
+/**
+ * Wait until `command` reached the Tauri boundary.
+ *
+ * git.service resolves the remote, checks the security gate and looks up a
+ * credential before it invokes, each behind its own await.
+ */
+async function waitForInvoke(command: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (parkedCommands.get(command)?.length) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${command}`);
+}
 
 function mockRepo(path: string, name: string): Repository {
   return {
@@ -490,8 +541,18 @@ describe('lv-toolbar repository tabs', () => {
       return btn as HTMLButtonElement;
     }
 
+    beforeEach(() => {
+      parkedCommands = new Map();
+      mockInvoke = (command: string) => parkingInvoke(command);
+      settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
+    });
+
     afterEach(() => {
+      // Release anything still parked first: a runner left awaiting its
+      // invoke would hold the shared slot into the next test.
+      for (const command of [...parkedCommands.keys()]) releaseCommand(command);
       resetRefOpLocks();
+      settingsStore.setState({ offlineMode: false, confirmNetworkOps: false, remoteAllowlist: [] });
     });
 
     it('renders Fetch, Pull and Push with labels and shortcut hints', async () => {
@@ -510,6 +571,46 @@ describe('lv-toolbar repository tabs', () => {
         expect(btn.getAttribute('aria-keyshortcuts')).to.contain('Control+Shift+');
         // Native buttons: reachable and activatable from the keyboard
         expect(btn.tagName).to.equal('BUTTON');
+      }
+    });
+
+    it('advertises the macOS chord it shows, rather than Control', async () => {
+      // aria-keyshortcuts was hard-coded to Control+Shift+… while the visible
+      // tooltip was platform-aware, so a macOS screen-reader user was told a
+      // chord the tooltip beside it contradicted. keyboard.service hashes ctrl
+      // and meta to the same "mod", so ⌘⇧ really is bound.
+      Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+      try {
+        openRemoteRepo({ ahead: 0, behind: 0 });
+        const el = await createToolbar();
+
+        for (const [op, key] of [['fetch', 'F'], ['pull', 'P'], ['push', 'U']] as const) {
+          const btn = remoteBtn(el, op);
+          expect(btn.getAttribute('aria-keyshortcuts'), `${op} chord`).to.equal(
+            `Meta+Shift+${key}`,
+          );
+          expect(btn.title, 'and the visible tooltip agrees').to.contain(`⌘⇧${key}`);
+        }
+      } finally {
+        Reflect.deleteProperty(navigator, 'platform');
+      }
+    });
+
+    it('advertises Control+Shift off macOS, matching its tooltip', async () => {
+      Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64', configurable: true });
+      try {
+        openRemoteRepo({ ahead: 0, behind: 0 });
+        const el = await createToolbar();
+
+        for (const [op, key] of [['fetch', 'F'], ['pull', 'P'], ['push', 'U']] as const) {
+          const btn = remoteBtn(el, op);
+          expect(btn.getAttribute('aria-keyshortcuts'), `${op} chord`).to.equal(
+            `Control+Shift+${key}`,
+          );
+          expect(btn.title).to.contain(`Ctrl+Shift+${key}`);
+        }
+      } finally {
+        Reflect.deleteProperty(navigator, 'platform');
       }
     });
 
@@ -589,15 +690,69 @@ describe('lv-toolbar repository tabs', () => {
       const path = openRemoteRepo({ ahead: 0, behind: 0 });
       const el = await createToolbar();
 
-      tryAcquirePush(`fetch:${path}`);
+      // Started through the shared runner — the way EVERY surface starts a
+      // fetch (the dashboard button, Ctrl+Shift+F, the palette and this
+      // toolbar all land in remote-operations.service). Claiming a key by
+      // hand would prove nothing about the key production actually uses.
+      parkCommand('fetch');
+      const running = runFetch(path);
+      await waitForInvoke('fetch');
       await el.updateComplete;
-      expect(remoteBtn(el, 'fetch').disabled).to.be.true;
+
+      expect(remoteBtn(el, 'fetch').disabled, 'Fetch is refused while it runs').to.be.true;
       expect(remoteBtn(el, 'fetch').title).to.contain('already in progress');
-      // The other two are untouched — a fetch holds no working tree
+
+      releaseCommand('fetch');
+      await running;
+      await el.updateComplete;
+      expect(remoteBtn(el, 'fetch').disabled).to.be.false;
+      expect(remoteBtn(el, 'fetch').title).to.contain('Fetch from remote');
+    });
+
+    it('disables Pull and Push too while a fetch holds the repository, naming it', async () => {
+      // The three share ONE per-repository slot, so a running fetch refuses a
+      // pull and a push as well. The toolbar used to leave both lit: the click
+      // reached the runner, which refused it — a pointless toast at best, and
+      // for Fetch a completely silent no-op.
+      const path = openRemoteRepo({ ahead: 2, behind: 3 });
+      const el = await createToolbar();
+
+      parkCommand('fetch');
+      const running = runFetch(path);
+      await waitForInvoke('fetch');
+      await el.updateComplete;
+
+      for (const op of ['pull', 'push'] as const) {
+        const btn = remoteBtn(el, op);
+        expect(btn.disabled, `${op} is refused while a fetch runs`).to.be.true;
+        // Named, so the tooltip says what the app is actually doing.
+        expect(btn.title).to.contain('a fetch is already running');
+      }
+
+      releaseCommand('fetch');
+      await running;
+      await el.updateComplete;
       expect(remoteBtn(el, 'pull').disabled).to.be.false;
       expect(remoteBtn(el, 'push').disabled).to.be.false;
+    });
 
-      releasePush(`fetch:${path}`);
+    it('disables Fetch and Pull while a push started elsewhere holds the repository', async () => {
+      const path = openRemoteRepo({ ahead: 2, behind: 1 });
+      const el = await createToolbar();
+
+      parkCommand('push');
+      const running = runPush(path);
+      await waitForInvoke('push');
+      await el.updateComplete;
+
+      expect(remoteBtn(el, 'fetch').disabled).to.be.true;
+      expect(remoteBtn(el, 'fetch').title).to.contain('a push is already running');
+      expect(remoteBtn(el, 'pull').disabled).to.be.true;
+      expect(remoteBtn(el, 'push').disabled).to.be.true;
+      expect(remoteBtn(el, 'push').title).to.contain('already in progress');
+
+      releaseCommand('push');
+      await running;
       await el.updateComplete;
       expect(remoteBtn(el, 'fetch').disabled).to.be.false;
     });
@@ -624,7 +779,9 @@ describe('lv-toolbar repository tabs', () => {
       tryAcquirePush(path);
       await el.updateComplete;
       expect(remoteBtn(el, 'push').disabled).to.be.true;
-      expect(remoteBtn(el, 'push').title).to.contain('already in progress');
+      // A force push holds this slot too, and the toolbar cannot tell which —
+      // so the tooltip must not claim a plain push specifically.
+      expect(remoteBtn(el, 'push').title).to.contain('already running in this repository');
 
       releasePush(path);
       await el.updateComplete;

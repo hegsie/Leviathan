@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { setupTauriMocks, emptyRepository } from '../fixtures/tauri-mock';
+import { setupTauriMocks, setupOpenRepository, emptyRepository } from '../fixtures/tauri-mock';
 import { AppPage } from '../pages/app.page';
 import { DialogsPage } from '../pages/dialogs.page';
 import {
@@ -969,6 +969,16 @@ test.describe('Welcome Screen - dropping a folder on the window', () => {
     await expect(app.welcomeScreen.locator('.drop-overlay')).toHaveCount(0);
   });
 
+  test('shows only the welcome screen\'s own overlay, never two', async ({ page }) => {
+    // app-shell renders a second copy of this affordance for the
+    // repository-open state (see the describe below). It is scoped to that
+    // state precisely so a drag here does not stack two dashed frames.
+    await emitDragEvent(page, 'tauri://drag-enter', ['/code/alpha']);
+
+    await expect(app.welcomeScreen.locator('.drop-overlay')).toBeVisible();
+    await expect(page.locator('lv-app-shell .window-drop-overlay')).toHaveCount(0);
+  });
+
   test('opens a dropped repository', async ({ page }) => {
     await startCommandCaptureWithMocks(page, {
       classify_repository_path: {
@@ -1080,6 +1090,64 @@ test.describe('Welcome Screen - dropping a folder on the window', () => {
     await expect(page.locator('.toast')).toContainText('permission denied');
     await expect(app.welcomeScreen).toBeVisible();
   });
+});
+
+/**
+ * The SAME drop, with a repository already open.
+ *
+ * `startRepositoryDropListener` is bound for the whole window, so a folder
+ * dropped here really is accepted — it opens in a new tab. But the affordance
+ * was bound only to `<lv-welcome .dragActive>`, so the identical drag showed a
+ * dashed "Drop a folder to open it" frame on one screen and absolutely nothing
+ * on the other: the same window behaving differently in its two states.
+ */
+test.describe('Dropping a folder while a repository is open', () => {
+  const dropOverlay = (page: Page) => page.locator('lv-app-shell .window-drop-overlay');
+
+  test.beforeEach(async ({ page }) => {
+    await setupOpenRepository(page);
+    // The welcome screen is gone — this is the other state.
+    await expect(page.locator('lv-welcome')).toHaveCount(0);
+  });
+
+  test('shows the drop affordance the welcome screen shows', async ({ page }) => {
+    await emitDragEvent(page, 'tauri://drag-enter', ['/code/alpha']);
+
+    await expect(dropOverlay(page)).toBeVisible();
+    await expect(dropOverlay(page)).toContainText('Drop a folder');
+    // And it says what will happen, which differs from the welcome case.
+    await expect(dropOverlay(page)).toContainText('new tab');
+
+    await emitDragEvent(page, 'tauri://drag-leave');
+    await expect(dropOverlay(page)).toHaveCount(0);
+  });
+
+  test('opens a dropped repository in a new tab and drops the affordance', async ({ page }) => {
+    await startCommandCaptureWithMocks(page, {
+      classify_repository_path: {
+        path: '/code/alpha',
+        name: 'alpha',
+        exists: true,
+        isDirectory: true,
+        isRepository: true,
+        isBare: false,
+      },
+      open_repository: repositoryPayload('/code/alpha'),
+      get_repository_info: repositoryPayload('/code/alpha'),
+    });
+
+    await emitDragEvent(page, 'tauri://drag-enter', ['/code/alpha']);
+    await expect(dropOverlay(page)).toBeVisible();
+    await emitDragEvent(page, 'tauri://drag-drop', ['/code/alpha']);
+
+    // The drop lands as a second tab…
+    await expect(page.locator('lv-toolbar .tab', { hasText: 'alpha' })).toBeVisible({
+      timeout: 10000,
+    });
+    // …and the affordance goes away with the drag that raised it.
+    await expect(dropOverlay(page)).toHaveCount(0);
+  });
+
 });
 
 /**
