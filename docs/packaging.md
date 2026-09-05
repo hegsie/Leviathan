@@ -10,7 +10,7 @@ manually from the Actions tab (workflow dispatch) with a release tag such as
 
 | Channel | Platform | Automation | One-time setup required |
 |---------|----------|------------|-------------------------|
-| winget | Windows | PR against `microsoft/winget-pkgs` | `WINGET_TOKEN` secret, fork of winget-pkgs, initial manual submission |
+| winget | Windows | PR against `microsoft/winget-pkgs` (first release: new-package PR via Komac) | `WINGET_TOKEN` secret, fork of winget-pkgs |
 | Homebrew | macOS (Apple Silicon) | Push to `hegsie/homebrew-gitnado` tap | Tap repository, `HOMEBREW_TAP_TOKEN` secret |
 | Scoop | Windows | Commit to `packaging/scoop/gitnado.json` on `main` | None |
 | AUR | Arch Linux | Community-maintained (`gitnado-bin`) | — |
@@ -33,25 +33,27 @@ One-time setup:
 2. Create a **classic** personal access token with the `public_repo` scope
    (fine-grained tokens are not supported by winget-releaser) and add it as
    the `WINGET_TOKEN` repository secret.
-3. The package must already exist in winget-pkgs before the action can update
-   it, so submit the first version manually with
-   [wingetcreate](https://github.com/microsoft/winget-create):
+3. Nothing else: the job checks whether `manifests/h/hegsie/Gitnado` exists in
+   winget-pkgs. If it does not (the very first release), it runs
+   [Komac](https://github.com/russellbanks/Komac) `new` with every manifest
+   field supplied on the command line and `--submit`, which opens the
+   "New package" PR. Once that PR is merged, every later release takes the
+   update path via winget-releaser.
 
-   ```powershell
-   wingetcreate new `
-     https://github.com/hegsie/gitnado/releases/download/v0.8.0/Gitnado_0.8.0_x64-setup.exe `
-     https://github.com/hegsie/gitnado/releases/download/v0.8.0/Gitnado_0.8.0_x64_en-US.msi
-   # PackageIdentifier: hegsie.Gitnado — then review and submit the PR
-   ```
-
-Once the initial PR is merged, every later release is submitted automatically.
 Users install with `winget install hegsie.Gitnado`.
 
-The first submission must be made from a release that ships `Gitnado_*`
-installers (0.9.0 or later). The earlier `hegsie.Leviathan` submission
+New-package PRs go through winget-pkgs moderation and typically take a few
+days; the automated executable check may flag a
+`Validation-Executable-Error` because the app needs the WebView2 runtime and
+a desktop session — a short comment on the PR saying so helps the moderator.
+If the Komac step ever fails, the same submission can be made by hand on
+Windows with [wingetcreate](https://github.com/microsoft/winget-create):
+`wingetcreate new <exe-url> <msi-url>` (identifier `hegsie.Gitnado`).
+
+The earlier `hegsie.Leviathan` submission
 ([microsoft/winget-pkgs#428196](https://github.com/microsoft/winget-pkgs/pull/428196))
-should be closed rather than merged — a published `hegsie.Leviathan` package
-would never receive updates.
+was closed unmerged — a published `hegsie.Leviathan` package would never
+receive updates.
 
 ## Homebrew
 
