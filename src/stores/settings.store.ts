@@ -103,7 +103,11 @@ const defaultSettings = {
   defaultBranchName: 'main',
   defaultRemoteName: 'origin',
   defaultClonePath: '',
-  showAvatars: true,
+  // Defaults OFF: avatars are images fetched from gravatar.com, which hands a
+  // third party an MD5 of every commit author's email and this machine's IP.
+  // A privacy-first client does not do that until the user asks for it.
+  // Existing installs keep whatever they had — see the v5 migration below.
+  showAvatars: false,
   showCommitSize: true,
   graphRowHeight: 40,
   graphColorScheme: 'default' as GraphColorScheme,
@@ -169,6 +173,15 @@ export function migrateSettings(persisted: unknown, fromVersion: number): Settin
     // a deliberate choice: pin those, and leave everyone else — including every
     // user who never touched the setting — on the new automatic behaviour.
     state.graphColorSchemeAuto = (state.graphColorScheme ?? 'default') === 'default';
+  }
+  if (fromVersion < 5 && state.showAvatars === undefined) {
+    // v5 flips the `showAvatars` default to `false` so a fresh install never
+    // talks to gravatar.com unasked. Unlike `autoStashOnCheckout`/`wordWrap`,
+    // this setting was always read — avatars have always been drawn — so a
+    // persisted value is a real user choice and the shallow merge rightly
+    // preserves it. Only a pre-v5 state that predates the key needs the OLD
+    // default filled in, so those users keep seeing what they saw before.
+    state.showAvatars = true;
   }
   return state as SettingsState;
 }
@@ -274,7 +287,7 @@ export const settingsStore = createStore<SettingsState>()(
     }),
     {
       name: 'leviathan-settings',
-      version: 4,
+      version: 5,
       // Changing a default only affects installs with no persisted state.
       // zustand's default merge is a shallow `{...defaults, ...persisted}`, and
       // the whole settings object is persisted the moment the user changes
@@ -285,6 +298,10 @@ export const settingsStore = createStore<SettingsState>()(
       // has only ever experienced auto-stashing. `wordWrap` has exactly the same
       // story: it was persisted but never read, so a persisted value is not a
       // user choice either and is dropped in favour of the diff view's own key.
+      //
+      // `showAvatars` is the opposite case: it WAS read — avatars have always
+      // been drawn — so a persisted value is a real user choice and the v5
+      // default flip to `false` must not reach it. See `migrateSettings`.
       migrate: migrateSettings,
       onRehydrateStorage: () => (state) => {
         if (state) {
