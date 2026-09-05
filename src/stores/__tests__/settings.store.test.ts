@@ -112,6 +112,12 @@ describe('settings.store', () => {
       expect(settingsStore.getState().autoStashOnCheckout).to.be.true;
     });
 
+    it('should not always sign off by default', () => {
+      // Sign-off is a project requirement, not a universal one: defaulting it
+      // on would add a trailer to every commit message unasked.
+      expect(settingsStore.getState().alwaysSignOff).to.be.false;
+    });
+
     it('should have 90 stale branch days by default', () => {
       expect(settingsStore.getState().staleBranchDays).to.equal(90);
     });
@@ -278,6 +284,11 @@ describe('settings.store', () => {
     it('should set auto stash on checkout', () => {
       settingsStore.getState().setAutoStashOnCheckout(true);
       expect(settingsStore.getState().autoStashOnCheckout).to.be.true;
+    });
+
+    it('should set always sign off', () => {
+      settingsStore.getState().setAlwaysSignOff(true);
+      expect(settingsStore.getState().alwaysSignOff).to.be.true;
     });
 
     it('should set stale branch days', () => {
